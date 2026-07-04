@@ -85,7 +85,10 @@ pub struct Notice {
 impl AppState {
     #[cfg(test)]
     fn new_ephemeral() -> Self {
-        Self::new_inner(None, mock_catalog())
+        let state = Self::new_inner(None, mock_catalog());
+        // Tests exercise selection/rotation against a known slate.
+        *state.games.lock().unwrap() = espn::mock_games();
+        state
     }
 
     fn new_with_catalog(catalog: Catalog) -> Self {
@@ -110,7 +113,9 @@ impl AppState {
         };
         AppState {
             catalog: Arc::new(catalog),
-            games: Arc::new(Mutex::new(espn::mock_games())),
+            // Empty until the first real fetch — boards show their no-games
+            // behavior rather than fake placeholder games.
+            games: Arc::new(Mutex::new(Vec::new())),
             frames: Arc::new(Mutex::new(HashMap::new())),
             configs: Arc::new(Mutex::new(configs)),
             devices: Arc::new(Mutex::new(HashMap::new())),
@@ -780,10 +785,12 @@ async fn poll_loop(state: AppState, source: Arc<dyn SportsDataSource>) {
                 continue;
             }
         }
-        let mut games = source.fetch().await;
+        let games = source.fetch().await;
         if games.is_empty() {
-            tracing::warn!("no games from source; using mock games");
-            games = espn::mock_games();
+            // Honest empty slate: boards fall through to their no-games
+            // behavior. (This used to substitute fake mock games, which
+            // put made-up scores on a real scoreboard.)
+            tracing::warn!("no games from source; showing empty slate");
         }
         let n = games.len();
         *state.games.lock().unwrap() = games;

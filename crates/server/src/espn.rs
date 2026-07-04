@@ -447,15 +447,11 @@ struct LeaderStat {
 
 /// Offline fallback source (swappable with `EspnSource` via the trait).
 #[allow(dead_code)]
-pub struct MockSource;
-
-#[async_trait]
-impl SportsDataSource for MockSource {
-    async fn fetch(&self) -> Vec<Game> {
-        mock_games()
-    }
-}
-
+/// Fixed two-game slate for tests (`AppState::new_ephemeral`) — a known
+/// rotation to exercise selection/exclusion logic against. Never served to
+/// real boards: production starts with an empty slate and stays empty when
+/// the source has nothing, rather than showing made-up scores.
+#[cfg(test)]
 pub fn mock_games() -> Vec<Game> {
     let bruins = TeamSide {
         abbrev: "BOS".into(), name: "BRUINS".into(), score: 2,
