@@ -6,9 +6,16 @@ import CoreGraphics
 /// The app's Ed25519 identity (32-byte secret seed, hex) lives in the Keychain so it
 /// survives app restarts AND unpairing — losing it would mean re-pairing every board.
 /// `nil` on first launch; the Rust core then mints one and we persist it.
+///
+/// UNSIGNED builds (xcodebuild CODE_SIGNING_ALLOWED=NO — the ios/run.sh flow) have
+/// no code identity, so simulator Keychain calls fail and the identity would rotate
+/// on every launch, silently unpairing the app from its boards. For that case only,
+/// the seed falls back to UserDefaults: the Keychain stays the source of truth
+/// whenever it works (Xcode builds, real devices).
 enum Keychain {
     private static let service = "com.scoreboard.identity"
     private static let account = "ed25519-secret-hex"
+    private static let defaultsKey = "ed25519-secret-hex-fallback"
 
     static func loadSecret() -> String? {
         let query: [String: Any] = [
@@ -19,9 +26,11 @@ enum Keychain {
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        if SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+           let data = item as? Data {
+            return String(data: data, encoding: .utf8)
+        }
+        return UserDefaults.standard.string(forKey: defaultsKey)
     }
 
     static func saveSecret(_ value: String) {
@@ -34,7 +43,9 @@ enum Keychain {
         var add = base
         add[kSecValueData as String] = Data(value.utf8)
         add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-        SecItemAdd(add as CFDictionary, nil)
+        if SecItemAdd(add as CFDictionary, nil) != errSecSuccess {
+            UserDefaults.standard.set(value, forKey: defaultsKey)
+        }
     }
 }
 
@@ -841,9 +852,16 @@ struct DashboardView: View {
         Form {
             nowShowingSection
             controlsSection
-            leaguePreferencesHeader
-            ForEach(model.leaguePrefs) { pref in
-                leagueCard(pref)
+            // The "League Preferences" title rides as the FIRST league card's
+            // section header, so the header→card gap matches the other
+            // sections' header padding. A header in its own empty section
+            // pays an extra inter-section gap instead (the standalone header
+            // remains only for the no-leagues empty state).
+            if model.leaguePrefs.isEmpty {
+                leaguePreferencesHeader
+            }
+            ForEach(Array(model.leaguePrefs.enumerated()), id: \.element.id) { index, pref in
+                leagueCard(pref, showsAreaHeader: index == 0)
             }
             settingsSection
         }
@@ -1096,9 +1114,10 @@ struct DashboardView: View {
             }
             .scrollTargetBehavior(.viewAligned)
             .animation(.default, value: model.focusedGameId)
-            // No bottom inset — it would stack on the section spacing and make
-            // the cards → "Controls" gap read larger than every other section gap.
-            .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 0, trailing: 0))
+            // Zero insets: with the row background cleared, any inset stacks
+            // visibly onto the header/section gaps — the cards' own chrome
+            // provides the breathing room, like a normal row's background.
+            .listRowInsets(EdgeInsets())
             .listRowBackground(Color.clear)
         }
     }
@@ -1197,37 +1216,42 @@ struct DashboardView: View {
         return hours <= 1 ? "Asleep — waking within the hour." : "Asleep — waking in about \(hours) hours."
     }
 
-    /// Header for the League Preferences area, with the Add League menu offering
-    /// every league that doesn't have a card yet.
+    /// The League Preferences title row + Add League menu. Rendered as the
+    /// first league card's section header (or the empty-state section's).
+    private var leaguePrefsHeaderContent: some View {
+        HStack {
+            Text("League Preferences")
+            Spacer()
+            Menu {
+                ForEach(model.leaguesWithoutPrefs, id: \.id) { sport in
+                    Button(sport.name) { editingSport = sport }
+                }
+            } label: {
+                Label("Add League", systemImage: "plus")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .textCase(nil)
+            .disabled(model.leaguesWithoutPrefs.isEmpty)
+        }
+    }
+
+    /// Empty state: no league cards to carry the header, so it gets its own
+    /// section with the explainer row.
     private var leaguePreferencesHeader: some View {
         Section {
-            if model.leaguePrefs.isEmpty {
-                Text("No leagues yet — add one to pick favorite teams and big games.")
-                    .foregroundStyle(.secondary)
-            }
+            Text("No leagues yet — add one to pick favorite teams and big games.")
+                .foregroundStyle(.secondary)
         } header: {
-            HStack {
-                Text("League Preferences")
-                Spacer()
-                Menu {
-                    ForEach(model.leaguesWithoutPrefs, id: \.id) { sport in
-                        Button(sport.name) { editingSport = sport }
-                    }
-                } label: {
-                    Label("Add League", systemImage: "plus")
-                        .font(.subheadline.weight(.semibold))
-                }
-                .textCase(nil)
-                .disabled(model.leaguesWithoutPrefs.isEmpty)
-            }
+            leaguePrefsHeaderContent
         }
     }
 
     /// One league's card: league name + Edit as the card's first row (not a section
     /// header, which visually competed with the "League Preferences" title), then
     /// the favorite teams (reorderable, swipe-to-delete) and the big-games row
-    /// (tap to change, swipe to turn off).
-    private func leagueCard(_ pref: BoardViewModel.LeaguePref) -> some View {
+    /// (tap to change, swipe to turn off). The first card carries the area's
+    /// "League Preferences" header.
+    private func leagueCard(_ pref: BoardViewModel.LeaguePref, showsAreaHeader: Bool) -> some View {
         Section {
             HStack {
                 Text(pref.sport.name)
@@ -1283,9 +1307,14 @@ struct DashboardView: View {
                     }
                 }
             }
+        } header: {
+            if showsAreaHeader {
+                leaguePrefsHeaderContent
+            }
         }
-        // League cards sit close together — they're one group, not separate areas.
-        .listSectionSpacing(12)
+        // First card keeps the uniform top-level gap (its header is the area
+        // title); the rest sit close together — one group, not separate areas.
+        .listSectionSpacing(showsAreaHeader ? 20 : 12)
     }
 }
 
