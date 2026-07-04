@@ -1,0 +1,13 @@
+[package]
+name = "simulator"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+scoreboard-protocol = { path = "../protocol" }
+board-core = { path = "../board-core" }
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+serde_json = "1"
+eframe = "0.29"

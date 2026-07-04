@@ -1,0 +1,5 @@
+/target
+Cargo.lock
+# real WiFi credentials — never commit (mirror of firmware/src/config.h)
+/src/config.rs
+/target.nosync

@@ -1,0 +1,8 @@
+# Keep the build context small + host-only. crates/* (all workspace members) and
+# Cargo.lock are intentionally included — cargo needs every member's manifest to
+# resolve the workspace, even though only `server` is compiled.
+/target
+/firmware-rs
+/firmware
+/ios
+/.git

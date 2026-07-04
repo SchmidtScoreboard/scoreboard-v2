@@ -1,0 +1,27 @@
+# Rust build artifacts (target is a SYMLINK to target.nosync — no trailing
+# slash, or the symlink itself gets tracked; firmware-rs is its own
+# workspace with its own target dir)
+target
+target.nosync
+**/*.rs.bk
+
+# iOS build artifacts (regenerate via ios/build-core.sh)
+ios/ScoreboardApp/build/
+ios/headers/
+ios/AppCore.xcframework/
+
+# Xcode user state
+xcuserdata/
+
+# ESP32 firmware build artifacts
+.pio/
+
+# Server runtime state: pairings/configs DB, legacy state file, and the
+# write-through ESPN catalog cache
+scoreboard.db
+scoreboard-state.json
+catalog.json
+
+# OS / tool noise
+.DS_Store
+nohup.out

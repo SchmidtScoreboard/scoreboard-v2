@@ -1,0 +1,4 @@
+module app_coreFFI {
+    header "app_coreFFI.h"
+    export *
+}

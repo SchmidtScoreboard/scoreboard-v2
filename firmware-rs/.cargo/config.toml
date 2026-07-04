@@ -1,0 +1,15 @@
+[build]
+target = "xtensa-esp32s3-none-elf"
+rustflags = ["-C", "link-arg=-Tlinkall.x"]
+
+[target.xtensa-esp32s3-none-elf]
+# `cargo run` builds, flashes over USB, and opens the serial monitor.
+runner = "espflash flash --monitor"
+
+[env]
+ESP_LOG = "info"
+
+# The espup "esp" toolchain ships rust-src (not a precompiled xtensa core),
+# so build core/alloc from source for the target.
+[unstable]
+build-std = ["core", "alloc"]

@@ -1,0 +1,12 @@
+[package]
+name = "scoreboard-protocol"
+edition.workspace = true
+version.workspace = true
+
+# no_std + alloc so the ESP32 firmware (and board-core) can depend on it.
+# std crates (server/sim/app-core) re-enable std transitively via serde_json etc.
+[dependencies]
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+sha2 = { version = "0.10", default-features = false }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+ed25519-dalek = { version = "2", default-features = false }

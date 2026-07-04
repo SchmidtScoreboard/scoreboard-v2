@@ -1,0 +1,8 @@
+[package]
+name = "board-core"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+scoreboard-protocol = { path = "../protocol" }
+embedded-graphics = "0.8"

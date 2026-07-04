@@ -1,0 +1,25 @@
+[package]
+name = "server"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+scoreboard-protocol = { path = "../protocol" }
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures-util = "0.3"
+embedded-graphics = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+reqwest = { version = "0.12", features = ["json"] }
+async-trait = "0.1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+rand = "0.8"
+hex = "0.4"
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[dev-dependencies]
+tokio-tungstenite = "0.21"

@@ -1,0 +1,22 @@
+[package]
+name = "app-core"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "app_core"
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+scoreboard-protocol = { path = "../protocol" }
+uniffi = { version = "0.28", features = ["cli"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+serde_json = "1"
+rand = "0.8"
+hex = "0.4"

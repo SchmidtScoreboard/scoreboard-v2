@@ -1,0 +1,7 @@
+# Keep the `railway up` upload small + host-only. The Dockerfile builds just the
+# `server` crate; crates/* and Cargo.lock are needed, everything below is not.
+/target
+/firmware-rs
+/firmware
+/ios
+/.git
