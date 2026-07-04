@@ -723,10 +723,21 @@ struct GameCard<Caption: View, Footer: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    // Championship badge in the card's corner — a caption
+                    // line would change the card height for big games only.
+                    if let champ = game.champ {
+                        Image(systemName: "trophy.fill")
+                            .font(.caption)
+                            .foregroundStyle(.yellow)
+                            .accessibilityLabel(champ)
+                    }
+                }
                 caption
             }
             GameFrame(game: game, httpBase: httpBase, frame: frame, refresh: refresh)
@@ -986,27 +997,10 @@ struct DashboardView: View {
         }
     }
 
-    /// The caption under the game title: provenance (WHY it's on the board, or
-    /// that it isn't) plus, for championship games, a trophy line naming the
-    /// specific stage ("Stanley Cup Final", "Playoffs"). Stacked — side by side
-    /// they truncate each other at card width. The two are independent: a big
-    /// game that isn't on the board still reads "Not on scoreboard".
-    private func captionRow(_ game: UiGame) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            sourceCaption(game)
-            if let champ = game.champ {
-                HStack(spacing: 4) {
-                    Image(systemName: "trophy.fill")
-                    Text(champ)
-                }
-                .foregroundStyle(.yellow)
-            }
-        }
-        .font(.caption2)
-        .lineLimit(1)
-    }
-
-    /// Provenance only — every card gets one, so nothing looks half-rendered.
+    /// The caption line under the game title: provenance only (WHY it's on the
+    /// board, or that it isn't) — every card gets exactly one line, so heights
+    /// stay uniform. Championship games get the trophy badge in the card's
+    /// corner (see GameCard) rather than an extra caption line.
     private func sourceCaption(_ game: UiGame) -> some View {
         let (icon, text, color): (String, String, Color) = {
             switch model.gameSource(game) {
@@ -1024,6 +1018,8 @@ struct DashboardView: View {
             Image(systemName: icon)
             Text(text)
         }
+        .font(.caption2)
+        .lineLimit(1)
         .foregroundStyle(color)
     }
 
@@ -1075,7 +1071,7 @@ struct DashboardView: View {
                         let pinned = model.focusedGameId == game.id
                         let dimmed = model.focusedGameId != nil && !pinned
                         GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId]) {
-                            captionRow(game)
+                            sourceCaption(game)
                         } footer: {
                             HStack(spacing: 8) {
                                 cardButton(pinned ? "Unpin" : "Pin", pinned ? "pin.slash" : "pin", tint: pinned ? .yellow : .white.opacity(0.85)) {
@@ -1125,7 +1121,7 @@ struct DashboardView: View {
                                 ForEach(games, id: \.id) { game in
                                     let showing = model.isShowing(game.id)
                                     GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId], refresh: refresh) {
-                                        captionRow(game)
+                                        sourceCaption(game)
                                     } footer: {
                                         // Two-step: a game must be ON the board (added or
                                         // via a preference) before it can be pinned.
