@@ -71,6 +71,10 @@ pub struct AppState {
     /// Last manifest JSON sent to each device; identical re-pushes are skipped so a
     /// refresh doesn't needlessly reset the board's rotation position.
     last_manifest: Arc<Mutex<HashMap<String, String>>>,
+    /// When we WATCHED each game transition to Final (ESPN has no end time, so we
+    /// observe it at poll granularity). Drives the post-game linger; memory-only —
+    /// a restart mid-linger just ends the linger early.
+    pub finished: Arc<Mutex<HashMap<String, std::time::Instant>>>,
 }
 
 /// A transient full-screen message for one board. Stored as text so each manifest
@@ -127,6 +131,7 @@ impl AppState {
             poll_wake: Arc::new(tokio::sync::Notify::new()),
             notices: Arc::new(Mutex::new(HashMap::new())),
             last_manifest: Arc::new(Mutex::new(HashMap::new())),
+            finished: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -346,13 +351,21 @@ async fn get_schedule(State(s): State<AppState>) -> Json<Schedule> {
 }
 
 pub(crate) fn to_summary(g: &Game) -> GameSummary {
+    // Scheduled games: the useful detail is WHEN they start ("7:05 PM"), for
+    // both team games and leaderboard events.
+    let pregame_detail = || {
+        (g.status == GameStatus::Pregame)
+            .then(|| start_time_label(&g.start_time))
+            .flatten()
+    };
     // Leaderboard sports (golf/F1): no away/home — show the event + leader.
     if let Some(lb) = &g.leaderboard {
-        let detail = lb
-            .rows
-            .first()
-            .map(|r| format!("{} {}", r.name, r.value))
-            .unwrap_or_default();
+        let detail = pregame_detail().unwrap_or_else(|| {
+            lb.rows
+                .first()
+                .map(|r| format!("{} {}", r.name, r.value))
+                .unwrap_or_default()
+        });
         return GameSummary {
             id: g.id.clone(),
             sport_id: g.sport_id.clone(),
@@ -366,11 +379,13 @@ pub(crate) fn to_summary(g: &Game) -> GameSummary {
             champ: g.champ.as_ref().map(|c| c.label.clone()),
         };
     }
-    let detail = if g.clock.is_empty() {
-        g.ordinal.clone()
-    } else {
-        format!("{} {}", g.ordinal, g.clock)
-    };
+    let detail = pregame_detail().unwrap_or_else(|| {
+        if g.clock.is_empty() {
+            g.ordinal.clone()
+        } else {
+            format!("{} {}", g.ordinal, g.clock)
+        }
+    });
     GameSummary {
         id: g.id.clone(),
         sport_id: g.sport_id.clone(),
@@ -388,6 +403,96 @@ pub(crate) fn to_summary(g: &Game) -> GameSummary {
 // ---- per-board selection + rendering ----
 pub(crate) fn is_live(g: &Game) -> bool {
     matches!(g.status, GameStatus::Active | GameStatus::Intermission)
+}
+
+/// How early a scheduled game may appear on the BOARD (matches the original
+/// scoreboard: live games, plus anything starting within half an hour).
+const PREGAME_WINDOW_MINS: i64 = 30;
+
+/// How long a just-ended game keeps showing its FINAL frame on the board.
+const FINAL_LINGER: Duration = Duration::from_secs(30 * 60);
+
+/// Called with each fresh slate BEFORE it replaces `state.games`: any game that
+/// was live in the old slate and is Final in the new one gets an end stamp NOW.
+/// Games that arrive already-Final (server restart, day-old finals in the feed)
+/// are never stamped — only an observed transition starts a linger.
+pub(crate) fn record_finished_transitions(state: &AppState, incoming: &[Game]) {
+    let was_live: HashSet<String> = state
+        .games
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|g| is_live(g))
+        .map(|g| g.id.clone())
+        .collect();
+    let mut fin = state.finished.lock().unwrap();
+    for g in incoming {
+        if g.status == GameStatus::Final && was_live.contains(&g.id) {
+            fin.entry(g.id.clone()).or_insert_with(std::time::Instant::now);
+            tracing::info!("game '{}' ended; lingering {}m", g.id, FINAL_LINGER.as_secs() / 60);
+        }
+    }
+    // Keep the map bounded: drop stamps past the linger or for vanished games.
+    fin.retain(|id, t| {
+        t.elapsed() < FINAL_LINGER && incoming.iter().any(|g| &g.id == id)
+    });
+}
+
+/// Parse ESPN's start-time format ("2026-06-28T13:00Z", sometimes with seconds).
+pub(crate) fn parse_espn_time(iso: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::{DateTime, NaiveDateTime, Utc};
+    if let Ok(t) = DateTime::parse_from_rfc3339(iso) {
+        return Some(t.with_timezone(&Utc));
+    }
+    for fmt in ["%Y-%m-%dT%H:%MZ", "%Y-%m-%dT%H:%M:%SZ"] {
+        if let Ok(t) = NaiveDateTime::parse_from_str(iso, fmt) {
+            return Some(t.and_utc());
+        }
+    }
+    None
+}
+
+/// The game's local start time as frame/caption text ("7:05 PM"), if parseable.
+pub(crate) fn start_time_label(iso: &str) -> Option<String> {
+    let t = parse_espn_time(iso)?;
+    Some(t.with_timezone(&chrono::Local).format("%-I:%M %p").to_string())
+}
+
+/// Should the BOARD show this game? Live always; scheduled only inside the
+/// pregame window. (The app's browse feed is broader — see `browse_shows`.)
+fn board_shows_at(g: &Game, now: chrono::DateTime<chrono::Utc>) -> bool {
+    if is_live(g) {
+        return true;
+    }
+    if g.status != GameStatus::Pregame {
+        return false;
+    }
+    match parse_espn_time(&g.start_time) {
+        // Within the window, including games slightly past their scheduled start
+        // that ESPN hasn't flipped to in-progress yet.
+        Some(start) => (start - now).num_minutes() <= PREGAME_WINDOW_MINS,
+        None => false,
+    }
+}
+
+/// State-aware board filter: the pure time-window logic, plus the post-game
+/// linger (a Final whose end we watched keeps showing for `FINAL_LINGER`).
+pub(crate) fn board_shows(state: &AppState, g: &Game) -> bool {
+    if g.status == GameStatus::Final {
+        return state
+            .finished
+            .lock()
+            .unwrap()
+            .get(&g.id)
+            .is_some_and(|t| t.elapsed() < FINAL_LINGER);
+    }
+    board_shows_at(g, chrono::Utc::now())
+}
+
+/// Should the app's "View all" browse feed show this game? Live plus ALL of the
+/// slate's upcoming games (so you can queue up tonight's game this morning).
+pub(crate) fn browse_shows(g: &Game) -> bool {
+    is_live(g) || g.status == GameStatus::Pregame
 }
 
 /// Stable per-sport team key shared by the catalog and games: "{sport}-{abbrev}".
@@ -439,7 +544,7 @@ fn chosen_games(state: &AppState, cfg: &BoardConfig) -> Vec<Game> {
     // Focus override: show ONLY this game while it's still live.
     if let Some(fid) = &cfg.focused_game_id {
         let games = state.games.lock().unwrap();
-        if let Some(g) = games.iter().find(|g| &g.id == fid && is_live(g)) {
+        if let Some(g) = games.iter().find(|g| &g.id == fid && board_shows(state, g)) {
             return vec![g.clone()];
         }
     }
@@ -467,7 +572,7 @@ fn candidate_games(state: &AppState, cfg: &BoardConfig) -> Vec<Game> {
     // blank.
     let unconfigured = favs.is_empty() && cfg.extra_game_ids.is_empty() && !has_champ_prefs;
     let mut out: Vec<Game> = Vec::new();
-    for g in games.iter().filter(|g| is_live(g)) {
+    for g in games.iter().filter(|g| board_shows(state, g)) {
         let wanted = (unconfigured
             || game_matches(g, &favs)
             || game_matches_champ(g, cfg)
@@ -793,6 +898,8 @@ async fn poll_loop(state: AppState, source: Arc<dyn SportsDataSource>) {
             tracing::warn!("no games from source; showing empty slate");
         }
         let n = games.len();
+        // Stamp any live -> Final transitions before the old slate disappears.
+        record_finished_transitions(&state, &games);
         *state.games.lock().unwrap() = games;
         let board_ids: Vec<String> = state.devices.lock().unwrap().keys().cloned().collect();
         for bid in &board_ids {
@@ -1112,6 +1219,84 @@ mod tests {
         assert!(state.notices.lock().unwrap().contains_key("b1"));
         let m = manifest_for_board(&state, "b1");
         assert!(m.display_on && m.rotation.len() == 1, "notice frame shows");
+    }
+
+    /// A game whose end we observed lingers on the board for 30 minutes; one that
+    /// arrives already-Final (restart, stale feed) never lingers; the linger expires.
+    #[test]
+    fn finals_linger_half_hour_after_observed_end() {
+        let state = AppState::new_ephemeral();
+        let live = Game {
+            id: "g1".into(),
+            sport_id: "nhl".into(),
+            away: TeamSide::empty("A"),
+            home: TeamSide::empty("B"),
+            status: GameStatus::Active,
+            ordinal: "3rd".into(),
+            clock: "1:00".into(),
+            start_time: String::new(),
+            leaderboard: None,
+            champ: None,
+        };
+        *state.games.lock().unwrap() = vec![live.clone()];
+
+        // Poll observes the transition to Final.
+        let ended = Game { status: GameStatus::Final, ordinal: String::new(), clock: String::new(), ..live };
+        let already_final = Game { id: "g2".into(), ..ended.clone() };
+        let slate = vec![ended, already_final];
+        record_finished_transitions(&state, &slate);
+        *state.games.lock().unwrap() = slate;
+
+        let cfg = BoardConfig::default(); // unconfigured -> whole slate
+        let ids: Vec<String> = candidate_games(&state, &cfg).iter().map(|g| g.id.clone()).collect();
+        assert!(ids.contains(&"g1".to_string()), "observed final lingers");
+        assert!(!ids.contains(&"g2".to_string()), "arrived-final never lingers");
+
+        // Age the stamp past the linger: the game drops off the board.
+        state
+            .finished
+            .lock()
+            .unwrap()
+            .insert("g1".into(), std::time::Instant::now() - FINAL_LINGER);
+        let ids: Vec<String> = candidate_games(&state, &cfg).iter().map(|g| g.id.clone()).collect();
+        assert!(!ids.contains(&"g1".to_string()), "linger expires after 30m");
+    }
+
+    /// The board shows live games plus scheduled ones inside the 30-minute
+    /// pregame window; the browse feed shows ALL upcoming games.
+    #[test]
+    fn pregame_window_gates_board_but_not_browse() {
+        use chrono::{Duration as D, Utc};
+        let now = Utc::now();
+        let mk = |mins_from_now: i64| Game {
+            id: "g".into(),
+            sport_id: "nhl".into(),
+            away: TeamSide::empty("A"),
+            home: TeamSide::empty("B"),
+            status: GameStatus::Pregame,
+            ordinal: String::new(),
+            clock: String::new(),
+            start_time: (now + D::minutes(mins_from_now)).format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            leaderboard: None,
+            champ: None,
+        };
+        assert!(board_shows_at(&mk(10), now), "starts in 10 min -> on the board");
+        assert!(board_shows_at(&mk(-5), now), "past scheduled start, not yet live -> keep showing");
+        assert!(!board_shows_at(&mk(120), now), "starts in 2h -> NOT on the board");
+        assert!(browse_shows(&mk(120)), "…but browsable in View all");
+        // Unparseable start time: never board-shown early.
+        let mut odd = mk(10);
+        odd.start_time = "not-a-time".into();
+        assert!(!board_shows_at(&odd, now));
+    }
+
+    /// ESPN timestamps (with and without seconds) parse; labels render local time.
+    #[test]
+    fn espn_time_parsing() {
+        assert!(parse_espn_time("2026-06-28T13:00Z").is_some());
+        assert!(parse_espn_time("2026-06-28T13:00:00Z").is_some());
+        assert!(parse_espn_time("garbage").is_none());
+        assert!(start_time_label("2026-06-28T13:00Z").is_some());
     }
 
     /// Removing a preference-driven game EXCLUDES it (preferences untouched);

@@ -207,7 +207,7 @@ async fn controller_loop(
                 Ok(ClientMsg::GetGames) => {
                     let games: Vec<GameSummary> = {
                         let g = state.games.lock().unwrap();
-                        g.iter().filter(|g| crate::is_live(g)).map(crate::to_summary).collect()
+                        g.iter().filter(|g| crate::browse_shows(g)).map(crate::to_summary).collect()
                     };
                     let _ = out.send(Message::Text(
                         serde_json::to_string(&ServerMsg::Games { games }).unwrap(),

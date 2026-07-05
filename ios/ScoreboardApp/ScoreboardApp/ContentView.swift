@@ -478,7 +478,13 @@ final class BoardViewModel: ObservableObject {
             return ai != bi ? ai < bi : a.0 < b.0
         }
         return groups.map { league, games in
-            (league, games.sorted { involvesFavorite($0) && !involvesFavorite($1) })
+            // Live games lead; within each bucket, favorites first.
+            (league, games.sorted { a, b in
+                let aLive = a.status != "pregame" ? 0 : 1
+                let bLive = b.status != "pregame" ? 0 : 1
+                if aLive != bLive { return aLive < bLive }
+                return involvesFavorite(a) && !involvesFavorite(b)
+            })
         }
     }
 
@@ -737,7 +743,7 @@ struct GameCard<Caption: View, Footer: View>: View {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(title)
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(.primary)
                         .lineLimit(1)
                     Spacer(minLength: 0)
                     // Championship badge in the card's corner — a caption
@@ -756,8 +762,11 @@ struct GameCard<Caption: View, Footer: View>: View {
         }
         .padding(10)
         .frame(width: 212)
-        .background(RoundedRectangle(cornerRadius: 14).fill(Color(white: 0.13)))
-        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.white.opacity(0.10)))
+        // Adaptive card chrome (white in light mode, dark in dark) matching the
+        // Form's section cards — only the LED panel stays black, like the real
+        // hardware. Radius matches the inset-grouped sections.
+        .background(RoundedRectangle(cornerRadius: 26).fill(Color(.secondarySystemGroupedBackground)))
+        .overlay(RoundedRectangle(cornerRadius: 26).strokeBorder(.primary.opacity(0.08)))
     }
 }
 
@@ -801,13 +810,10 @@ struct DashboardView: View {
     @State private var showRemoveConfirm = false
     /// Which settings-row explainer card is up (nil = none).
     @State private var settingsInfo: SettingsInfoTopic?
-    /// Bumps expanded-view cards' HTTP render URLs to force a refetch.
-    @State private var refresh = 0
-    /// Now-showing section: collapsed (board rotation) vs expanded (all leagues).
-    @State private var showAllGames = false
+    /// Pushes the All-games screen (the "View all" button).
+    @State private var showAllGamesScreen = false
     /// League being edited (per-card Edit button or the Add League menu).
     @State private var editingSport: UiSport?
-    @Namespace private var cardNS
 
     /// One clear status for the selected board (replaces the old "Connected /
     /// board offline" pair): server-down vs board-offline vs online.
@@ -829,13 +835,16 @@ struct DashboardView: View {
             .navigationDestination(item: $editingSport) { sport in
                 LeagueEditorView(model: model, sport: sport)
             }
+            .navigationDestination(isPresented: $showAllGamesScreen) {
+                AllGamesView(model: model)
+            }
             .toolbar {
                 ToolbarItem(placement: .principal) { boardMenu }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { showSettings = true } label: { Image(systemName: "gear") }
                 }
             }
-            .onAppear { refresh += 1; model.requestGames() }
+            .onAppear { model.requestGames() }
             .sheet(isPresented: $showSettings) { SettingsView(model: model) }
             .sheet(isPresented: $showAddBoard) { AddBoardSheet(model: model) }
             .alert("Name this scoreboard", isPresented: $showRename) {
@@ -965,54 +974,28 @@ struct DashboardView: View {
         }
     }
 
-    /// One unified games section. Collapsed: the board's rotation as a single
-    /// snapping carousel (pinned game first, others dimmed; tap to pin). Expanded
-    /// via "View all": a carousel per league, preference leagues first — cards
-    /// shared between the two states animate into place.
+    /// The board's rotation as a single snapping carousel (pinned game first,
+    /// others dimmed). "View all" pushes the full per-league browser screen.
     private var nowShowingSection: some View {
         Section {
-            if showAllGames {
-                expandedCarousels
-            } else {
-                collapsedCarousel
-            }
+            collapsedCarousel
         } header: {
+            // The section's margins are zeroed (full-bleed carousel), so the
+            // header re-applies the standard margin itself.
             HStack {
                 Text("Now showing")
                 Spacer()
-                if showAllGames {
-                    // Bordered so the three header actions read as separate buttons.
-                    Button("Reset") {
-                        withAnimation { model.resetRotation() }
-                    }
-                    .buttonStyle(.bordered)
-                    .buttonBorderShape(.capsule)
-                    .controlSize(.small)
+                Button("View all") { showAllGamesScreen = true }
+                    .font(.subheadline.weight(.semibold))
                     .textCase(nil)
-                    .disabled(!model.rotationModified)
-
-                    Button {
-                        refresh += 1
-                        model.requestGames()
-                    } label: {
-                        Image(systemName: "arrow.clockwise").font(.subheadline.weight(.semibold))
-                    }
-                    .buttonStyle(.bordered)
-                    .buttonBorderShape(.capsule)
-                    .controlSize(.small)
-                }
-                Button(showAllGames ? "Show less" : "View all") {
-                    withAnimation(.spring(duration: 0.45)) { showAllGames.toggle() }
-                    if showAllGames {
-                        refresh += 1
-                        model.requestGames()
-                    }
-                }
-                .font(.subheadline.weight(.semibold))
-                .textCase(nil)
-                .modifier(BorderedWhenExpanded(bordered: showAllGames))
             }
+            .padding(.horizontal, 20)
         }
+        // Zero the section's own horizontal margins: the LIST CELL clips its
+        // content, so a full-bleed carousel needs the cell itself to span the
+        // screen. Alignment comes from content margins instead. (iOS 26 API;
+        // earlier systems keep the section-clipped carousel.)
+        .modifier(FullBleedSection())
     }
 
     /// The caption line under the game title: provenance only (WHY it's on the
@@ -1032,19 +1015,22 @@ struct DashboardView: View {
                     : ("circle.dashed", "Not on scoreboard", .gray)
             }
         }()
+        // Color only the icon; the text stays secondary so it reads in both
+        // color schemes (yellow text on a white card is illegible).
         return HStack(spacing: 4) {
             Image(systemName: icon)
+                .foregroundStyle(color)
             Text(text)
+                .foregroundStyle(.secondary)
         }
         .font(.caption2)
         .lineLimit(1)
-        .foregroundStyle(color)
     }
 
     /// A compact labeled action button for the card footer. Hand-rolled capsule
     /// (the stock bordered style balloons and wraps its label at this width);
     /// fills the width it's given so side-by-side buttons come out equal.
-    private func cardButton(_ title: String, _ icon: String, tint: Color = .white.opacity(0.85), action: @escaping () -> Void) -> some View {
+    private func cardButton(_ title: String, _ icon: String, tint: Color = .primary, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 4) {
                 Image(systemName: icon)
@@ -1056,7 +1042,8 @@ struct DashboardView: View {
             .foregroundStyle(tint)
             .frame(maxWidth: .infinity)
             .padding(.vertical, 6)
-            .background(Capsule().fill(.white.opacity(0.08)))
+            // Adaptive fill: subtle in both light and dark card chrome.
+            .background(Capsule().fill(.primary.opacity(0.06)))
         }
         .buttonStyle(.plain)
     }
@@ -1066,7 +1053,8 @@ struct DashboardView: View {
     @ViewBuilder private var collapsedCarousel: some View {
         if !model.online {
             // The server is reachable but this board isn't — explain it inline
-            // (the rest of the dashboard still works for configuring).
+            // (the rest of the dashboard still works for configuring). The section
+            // margins are zeroed for the carousel, so this row draws its own card.
             HStack(spacing: 12) {
                 Image(systemName: "antenna.radiowaves.left.and.right.slash")
                     .font(.title3)
@@ -1078,10 +1066,20 @@ struct DashboardView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                Spacer(minLength: 0)
             }
+            .padding(14)
+            .background(RoundedRectangle(cornerRadius: 26).fill(Color(.secondarySystemGroupedBackground)))
+            .padding(.horizontal, 20)
+            .listRowBackground(Color.clear)
+            .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+            .listRowSeparator(.hidden)
         } else if model.nowShowing.isEmpty {
             Text("Nothing live right now")
                 .foregroundStyle(.secondary)
+                .padding(.horizontal, 20)
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
         } else {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(alignment: .top, spacing: 12) {
@@ -1092,7 +1090,7 @@ struct DashboardView: View {
                             sourceCaption(game)
                         } footer: {
                             HStack(spacing: 8) {
-                                cardButton(pinned ? "Unpin" : "Pin", pinned ? "pin.slash" : "pin", tint: pinned ? .yellow : .white.opacity(0.85)) {
+                                cardButton(pinned ? "Unpin" : "Pin", pinned ? "pin.slash" : "pin", tint: pinned ? .orange : .primary) {
                                     withAnimation { pinned ? model.clearFocus() : model.focusGame(game.id) }
                                 }
                                 if !dimmed {
@@ -1102,7 +1100,6 @@ struct DashboardView: View {
                                 }
                             }
                         }
-                        .matchedGeometryEffect(id: game.id, in: cardNS)
                         // While something else is pinned, cards go monochrome —
                         // only their Pin button still does anything.
                         .saturation(dimmed ? 0 : 1)
@@ -1110,8 +1107,11 @@ struct DashboardView: View {
                     }
                 }
                 .scrollTargetLayout()
-                .padding(.horizontal)
             }
+            // The section margins are zeroed, so the cell (and its clip) spans the
+            // full screen; the content margin puts the FIRST card exactly on the
+            // other sections' leading edge while scrolling bleeds to the edges.
+            .contentMargins(.horizontal, 20, for: .scrollContent)
             .scrollTargetBehavior(.viewAligned)
             .animation(.default, value: model.focusedGameId)
             // Zero insets: with the row background cleared, any inset stacks
@@ -1119,62 +1119,7 @@ struct DashboardView: View {
             // provides the breathing room, like a normal row's background.
             .listRowInsets(EdgeInsets())
             .listRowBackground(Color.clear)
-        }
-    }
-
-    /// Every live game, one carousel per league; preference leagues lead the list.
-    @ViewBuilder private var expandedCarousels: some View {
-        if model.liveGames.isEmpty {
-            Text("No live games right now.")
-                .foregroundStyle(.secondary)
-        } else {
-            VStack(alignment: .leading, spacing: 14) {
-                ForEach(model.expandedLeagueGroups, id: \.0) { league, games in
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(model.leagueName(league).uppercased())
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal)
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(alignment: .top, spacing: 12) {
-                                ForEach(games, id: \.id) { game in
-                                    let showing = model.isShowing(game.id)
-                                    GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId], refresh: refresh) {
-                                        sourceCaption(game)
-                                    } footer: {
-                                        // Two-step: a game must be ON the board (added or
-                                        // via a preference) before it can be pinned.
-                                        HStack(spacing: 8) {
-                                            if showing {
-                                                cardButton("Remove", "minus.circle", tint: .red) {
-                                                    model.removeFromRotation(game)
-                                                }
-                                                cardButton("Pin", "pin") {
-                                                    withAnimation {
-                                                        model.focusGame(game.id)
-                                                        showAllGames = false
-                                                    }
-                                                }
-                                            } else {
-                                                cardButton("Add", "plus.circle", tint: .green) {
-                                                    model.addGame(game.id)
-                                                }
-                                            }
-                                        }
-                                    }
-                                    .matchedGeometryEffect(id: game.id, in: cardNS)
-                                }
-                            }
-                            .scrollTargetLayout()
-                            .padding(.horizontal)
-                        }
-                        .scrollTargetBehavior(.viewAligned)
-                    }
-                }
-            }
-            .padding(.vertical, 8)
-            .listRowInsets(EdgeInsets())
-            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
         }
     }
 
@@ -1399,16 +1344,158 @@ struct SettingsInfoCard: View {
     }
 }
 
-/// Applies the bordered capsule look only while the header is in its expanded
-/// (multi-button) state, so the lone "View all" stays a plain text button.
-struct BorderedWhenExpanded: ViewModifier {
-    let bordered: Bool
+/// Zeroes a section's horizontal margins so its cell — and the cell's clip —
+/// spans the full screen (full-bleed carousels). iOS 26 API; a no-op earlier,
+/// where the carousel stays clipped to the section width.
+struct FullBleedSection: ViewModifier {
     func body(content: Content) -> some View {
-        if bordered {
-            content.buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small)
+        if #available(iOS 26.0, *) {
+            content.listSectionMargins(.horizontal, 0)
         } else {
             content
         }
+    }
+}
+
+/// The pushed "View all" screen: every live game, one carousel per league,
+/// preference leagues first. Reset + refresh live in the toolbar. A plain
+/// ScrollView (no Form) — carousels bleed to the screen edges naturally.
+struct AllGamesView: View {
+    @ObservedObject var model: BoardViewModel
+    @Environment(\.dismiss) private var dismiss
+    /// Bumps the cards' HTTP render URLs to force a refetch.
+    @State private var refresh = 0
+
+    var body: some View {
+        ScrollView {
+            if model.liveGames.isEmpty {
+                ContentUnavailableView("No live games", systemImage: "sportscourt", description: Text("Tap refresh to check again."))
+                    .padding(.top, 60)
+            } else {
+                LazyVStack(alignment: .leading, spacing: 18) {
+                    ForEach(model.expandedLeagueGroups, id: \.0) { league, games in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(model.leagueName(league).uppercased())
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 20)
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(alignment: .top, spacing: 12) {
+                                    ForEach(games, id: \.id) { game in
+                                        allGamesCard(game)
+                                    }
+                                }
+                                .scrollTargetLayout()
+                            }
+                            .contentMargins(.horizontal, 20, for: .scrollContent)
+                            .scrollTargetBehavior(.viewAligned)
+                        }
+                    }
+                }
+                .padding(.vertical, 12)
+            }
+        }
+        .background(Color(.systemGroupedBackground))
+        .navigationTitle("All games")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Reset") {
+                    withAnimation { model.resetRotation() }
+                }
+                .disabled(!model.rotationModified)
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    refresh += 1
+                    model.requestGames()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+            }
+        }
+        .onAppear { refresh += 1; model.requestGames() }
+    }
+
+    /// One game card with its provenance caption and Add / Remove+Pin footer.
+    /// Two-step: a game must be ON the board before it can be pinned; pinning
+    /// pops back to the dashboard to show the result.
+    private func allGamesCard(_ game: UiGame) -> some View {
+        let showing = model.isShowing(game.id)
+        return GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId], refresh: refresh) {
+            AllGamesCaption(model: model, game: game)
+        } footer: {
+            HStack(spacing: 8) {
+                if showing {
+                    AllGamesCardButton(title: "Remove", icon: "minus.circle", tint: .red) {
+                        model.removeFromRotation(game)
+                    }
+                    AllGamesCardButton(title: "Pin", icon: "pin", tint: .primary) {
+                        model.focusGame(game.id)
+                        dismiss()
+                    }
+                } else {
+                    AllGamesCardButton(title: "Add", icon: "plus.circle", tint: .green) {
+                        model.addGame(game.id)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The provenance caption, reusable outside DashboardView.
+struct AllGamesCaption: View {
+    @ObservedObject var model: BoardViewModel
+    let game: UiGame
+
+    var body: some View {
+        let (icon, text, color): (String, String, Color) = {
+            // A scheduled game you haven't added: the start time beats a generic
+            // "not on scoreboard" (the Add button already implies that).
+            if game.status == "pregame", !model.isShowing(game.id) {
+                return ("clock", game.detail.isEmpty ? "Upcoming" : "Starts \(game.detail)", .gray)
+            }
+            switch model.gameSource(game) {
+            case .favorite: return ("star.fill", "Favorite", .yellow)
+            case .added: return ("plus.circle.fill", "Added manually", .cyan)
+            case nil:
+                return model.isShowing(game.id)
+                    ? ("dot.radiowaves.left.and.right", "Live now", .gray)
+                    : ("circle.dashed", "Not on scoreboard", .gray)
+            }
+        }()
+        return HStack(spacing: 4) {
+            Image(systemName: icon).foregroundStyle(color)
+            Text(text).foregroundStyle(.secondary)
+        }
+        .font(.caption2)
+        .lineLimit(1)
+    }
+}
+
+/// The compact capsule card button, reusable outside DashboardView.
+struct AllGamesCardButton: View {
+    let title: String
+    let icon: String
+    var tint: Color = .primary
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: icon)
+                Text(title)
+            }
+            .font(.caption.weight(.semibold))
+            .lineLimit(1)
+            .fixedSize(horizontal: false, vertical: true)
+            .foregroundStyle(tint)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(.primary.opacity(0.06)))
+        }
+        .buttonStyle(.plain)
     }
 }
 

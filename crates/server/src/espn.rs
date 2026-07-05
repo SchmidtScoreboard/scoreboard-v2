@@ -493,22 +493,29 @@ pub fn mock_games() -> Vec<Game> {
 /// Demo source: synthetic live games with ticking scores/clocks (for `--demo`).
 pub struct DemoSource {
     tick: AtomicU64,
+    /// Wall-clock baseline for the scripted "game that ends" — the tick counter
+    /// depends on poll cadence, so it can't time a five-minute story.
+    started: std::time::Instant,
 }
 
 impl DemoSource {
     pub fn new() -> Self {
-        Self { tick: AtomicU64::new(0) }
+        Self { tick: AtomicU64::new(0), started: std::time::Instant::now() }
     }
 }
 
 #[async_trait]
 impl SportsDataSource for DemoSource {
     async fn fetch(&self) -> Vec<Game> {
-        demo_games(self.tick.fetch_add(1, Ordering::Relaxed))
+        demo_games(self.tick.fetch_add(1, Ordering::Relaxed), self.started.elapsed().as_secs())
     }
 }
 
-fn demo_games(n: u64) -> Vec<Game> {
+fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
+    // The scripted ending: live for the first five minutes of the server's life,
+    // then FINAL — exercises the observed live->Final transition and the
+    // half-hour linger without waiting for a real game to end.
+    let ending_live = elapsed_secs < 5 * 60;
     let team = |abbrev: &str, name: &str, score: u32, p: &str, s: &str| TeamSide {
         abbrev: abbrev.into(),
         name: name.into(),
@@ -587,6 +594,16 @@ fn demo_games(n: u64) -> Vec<Game> {
             champ: None,
         },
         Game {
+            id: "demo-mlb-ending".into(), sport_id: "mlb".into(),
+            away: team("HOU", "ASTROS", 5, "002D62", "EB6E1F"),
+            home: team("SEA", "MARINERS", 4, "0C2C56", "005C5C"),
+            status: if ending_live { GameStatus::Active } else { GameStatus::Final },
+            ordinal: if ending_live { "9th".into() } else { String::new() },
+            clock: String::new(), start_time: String::new(),
+            leaderboard: None,
+            champ: None,
+        },
+        Game {
             id: "demo-nfl".into(), sport_id: "nfl".into(),
             away: team("NE", "PATRIOTS", (n / 9 % 35) as u32, "002244", "C60C30"),
             home: team("BUF", "BILLS", (n / 8 % 35) as u32, "00338D", "FFFFFF"),
@@ -628,6 +645,26 @@ fn demo_games(n: u64) -> Vec<Game> {
                 LeaderRow { name: "LECLERC".into(), value: "+5.8".into() },
                 LeaderRow { name: "PIASTRI".into(), value: "+9.0".into() },
             ] }),
+            champ: None,
+        },
+        // Upcoming games: one inside the 30-min pregame window (appears on the
+        // board with its start time), one hours out (View-all browse only).
+        Game {
+            id: "demo-nhl-soon".into(), sport_id: "nhl".into(),
+            away: team("NYR", "RANGERS", 0, "0038A8", "CE1126"),
+            home: team("EDM", "OILERS", 0, "041E42", "FF4C00"),
+            status: GameStatus::Pregame, ordinal: String::new(), clock: String::new(),
+            start_time: (chrono::Utc::now() + chrono::Duration::minutes(20)).format("%Y-%m-%dT%H:%MZ").to_string(),
+            leaderboard: None,
+            champ: None,
+        },
+        Game {
+            id: "demo-nba-tonight".into(), sport_id: "nba".into(),
+            away: team("MIL", "BUCKS", 0, "00471B", "EEE1C6"),
+            home: team("PHX", "SUNS", 0, "1D1160", "E56020"),
+            status: GameStatus::Pregame, ordinal: String::new(), clock: String::new(),
+            start_time: (chrono::Utc::now() + chrono::Duration::hours(3)).format("%Y-%m-%dT%H:%MZ").to_string(),
+            leaderboard: None,
             champ: None,
         },
     ]

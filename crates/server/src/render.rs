@@ -278,7 +278,12 @@ fn status_for(g: &Game) -> (String, Rgb888) {
             if g.ordinal.is_empty() { "INT".to_string() } else { g.ordinal.clone() },
             WHITE,
         ),
-        GameStatus::Pregame => ("PREGAME".to_string(), GREY),
+        // Scheduled games show WHEN they start (like the original scoreboard);
+        // "PREGAME" only if ESPN's timestamp doesn't parse.
+        GameStatus::Pregame => (
+            crate::start_time_label(&g.start_time).unwrap_or_else(|| "PREGAME".to_string()),
+            GREY,
+        ),
     }
 }
 
