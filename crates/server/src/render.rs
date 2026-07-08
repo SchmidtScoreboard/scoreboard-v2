@@ -413,6 +413,7 @@ mod kern_tests {
             clock: String::new(),
             start_time: String::new(),
             leaderboard: None,
+            session: None,
             champ: None,
         };
         let (_, px) = render_game(&g);
@@ -457,6 +458,7 @@ mod kern_tests {
                 ],
             }),
             champ: None,
+            session: Some("race".into()),
         };
         let (_, px) = render_leaderboard(&g); // 64x32 RGB565-LE, 2 bytes/pixel
         let row_lit = |y: usize| {

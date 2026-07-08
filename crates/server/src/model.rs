@@ -76,6 +76,10 @@ pub struct Game {
     /// Set when this is a postseason/championship game — drives the board's
     /// big-games preference and the app's game-card caption.
     pub champ: Option<Champ>,
+    /// Session kind for multi-session events (F1: "race" / "quali" / "sprint" /
+    /// "sprint-quali") — drives the per-league session subscription. `None` for
+    /// ordinary games.
+    pub session: Option<String>,
 }
 
 pub fn hex_to_rgb(hex: &str) -> Rgb888 {

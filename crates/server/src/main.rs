@@ -111,10 +111,11 @@ impl AppState {
     }
 
     fn new_inner(db: Option<Connection>, catalog: Catalog) -> Self {
-        let (configs, allow) = match &db {
+        let (mut configs, allow) = match &db {
             Some(conn) => (load_configs(conn), load_pairings(conn)),
             None => (HashMap::new(), HashMap::new()),
         };
+        sanitize_configs(&catalog, &mut configs);
         AppState {
             catalog: Arc::new(catalog),
             // Empty until the first real fetch — boards show their no-games
@@ -198,6 +199,28 @@ fn open_db(path: &std::path::Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
+/// Drop config leftovers that no longer make sense against the catalog:
+/// team favorites for leagues that have NO teams (PGA/LPGA/F1 became
+/// option-subscription leagues, orphaning their old pseudo-teams). Sports
+/// absent from the catalog are left untouched — the catalog may be the small
+/// mock fallback, and deleting real preferences against it would be data loss.
+fn sanitize_configs(catalog: &Catalog, configs: &mut HashMap<String, BoardConfig>) {
+    let teamless: HashSet<&str> = catalog
+        .sports
+        .iter()
+        .filter(|s| s.teams.is_empty())
+        .map(|s| s.id.as_str())
+        .collect();
+    for cfg in configs.values_mut() {
+        for s in cfg.sports.iter_mut() {
+            if teamless.contains(s.sport_id.as_str()) && !s.favorite_team_ids.is_empty() {
+                tracing::info!("dropping orphaned favorites for teamless league '{}'", s.sport_id);
+                s.favorite_team_ids.clear();
+            }
+        }
+    }
+}
+
 /// Load every persisted board config (board pubkey -> config).
 fn load_configs(conn: &Connection) -> HashMap<String, BoardConfig> {
     let mut out = HashMap::new();
@@ -259,6 +282,23 @@ async fn main() {
         return;
     }
 
+    // One-shot: fetch the full ESPN catalog, write the disk cache, exit. Seeds
+    // demo mode (which never contacts ESPN) with the real team lists.
+    if std::env::args().any(|a| a == "--fetch-catalog") {
+        match espn::EspnSource::new().fetch_catalog().await {
+            Some(c) => {
+                cache_catalog(&c);
+                let teams: usize = c.sports.iter().map(|s| s.teams.len()).sum();
+                println!("cached {} sports / {} teams -> {}", c.sports.len(), teams, catalog_cache_path().display());
+            }
+            None => {
+                eprintln!("catalog fetch failed (ESPN unreachable?); cache unchanged");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     // `--demo` flag or DEMO env (the dummy Railway service just sets DEMO=1).
     let demo = std::env::args().any(|a| a == "--demo") || std::env::var("DEMO").is_ok();
     let source: Arc<dyn SportsDataSource> = if demo {
@@ -268,26 +308,22 @@ async fn main() {
         Arc::new(espn::EspnSource::new())
     };
     // Team rosters come from the data source's /teams endpoint — the FULL league
-    // roster, independent of which games are live. In live mode we cache the last
-    // good catalog to disk, so an ESPN outage at startup still serves the full list
-    // instead of the tiny mock. Demo mode keeps its synthetic catalog and never
-    // touches the cache.
+    // roster, independent of which games are live. Live mode caches the last good
+    // catalog to disk; demo mode (whose source never fetches) reads that same
+    // cache, so it serves the full team list WITHOUT ever contacting ESPN.
+    // Seed or refresh the cache with `server --fetch-catalog`.
     let catalog = match source.fetch_catalog().await {
         Some(c) => {
             tracing::info!("catalog: {} sports from source", c.sports.len());
-            if !demo {
-                cache_catalog(&c);
-            }
+            cache_catalog(&c);
             c
         }
-        None if !demo => load_cached_catalog().unwrap_or_else(|| {
-            tracing::warn!("catalog: source unavailable and no cache yet, using mock");
+        None => load_cached_catalog().unwrap_or_else(|| {
+            tracing::warn!(
+                "catalog: no cache yet, using mock (run `server --fetch-catalog` to seed the full list)"
+            );
             mock_catalog()
         }),
-        None => {
-            tracing::warn!("catalog: team fetch unavailable, using mock");
-            mock_catalog()
-        }
     };
     let state = AppState::new_with_catalog(catalog);
     tokio::spawn(poll_loop(state.clone(), source));
@@ -517,25 +553,43 @@ fn champ_option_covers(sport_id: &str, option_id: &str, tier: &str) -> bool {
         ("nhl", "conf") => tier == "conf" || tier == "final",
         ("nhl", "final") => tier == "final",
         ("nba", "final") => tier == "final",
+        ("wnba", "final") => tier == "final",
         ("mlb", "ws") => tier == "ws",
         ("nfl", "sb") => tier == "sb",
         // "Playoff + Bowls" covers both; "Bowl Games" covers just the bowls.
         ("cfb", "playoff") => true,
         ("cfb", "bowl") => tier == "bowl",
         ("cbb" | "wcbb", "tournament") => tier == "tournament",
+        ("mls", "cup") => tier == "cup",
+        // World Cup tiers nest: final ⊂ semis ⊂ the knockout stage.
+        ("wc", "final") => tier == "final",
+        ("wc", "semi") => matches!(tier, "final" | "semi"),
+        ("wc", "knockout") => matches!(tier, "final" | "semi" | "quarter" | "knockout"),
+        // Golf: "majors" covers major-tier events (the "all" option is handled in
+        // `game_option_priority`, since regular events carry no champ tag).
+        ("pga" | "lpga", "majors") => tier == "major",
         _ => option_id == tier,
     }
 }
 
-/// Whether the board's per-sport big-games preference wants this game.
-fn game_matches_champ(g: &Game, cfg: &BoardConfig) -> bool {
-    let Some(champ) = &g.champ else { return false };
+/// Which F1 sessions a subscription level includes.
+fn f1_option_covers(option_id: &str, session: &str) -> bool {
+    match option_id {
+        "gp" => session == "race",
+        "gp-quali" => matches!(session, "race" | "quali"),
+        // Sprints bring their own qualifying session along.
+        "gp-quali-sprint" => matches!(session, "race" | "quali" | "sprint" | "sprint-quali"),
+        _ => false,
+    }
+}
+
+/// The board's league option for a game's sport, if one is set (never "none").
+fn league_option<'a>(cfg: &'a BoardConfig, sport_id: &str) -> Option<&'a str> {
     cfg.sports
         .iter()
-        .find(|s| s.sport_id == g.sport_id)
+        .find(|s| s.sport_id == sport_id)
         .and_then(|s| s.championship_option_id.as_deref())
-        .map(|opt| champ_option_covers(&g.sport_id, opt, &champ.tier))
-        .unwrap_or(false)
+        .filter(|o| *o != "none")
 }
 
 /// What the BOARD displays right now: the pinned game alone while a live focus is
@@ -951,35 +1005,47 @@ pub(crate) fn championship_options_for(sport_id: &str) -> Vec<ChampionshipOption
             ("final", "Stanley Cup Final"),
             ("conf", "Conference Finals+"),
             ("playoffs", "All playoffs"),
+            ("all", "Every match"),
         ],
-        "nba" => &[("none", "Off"), ("final", "NBA Finals"), ("playoffs", "All playoffs")],
-        "mlb" => &[("none", "Off"), ("ws", "World Series"), ("playoffs", "All playoffs")],
-        "nfl" => &[("none", "Off"), ("sb", "Super Bowl"), ("playoffs", "All playoffs")],
-        "golf" | "f1" => &[], // leaderboard sports: just favorite the tour/series
-        _ => &[("none", "Off"), ("playoffs", "All playoffs")],
+        "nba" => &[("none", "Off"), ("final", "NBA Finals"), ("playoffs", "All playoffs"), ("all", "Every match")],
+        "wnba" => &[("none", "Off"), ("final", "WNBA Finals"), ("playoffs", "All playoffs"), ("all", "Every match")],
+        "mlb" => &[("none", "Off"), ("ws", "World Series"), ("playoffs", "All playoffs"), ("all", "Every match")],
+        "nfl" => &[("none", "Off"), ("sb", "Super Bowl"), ("playoffs", "All playoffs"), ("all", "Every match")],
+        "cfb" => &[("none", "Off"), ("playoff", "CFP + bowls"), ("bowl", "Bowl games only"), ("all", "Every match")],
+        "cbb" | "wcbb" => &[("none", "Off"), ("tournament", "March Madness"), ("all", "Every match")],
+        "mls" => &[("none", "Off"), ("cup", "MLS Cup"), ("playoffs", "All playoffs"), ("all", "Every match")],
+        // EPL has no playoffs, so the only league-wide subscription is all of it.
+        "epl" => &[("none", "Off"), ("all", "Every match")],
+        "wc" => &[
+            ("none", "Off"),
+            ("final", "World Cup Final"),
+            ("semi", "Semifinals +"),
+            ("knockout", "Knockout stage"),
+            ("all", "Every match"),
+        ],
+        // Leaderboard sports subscribe by EVENT KIND, not by team.
+        "pga" | "lpga" => &[("none", "Off"), ("all", "All events"), ("majors", "Majors only")],
+        "f1" => &[
+            ("none", "Off"),
+            ("gp", "Grands Prix"),
+            ("gp-quali", "GP + Qualifying"),
+            ("gp-quali-sprint", "GP + Qualifying + Sprints"),
+        ],
+        _ => &[("none", "Off"), ("playoffs", "All playoffs"), ("all", "Every match")],
     };
     opts.iter().map(|(id, label)| champ(id, label)).collect()
 }
 
-/// Golf as one sport with favoritable PGA + LPGA "teams" — reuses the favorites
-/// pipeline (favorite a tour to show its live tournaments).
-pub(crate) fn golf_sport() -> SportDescriptor {
-    SportDescriptor {
-        id: "golf".into(),
-        name: "Golf".into(),
-        teams: vec![team("golf", "PGA", "PGA Tour"), team("golf", "LPGA", "LPGA Tour")],
-        championship_options: vec![],
-    }
-}
-
-/// Formula 1 as one sport with a single favoritable "Formula 1" entry.
-pub(crate) fn f1_sport() -> SportDescriptor {
-    SportDescriptor {
-        id: "f1".into(),
-        name: "Formula 1".into(),
-        teams: vec![team("f1", "F1", "Formula 1")],
-        championship_options: vec![],
-    }
+/// The leaderboard "leagues" (PGA / LPGA / F1) have no teams — they're
+/// subscribed via their event-kind options above.
+pub(crate) fn leaderboard_sports() -> Vec<SportDescriptor> {
+    let sport = |id: &str, name: &str| SportDescriptor {
+        id: id.into(),
+        name: name.into(),
+        teams: vec![],
+        championship_options: championship_options_for(id),
+    };
+    vec![sport("pga", "PGA Tour"), sport("lpga", "LPGA Tour"), sport("f1", "Formula 1")]
 }
 
 /// Where the last-good live catalog is cached (alongside the SQLite DB, so it
@@ -1072,9 +1138,10 @@ fn mock_catalog() -> Catalog {
                     team_c("nfl", "SF", "49ers", "AA0000", "B3995D"),
                 ],
             ),
-            golf_sport(),
-            f1_sport(),
-        ],
+        ]
+        .into_iter()
+        .chain(leaderboard_sports())
+        .collect(),
     }
 }
 
@@ -1101,6 +1168,7 @@ fn preview() {
         start_time: String::new(),
         leaderboard: None,
         champ: None,
+        session: None,
     };
     let samples: Vec<(&str, Game)> = vec![
         // Tagged as a championship game so the app's big-game caption is
@@ -1116,7 +1184,7 @@ fn preview() {
         // Kerning torture tile (5x8): LT / AV pairs that leave holes with fixed advance.
         ("kern_5x8", g("9", "nhl", mk("TB", "BOLTS", 3, "002868", "FFFFFF"), mk("LV", "GRAVY", 2, "C8102E", "FFFFFF"), GameStatus::Active, "1st", "8:00")),
         ("golf", Game {
-            id: "g".into(), sport_id: "golf".into(),
+            id: "g".into(), sport_id: "pga".into(),
             away: model::TeamSide::empty("PGA"), home: model::TeamSide::empty(""),
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(),
             leaderboard: Some(model::Leaderboard { name: "MASTERS".into(), rows: vec![
@@ -1127,6 +1195,7 @@ fn preview() {
                 model::LeaderRow { name: "FLEETWOOD".into(), value: "-2".into() },
             ] }),
             champ: None,
+            session: None,
         }),
         ("f1", Game {
             id: "f".into(), sport_id: "f1".into(),
@@ -1140,6 +1209,7 @@ fn preview() {
                 model::LeaderRow { name: "HAMILTON".into(), value: "+12".into() },
             ] }),
             champ: None,
+            session: None,
         }),
     ];
     for (name, game) in &samples {
@@ -1221,6 +1291,169 @@ mod tests {
         assert!(m.display_on && m.rotation.len() == 1, "notice frame shows");
     }
 
+    /// Loading configs drops team favorites for leagues the catalog says have no
+    /// teams (the old golf/F1 pseudo-teams), but never touches teamed leagues or
+    /// sports missing from the catalog (which may just be the mock fallback).
+    #[test]
+    fn orphaned_teamless_favorites_are_dropped_on_load() {
+        let mut configs = HashMap::new();
+        configs.insert(
+            "b1".to_string(),
+            BoardConfig {
+                sports: vec![
+                    SportConfig {
+                        sport_id: "f1".into(),
+                        favorite_team_ids: vec!["f1-f1".into()], // orphan from before the split
+                        championship_option_id: Some("gp".into()),
+                    },
+                    SportConfig {
+                        sport_id: "nhl".into(),
+                        favorite_team_ids: vec!["nhl-bos".into()],
+                        championship_option_id: None,
+                    },
+                    SportConfig {
+                        sport_id: "golf".into(), // sport no longer in the catalog at all
+                        favorite_team_ids: vec!["golf-pga".into()],
+                        championship_option_id: None,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        sanitize_configs(&mock_catalog(), &mut configs);
+        let cfg = &configs["b1"];
+        let by_id = |id: &str| cfg.sports.iter().find(|s| s.sport_id == id).unwrap();
+        assert!(by_id("f1").favorite_team_ids.is_empty(), "teamless league favorites dropped");
+        assert_eq!(by_id("f1").championship_option_id.as_deref(), Some("gp"), "option kept");
+        assert_eq!(by_id("nhl").favorite_team_ids, vec!["nhl-bos".to_string()], "teamed league untouched");
+        assert_eq!(by_id("golf").favorite_team_ids, vec!["golf-pga".to_string()], "absent sport left alone");
+    }
+
+    /// The per-league subscription options: golf all/majors, F1 session levels,
+    /// World Cup rounds + "every match".
+    #[test]
+    fn league_option_subscriptions() {
+        // Test-readability shim over `game_option_priority`.
+        let game_matches_league_option =
+            |g: &Game, cfg: &BoardConfig| game_option_priority(g, cfg).is_some();
+        let mk = |sport: &str, champ_tier: Option<&str>, session: Option<&str>| Game {
+            id: "g".into(),
+            sport_id: sport.into(),
+            away: TeamSide::empty("X"),
+            home: TeamSide::empty(""),
+            status: GameStatus::Active,
+            ordinal: String::new(),
+            clock: String::new(),
+            start_time: String::new(),
+            leaderboard: None,
+            champ: champ_tier.map(|t| model::Champ { tier: t.into(), label: t.into() }),
+            session: session.map(Into::into),
+            situation: None,
+        };
+        let cfg = |sport: &str, opt: &str| BoardConfig {
+            sports: vec![SportConfig {
+                sport_id: sport.into(),
+                favorite_team_ids: vec![],
+                championship_option_id: Some(opt.into()),
+            }],
+            ..Default::default()
+        };
+
+        // Golf: "all" shows everything; "majors" only major-tier events.
+        assert!(game_matches_league_option(&mk("pga", None, None), &cfg("pga", "all")));
+        assert!(!game_matches_league_option(&mk("pga", None, None), &cfg("pga", "majors")));
+        assert!(game_matches_league_option(&mk("pga", Some("major"), None), &cfg("pga", "majors")));
+
+        // F1 session levels nest race < +quali < +sprints.
+        assert!(game_matches_league_option(&mk("f1", None, Some("race")), &cfg("f1", "gp")));
+        assert!(!game_matches_league_option(&mk("f1", None, Some("quali")), &cfg("f1", "gp")));
+        assert!(game_matches_league_option(&mk("f1", None, Some("quali")), &cfg("f1", "gp-quali")));
+        assert!(!game_matches_league_option(&mk("f1", None, Some("sprint")), &cfg("f1", "gp-quali")));
+        assert!(game_matches_league_option(&mk("f1", None, Some("sprint-quali")), &cfg("f1", "gp-quali-sprint")));
+
+        // World Cup: knockout covers the rounds; group stage only via "all".
+        assert!(game_matches_league_option(&mk("wc", Some("quarter"), None), &cfg("wc", "knockout")));
+        assert!(!game_matches_league_option(&mk("wc", Some("knockout"), None), &cfg("wc", "semi")));
+        assert!(game_matches_league_option(&mk("wc", Some("final"), None), &cfg("wc", "semi")));
+        assert!(!game_matches_league_option(&mk("wc", None, None), &cfg("wc", "knockout")));
+        assert!(game_matches_league_option(&mk("wc", None, None), &cfg("wc", "all")));
+
+        // WNBA Finals-only now exists.
+        assert!(game_matches_league_option(&mk("wnba", Some("final"), None), &cfg("wnba", "final")));
+        assert!(!game_matches_league_option(&mk("wnba", Some("playoffs"), None), &cfg("wnba", "final")));
+
+        // "Every match" is a universal blanket, champ tag or not.
+        assert!(game_matches_league_option(&mk("nhl", None, None), &cfg("nhl", "all")));
+        assert!(game_matches_league_option(&mk("epl", None, None), &cfg("epl", "all")));
+        assert!(!game_matches_league_option(&mk("nhl", None, None), &cfg("nhl", "playoffs")));
+    }
+
+    /// Rotation slots go by priority — manual adds first, then favorites, then
+    /// targeted options, then blankets — and everything past the cap is reported
+    /// as bumped (except for unconfigured boards sampling the slate).
+    #[test]
+    fn rotation_cap_prioritizes_and_reports_bumped() {
+        let state = AppState::new_ephemeral();
+        let side = |abbrev: &str| TeamSide {
+            abbrev: abbrev.into(),
+            name: abbrev.into(),
+            score: 0,
+            primary: model::hex_to_rgb("111111"),
+            secondary: model::hex_to_rgb("ffffff"),
+        };
+        // 25 blanket-covered NHL games, then one favorite game and one manual add
+        // at the END of the feed (weakest feed position, strongest claims).
+        let mut games: Vec<Game> = (0..25)
+            .map(|i| Game {
+                id: format!("blanket-{i}"),
+                sport_id: "nhl".into(),
+                away: side("AAA"),
+                home: side("BBB"),
+                status: GameStatus::Active,
+                ordinal: "1st".into(),
+                clock: "5:00".into(),
+                start_time: String::new(),
+                leaderboard: None,
+                champ: None,
+                session: None,
+                situation: None,
+            })
+            .collect();
+        games.push(Game { id: "fav-game".into(), away: side("FAV"), ..games[0].clone() });
+        games.push(Game { id: "added-game".into(), away: side("ZZZ"), ..games[0].clone() });
+        *state.games.lock().unwrap() = games;
+
+        let cfg = BoardConfig {
+            sports: vec![SportConfig {
+                sport_id: "nhl".into(),
+                favorite_team_ids: vec!["nhl-fav".into()],
+                championship_option_id: Some("all".into()),
+            }],
+            extra_game_ids: vec!["added-game".into()],
+            ..Default::default()
+        };
+        let (shown, bumped) = candidates_with_bumped(&state, &cfg);
+        assert_eq!(shown.len(), 20, "cap is 20");
+        assert_eq!(shown[0].id, "added-game", "manual add outranks everything");
+        assert_eq!(shown[1].id, "fav-game", "favorite outranks the blanket");
+        assert_eq!(bumped.len(), 7, "25 + 2 wanted, 20 shown");
+        assert!(bumped.iter().all(|g| g.id.starts_with("blanket-")), "only blanket games bumped");
+
+        // The app sees the bumped games flagged in now_showing.
+        state.configs.lock().unwrap().insert("b1".into(), cfg);
+        let ServerMsg::BoardState { now_showing, .. } = board_state_msg(&state, "b1") else {
+            panic!("expected BoardState");
+        };
+        assert_eq!(now_showing.len(), 27);
+        assert_eq!(now_showing.iter().filter(|g| g.bumped).count(), 7);
+        assert!(now_showing.iter().filter(|g| g.bumped).all(|g| g.frame_id.is_empty()));
+
+        // Unconfigured boards sample the slate silently — no bump reports.
+        let (shown, bumped) = candidates_with_bumped(&state, &BoardConfig::default());
+        assert_eq!(shown.len(), 20);
+        assert!(bumped.is_empty(), "nothing was chosen, so nothing was lost");
+    }
+
     /// A game whose end we observed lingers on the board for 30 minutes; one that
     /// arrives already-Final (restart, stale feed) never lingers; the linger expires.
     #[test]
@@ -1237,6 +1470,7 @@ mod tests {
             start_time: String::new(),
             leaderboard: None,
             champ: None,
+            session: None,
         };
         *state.games.lock().unwrap() = vec![live.clone()];
 
@@ -1279,6 +1513,7 @@ mod tests {
             start_time: (now + D::minutes(mins_from_now)).format("%Y-%m-%dT%H:%M:%SZ").to_string(),
             leaderboard: None,
             champ: None,
+            session: None,
         };
         assert!(board_shows_at(&mk(10), now), "starts in 10 min -> on the board");
         assert!(board_shows_at(&mk(-5), now), "past scheduled start, not yet live -> keep showing");
@@ -1489,6 +1724,7 @@ mod tests {
             start_time: String::new(),
             leaderboard: None,
             champ: None,
+            session: None,
         }
     }
 

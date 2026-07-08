@@ -371,10 +371,50 @@ final class BoardViewModel: ObservableObject {
     }
 
     /// Leagues without a card yet — offered by the "Add League" menu.
-    var leaguesWithoutPrefs: [UiSport] {
-        let have = Set(leaguePrefs.map(\.id))
-        return sports.filter { !have.contains($0.id) }
+    /// Sport-category grouping for the league picker sheet.
+    static func leagueCategory(_ id: String) -> String {
+        switch id {
+        case "nhl": return "Hockey"
+        case "nba", "wnba", "cbb", "wcbb": return "Basketball"
+        case "mlb": return "Baseball"
+        case "nfl", "cfb": return "Football"
+        case "mls", "epl", "wc": return "Soccer"
+        case "pga", "lpga": return "Golf"
+        case "f1": return "Motorsport"
+        default: return "Other"
+        }
     }
+    private static let categoryOrder = [
+        "Hockey", "Basketball", "Baseball", "Football", "Soccer", "Golf", "Motorsport", "Other",
+    ]
+
+    /// Every catalog league grouped by sport category, in a fixed category order.
+    var leaguesByCategory: [(String, [UiSport])] {
+        var groups: [String: [UiSport]] = [:]
+        for sport in sports {
+            groups[Self.leagueCategory(sport.id), default: []].append(sport)
+        }
+        return Self.categoryOrder.compactMap { cat in
+            groups[cat].map { (cat, $0.sorted { $0.name < $1.name }) }
+        }
+    }
+
+    /// Short summary of a league's current subscription ("2 teams · MLS Cup"),
+    /// or nil when nothing is configured. Counts only favorites that still
+    /// resolve against the catalog — configs can carry orphans (e.g. the old
+    /// "Formula 1" team from before the leaderboard-league split).
+    func subscriptionSummary(_ sport: UiSport) -> String? {
+        var parts: [String] = []
+        let favs = favoriteIds(sport.id)
+        let n = sport.teams.filter { favs.contains($0.id) }.count
+        if n == 1 { parts.append("1 team") } else if n > 1 { parts.append("\(n) teams") }
+        let champId = championshipId(sport.id)
+        if champId != "none", let opt = sport.championshipOptions.first(where: { $0.id == champId }) {
+            parts.append(opt.label)
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
 
     /// Remove a single favorited team (swipe-to-delete on a league card).
     func removeFavorite(_ sportId: String, _ teamId: String) {
@@ -812,8 +852,10 @@ struct DashboardView: View {
     @State private var settingsInfo: SettingsInfoTopic?
     /// Pushes the All-games screen (the "View all" button).
     @State private var showAllGamesScreen = false
-    /// League being edited (per-card Edit button or the Add League menu).
+    /// League being edited (per-card Edit button).
     @State private var editingSport: UiSport?
+    /// The Add League sheet (all leagues grouped by sport).
+    @State private var showLeaguePicker = false
 
     /// One clear status for the selected board (replaces the old "Connected /
     /// board offline" pair): server-down vs board-offline vs online.
@@ -847,6 +889,7 @@ struct DashboardView: View {
             .onAppear { model.requestGames() }
             .sheet(isPresented: $showSettings) { SettingsView(model: model) }
             .sheet(isPresented: $showAddBoard) { AddBoardSheet(model: model) }
+            .sheet(isPresented: $showLeaguePicker) { LeaguePickerSheet(model: model) }
             .alert("Name this scoreboard", isPresented: $showRename) {
                 TextField("Name", text: $renameText)
                 Button("Save") { model.rename(renameText) }
@@ -1167,16 +1210,16 @@ struct DashboardView: View {
         HStack {
             Text("League Preferences")
             Spacer()
-            Menu {
-                ForEach(model.leaguesWithoutPrefs, id: \.id) { sport in
-                    Button(sport.name) { editingSport = sport }
-                }
+            Button {
+                showLeaguePicker = true
             } label: {
-                Label("Add League", systemImage: "plus")
-                    .font(.subheadline.weight(.semibold))
+                HStack(spacing: 3) {
+                    Image(systemName: "plus")
+                    Text("Add League")
+                }
+                .font(.subheadline.weight(.semibold))
             }
             .textCase(nil)
-            .disabled(model.leaguesWithoutPrefs.isEmpty)
         }
     }
 
@@ -1499,6 +1542,53 @@ struct AllGamesCardButton: View {
     }
 }
 
+/// The Add League sheet: every league in the catalog, grouped by sport, with the
+/// current subscription summarized on each row. Tapping any league — subscribed
+/// or not — opens its editor.
+struct LeaguePickerSheet: View {
+    @ObservedObject var model: BoardViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(model.leaguesByCategory, id: \.0) { category, sports in
+                    Section(category) {
+                        ForEach(sports, id: \.id) { sport in
+                            NavigationLink {
+                                LeagueEditorView(model: model, sport: sport)
+                            } label: {
+                                HStack {
+                                    Text(sport.name)
+                                    Spacer()
+                                    if let summary = model.subscriptionSummary(sport) {
+                                        Text(summary)
+                                            .font(.footnote)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Leagues")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .overlay {
+                if model.sports.isEmpty {
+                    ProgressView("Loading leagues…")
+                }
+            }
+        }
+    }
+}
+
 /// Full-screen state while the app can't reach the server: nothing works without
 /// it, so explain what's happening and where to fix the URL instead of showing a
 /// dead dashboard.
@@ -1636,11 +1726,42 @@ struct LeagueEditorView: View {
     @State private var selection: Set<String> = []
     @State private var champ = "none"
     @State private var loaded = false
+    @State private var search = ""
+
+    /// What the option picker configures varies by league kind.
+    private var optionsTitle: String {
+        switch sport.id {
+        case "pga", "lpga": return "Events"
+        case "f1": return "Sessions"
+        case "wc": return "Matches"
+        default: return "Big games"
+        }
+    }
+
+    /// Teams matching the search text (all of them when it's empty).
+    private var filteredTeams: [UiTeam] {
+        guard !search.isEmpty else { return sport.teams }
+        return sport.teams.filter {
+            $0.name.localizedCaseInsensitiveContains(search)
+                || $0.abbrev.localizedCaseInsensitiveContains(search)
+        }
+    }
 
     var body: some View {
+        // Search only makes sense for leagues with team lists (college football
+        // has 500 of them); the subscription leagues are just a picker.
+        if sport.teams.isEmpty {
+            editorList
+        } else {
+            editorList
+                .searchable(text: $search, prompt: "Search teams")
+        }
+    }
+
+    private var editorList: some View {
         List {
             if !sport.championshipOptions.isEmpty {
-                Section("Big games") {
+                Section(optionsTitle) {
                     Picker("Show", selection: $champ) {
                         ForEach(sport.championshipOptions, id: \.id) { opt in
                             Text(opt.label).tag(opt.id)
@@ -1648,27 +1769,26 @@ struct LeagueEditorView: View {
                     }
                 }
             }
-            Section {
-                ForEach(sport.teams, id: \.id) { team in
-                    Button {
-                        toggle(team.id)
-                    } label: {
-                        HStack(spacing: 12) {
-                            TeamColorSwatch(team: team)
-                            Text(team.name).foregroundStyle(.primary)
-                            Spacer()
-                            if selection.contains(team.id) {
-                                Image(systemName: "checkmark")
-                                    .fontWeight(.semibold)
-                                    .foregroundStyle(.tint)
+            // Subscription leagues (PGA/LPGA/F1) have no teams — just the picker.
+            if !sport.teams.isEmpty {
+                Section("Teams") {
+                    ForEach(filteredTeams, id: \.id) { team in
+                        Button {
+                            toggle(team.id)
+                        } label: {
+                            HStack(spacing: 12) {
+                                TeamBadge(team: team, sportId: sport.id)
+                                Text(team.name).foregroundStyle(.primary)
+                                Spacer()
+                                if selection.contains(team.id) {
+                                    Image(systemName: "checkmark")
+                                        .fontWeight(.semibold)
+                                        .foregroundStyle(.tint)
+                                }
                             }
                         }
                     }
                 }
-            } header: {
-                Text("Teams")
-            } footer: {
-                Text("Tap to add or remove teams. Changes apply when you go back.")
             }
         }
         .navigationTitle(sport.name)

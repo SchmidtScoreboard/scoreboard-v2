@@ -43,6 +43,11 @@ impl EspnSource {
                 League { sport_id: "cbb", sport: "basketball", league: "mens-college-basketball", name: "Men's College Basketball", games_query: "?groups=50" },
                 League { sport_id: "wcbb", sport: "basketball", league: "womens-college-basketball", name: "Women's College Basketball", games_query: "?groups=50" },
                 League { sport_id: "wnba", sport: "basketball", league: "wnba", name: "WNBA", games_query: "" },
+                League { sport_id: "mls", sport: "soccer", league: "usa.1", name: "MLS", games_query: "" },
+                League { sport_id: "epl", sport: "soccer", league: "eng.1", name: "Premier League", games_query: "" },
+                // The World Cup is its own ESPN "league" of national teams;
+                // favoriting a country works exactly like favoriting a club.
+                League { sport_id: "wc", sport: "soccer", league: "fifa.world", name: "World Cup", games_query: "" },
             ],
         }
     }
@@ -140,9 +145,8 @@ impl SportsDataSource for EspnSource {
         if sports.is_empty() {
             return None; // ESPN team fetch unavailable -> caller falls back to mock_catalog
         }
-        // Leaderboard sports (golf PGA/LPGA + F1) aren't ESPN team lists — add them.
-        sports.push(crate::golf_sport());
-        sports.push(crate::f1_sport());
+        // Leaderboard sports (PGA / LPGA / F1) aren't ESPN team lists — add them.
+        sports.extend(crate::leaderboard_sports());
         Some(Catalog { sports })
     }
 }
@@ -151,6 +155,8 @@ impl SportsDataSource for EspnSource {
 impl EspnSource {
     async fn fetch_golf(&self) -> Vec<Game> {
         let mut out = Vec::new();
+        // PGA and LPGA are separate leagues in the catalog ("pga"/"lpga"), each
+        // subscribable to all events or majors only.
         for tour in ["pga", "lpga"] {
             let url =
                 format!("https://site.api.espn.com/apis/site/v2/sports/golf/leaderboard?league={tour}");
@@ -167,9 +173,8 @@ impl EspnSource {
                     continue;
                 }
             };
-            let tag = tour.to_uppercase();
             for ev in events {
-                if let Some(g) = parse_golf(&tag, ev) {
+                if let Some(g) = parse_golf(tour, ev) {
                     out.push(g);
                 }
             }
@@ -192,7 +197,7 @@ impl EspnSource {
                 return Vec::new();
             }
         };
-        events.into_iter().filter_map(parse_f1).collect()
+        events.into_iter().flat_map(parse_f1).collect()
     }
 }
 
@@ -221,7 +226,33 @@ fn pick_leader_comp(comps: Vec<LeaderComp>) -> Option<LeaderComp> {
     })
 }
 
-fn parse_golf(tag: &str, ev: LeaderEvent) -> Option<Game> {
+/// The tours' majors, matched against ESPN event names (lowercased).
+fn golf_major_label(sport_id: &str, event_name: &str) -> Option<&'static str> {
+    let n = event_name.to_lowercase();
+    let majors: &[(&str, &str)] = match sport_id {
+        "pga" => &[
+            ("masters", "The Masters"),
+            ("pga championship", "PGA Championship"),
+            ("u.s. open", "U.S. Open"),
+            ("us open", "U.S. Open"),
+            ("open championship", "The Open"),
+        ],
+        "lpga" => &[
+            ("chevron", "Chevron Championship"),
+            ("u.s. women's open", "U.S. Women's Open"),
+            ("us women's open", "U.S. Women's Open"),
+            ("women's pga", "Women's PGA"),
+            ("kpmg", "Women's PGA"),
+            ("evian", "Evian Championship"),
+            ("women's open", "Women's Open"),
+            ("aig", "Women's Open"),
+        ],
+        _ => &[],
+    };
+    majors.iter().find(|(key, _)| n.contains(key)).map(|(_, label)| *label)
+}
+
+fn parse_golf(sport_id: &str, ev: LeaderEvent) -> Option<Game> {
     let comp = pick_leader_comp(ev.competitions)?;
     let status = map_status(&comp.status.type_.name).unwrap_or(GameStatus::Pregame);
     // Top 4 by current position (ties allowed), name = last name, score = "+5"/"E".
@@ -245,53 +276,77 @@ fn parse_golf(tag: &str, ev: LeaderEvent) -> Option<Game> {
         .collect();
     ranked.sort_by_key(|(p, _)| *p);
     let rows = ranked.into_iter().take(4).map(|(_, r)| r).collect();
+    let name = clean_golf_name(&ev.short_name);
+    let champ = golf_major_label(sport_id, &ev.short_name)
+        .map(|label| Champ { tier: "major".into(), label: label.into() });
     Some(Game {
         id: ev.id,
-        sport_id: "golf".into(),
-        away: TeamSide::empty(tag),
+        sport_id: sport_id.into(),
+        away: TeamSide::empty(&sport_id.to_uppercase()),
         home: TeamSide::empty(""),
         status,
         ordinal: String::new(),
         clock: String::new(),
         start_time: comp.date,
-        leaderboard: Some(Leaderboard { name: clean_golf_name(&ev.short_name), rows }),
-        champ: None,
+        leaderboard: Some(Leaderboard { name, rows }),
+        champ,
+        session: None,
+        situation: None,
     })
 }
 
-fn parse_f1(ev: LeaderEvent) -> Option<Game> {
-    let comp = pick_leader_comp(ev.competitions)?;
-    let status = map_status(&comp.status.type_.name).unwrap_or(GameStatus::Pregame);
-    let mut drivers: Vec<(i64, LeaderRow)> = comp
-        .competitors
+/// One F1 event is a whole race weekend; each session the user can subscribe to
+/// (race / qualifying / sprint / sprint qualifying) becomes its OWN game with its
+/// own schedule, status, and standings. Practice sessions are never shown.
+fn parse_f1(ev: LeaderEvent) -> Vec<Game> {
+    let base = clean_f1_name(&ev.short_name);
+    ev.competitions
         .into_iter()
-        .enumerate()
-        .filter_map(|(i, c)| {
-            let name = f1_last_name(&c.athlete.as_ref()?.display_name);
-            let order = if c.order > 0 { c.order } else { i as i64 + 1 };
-            let value = c
-                .statistics
-                .first()
-                .map(|s| s.display_value.clone())
-                .filter(|v| !v.is_empty())
-                .unwrap_or_else(|| format!("P{order}"));
-            Some((order, LeaderRow { name, value }))
+        .filter_map(|comp| {
+            // (session id, frame-title suffix)
+            let (session, suffix) = match comp.type_.as_ref().map(|t| t.abbreviation.as_str()) {
+                Some("Race") => ("race", ""),
+                Some("Qual") => ("quali", " Q"),
+                Some("SR") => ("sprint", " S"),
+                Some("SS") => ("sprint-quali", " SQ"),
+                _ => return None, // practice / unknown
+            };
+            let status = map_status(&comp.status.type_.name).unwrap_or(GameStatus::Pregame);
+            let mut drivers: Vec<(i64, LeaderRow)> = comp
+                .competitors
+                .into_iter()
+                .enumerate()
+                .filter_map(|(i, c)| {
+                    let name = f1_last_name(&c.athlete.as_ref()?.display_name);
+                    let order = if c.order > 0 { c.order } else { i as i64 + 1 };
+                    let value = c
+                        .statistics
+                        .first()
+                        .map(|s| s.display_value.clone())
+                        .filter(|v| !v.is_empty())
+                        .unwrap_or_else(|| format!("P{order}"));
+                    Some((order, LeaderRow { name, value }))
+                })
+                .collect();
+            drivers.sort_by_key(|(o, _)| *o);
+            let rows = drivers.into_iter().take(4).map(|(_, r)| r).collect();
+            let name = fit_words(&format!("{base}{suffix}"), 13);
+            Some(Game {
+                id: format!("{}-{}", ev.id, session),
+                sport_id: "f1".into(),
+                away: TeamSide::empty("F1"),
+                home: TeamSide::empty(""),
+                status,
+                ordinal: String::new(),
+                clock: String::new(),
+                start_time: comp.date.clone(),
+                leaderboard: Some(Leaderboard { name, rows }),
+                champ: None,
+                session: Some(session.into()),
+                situation: None,
+            })
         })
-        .collect();
-    drivers.sort_by_key(|(o, _)| *o);
-    let rows = drivers.into_iter().take(4).map(|(_, r)| r).collect();
-    Some(Game {
-        id: ev.id,
-        sport_id: "f1".into(),
-        away: TeamSide::empty("F1"),
-        home: TeamSide::empty(""),
-        status,
-        ordinal: String::new(),
-        clock: String::new(),
-        start_time: comp.date,
-        leaderboard: Some(Leaderboard { name: clean_f1_name(&ev.short_name), rows }),
-        champ: None,
-    })
+        .collect()
 }
 
 fn golfer_last_name(full: &str) -> String {
@@ -368,12 +423,24 @@ fn golf_name_map(name: &str) -> Option<&'static str> {
 
 /// Shorten an F1 race `shortName` (drop leading sponsor words until it fits).
 fn clean_f1_name(short: &str) -> String {
-    let up = short.to_uppercase();
+    fit_words(&short.to_uppercase(), 13)
+}
+
+/// Fit `text` to `max` chars for the 64px frame by dropping LEADING words (they
+/// carry sponsors: "PIRELLI BRITISH GP" -> "BRITISH GP"); hard-truncate if a
+/// two-word tail still doesn't fit.
+fn fit_words(text: &str, max: usize) -> String {
+    let up = text.to_uppercase();
     let mut words: Vec<&str> = up.split_whitespace().collect();
-    while words.len() > 2 && words.join(" ").chars().count() > 13 {
+    while words.len() > 2 && words.join(" ").chars().count() > max {
         words.remove(0);
     }
-    words.join(" ")
+    let joined = words.join(" ");
+    if joined.chars().count() > max {
+        joined.chars().take(max).collect()
+    } else {
+        joined
+    }
 }
 
 /// ESPN encodes some numeric ids as strings ("72") — accept either.
@@ -415,6 +482,15 @@ struct LeaderComp {
     status: Status,
     #[serde(default)]
     competitors: Vec<LeaderCompetitor>,
+    /// Session kind for racing weekends ("Race", "Qual", "SR", "SS", "FP1"…).
+    #[serde(default, rename = "type")]
+    type_: Option<LeaderCompType>,
+}
+
+#[derive(Deserialize)]
+struct LeaderCompType {
+    #[serde(default)]
+    abbreviation: String,
 }
 #[derive(Deserialize)]
 struct LeaderCompetitor {
@@ -479,6 +555,7 @@ pub fn mock_games() -> Vec<Game> {
             // offline (outside playoff season there are no live postseason
             // games to test against).
             champ: Some(Champ { tier: "final".into(), label: "Stanley Cup Final".into() }),
+            session: None,
         },
         Game {
             id: "mock-nba".into(), sport_id: "nba".into(), away: celtics, home: lakers,
@@ -486,6 +563,7 @@ pub fn mock_games() -> Vec<Game> {
             start_time: String::new(),
             leaderboard: None,
             champ: None,
+            session: None,
         },
     ]
 }
@@ -544,6 +622,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: period(0), clock: clock.clone(), start_time: String::new(),
             leaderboard: None,
             champ: Some(Champ { tier: "final".into(), label: "Stanley Cup Final".into() }),
+            session: None,
         },
         Game {
             id: "demo-nhl-2".into(), sport_id: "nhl".into(),
@@ -552,6 +631,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: period(2), clock: clock.clone(), start_time: String::new(),
             leaderboard: None,
             champ: Some(Champ { tier: "conf".into(), label: "Conference Finals".into() }),
+            session: None,
         },
         Game {
             id: "demo-nba".into(), sport_id: "nba".into(),
@@ -560,6 +640,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: period(1), clock: clock.clone(), start_time: String::new(),
             leaderboard: None,
             champ: None,
+            session: None,
         },
         Game {
             id: "demo-nba-2".into(), sport_id: "nba".into(),
@@ -568,6 +649,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: period(3), clock: clock.clone(), start_time: String::new(),
             leaderboard: None,
             champ: None,
+            session: None,
         },
         Game {
             id: "demo-nba-3".into(), sport_id: "nba".into(),
@@ -576,6 +658,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: period(0), clock: clock.clone(), start_time: String::new(),
             leaderboard: None,
             champ: None,
+            session: None,
         },
         Game {
             id: "demo-mlb".into(), sport_id: "mlb".into(),
@@ -584,6 +667,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: period(2), clock: String::new(), start_time: String::new(),
             leaderboard: None,
             champ: None,
+            session: None,
         },
         Game {
             id: "demo-mlb-2".into(), sport_id: "mlb".into(),
@@ -592,6 +676,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: period(1), clock: String::new(), start_time: String::new(),
             leaderboard: None,
             champ: None,
+            session: None,
         },
         Game {
             id: "demo-mlb-ending".into(), sport_id: "mlb".into(),
@@ -602,17 +687,59 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             clock: String::new(), start_time: String::new(),
             leaderboard: None,
             champ: None,
+            session: None,
         },
         Game {
             id: "demo-nfl".into(), sport_id: "nfl".into(),
             away: team("NE", "PATRIOTS", (n / 9 % 35) as u32, "002244", "C60C30"),
             home: team("BUF", "BILLS", (n / 8 % 35) as u32, "00338D", "FFFFFF"),
-            status: GameStatus::Active, ordinal: period(3), clock, start_time: String::new(),
+            status: GameStatus::Active, ordinal: period(3), clock: clock.clone(), start_time: String::new(),
             leaderboard: None,
             champ: None,
+            session: None,
+            situation: Some(Situation::Football {
+                down_string: match n % 4 {
+                    0 => "1st + 10", 1 => "2nd + 7", 2 => "3rd + 4", _ => "4th + 1",
+                }.into(),
+                ball_position: if (n / 8) % 2 == 0 {
+                    format!("NE {}", 20 + n % 30)
+                } else {
+                    format!("BUF {}", 20 + n % 30)
+                },
+                home_possession: Some((n / 8) % 2 == 1),
+            }),
         },
         Game {
-            id: "demo-golf".into(), sport_id: "golf".into(),
+            id: "demo-mls".into(), sport_id: "mls".into(),
+            away: team("LAFC", "LAFC", (n / 6 % 4) as u32, "000000", "C39E6D"),
+            home: team("MIA", "INTER MIAMI", (n / 4 % 4) as u32, "F7B5CD", "231F20"),
+            status: GameStatus::Active, ordinal: "2nd".into(), clock: clock.clone(), start_time: String::new(),
+            leaderboard: None,
+            champ: None,
+            session: None,
+            situation: None,
+        },
+        Game {
+            id: "demo-epl".into(), sport_id: "epl".into(),
+            away: team("ARS", "ARSENAL", (n / 5 % 4) as u32, "EF0107", "FFFFFF"),
+            home: team("MCI", "MAN CITY", (n / 7 % 4) as u32, "6CABDD", "FFFFFF"),
+            status: GameStatus::Active, ordinal: "1st".into(), clock: clock.clone(), start_time: String::new(),
+            leaderboard: None,
+            champ: None,
+            session: None,
+            situation: None,
+        },
+        Game {
+            id: "demo-wc".into(), sport_id: "wc".into(),
+            away: team("USA", "USA", (n / 8 % 3) as u32, "002868", "BF0A30"),
+            home: team("FRA", "FRANCE", (n / 9 % 3) as u32, "21304D", "FFFFFF"),
+            status: GameStatus::Active, ordinal: "2nd".into(), clock, start_time: String::new(),
+            leaderboard: None,
+            champ: None,
+            session: None,
+        },
+        Game {
+            id: "demo-golf".into(), sport_id: "pga".into(),
             away: TeamSide::empty("PGA"), home: TeamSide::empty(""),
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(),
             leaderboard: Some(Leaderboard { name: "MASTERS".into(), rows: vec![
@@ -621,10 +748,12 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
                 LeaderRow { name: "MORIKAWA".into(), value: "-5".into() },
                 LeaderRow { name: "SCHAUFFELE".into(), value: "-3".into() },
             ] }),
-            champ: None,
+            champ: Some(Champ { tier: "major".into(), label: "The Masters".into() }),
+            session: None,
+            situation: None,
         },
         Game {
-            id: "demo-golf-2".into(), sport_id: "golf".into(),
+            id: "demo-golf-2".into(), sport_id: "lpga".into(),
             away: TeamSide::empty("LPGA"), home: TeamSide::empty(""),
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(),
             leaderboard: Some(Leaderboard { name: "US OPEN".into(), rows: vec![
@@ -633,7 +762,9 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
                 LeaderRow { name: "VU".into(), value: "-4".into() },
                 LeaderRow { name: "SAIGO".into(), value: "-2".into() },
             ] }),
-            champ: None,
+            champ: Some(Champ { tier: "major".into(), label: "U.S. Women's Open".into() }),
+            session: None,
+            situation: None,
         },
         Game {
             id: "demo-f1".into(), sport_id: "f1".into(),
@@ -646,6 +777,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
                 LeaderRow { name: "PIASTRI".into(), value: "+9.0".into() },
             ] }),
             champ: None,
+            session: Some("race".into()),
         },
         // Upcoming games: one inside the 30-min pregame window (appears on the
         // board with its start time), one hours out (View-all browse only).
@@ -657,6 +789,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             start_time: (chrono::Utc::now() + chrono::Duration::minutes(20)).format("%Y-%m-%dT%H:%MZ").to_string(),
             leaderboard: None,
             champ: None,
+            session: None,
         },
         Game {
             id: "demo-nba-tonight".into(), sport_id: "nba".into(),
@@ -666,6 +799,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             start_time: (chrono::Utc::now() + chrono::Duration::hours(3)).format("%Y-%m-%dT%H:%MZ").to_string(),
             leaderboard: None,
             champ: None,
+            session: None,
         },
     ]
 }
@@ -829,6 +963,7 @@ fn parse_event(sport_id: &str, ev: Event) -> Option<Game> {
         start_time: comp.date,
         leaderboard: None,
         champ,
+        session: None,
     })
 }
 
@@ -860,8 +995,32 @@ fn classify_champ(sport_id: &str, season: Option<&EventSeason>, headline: &str) 
         }
         "wnba" => {
             if h.contains("wnba finals") {
-                return tag("playoffs", "WNBA Finals");
+                return tag("final", "WNBA Finals");
             }
+        }
+        "mls" => {
+            if h.contains("mls cup") {
+                return tag("cup", "MLS Cup");
+            }
+        }
+        // World Cup rounds arrive via the season slug ("round-of-16",
+        // "quarterfinals", …) rather than headlines. Group-stage games get no
+        // champ tag — the "Every match" option covers them separately.
+        "wc" => {
+            let slug = season.map(|s| s.slug.as_str()).unwrap_or("");
+            if slug.contains("semifinal") {
+                return tag("semi", "World Cup Semifinal");
+            }
+            if slug.contains("quarterfinal") {
+                return tag("quarter", "World Cup Quarterfinal");
+            }
+            if slug.contains("third-place") || slug.contains("round-of") || slug.contains("knockout") {
+                return tag("knockout", "World Cup Knockout");
+            }
+            if slug.contains("final") {
+                return tag("final", "World Cup Final");
+            }
+            return None; // group stage / unknown: never generic-postseason
         }
         "mlb" => {
             if h.contains("world series") {
@@ -897,12 +1056,14 @@ fn classify_champ(sport_id: &str, season: Option<&EventSeason>, headline: &str) 
 fn map_status(name: &str) -> Option<GameStatus> {
     Some(match name {
         "STATUS_SCHEDULED" => GameStatus::Pregame,
-        "STATUS_IN_PROGRESS" => GameStatus::Active,
-        "STATUS_HALFTIME" | "STATUS_END_PERIOD" | "STATUS_DELAYED" | "STATUS_SUSPENDED" => {
-            GameStatus::Intermission
-        }
-        "STATUS_FINAL" | "STATUS_PLAY_COMPLETE" => GameStatus::Final,
-        "STATUS_POSTPONED" | "STATUS_CANCELED" => return None,
+        // Soccer runs through halves, extra time, and shootouts as distinct states.
+        "STATUS_IN_PROGRESS" | "STATUS_FIRST_HALF" | "STATUS_SECOND_HALF"
+        | "STATUS_OVERTIME" | "STATUS_EXTRA_TIME" | "STATUS_SHOOTOUT" => GameStatus::Active,
+        "STATUS_HALFTIME" | "STATUS_END_PERIOD" | "STATUS_DELAYED" | "STATUS_SUSPENDED"
+        | "STATUS_HALFTIME_ET" | "STATUS_END_OF_EXTRATIME" => GameStatus::Intermission,
+        "STATUS_FINAL" | "STATUS_PLAY_COMPLETE" | "STATUS_FULL_TIME" | "STATUS_FINAL_PEN"
+        | "STATUS_FINAL_AET" => GameStatus::Final,
+        "STATUS_POSTPONED" | "STATUS_CANCELED" | "STATUS_ABANDONED" => return None,
         _ => GameStatus::Pregame,
     })
 }
@@ -937,17 +1098,22 @@ fn ordinal_for(status: &Status, gs: GameStatus) -> String {
 mod leader_tests {
     use super::*;
 
-    /// An F1 weekend lists practice/quali (finished) before the race. We must show
-    /// the in-progress race, not the first (finished) session.
+    /// An F1 weekend fans out into per-session games (practice skipped), each
+    /// with its own id, status, schedule, and standings.
     #[test]
-    fn f1_picks_in_progress_race_not_finished_practice() {
+    fn f1_emits_one_game_per_subscribable_session() {
         let json = r#"{
             "id": "evt1",
-            "shortName": "Lenovo Austrian GP",
+            "shortName": "Pirelli British GP",
             "competitions": [
-                {"date":"2026-06-26T11:30Z","status":{"type":{"name":"STATUS_FINAL"}},
+                {"date":"2026-07-03T11:30Z","status":{"type":{"name":"STATUS_FINAL"}},
+                 "type":{"abbreviation":"FP1"},
                  "competitors":[{"order":1,"athlete":{"displayName":"Practice Driver"}}]},
-                {"date":"2026-06-28T13:00Z","status":{"type":{"name":"STATUS_IN_PROGRESS"}},
+                {"date":"2026-07-04T15:00Z","status":{"type":{"name":"STATUS_FINAL"}},
+                 "type":{"abbreviation":"Qual"},
+                 "competitors":[{"order":1,"athlete":{"displayName":"Lando Norris"}}]},
+                {"date":"2026-07-05T14:00Z","status":{"type":{"name":"STATUS_IN_PROGRESS"}},
+                 "type":{"abbreviation":"Race"},
                  "competitors":[
                     {"order":1,"athlete":{"displayName":"Max Verstappen"}},
                     {"order":2,"athlete":{"displayName":"Lando Norris"}}
@@ -955,40 +1121,44 @@ mod leader_tests {
             ]
         }"#;
         let ev: LeaderEvent = serde_json::from_str(json).expect("deserialize event");
-        let g = parse_f1(ev).expect("parse_f1 should yield a game");
-        assert_eq!(g.status, GameStatus::Active, "should pick the in-progress race");
-        assert_eq!(g.sport_id, "f1");
-        assert_eq!(g.away.abbrev, "F1");
-        let lb = g.leaderboard.expect("leaderboard present");
+        let games = parse_f1(ev);
+        assert_eq!(games.len(), 2, "practice is skipped; quali + race emitted");
+
+        let quali = games.iter().find(|g| g.session.as_deref() == Some("quali")).unwrap();
+        assert_eq!(quali.id, "evt1-quali");
+        assert_eq!(quali.status, GameStatus::Final);
+        assert!(quali.leaderboard.as_ref().unwrap().name.ends_with(" Q"), "quali title suffixed");
+
+        let race = games.iter().find(|g| g.session.as_deref() == Some("race")).unwrap();
+        assert_eq!(race.id, "evt1-race");
+        assert_eq!(race.status, GameStatus::Active);
+        assert_eq!(race.leaderboard.as_ref().unwrap().name, "BRITISH GP");
         assert_eq!(
-            lb.rows.first().map(|r| r.name.as_str()),
-            Some("VERSTAPPEN"),
-            "leaderboard rows should come from the race, not the practice session"
+            race.leaderboard.as_ref().unwrap().rows.first().map(|r| r.name.as_str()),
+            Some("VERSTAPPEN")
         );
     }
 
-    /// When nothing is live, fall back to the soonest upcoming session.
+    /// Golf majors get the "major" champ tier; regular tour stops don't.
     #[test]
-    fn f1_falls_back_to_next_upcoming_when_none_live() {
-        let json = r#"{
-            "id": "evt2",
-            "shortName": "Test GP",
-            "competitions": [
-                {"date":"2026-06-26T11:30Z","status":{"type":{"name":"STATUS_FINAL"}},
-                 "competitors":[{"order":1,"athlete":{"displayName":"Past Driver"}}]},
-                {"date":"2026-06-28T13:00Z","status":{"type":{"name":"STATUS_SCHEDULED"}},
-                 "competitors":[{"order":1,"athlete":{"displayName":"Future Driver"}}]}
-            ]
-        }"#;
-        let ev: LeaderEvent = serde_json::from_str(json).expect("deserialize event");
-        let g = parse_f1(ev).expect("parse_f1 should yield a game");
-        assert_eq!(g.status, GameStatus::Pregame, "should pick the upcoming session");
-        assert_eq!(
-            g.leaderboard.unwrap().rows.first().map(|r| r.name.clone()),
-            Some("DRIVER".to_string()),
-            "should come from the upcoming session"
-        );
+    fn golf_majors_are_classified() {
+        assert_eq!(golf_major_label("pga", "The Masters"), Some("The Masters"));
+        assert_eq!(golf_major_label("pga", "Travelers Championship"), None);
+        assert_eq!(golf_major_label("lpga", "KPMG Women's PGA Championship"), Some("Women's PGA"));
+        assert_eq!(golf_major_label("lpga", "Portland Classic"), None);
     }
+
+    /// World Cup rounds classify from the season slug; group stage stays untagged.
+    #[test]
+    fn world_cup_rounds_classify_from_slug() {
+        let season = |slug: &str| EventSeason { type_: 13800, slug: slug.into() };
+        assert_eq!(classify_champ("wc", Some(&season("round-of-16")), "").unwrap().tier, "knockout");
+        assert_eq!(classify_champ("wc", Some(&season("quarterfinals")), "").unwrap().tier, "quarter");
+        assert_eq!(classify_champ("wc", Some(&season("semifinals")), "").unwrap().tier, "semi");
+        assert_eq!(classify_champ("wc", Some(&season("final")), "").unwrap().tier, "final");
+        assert_eq!(classify_champ("wc", Some(&season("group-stage")), ""), None);
+    }
+
 }
 
 #[cfg(test)]
@@ -1055,4 +1225,41 @@ mod champ_tests {
         assert_eq!(champ.tier, "final");
         assert_eq!(champ.label, "Stanley Cup Final");
     }
+
+        let json = |possession: &str| format!(r#"{{
+            "competitions": [{{
+                "id": "401",
+                "date": "2026-10-04T20:00Z",
+                "status": {{"type": {{"name": "STATUS_IN_PROGRESS"}}, "period": 3, "displayClock": "8:12"}},
+                "situation": {{
+                    "shortDownDistanceText": "3rd & 4",
+                    "possessionText": "SEA 25",
+                    "possession": "{possession}"
+                }},
+                "competitors": [
+                    {{"id": "12", "homeAway": "home", "score": "17", "team": {{"abbreviation": "SEA", "shortDisplayName": "Seahawks"}}}},
+                    {{"id": "25", "homeAway": "away", "score": "14", "team": {{"abbreviation": "SF", "shortDisplayName": "49ers"}}}}
+                ]
+            }}]
+        }}"#);
+        let ev: Event = serde_json::from_str(&json("12")).unwrap();
+        let g = parse_event("nfl", ev).unwrap();
+        assert_eq!(
+                home_possession: Some(true),
+            })
+        );
+
+        let ev: Event = serde_json::from_str(&json("25")).unwrap();
+        let g = parse_event("cfb", ev).unwrap();
+        assert!(matches!(
+            Some(Situation::Football { home_possession: Some(false), .. })
+        ));
+
+        // Non-football sports never get a football situation from these fields.
+        let ev: Event = serde_json::from_str(&json("12")).unwrap();
+                home_possession: None,
+            })
+        );
+        let ev: Event = serde_json::from_str(&json("mlb", "STATUS_IN_PROGRESS")).unwrap();
+        assert_eq!(
 }
