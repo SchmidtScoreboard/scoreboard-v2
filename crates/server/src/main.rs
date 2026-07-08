@@ -54,7 +54,10 @@ impl RateLimiter {
 pub struct AppState {
     pub catalog: Arc<Catalog>,
     pub games: Arc<Mutex<Vec<Game>>>,
-    pub frames: Arc<Mutex<HashMap<FrameId, Vec<u8>>>>,
+    /// Rendered frames by content id, stamped with the eviction generation they
+    /// were minted in (so `evict_stale_frames` never drops a frame between its
+    /// render and its manifest registration — that write pair isn't atomic).
+    pub frames: Arc<Mutex<HashMap<FrameId, (u64, Vec<u8>)>>>,
     pub configs: Arc<Mutex<HashMap<String, BoardConfig>>>, // board_id -> prefs
     pub devices: Arc<Mutex<HashMap<String, UnboundedSender<Message>>>>, // board_id -> sink
     pub controllers: Arc<Mutex<HashMap<String, Vec<UnboundedSender<Message>>>>>, // board_id -> app sinks
@@ -71,6 +74,11 @@ pub struct AppState {
     /// Last manifest JSON sent to each device; identical re-pushes are skipped so a
     /// refresh doesn't needlessly reset the board's rotation position.
     last_manifest: Arc<Mutex<HashMap<String, String>>>,
+    /// Frame ids kept by the previous eviction pass — one grace generation so a
+    /// device still fetching the manifest we just replaced can't miss its frames.
+    frame_grace: Arc<Mutex<HashSet<FrameId>>>,
+    /// Current eviction generation; every cached frame is stamped with it.
+    frame_gen: Arc<std::sync::atomic::AtomicU64>,
     /// When we WATCHED each game transition to Final (ESPN has no end time, so we
     /// observe it at poll granularity). Drives the post-game linger; memory-only —
     /// a restart mid-linger just ends the linger early.
@@ -132,8 +140,16 @@ impl AppState {
             poll_wake: Arc::new(tokio::sync::Notify::new()),
             notices: Arc::new(Mutex::new(HashMap::new())),
             last_manifest: Arc::new(Mutex::new(HashMap::new())),
+            frame_grace: Arc::new(Mutex::new(HashSet::new())),
+            frame_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             finished: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Cache a rendered frame, stamped with the current eviction generation.
+    pub fn cache_frame(&self, id: FrameId, px: Vec<u8>) {
+        let gen = self.frame_gen.load(std::sync::atomic::Ordering::Relaxed);
+        self.frames.lock().unwrap().insert(id, (gen, px));
     }
 
     /// Drop the manifest-dedup entry for a board (used when it reconnects, so the
@@ -712,11 +728,10 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
             state.notices.lock().unwrap().remove(board_id);
             let dwell_ms = cfg.dwell_secs.clamp(3, 60) * 1000;
             let mut rotation = Vec::new();
-            let mut frames = state.frames.lock().unwrap();
             for g in &chosen {
                 let (id, px) = render::render_game(g);
-                frames.insert(id.clone(), px);
-                rotation.push(RotationEntry { frame_id: id, dwell_ms: 7000 });
+                state.cache_frame(id.clone(), px);
+                rotation.push(RotationEntry { frame_id: id, dwell_ms });
             }
             return Manifest {
                 rotation,
@@ -740,7 +755,7 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
                 let lines: Vec<(&str, bool, embedded_graphics::pixelcolor::Rgb888)> =
                     n.lines.iter().map(|(s, b, c)| (s.as_str(), *b, *c)).collect();
                 let (id, px) = render::render_notice(&lines, Some(frac));
-                state.frames.lock().unwrap().insert(id.clone(), px);
+                state.cache_frame(id.clone(), px);
                 return Manifest {
                     rotation: vec![RotationEntry { frame_id: id, dwell_ms: 60_000 }],
                     display_on: true,
@@ -758,7 +773,7 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
         let now = chrono::Local::now();
         use chrono::Timelike;
         let (id, px) = render::render_clock(now.hour(), now.minute());
-        state.frames.lock().unwrap().insert(id.clone(), px);
+        state.cache_frame(id.clone(), px);
         vec![RotationEntry { frame_id: id, dwell_ms: 60_000 }]
     } else {
         vec![]
@@ -927,6 +942,30 @@ pub fn tick_once(state: &AppState) {
     for bid in board_ids {
         push_board(state, &bid);
     }
+    evict_stale_frames(state);
+}
+
+/// Frames are content-addressed and every score/clock/situation change mints new
+/// ids, so the cache only grows — evict what no board can ask for anymore.
+/// Devices only request ids from their CURRENT manifest (all kept via
+/// `last_manifest`); one grace generation covers a device still fetching the
+/// manifest we just replaced. Everything else is re-rendered on demand.
+pub fn evict_stale_frames(state: &AppState) {
+    let mut keep: HashSet<FrameId> = HashSet::new();
+    for json in state.last_manifest.lock().unwrap().values() {
+        if let Ok(ServerMsg::Manifest(m)) = serde_json::from_str::<ServerMsg>(json) {
+            keep.extend(m.rotation.into_iter().map(|r| r.frame_id));
+        }
+    }
+    let mut grace = state.frame_grace.lock().unwrap();
+    // Bump the generation first (returns the old one): frames minted during the
+    // era that just ended survive this pass unconditionally, closing the race
+    // where a frame is rendered but its manifest isn't registered yet — by the
+    // NEXT pass (30s), registration (microseconds) has long since happened.
+    let prev_gen = state.frame_gen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut frames = state.frames.lock().unwrap();
+    frames.retain(|id, (gen, _)| keep.contains(id) || grace.contains(id) || *gen >= prev_gen);
+    *grace = keep;
 }
 
 async fn tick_loop(state: AppState) {
@@ -949,7 +988,7 @@ pub fn push_board_state(state: &AppState, board_id: &str) {
             ServerMsg::BoardState { now_showing, .. } => now_showing
                 .iter()
                 .filter(|g| !g.frame_id.is_empty())
-                .filter_map(|g| cache.get(&g.frame_id).map(|px| Message::Binary(encode_frame(&g.frame_id, px))))
+                .filter_map(|g| cache.get(&g.frame_id).map(|(_, px)| Message::Binary(encode_frame(&g.frame_id, px))))
                 .collect(),
             _ => Vec::new(),
         }
@@ -982,7 +1021,7 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
             .map(|g| {
                 let mut s = to_summary(g);
                 let (fid, px) = render::render_game(g);
-                frames.insert(fid.clone(), px);
+                state.cache_frame(fid.clone(), px);
                 s.frame_id = fid;
                 s
             })
@@ -1416,6 +1455,50 @@ mod tests {
         crate::ws::apply_command(&state, "b1", Command::ClearWakeTimer);
         let cfg = state.config_for("b1");
         assert!(!cfg.power && cfg.wake_at.is_none(), "indefinite off: asleep, no timer");
+    }
+
+    /// The frame cache stays bounded: ids no current manifest references are
+    /// dropped after one grace generation (a device may still be fetching the
+    /// manifest we just replaced), while live ids always survive.
+    #[test]
+    fn stale_frames_are_evicted_after_grace() {
+        let state = AppState::new_ephemeral();
+        push_board(&state, "b1"); // renders + caches the current rotation
+        evict_stale_frames(&state); // grace <- current ids
+        let old_ids: Vec<FrameId> = state.frames.lock().unwrap().keys().cloned().collect();
+        assert!(!old_ids.is_empty(), "manifest should have cached frames");
+
+        // A score change mints a new frame id for that game on the next push.
+        state.games.lock().unwrap()[0].away.score += 100;
+        push_board(&state, "b1");
+        let live_ids: Vec<FrameId> = {
+            let last = state.last_manifest.lock().unwrap();
+            let json = last.get("b1").expect("manifest recorded");
+            match serde_json::from_str::<ServerMsg>(json) {
+                Ok(ServerMsg::Manifest(m)) => m.rotation.into_iter().map(|r| r.frame_id).collect(),
+                _ => panic!("stored manifest should parse"),
+            }
+        };
+        let replaced: Vec<&FrameId> = old_ids.iter().filter(|id| !live_ids.contains(id)).collect();
+        assert!(!replaced.is_empty(), "the score bump should replace a frame id");
+
+        // First pass: replaced ids survive on grace; live ids obviously kept.
+        evict_stale_frames(&state);
+        {
+            let frames = state.frames.lock().unwrap();
+            for id in &replaced {
+                assert!(frames.contains_key(*id), "grace keeps last generation");
+            }
+        }
+        // Second pass: grace expired — replaced ids gone, live ids kept.
+        evict_stale_frames(&state);
+        let frames = state.frames.lock().unwrap();
+        for id in &replaced {
+            assert!(!frames.contains_key(*id), "stale frame should be evicted");
+        }
+        for id in &live_ids {
+            assert!(frames.contains_key(id), "current manifest frames must survive");
+        }
     }
 
     /// A knob turn writes the SAME brightness the app's slider does — one value,

@@ -222,8 +222,10 @@ impl Board {
             .as_ref()
             .is_some_and(|old| !m.rotation.is_empty() && old.rotation.len() == m.rotation.len());
         self.manifest = Some(m);
-        self.idx = 0;
-        self.last_advance = self.clock;
+        if !same_shape {
+            self.idx = 0;
+            self.last_advance = self.clock;
+        }
         // Evict frames no longer referenced so the cache stays bounded on-device
         // (keep the current rotation + the last shown frame for a smooth swap).
         let keep: Vec<FrameId> = {
@@ -720,6 +722,54 @@ mod tests {
         b.tick(10_000); // bar expired
         b.on_manifest(m(70));
         assert_eq!(b.brightness(), 70, "adoption resumes once the knob settles");
+    }
+
+    /// A same-length manifest is the same lineup with refreshed pixels (scores
+    /// changed), so the board keeps its rotation slot and dwell timer instead of
+    /// restarting at game 1 on every server poll. A different length is a new
+    /// rotation and starts from the top.
+    #[test]
+    fn same_shape_manifest_keeps_rotation_position() {
+        use scoreboard_protocol::RotationEntry;
+        let mk = |ids: &[&str]| Manifest {
+            rotation: ids
+                .iter()
+                .map(|i| RotationEntry { frame_id: (*i).into(), dwell_ms: 1000 })
+                .collect(),
+            display_on: true,
+            off_state: Default::default(),
+            brightness: 100,
+        };
+        // Solid-color frames; the colors survive the RGB565 round-trip exactly.
+        let solid = |r: u8, g: u8, b: u8| -> Vec<u8> {
+            let px = scoreboard_protocol::rgb888_to_565(r, g, b).to_le_bytes();
+            (0..FRAME_PIXELS).flat_map(|_| px).collect()
+        };
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.tick(0);
+        b.on_manifest(mk(&["a", "b", "c"]));
+        b.on_frame("a".into(), solid(255, 0, 0));
+        b.on_frame("b".into(), solid(0, 255, 0));
+        b.on_frame("c".into(), solid(0, 0, 255));
+        b.tick(1200); // dwell elapsed -> slot 1
+        assert_eq!(b.framebuffer()[0], 0x00FF00, "should have advanced to slot 1");
+
+        // Same-length refresh with new frame ids: slot and dwell timer kept.
+        b.on_manifest(mk(&["d", "e", "f"]));
+        b.on_frame("d".into(), solid(255, 0, 0));
+        b.on_frame("e".into(), solid(255, 255, 255));
+        b.on_frame("f".into(), solid(0, 0, 255));
+        b.tick(1300); // dwell NOT elapsed since the slot-1 advance
+        assert_eq!(b.framebuffer()[0], 0xFFFFFF, "slot 1 kept across a same-shape refresh");
+
+        // Different length: genuinely new rotation, restart at the top.
+        b.on_manifest(mk(&["g", "h"]));
+        b.on_frame("g".into(), solid(0, 255, 0));
+        b.on_frame("h".into(), solid(0, 0, 255));
+        b.tick(1400);
+        assert_eq!(b.framebuffer()[0], 0x00FF00, "new-shape rotation restarts at slot 0");
     }
 
     #[test]

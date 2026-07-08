@@ -98,7 +98,7 @@ async fn device_loop(sender: WsSender, mut receiver: WsReceiver, state: AppState
                     {
                         let frames = state.frames.lock().unwrap();
                         for fid in ids {
-                            if let Some(px) = frames.get(&fid) {
+                            if let Some((_, px)) = frames.get(&fid) {
                                 out.push((fid.clone(), px.clone()));
                             }
                         }
@@ -123,6 +123,9 @@ async fn device_loop(sender: WsSender, mut receiver: WsReceiver, state: AppState
     }
 
     state.devices.lock().unwrap().remove(&board_id);
+    // Drop the manifest-dedup entry too: with the board gone nothing can request
+    // its frames, so the eviction pass may reclaim them (reconnect re-renders).
+    state.forget_last_manifest(&board_id);
     forward.abort();
     // Mirror the connect path: apps should see "offline" now, not at the next poll.
     push_board_state(&state, &board_id);
