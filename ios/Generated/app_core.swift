@@ -543,6 +543,11 @@ public protocol ScoreboardClientProtocol: AnyObject {
      */
     func clearFocus(boardId: String)
 
+    /**
+     * Keep the board off with no auto-wake (cancels a running sleep timer).
+     */
+    func clearWakeTimer(boardId: String)
+
     func connect()
 
     /**
@@ -591,6 +596,11 @@ public protocol ScoreboardClientProtocol: AnyObject {
     func secretKeyHex() -> String
 
     func setBrightness(boardId: String, level: UInt8)
+
+    /**
+     * Seconds each game holds the panel before the rotation advances.
+     */
+    func setDwell(boardId: String, secs: UInt32)
 
     func setListener(listener: ClientListener)
 
@@ -702,6 +712,15 @@ open class ScoreboardClient:
     }
     }
 
+    /**
+     * Keep the board off with no auto-wake (cancels a running sleep timer).
+     */
+    open func clearWakeTimer(boardId: String) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_clear_wake_timer(self.uniffiClonePointer(),
+                                                                    FfiConverterString.lower(boardId), $0)
+    }
+    }
+
     open func connect() { try! rustCall {
         uniffi_app_core_fn_method_scoreboardclient_connect(self.uniffiClonePointer(), $0)
     }
@@ -793,6 +812,16 @@ open class ScoreboardClient:
         uniffi_app_core_fn_method_scoreboardclient_set_brightness(self.uniffiClonePointer(),
                                                                   FfiConverterString.lower(boardId),
                                                                   FfiConverterUInt8.lower(level), $0)
+    }
+    }
+
+    /**
+     * Seconds each game holds the panel before the rotation advances.
+     */
+    open func setDwell(boardId: String, secs: UInt32) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_set_dwell(self.uniffiClonePointer(),
+                                                             FfiConverterString.lower(boardId),
+                                                             FfiConverterUInt32.lower(secs), $0)
     }
     }
 
@@ -903,6 +932,10 @@ public struct UiBoardConfig {
     public var offState: UiOffState
     public var sleepHours: UInt32
     /**
+     * Seconds each game holds the panel before the rotation advances.
+     */
+    public var dwellSecs: UInt32
+    /**
      * Unix seconds when a button-sleep auto-wakes (None when not sleeping).
      */
     public var wakeAt: UInt64?
@@ -913,6 +946,9 @@ public struct UiBoardConfig {
                 /**
                     * Preference-driven games one-off removed from the rotation.
                     */ excludedGameIds: [String], focusedGameId: String?, name: String?, offState: UiOffState, sleepHours: UInt32,
+                /**
+                    * Seconds each game holds the panel before the rotation advances.
+                    */ dwellSecs: UInt32,
                 /**
                     * Unix seconds when a button-sleep auto-wakes (None when not sleeping).
                     */ wakeAt: UInt64?)
@@ -926,6 +962,7 @@ public struct UiBoardConfig {
         self.name = name
         self.offState = offState
         self.sleepHours = sleepHours
+        self.dwellSecs = dwellSecs
         self.wakeAt = wakeAt
     }
 }
@@ -959,6 +996,9 @@ extension UiBoardConfig: Equatable, Hashable {
         if lhs.sleepHours != rhs.sleepHours {
             return false
         }
+        if lhs.dwellSecs != rhs.dwellSecs {
+            return false
+        }
         if lhs.wakeAt != rhs.wakeAt {
             return false
         }
@@ -975,6 +1015,7 @@ extension UiBoardConfig: Equatable, Hashable {
         hasher.combine(name)
         hasher.combine(offState)
         hasher.combine(sleepHours)
+        hasher.combine(dwellSecs)
         hasher.combine(wakeAt)
     }
 }
@@ -995,6 +1036,7 @@ public struct FfiConverterTypeUiBoardConfig: FfiConverterRustBuffer {
                 name: FfiConverterOptionString.read(from: &buf),
                 offState: FfiConverterTypeUiOffState.read(from: &buf),
                 sleepHours: FfiConverterUInt32.read(from: &buf),
+                dwellSecs: FfiConverterUInt32.read(from: &buf),
                 wakeAt: FfiConverterOptionUInt64.read(from: &buf)
             )
     }
@@ -1009,6 +1051,7 @@ public struct FfiConverterTypeUiBoardConfig: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.name, into: &buf)
         FfiConverterTypeUiOffState.write(value.offState, into: &buf)
         FfiConverterUInt32.write(value.sleepHours, into: &buf)
+        FfiConverterUInt32.write(value.dwellSecs, into: &buf)
         FfiConverterOptionUInt64.write(value.wakeAt, into: &buf)
     }
 }
@@ -1103,6 +1146,11 @@ public struct UiGame {
      */
     public var frameId: String
     /**
+     * True when the game qualifies for the board but lost its rotation slot to
+     * the cap — show it grayed with an offer to add it manually.
+     */
+    public var bumped: Bool
+    /**
      * Championship tier label when this is a postseason/championship game
      * ("Stanley Cup Final", "Playoffs"); nil for regular-season games.
      */
@@ -1115,6 +1163,10 @@ public struct UiGame {
                     * Content hash of this game's rendered frame; look it up among the frames pushed
                     * via `on_frame` to draw the card.
                     */ frameId: String,
+                /**
+                    * True when the game qualifies for the board but lost its rotation slot to
+                    * the cap — show it grayed with an offer to add it manually.
+                    */ bumped: Bool,
                 /**
                     * Championship tier label when this is a postseason/championship game
                     * ("Stanley Cup Final", "Playoffs"); nil for regular-season games.
@@ -1129,6 +1181,7 @@ public struct UiGame {
         self.status = status
         self.detail = detail
         self.frameId = frameId
+        self.bumped = bumped
         self.champ = champ
     }
 }
@@ -1162,6 +1215,9 @@ extension UiGame: Equatable, Hashable {
         if lhs.frameId != rhs.frameId {
             return false
         }
+        if lhs.bumped != rhs.bumped {
+            return false
+        }
         if lhs.champ != rhs.champ {
             return false
         }
@@ -1178,6 +1234,7 @@ extension UiGame: Equatable, Hashable {
         hasher.combine(status)
         hasher.combine(detail)
         hasher.combine(frameId)
+        hasher.combine(bumped)
         hasher.combine(champ)
     }
 }
@@ -1198,6 +1255,7 @@ public struct FfiConverterTypeUiGame: FfiConverterRustBuffer {
                 status: FfiConverterString.read(from: &buf),
                 detail: FfiConverterString.read(from: &buf),
                 frameId: FfiConverterString.read(from: &buf),
+                bumped: FfiConverterBool.read(from: &buf),
                 champ: FfiConverterOptionString.read(from: &buf)
             )
     }
@@ -1212,6 +1270,7 @@ public struct FfiConverterTypeUiGame: FfiConverterRustBuffer {
         FfiConverterString.write(value.status, into: &buf)
         FfiConverterString.write(value.detail, into: &buf)
         FfiConverterString.write(value.frameId, into: &buf)
+        FfiConverterBool.write(value.bumped, into: &buf)
         FfiConverterOptionString.write(value.champ, into: &buf)
     }
 }
@@ -2039,6 +2098,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_method_scoreboardclient_clear_focus() != 55769 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_app_core_checksum_method_scoreboardclient_clear_wake_timer() != 29871 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_method_scoreboardclient_connect() != 42838 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2070,6 +2132,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_brightness() != 13017 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_scoreboardclient_set_dwell() != 50551 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_listener() != 33592 {

@@ -255,8 +255,20 @@ final class BoardViewModel: ObservableObject {
     // ---- controls (operate on the selected board) ----
     func setPower(_ on: Bool) {
         guard let id = selectedBoardId else { return }
-        mutate(id) { $0.power = on }
+        mutate(id) {
+            $0.power = on
+            // App sleep runs the same timed window as the button press; show the
+            // countdown immediately (the server confirms with the real wake time).
+            $0.wakeAt = on ? nil : UInt64(Date().timeIntervalSince1970) + UInt64($0.sleepHours) * 3600
+        }
         client?.setPower(boardId: id, on: on)
+    }
+
+    /// Stay asleep with no auto-wake ("off until I say so").
+    func keepOff() {
+        guard let id = selectedBoardId else { return }
+        mutate(id) { $0.wakeAt = nil }
+        client?.clearWakeTimer(boardId: id)
     }
 
     /// Round to the knob's scale (steps of 10, floor 10) so the slider and the
@@ -1248,19 +1260,31 @@ struct DashboardView: View {
         } header: {
             Text("Controls")
         } footer: {
-            if let text = sleepFooter {
-                Text(text)
-            }
+            sleepFooter
         }
     }
 
-    /// "Asleep — waking in about N hours." while a button-sleep timer is running.
-    private var sleepFooter: String? {
-        guard !model.power, let w = model.current.wakeAt else { return nil }
-        let remaining = Int(w) - Int(Date().timeIntervalSince1970)
-        guard remaining > 0 else { return nil }
-        let hours = (remaining + 1800) / 3600
-        return hours <= 1 ? "Asleep — waking within the hour." : "Asleep — waking in about \(hours) hours."
+    /// While asleep: a live countdown to the wake time (armed identically by the
+    /// app's power button and the physical knob) with an escape hatch to stay off
+    /// indefinitely — or, once indefinite, a note that only power turns it back on.
+    @ViewBuilder private var sleepFooter: some View {
+        if !model.power {
+            if let w = model.current.wakeAt, TimeInterval(w) > Date().timeIntervalSince1970 {
+                HStack(spacing: 12) {
+                    // `.relative` keeps itself accurate ("1 hr, 53 min" … "45 sec").
+                    (Text("Asleep — waking in ")
+                        + Text(Date(timeIntervalSince1970: TimeInterval(w)), style: .relative)
+                        + Text("."))
+                    Spacer(minLength: 8)
+                    Button("Keep off") { model.keepOff() }
+                        .font(.footnote.weight(.semibold))
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.tint)
+                }
+            } else {
+                Text("Asleep until turned back on.")
+            }
+        }
     }
 
     /// The League Preferences title row + Add League menu. Rendered as the

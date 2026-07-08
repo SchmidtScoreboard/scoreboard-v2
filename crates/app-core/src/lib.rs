@@ -369,6 +369,11 @@ impl ScoreboardClient {
         let _ = self.tx.send(Out::Command(board_id, Command::SetPower { on }));
     }
 
+    /// Keep the board off with no auto-wake (cancels a running sleep timer).
+    pub fn clear_wake_timer(&self, board_id: String) {
+        let _ = self.tx.send(Out::Command(board_id, Command::ClearWakeTimer));
+    }
+
     pub fn set_brightness(&self, board_id: String, level: u8) {
         let _ = self.tx.send(Out::Command(board_id, Command::SetBrightness { level }));
     }

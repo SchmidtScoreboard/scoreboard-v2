@@ -863,18 +863,37 @@ pub fn handle_button(state: &AppState, board_id: &str) {
     push_board_state(state, board_id);
 }
 
-/// The app toggled power. Mirror the physical button's feedback: powering off
-/// shows the "SLEEPING" splash (indefinite sleep — no duration line); powering on
-/// cancels any active notice so the games/off-state appear immediately.
+/// The device knob turned. There is ONE brightness per board — the knob writes
+/// the same config field the app's slider does; the next manifest echoes it back
+/// to the device and the app sees it in the board state.
+pub fn handle_device_brightness(state: &AppState, board_id: &str, level: u8) {
+    let mut cfg = state.config_for(board_id);
+    let level = level.clamp(10, 100);
+    if cfg.brightness == level {
+        return;
+    }
+    cfg.brightness = level;
+    state.configs.lock().unwrap().insert(board_id.to_string(), cfg.clone());
+    state.persist_config(board_id, &cfg);
+    push_board(state, board_id);
+    push_board_state(state, board_id);
+}
+
+/// The app toggled power. Same behavior as the physical button: powering off is
+/// a timed sleep (`apply_command` armed `wake_at`), so the splash shows the same
+/// duration line; powering on cancels any active notice so the games/off-state
+/// appear immediately.
 pub fn handle_app_power(state: &AppState, board_id: &str, on: bool) {
     if on {
         state.notices.lock().unwrap().remove(board_id);
     } else {
-        set_notice(state, board_id, &[("SLEEPING", true, NOTICE_WHITE)], SPLASH_SECS);
+        let hours = state.config_for(board_id).sleep_hours.max(1);
+        let caption = if hours == 1 { "FOR 1 HOUR".to_string() } else { format!("FOR {hours} HOURS") };
+        set_notice(state, board_id, &[("SLEEPING", true, NOTICE_WHITE), (&caption, false, NOTICE_GREY)], SPLASH_SECS);
     }
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -1342,6 +1361,31 @@ mod tests {
         let m = manifest_for_board(&state, "b1");
         assert!(!m.rotation.is_empty(), "games back after wake");
         assert!(!state.notices.lock().unwrap().contains_key("b1"), "games clear the notice");
+    }
+
+    /// App power-off arms the SAME timed sleep the button does (wake_at from
+    /// sleep_hours + the "SLEEPING FOR N HOURS" splash); power-on cancels it.
+    #[test]
+    fn app_power_off_arms_the_sleep_timer() {
+        let state = AppState::new_ephemeral();
+        crate::ws::apply_command(&state, "b1", Command::SetSleepHours { hours: 2 });
+        crate::ws::apply_command(&state, "b1", Command::SetPower { on: false });
+        let cfg = state.config_for("b1");
+        assert!(!cfg.power);
+        let wake = cfg.wake_at.expect("app sleep sets a wake timer like the button");
+        let expect = unix_now() + 2 * 3600;
+        assert!((wake as i64 - expect as i64).abs() <= 5, "timer = sleep_hours");
+        assert!(state.notices.lock().unwrap().contains_key("b1"), "sleep splash shows");
+
+        crate::ws::apply_command(&state, "b1", Command::SetPower { on: true });
+        let cfg = state.config_for("b1");
+        assert!(cfg.power && cfg.wake_at.is_none(), "power-on cancels the timer");
+
+        // "Off until I say so": cancel the timer while staying asleep.
+        crate::ws::apply_command(&state, "b1", Command::SetPower { on: false });
+        crate::ws::apply_command(&state, "b1", Command::ClearWakeTimer);
+        let cfg = state.config_for("b1");
+        assert!(!cfg.power && cfg.wake_at.is_none(), "indefinite off: asleep, no timer");
     }
 
     /// A knob turn writes the SAME brightness the app's slider does — one value,

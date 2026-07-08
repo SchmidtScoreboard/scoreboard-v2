@@ -352,6 +352,11 @@ RustBuffer uniffi_app_core_fn_method_scoreboardclient_board_ids(void*_Nonnull pt
 void uniffi_app_core_fn_method_scoreboardclient_clear_focus(void*_Nonnull ptr, RustBuffer board_id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_CLEAR_WAKE_TIMER
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_CLEAR_WAKE_TIMER
+void uniffi_app_core_fn_method_scoreboardclient_clear_wake_timer(void*_Nonnull ptr, RustBuffer board_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_CONNECT
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_CONNECT
 void uniffi_app_core_fn_method_scoreboardclient_connect(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
@@ -405,6 +410,11 @@ RustBuffer uniffi_app_core_fn_method_scoreboardclient_secret_key_hex(void*_Nonnu
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_BRIGHTNESS
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_BRIGHTNESS
 void uniffi_app_core_fn_method_scoreboardclient_set_brightness(void*_Nonnull ptr, RustBuffer board_id, uint8_t level, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_DWELL
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_DWELL
+void uniffi_app_core_fn_method_scoreboardclient_set_dwell(void*_Nonnull ptr, RustBuffer board_id, uint32_t secs, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_LISTENER
@@ -735,6 +745,12 @@ uint16_t uniffi_app_core_checksum_method_scoreboardclient_clear_focus(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_CLEAR_WAKE_TIMER
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_CLEAR_WAKE_TIMER
+uint16_t uniffi_app_core_checksum_method_scoreboardclient_clear_wake_timer(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_CONNECT
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_CONNECT
 uint16_t uniffi_app_core_checksum_method_scoreboardclient_connect(void
@@ -798,6 +814,12 @@ uint16_t uniffi_app_core_checksum_method_scoreboardclient_secret_key_hex(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_BRIGHTNESS
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_BRIGHTNESS
 uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_brightness(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_DWELL
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_DWELL
+uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_dwell(void
     
 );
 #endif

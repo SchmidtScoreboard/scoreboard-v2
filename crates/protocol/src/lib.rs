@@ -220,6 +220,11 @@ pub enum Command {
     SetOffState { off_state: OffState },
     /// How long a button-press sleep lasts (hours) before auto-wake.
     SetSleepHours { hours: u32 },
+    /// Stay asleep with no auto-wake: cancels a running sleep timer without
+    /// turning the display back on ("off until I say so").
+    ClearWakeTimer,
+    /// Seconds each game holds the panel before the rotation advances.
+    SetDwell { secs: u32 },
     Rename { name: String },
 }
 

@@ -271,9 +271,14 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
             Command::SetBrightness { level } => cfg.brightness = level.clamp(10, 100),
             Command::SetPower { on } => {
                 cfg.power = on;
-                // Turning on from the app cancels any pending button-sleep timer.
                 if on {
+                    // Turning on from the app cancels any pending sleep timer.
                     cfg.wake_at = None;
+                } else {
+                    // App sleep = button sleep: the same timed window, after
+                    // which the server wakes the board — never an indefinite off.
+                    cfg.wake_at =
+                        Some(crate::unix_now() + cfg.sleep_hours.max(1) as u64 * 3600);
                 }
                 power_toggle = Some(on);
             }
@@ -323,6 +328,9 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
             }
             Command::SetOffState { off_state } => cfg.off_state = off_state,
             Command::SetSleepHours { hours } => cfg.sleep_hours = hours.clamp(1, 72),
+            // Indefinite off: drop the auto-wake but leave the power state alone
+            // (only meaningful while asleep; harmless no-op when awake).
+            Command::ClearWakeTimer => cfg.wake_at = None,
             Command::SetDwell { secs } => cfg.dwell_secs = secs.clamp(3, 60),
             // Deliberately no catch-all: a new Command variant should be a compile
             // error here, not a silently ignored no-op.
