@@ -60,6 +60,40 @@ pub struct Champ {
     pub label: String,
 }
 
+/// Live in-game situation, rendered with the ORIGINAL scoreboard's sport-specific
+/// bottom layouts (rust-scoreboard football.rs / baseball.rs / hockey.rs).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Situation {
+    /// NFL/CFB: down & distance + yardline + which side has the ball.
+    Football {
+        /// e.g. "3rd + 4" — ESPN shortDownDistanceText with "&" → "+" like the
+        /// original server did (the 4x6 font has no ampersand glyph).
+        down_string: String,
+        /// e.g. "SEA 25" — ESPN possessionText, drawn verbatim.
+        ball_position: String,
+        /// Some(true)=home ball, Some(false)=away, None=unknown (no indicator).
+        home_possession: Option<bool>,
+    },
+    /// MLB: the count, outs, runners on base, and which half of the inning.
+    Baseball {
+        balls: u8,
+        strikes: u8,
+        outs: u8,
+        on_first: bool,
+        on_second: bool,
+        on_third: bool,
+        is_inning_top: bool,
+    },
+    /// NHL: power-play flags (badge shows the abbrev of the team on the PP) or
+    /// the skater counts when both sides are short-handed (e.g. "4-4").
+    Hockey {
+        away_powerplay: bool,
+        home_powerplay: bool,
+        away_players: u8,
+        home_players: u8,
+    },
+}
+
 #[derive(Clone, Debug)]
 pub struct Game {
     pub id: String,
@@ -80,6 +114,9 @@ pub struct Game {
     /// "sprint-quali") — drives the per-league session subscription. `None` for
     /// ordinary games.
     pub session: Option<String>,
+    /// Sport-specific live details (football down/possession, baseball count/
+    /// bases, hockey power play), shown only while the game is Active.
+    pub situation: Option<Situation>,
 }
 
 pub fn hex_to_rgb(hex: &str) -> Rgb888 {

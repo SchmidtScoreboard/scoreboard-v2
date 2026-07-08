@@ -2,7 +2,7 @@
 //! live games from ESPN's public scoreboard API (ported from the original
 //! Python backend); `MockSource` provides offline fallback games.
 
-use crate::model::{ensure_contrast, hex_to_rgb, Champ, Game, GameStatus, Leaderboard, LeaderRow, TeamSide};
+use crate::model::{ensure_contrast, hex_to_rgb, Champ, Game, GameStatus, Leaderboard, LeaderRow, Situation, TeamSide};
 use async_trait::async_trait;
 use scoreboard_protocol::{Catalog, SportDescriptor, Team};
 use serde::Deserialize;
@@ -33,7 +33,12 @@ pub struct EspnSource {
 impl EspnSource {
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            // A hard timeout so one hung upstream (ESPN or the NHL API) can't
+            // stall the poll loop — a lost cycle beats a frozen slate.
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .expect("reqwest client"),
             leagues: vec![
                 League { sport_id: "nhl", sport: "hockey", league: "nhl", name: "NHL", games_query: "" },
                 League { sport_id: "nba", sport: "basketball", league: "nba", name: "NBA", games_query: "" },
@@ -80,6 +85,7 @@ impl SportsDataSource for EspnSource {
         }
         out.extend(self.fetch_golf().await);
         out.extend(self.fetch_f1().await);
+        self.attach_nhl_situations(&mut out).await;
         out
     }
 
@@ -556,6 +562,7 @@ pub fn mock_games() -> Vec<Game> {
             // games to test against).
             champ: Some(Champ { tier: "final".into(), label: "Stanley Cup Final".into() }),
             session: None,
+            situation: None,
         },
         Game {
             id: "mock-nba".into(), sport_id: "nba".into(), away: celtics, home: lakers,
@@ -564,6 +571,7 @@ pub fn mock_games() -> Vec<Game> {
             leaderboard: None,
             champ: None,
             session: None,
+            situation: None,
         },
     ]
 }
@@ -623,6 +631,14 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             leaderboard: None,
             champ: Some(Champ { tier: "final".into(), label: "Stanley Cup Final".into() }),
             session: None,
+            // Cycle the strength states so the power-play badge (abbrev or
+            // skater counts) is visible in demo mode.
+            situation: Some(match (n / 6) % 4 {
+                0 => Situation::Hockey { away_powerplay: true, home_powerplay: false, away_players: 5, home_players: 4 },
+                1 => Situation::Hockey { away_powerplay: false, home_powerplay: true, away_players: 4, home_players: 5 },
+                2 => Situation::Hockey { away_powerplay: false, home_powerplay: false, away_players: 4, home_players: 4 },
+                _ => Situation::Hockey { away_powerplay: false, home_powerplay: false, away_players: 5, home_players: 5 },
+            }),
         },
         Game {
             id: "demo-nhl-2".into(), sport_id: "nhl".into(),
@@ -632,6 +648,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             leaderboard: None,
             champ: Some(Champ { tier: "conf".into(), label: "Conference Finals".into() }),
             session: None,
+            situation: None,
         },
         Game {
             id: "demo-nba".into(), sport_id: "nba".into(),
@@ -641,6 +658,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             leaderboard: None,
             champ: None,
             session: None,
+            situation: None,
         },
         Game {
             id: "demo-nba-2".into(), sport_id: "nba".into(),
@@ -650,6 +668,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             leaderboard: None,
             champ: None,
             session: None,
+            situation: None,
         },
         Game {
             id: "demo-nba-3".into(), sport_id: "nba".into(),
@@ -659,6 +678,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             leaderboard: None,
             champ: None,
             session: None,
+            situation: None,
         },
         Game {
             id: "demo-mlb".into(), sport_id: "mlb".into(),
@@ -668,6 +688,15 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             leaderboard: None,
             champ: None,
             session: None,
+            situation: Some(Situation::Baseball {
+                balls: (n % 4) as u8,
+                strikes: (n % 3) as u8,
+                outs: ((n / 3) % 3) as u8,
+                on_first: n % 2 == 0,
+                on_second: (n / 2) % 2 == 0,
+                on_third: (n / 4) % 2 == 0,
+                is_inning_top: (n / 8) % 2 == 0,
+            }),
         },
         Game {
             id: "demo-mlb-2".into(), sport_id: "mlb".into(),
@@ -677,6 +706,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             leaderboard: None,
             champ: None,
             session: None,
+            situation: None,
         },
         Game {
             id: "demo-mlb-ending".into(), sport_id: "mlb".into(),
@@ -688,6 +718,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             leaderboard: None,
             champ: None,
             session: None,
+            situation: None,
         },
         Game {
             id: "demo-nfl".into(), sport_id: "nfl".into(),
@@ -737,6 +768,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             leaderboard: None,
             champ: None,
             session: None,
+            situation: None,
         },
         Game {
             id: "demo-golf".into(), sport_id: "pga".into(),
@@ -778,6 +810,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             ] }),
             champ: None,
             session: Some("race".into()),
+            situation: None,
         },
         // Upcoming games: one inside the 30-min pregame window (appears on the
         // board with its start time), one hours out (View-all browse only).
@@ -790,6 +823,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             leaderboard: None,
             champ: None,
             session: None,
+            situation: None,
         },
         Game {
             id: "demo-nba-tonight".into(), sport_id: "nba".into(),
@@ -800,6 +834,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             leaderboard: None,
             champ: None,
             session: None,
+            situation: None,
         },
     ]
 }
@@ -838,6 +873,34 @@ struct Competition {
     /// the postseason tier (final vs conference finals vs early rounds).
     #[serde(default)]
     notes: Vec<CompNote>,
+    /// Live in-game details: football down/distance/possession, baseball
+    /// count/outs/runners. Only present while the game is in progress.
+    #[serde(default)]
+    situation: Option<EspnSituation>,
+}
+/// ESPN `competitions[0].situation` (subset) — the same fields the original
+/// scoreboard's Python server read (football_v2.py / baseball_v2.py).
+#[derive(Deserialize, Default)]
+struct EspnSituation {
+    #[serde(default, rename = "shortDownDistanceText")]
+    short_down_distance_text: String,
+    #[serde(default, rename = "possessionText")]
+    possession_text: String,
+    /// Team id of the side with the ball (matches Competitor.id).
+    #[serde(default)]
+    possession: Option<String>,
+    #[serde(default)]
+    balls: u8,
+    #[serde(default)]
+    strikes: u8,
+    #[serde(default)]
+    outs: u8,
+    #[serde(default, rename = "onFirst")]
+    on_first: bool,
+    #[serde(default, rename = "onSecond")]
+    on_second: bool,
+    #[serde(default, rename = "onThird")]
+    on_third: bool,
 }
 #[derive(Deserialize)]
 struct CompNote {
@@ -857,9 +920,16 @@ struct Status {
 struct StatusType {
     #[serde(default)]
     name: String,
+    /// e.g. "Top 5th" — the original server derived baseball's inning half from
+    /// this ("Top" substring check), so we do too.
+    #[serde(default, rename = "shortDetail")]
+    short_detail: String,
 }
 #[derive(Deserialize)]
 struct Competitor {
+    /// Competitor id == team id; football possession is matched against this.
+    #[serde(default)]
+    id: String,
     #[serde(default)]
     score: String,
     #[serde(default, rename = "homeAway")]
@@ -876,6 +946,124 @@ struct EspnTeam {
     color: String,
     #[serde(default, rename = "alternateColor")]
     alternate_color: String,
+}
+
+// ---- NHL power plays (api-web.nhle.com) ----
+// ESPN's hockey scoreboard has no power-play info, so — exactly like the
+// original scoreboard's server (hockey.py) — the live strength state comes from
+// the NHL's own API: `powerPlay` + `numSkaters` on each side of the gamecenter
+// boxscore. Games are matched to ESPN's by team abbreviation.
+
+#[derive(Deserialize)]
+struct NhlScoreNow {
+    #[serde(default)]
+    games: Vec<NhlScoreGame>,
+}
+#[derive(Deserialize)]
+struct NhlScoreGame {
+    id: i64,
+    #[serde(default, rename = "gameState")]
+    game_state: String,
+    #[serde(rename = "awayTeam")]
+    away_team: NhlTeamRef,
+    #[serde(rename = "homeTeam")]
+    home_team: NhlTeamRef,
+}
+#[derive(Deserialize)]
+struct NhlTeamRef {
+    #[serde(default)]
+    abbrev: String,
+    /// Present on boxscore teams while live; absent otherwise (like the
+    /// original's `.get("powerPlay", False)`).
+    #[serde(default, rename = "powerPlay")]
+    power_play: bool,
+    /// i64 so a malformed value can't abort the whole boxscore parse; clamped
+    /// to u8 range on use (the original clamped negatives to 0 the same way).
+    #[serde(default, rename = "numSkaters")]
+    num_skaters: i64,
+}
+#[derive(Deserialize)]
+struct NhlBoxscore {
+    #[serde(rename = "awayTeam")]
+    away_team: NhlTeamRef,
+    #[serde(rename = "homeTeam")]
+    home_team: NhlTeamRef,
+}
+
+/// ESPN and the NHL API disagree on a few team abbreviations — normalize to
+/// the NHL's, both for matching the two feeds and for the power-play badge
+/// text (the original always displayed NHL-style abbrevs: TBL, not TB).
+pub(crate) fn nhl_abbrev(a: &str) -> String {
+    match a.to_ascii_uppercase().as_str() {
+        "NJ" => "NJD".into(),
+        "TB" => "TBL".into(),
+        "LA" => "LAK".into(),
+        "SJ" => "SJS".into(),
+        "UTAH" => "UTA".into(),
+        other => other.into(),
+    }
+}
+
+impl EspnSource {
+    /// Attach `Situation::Hockey` to live NHL games from the NHL API's
+    /// boxscores. Any failure just means no power-play info this cycle.
+    async fn attach_nhl_situations(&self, games: &mut [Game]) {
+        if !games.iter().any(|g| g.sport_id == "nhl" && g.status == GameStatus::Active) {
+            return;
+        }
+        let score_now: NhlScoreNow = match self
+            .client
+            .get("https://api-web.nhle.com/v1/score/now")
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())
+        {
+            Ok(r) => match r.json().await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!("nhl score/now parse: {e}");
+                    return;
+                }
+            },
+            Err(e) => {
+                tracing::warn!("nhl score/now fetch: {e}");
+                return;
+            }
+        };
+        // (away, home) abbrev pair -> hockey situation, for live games only.
+        let mut by_teams = std::collections::HashMap::new();
+        for g in score_now.games.iter().filter(|g| matches!(g.game_state.as_str(), "LIVE" | "CRIT")) {
+            let url = format!("https://api-web.nhle.com/v1/gamecenter/{}/boxscore", g.id);
+            let bs: NhlBoxscore = match self.client.get(&url).send().await {
+                Ok(r) => match r.json().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!("nhl boxscore parse {}: {e}", g.id);
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("nhl boxscore fetch {}: {e}", g.id);
+                    continue;
+                }
+            };
+            by_teams.insert(
+                (nhl_abbrev(&g.away_team.abbrev), nhl_abbrev(&g.home_team.abbrev)),
+                Situation::Hockey {
+                    away_powerplay: bs.away_team.power_play,
+                    home_powerplay: bs.home_team.power_play,
+                    away_players: bs.away_team.num_skaters.clamp(0, 255) as u8,
+                    home_players: bs.home_team.num_skaters.clamp(0, 255) as u8,
+                },
+            );
+        }
+        for g in games.iter_mut().filter(|g| g.sport_id == "nhl" && g.status == GameStatus::Active) {
+            let key = (nhl_abbrev(&g.away.abbrev), nhl_abbrev(&g.home.abbrev));
+            if let Some(sit) = by_teams.get(&key) {
+                g.situation = Some(sit.clone());
+            }
+        }
+    }
 }
 
 // ---- ESPN teams endpoint JSON (subset) ----
@@ -924,6 +1112,7 @@ fn parse_event(sport_id: &str, ev: Event) -> Option<Game> {
 
     let mut home = None;
     let mut away = None;
+    let mut home_id = String::new();
     for c in comp.competitors {
         let primary = hex_to_rgb(if c.team.color.is_empty() { "222222" } else { &c.team.color });
         let secondary = ensure_contrast(
@@ -939,17 +1128,56 @@ fn parse_event(sport_id: &str, ev: Event) -> Option<Game> {
             secondary,
         };
         match c.home_away.as_str() {
-            "home" => home = Some(side),
+            "home" => {
+                home = Some(side);
+                home_id = c.id;
+            }
             "away" => away = Some(side),
             _ => {}
         }
     }
 
-    let ordinal = ordinal_for(&comp.status, status);
+    let mut ordinal = ordinal_for(&comp.status, status);
+    // The original called every extra NHL period "OT" (never "4th"/"5th").
+    if sport_id == "nhl" && comp.status.period > 3 {
+        ordinal = if status == GameStatus::Intermission { "OT INT".into() } else { "OT".into() };
+    }
     let clock = if status == GameStatus::Active {
         comp.status.display_clock.clone()
     } else {
         String::new()
+    };
+
+    // Sport-specific live details — same ESPN fields the original scoreboard's
+    // server read. Only attached while in progress (ESPN keeps a stale situation
+    // object on finished games).
+    // A live game with no situation object still gets the sport layout with
+    // zeroed fields — the original's server defaulted every field the same way,
+    // so the panel never flips between layouts mid-game when ESPN omits it.
+    let empty_situation = EspnSituation::default();
+    let situation = match (status, sport_id) {
+        (GameStatus::Active, "nfl" | "cfb") => {
+            let s = comp.situation.as_ref().unwrap_or(&empty_situation);
+            Some(Situation::Football {
+                // "&" → "+" like the original (the 4x6 font has no ampersand).
+                down_string: s.short_down_distance_text.replace('&', "+"),
+                ball_position: s.possession_text.clone(),
+                home_possession: s.possession.as_ref().map(|p| *p == home_id),
+            })
+        }
+        (GameStatus::Active, "mlb") => {
+            let s = comp.situation.as_ref().unwrap_or(&empty_situation);
+            Some(Situation::Baseball {
+                balls: s.balls,
+                strikes: s.strikes,
+                outs: s.outs,
+                on_first: s.on_first,
+                on_second: s.on_second,
+                on_third: s.on_third,
+                is_inning_top: comp.status.type_.short_detail.contains("Top"),
+            })
+        }
+        _ => None,
     };
 
     Some(Game {
@@ -964,6 +1192,7 @@ fn parse_event(sport_id: &str, ev: Event) -> Option<Game> {
         leaderboard: None,
         champ,
         session: None,
+        situation,
     })
 }
 
@@ -1226,6 +1455,11 @@ mod champ_tests {
         assert_eq!(champ.label, "Stanley Cup Final");
     }
 
+    /// Football situations read the same ESPN fields the original server did:
+    /// shortDownDistanceText ("&"->"+"), possessionText, and possession matched
+    /// against the HOME competitor id.
+    #[test]
+    fn parse_event_attaches_football_situation() {
         let json = |possession: &str| format!(r#"{{
             "competitions": [{{
                 "id": "401",
@@ -1245,6 +1479,10 @@ mod champ_tests {
         let ev: Event = serde_json::from_str(&json("12")).unwrap();
         let g = parse_event("nfl", ev).unwrap();
         assert_eq!(
+            g.situation,
+            Some(Situation::Football {
+                down_string: "3rd + 4".into(), // "&" replaced like the original
+                ball_position: "SEA 25".into(),
                 home_possession: Some(true),
             })
         );
@@ -1252,14 +1490,129 @@ mod champ_tests {
         let ev: Event = serde_json::from_str(&json("25")).unwrap();
         let g = parse_event("cfb", ev).unwrap();
         assert!(matches!(
+            g.situation,
             Some(Situation::Football { home_possession: Some(false), .. })
         ));
 
         // Non-football sports never get a football situation from these fields.
         let ev: Event = serde_json::from_str(&json("12")).unwrap();
+        assert_eq!(parse_event("nba", ev).unwrap().situation, None);
+    }
+
+    /// Baseball: count/outs/runners from situation, inning half from the
+    /// "Top ..." shortDetail substring (exactly the original's check).
+    #[test]
+    fn parse_event_attaches_baseball_situation() {
+        let json = |detail: &str, name: &str| format!(r#"{{
+            "competitions": [{{
+                "id": "401",
+                "date": "2026-07-07T23:05Z",
+                "status": {{"type": {{"name": "{name}", "shortDetail": "{detail}"}}, "period": 5}},
+                "situation": {{
+                    "balls": 3, "strikes": 2, "outs": 1,
+                    "onFirst": true, "onSecond": false, "onThird": true
+                }},
+                "competitors": [
+                    {{"id": "10", "homeAway": "home", "score": "4", "team": {{"abbreviation": "SEA", "shortDisplayName": "Mariners"}}}},
+                    {{"id": "11", "homeAway": "away", "score": "2", "team": {{"abbreviation": "HOU", "shortDisplayName": "Astros"}}}}
+                ]
+            }}]
+        }}"#);
+        let ev: Event = serde_json::from_str(&json("Top 5th", "STATUS_IN_PROGRESS")).unwrap();
+        let g = parse_event("mlb", ev).unwrap();
+        assert_eq!(
+            g.situation,
+            Some(Situation::Baseball {
+                balls: 3, strikes: 2, outs: 1,
+                on_first: true, on_second: false, on_third: true,
+                is_inning_top: true,
+            })
+        );
+
+        let ev: Event = serde_json::from_str(&json("Bot 5th", "STATUS_IN_PROGRESS")).unwrap();
+        assert!(matches!(
+            parse_event("mlb", ev).unwrap().situation,
+            Some(Situation::Baseball { is_inning_top: false, .. })
+        ));
+
+        // ESPN keeps a stale situation object on finished games — ignore it.
+        let ev: Event = serde_json::from_str(&json("Final", "STATUS_FINAL")).unwrap();
+        assert_eq!(parse_event("mlb", ev).unwrap().situation, None);
+    }
+
+    /// A live game with NO situation object still gets the sport layout with
+    /// zeroed fields — the original's server defaulted the same way, so the
+    /// panel never flips between layouts when ESPN transiently omits it.
+    #[test]
+    fn live_game_without_situation_object_gets_zeroed_layout() {
+        let json = |sport: &str, league_status: &str| format!(r#"{{
+            "competitions": [{{
+                "id": "401",
+                "date": "2026-10-04T20:00Z",
+                "status": {{"type": {{"name": "{league_status}", "shortDetail": "Bot 3rd"}}, "period": 3, "displayClock": "8:12"}},
+                "competitors": [
+                    {{"id": "12", "homeAway": "home", "score": "7", "team": {{"abbreviation": "SEA", "shortDisplayName": "{sport} Home"}}}},
+                    {{"id": "25", "homeAway": "away", "score": "3", "team": {{"abbreviation": "SF", "shortDisplayName": "{sport} Away"}}}}
+                ]
+            }}]
+        }}"#);
+        let ev: Event = serde_json::from_str(&json("nfl", "STATUS_IN_PROGRESS")).unwrap();
+        assert_eq!(
+            parse_event("nfl", ev).unwrap().situation,
+            Some(Situation::Football {
+                down_string: String::new(),
+                ball_position: String::new(),
                 home_possession: None,
             })
         );
         let ev: Event = serde_json::from_str(&json("mlb", "STATUS_IN_PROGRESS")).unwrap();
         assert_eq!(
+            parse_event("mlb", ev).unwrap().situation,
+            Some(Situation::Baseball {
+                balls: 0, strikes: 0, outs: 0,
+                on_first: false, on_second: false, on_third: false,
+                is_inning_top: false,
+            })
+        );
+        // Pregame stays layout-free.
+        let ev: Event = serde_json::from_str(&json("nfl", "STATUS_SCHEDULED")).unwrap();
+        assert_eq!(parse_event("nfl", ev).unwrap().situation, None);
+    }
+
+    /// The original called every extra NHL period "OT", never "4th".
+    #[test]
+    fn nhl_overtime_ordinal_is_ot() {
+        let json = |period: u32, name: &str| format!(r#"{{
+            "competitions": [{{
+                "id": "401",
+                "date": "2026-06-10T00:00Z",
+                "status": {{"type": {{"name": "{name}"}}, "period": {period}, "displayClock": "3:33"}},
+                "competitors": [
+                    {{"id": "1", "homeAway": "home", "score": "2", "team": {{"abbreviation": "EDM", "shortDisplayName": "Oilers"}}}},
+                    {{"id": "2", "homeAway": "away", "score": "2", "team": {{"abbreviation": "FLA", "shortDisplayName": "Panthers"}}}}
+                ]
+            }}]
+        }}"#);
+        let ev: Event = serde_json::from_str(&json(4, "STATUS_IN_PROGRESS")).unwrap();
+        assert_eq!(parse_event("nhl", ev).unwrap().ordinal, "OT");
+        let ev: Event = serde_json::from_str(&json(5, "STATUS_IN_PROGRESS")).unwrap();
+        assert_eq!(parse_event("nhl", ev).unwrap().ordinal, "OT", "2OT/SO also reads OT");
+        // Regulation periods unchanged; other sports unaffected.
+        let ev: Event = serde_json::from_str(&json(3, "STATUS_IN_PROGRESS")).unwrap();
+        assert_eq!(parse_event("nhl", ev).unwrap().ordinal, "3rd");
+        let ev: Event = serde_json::from_str(&json(4, "STATUS_IN_PROGRESS")).unwrap();
+        assert_eq!(parse_event("nba", ev).unwrap().ordinal, "4th");
+    }
+
+    /// The ESPN<->NHL abbreviation bridge for power-play matching.
+    #[test]
+    fn nhl_abbrev_aliases() {
+        for (espn, nhl) in [("NJ", "NJD"), ("TB", "TBL"), ("LA", "LAK"), ("SJ", "SJS"), ("UTAH", "UTA")] {
+            assert_eq!(nhl_abbrev(espn), nhl);
+        }
+        // Already-NHL abbrevs pass through (matching is idempotent).
+        for same in ["BOS", "TOR", "NJD", "TBL", "VGK"] {
+            assert_eq!(nhl_abbrev(same), same);
+        }
+    }
 }

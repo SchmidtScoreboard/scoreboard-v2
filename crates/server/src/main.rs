@@ -1255,6 +1255,7 @@ fn preview() {
         leaderboard: None,
         champ: None,
         session: None,
+        situation: None,
     };
     let samples: Vec<(&str, Game)> = vec![
         // Tagged as a championship game so the app's big-game caption is
@@ -1266,6 +1267,33 @@ fn preview() {
             game
         }),
         ("nba_active", g("2", "nba", mk("BOS", "CELTICS", 88, "007A33", "FFFFFF"), mk("LAL", "LAKERS", 84, "552583", "FDB927"), GameStatus::Active, "4th", "5:20")),
+        // The three situational layouts ported from the original scoreboard.
+        ("nfl_situation", {
+            let mut game = g("s1", "nfl", mk("SF", "49ERS", 14, "AA0000", "B3995D"), mk("SEA", "SEAHAWKS", 17, "002244", "69BE28"), GameStatus::Active, "3rd", "8:12");
+            game.situation = Some(model::Situation::Football {
+                down_string: "3rd + 4".into(),
+                ball_position: "SEA 25".into(),
+                home_possession: Some(false),
+            });
+            game
+        }),
+        ("mlb_situation", {
+            let mut game = g("s2", "mlb", mk("HOU", "ASTROS", 2, "002D62", "EB6E1F"), mk("SEA", "MARINERS", 4, "0C2C56", "005C5C"), GameStatus::Active, "5th", "");
+            game.situation = Some(model::Situation::Baseball {
+                balls: 3, strikes: 2, outs: 2,
+                on_first: true, on_second: true, on_third: false,
+                is_inning_top: true,
+            });
+            game
+        }),
+        ("nhl_powerplay", {
+            let mut game = g("s3", "nhl", mk("DAL", "STARS", 1, "006341", "A2AAAD"), mk("STL", "BLUES", 2, "002F87", "FCB514"), GameStatus::Active, "2nd", "14:02");
+            game.situation = Some(model::Situation::Hockey {
+                away_powerplay: true, home_powerplay: false,
+                away_players: 5, home_players: 4,
+            });
+            game
+        }),
         ("nhl_final", g("5", "nhl", mk("BOS", "BRUINS", 4, "FFB81C", "000000"), mk("TOR", "LEAFS", 2, "00205B", "FFFFFF"), GameStatus::Final, "", "")),
         // Kerning torture tile (5x8): LT / AV pairs that leave holes with fixed advance.
         ("kern_5x8", g("9", "nhl", mk("TB", "BOLTS", 3, "002868", "FFFFFF"), mk("LV", "GRAVY", 2, "C8102E", "FFFFFF"), GameStatus::Active, "1st", "8:00")),
@@ -1282,6 +1310,7 @@ fn preview() {
             ] }),
             champ: None,
             session: None,
+            situation: None,
         }),
         ("f1", Game {
             id: "f".into(), sport_id: "f1".into(),
@@ -1296,6 +1325,7 @@ fn preview() {
             ] }),
             champ: None,
             session: None,
+            situation: None,
         }),
     ];
     for (name, game) in &samples {
@@ -1595,6 +1625,7 @@ mod tests {
             leaderboard: None,
             champ: None,
             session: None,
+            situation: None,
         };
         *state.games.lock().unwrap() = vec![live.clone()];
 
@@ -1638,6 +1669,7 @@ mod tests {
             leaderboard: None,
             champ: None,
             session: None,
+            situation: None,
         };
         assert!(board_shows_at(&mk(10), now), "starts in 10 min -> on the board");
         assert!(board_shows_at(&mk(-5), now), "past scheduled start, not yet live -> keep showing");
@@ -1849,6 +1881,7 @@ mod tests {
             leaderboard: None,
             champ: None,
             session: None,
+            situation: None,
         }
     }
 
