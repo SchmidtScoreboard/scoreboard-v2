@@ -2,7 +2,7 @@
 //! live games from ESPN's public scoreboard API (ported from the original
 //! Python backend); `MockSource` provides offline fallback games.
 
-use crate::model::{ensure_contrast, hex_to_rgb, Champ, Game, GameStatus, Leaderboard, LeaderRow, Situation, TeamSide};
+use crate::model::{ensure_contrast, hex_to_rgb, Champ, Game, GameStatus, Leaderboard, LeaderRow, Pregame, Situation, TeamSide};
 use async_trait::async_trait;
 use scoreboard_protocol::{Catalog, SportDescriptor, Team};
 use serde::Deserialize;
@@ -298,6 +298,7 @@ fn parse_golf(sport_id: &str, ev: LeaderEvent) -> Option<Game> {
         champ,
         session: None,
         situation: None,
+        pregame: None,
     })
 }
 
@@ -350,6 +351,7 @@ fn parse_f1(ev: LeaderEvent) -> Vec<Game> {
                 champ: None,
                 session: Some(session.into()),
                 situation: None,
+                pregame: None,
             })
         })
         .collect()
@@ -563,6 +565,7 @@ pub fn mock_games() -> Vec<Game> {
             champ: Some(Champ { tier: "final".into(), label: "Stanley Cup Final".into() }),
             session: None,
             situation: None,
+            pregame: None,
         },
         Game {
             id: "mock-nba".into(), sport_id: "nba".into(), away: celtics, home: lakers,
@@ -572,6 +575,7 @@ pub fn mock_games() -> Vec<Game> {
             champ: None,
             session: None,
             situation: None,
+            pregame: None,
         },
     ]
 }
@@ -639,6 +643,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
                 2 => Situation::Hockey { away_powerplay: false, home_powerplay: false, away_players: 4, home_players: 4 },
                 _ => Situation::Hockey { away_powerplay: false, home_powerplay: false, away_players: 5, home_players: 5 },
             }),
+            pregame: None,
         },
         Game {
             id: "demo-nhl-2".into(), sport_id: "nhl".into(),
@@ -649,6 +654,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             champ: Some(Champ { tier: "conf".into(), label: "Conference Finals".into() }),
             session: None,
             situation: None,
+            pregame: None,
         },
         Game {
             id: "demo-nba".into(), sport_id: "nba".into(),
@@ -659,6 +665,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             champ: None,
             session: None,
             situation: None,
+            pregame: None,
         },
         Game {
             id: "demo-nba-2".into(), sport_id: "nba".into(),
@@ -669,6 +676,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             champ: None,
             session: None,
             situation: None,
+            pregame: None,
         },
         Game {
             id: "demo-nba-3".into(), sport_id: "nba".into(),
@@ -679,6 +687,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             champ: None,
             session: None,
             situation: None,
+            pregame: None,
         },
         Game {
             id: "demo-mlb".into(), sport_id: "mlb".into(),
@@ -697,6 +706,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
                 on_third: (n / 4) % 2 == 0,
                 is_inning_top: (n / 8) % 2 == 0,
             }),
+            pregame: None,
         },
         Game {
             id: "demo-mlb-2".into(), sport_id: "mlb".into(),
@@ -707,6 +717,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             champ: None,
             session: None,
             situation: None,
+            pregame: None,
         },
         Game {
             id: "demo-mlb-ending".into(), sport_id: "mlb".into(),
@@ -719,6 +730,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             champ: None,
             session: None,
             situation: None,
+            pregame: None,
         },
         Game {
             id: "demo-nfl".into(), sport_id: "nfl".into(),
@@ -739,6 +751,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
                 },
                 home_possession: Some((n / 8) % 2 == 1),
             }),
+            pregame: None,
         },
         Game {
             id: "demo-mls".into(), sport_id: "mls".into(),
@@ -749,6 +762,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             champ: None,
             session: None,
             situation: None,
+            pregame: None,
         },
         Game {
             id: "demo-epl".into(), sport_id: "epl".into(),
@@ -759,6 +773,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             champ: None,
             session: None,
             situation: None,
+            pregame: None,
         },
         Game {
             id: "demo-wc".into(), sport_id: "wc".into(),
@@ -769,6 +784,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             champ: None,
             session: None,
             situation: None,
+            pregame: None,
         },
         Game {
             id: "demo-golf".into(), sport_id: "pga".into(),
@@ -783,6 +799,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             champ: Some(Champ { tier: "major".into(), label: "The Masters".into() }),
             session: None,
             situation: None,
+            pregame: None,
         },
         Game {
             id: "demo-golf-2".into(), sport_id: "lpga".into(),
@@ -797,6 +814,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             champ: Some(Champ { tier: "major".into(), label: "U.S. Women's Open".into() }),
             session: None,
             situation: None,
+            pregame: None,
         },
         Game {
             id: "demo-f1".into(), sport_id: "f1".into(),
@@ -811,6 +829,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             champ: None,
             session: Some("race".into()),
             situation: None,
+            pregame: None,
         },
         // Upcoming games: one inside the 30-min pregame window (appears on the
         // board with its start time), one hours out (View-all browse only).
@@ -824,6 +843,11 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             champ: None,
             session: None,
             situation: None,
+            pregame: Some(Pregame {
+                away_record: "48-25".into(),
+                home_record: "51-22".into(),
+                broadcast: "ESPN".into(),
+            }),
         },
         Game {
             id: "demo-nba-tonight".into(), sport_id: "nba".into(),
@@ -835,6 +859,7 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             champ: None,
             session: None,
             situation: None,
+            pregame: None,
         },
     ]
 }
@@ -877,6 +902,10 @@ struct Competition {
     /// count/outs/runners. Only present while the game is in progress.
     #[serde(default)]
     situation: Option<EspnSituation>,
+    /// TV listings by market; only the "national" entry is shown (regional
+    /// feeds differ per viewer, so naming one would usually be wrong).
+    #[serde(default)]
+    broadcasts: Vec<EspnBroadcast>,
 }
 /// ESPN `competitions[0].situation` (subset) — the same fields the original
 /// scoreboard's Python server read (football_v2.py / baseball_v2.py).
@@ -935,6 +964,23 @@ struct Competitor {
     #[serde(default, rename = "homeAway")]
     home_away: String,
     team: EspnTeam,
+    /// Season records; the overall one has type "total" (summary "47-42").
+    #[serde(default)]
+    records: Vec<EspnRecord>,
+}
+#[derive(Deserialize)]
+struct EspnRecord {
+    #[serde(default, rename = "type")]
+    type_: String,
+    #[serde(default)]
+    summary: String,
+}
+#[derive(Deserialize)]
+struct EspnBroadcast {
+    #[serde(default)]
+    market: String,
+    #[serde(default)]
+    names: Vec<String>,
 }
 #[derive(Deserialize)]
 struct EspnTeam {
@@ -1113,6 +1159,15 @@ fn parse_event(sport_id: &str, ev: Event) -> Option<Game> {
     let mut home = None;
     let mut away = None;
     let mut home_id = String::new();
+    let (mut home_record, mut away_record) = (String::new(), String::new());
+    let overall = |c: &Competitor| {
+        c.records
+            .iter()
+            .find(|r| r.type_ == "total")
+            .or_else(|| c.records.first())
+            .map(|r| r.summary.clone())
+            .unwrap_or_default()
+    };
     for c in comp.competitors {
         let primary = hex_to_rgb(if c.team.color.is_empty() { "222222" } else { &c.team.color });
         let secondary = ensure_contrast(
@@ -1129,10 +1184,14 @@ fn parse_event(sport_id: &str, ev: Event) -> Option<Game> {
         };
         match c.home_away.as_str() {
             "home" => {
+                home_record = overall(&c);
                 home = Some(side);
                 home_id = c.id;
             }
-            "away" => away = Some(side),
+            "away" => {
+                away_record = overall(&c);
+                away = Some(side);
+            }
             _ => {}
         }
     }
@@ -1180,6 +1239,21 @@ fn parse_event(sport_id: &str, ev: Event) -> Option<Game> {
         _ => None,
     };
 
+    // Scheduled games trade their meaningless 0-0 score line for the records,
+    // plus the national broadcast under the start time. National only — a
+    // regional feed's name is usually wrong for whoever is looking at the board.
+    let pregame = (status == GameStatus::Pregame).then(|| {
+        let broadcast = comp
+            .broadcasts
+            .iter()
+            .find(|b| b.market == "national")
+            .and_then(|b| b.names.first())
+            .map(|n| n.to_uppercase().chars().take(15).collect())
+            .unwrap_or_default();
+        Pregame { away_record, home_record, broadcast }
+    })
+    .filter(|p| *p != Pregame::default());
+
     Some(Game {
         id: comp.id,
         sport_id: sport_id.into(),
@@ -1193,6 +1267,7 @@ fn parse_event(sport_id: &str, ev: Event) -> Option<Game> {
         champ,
         session: None,
         situation,
+        pregame,
     })
 }
 
@@ -1602,6 +1677,40 @@ mod champ_tests {
         assert_eq!(parse_event("nhl", ev).unwrap().ordinal, "3rd");
         let ev: Event = serde_json::from_str(&json(4, "STATUS_IN_PROGRESS")).unwrap();
         assert_eq!(parse_event("nba", ev).unwrap().ordinal, "4th");
+    }
+
+    /// Scheduled games carry each side's overall record and the NATIONAL
+    /// broadcast (regional feeds are wrong for most viewers); live games don't.
+    #[test]
+    fn pregame_records_and_national_broadcast() {
+        let json = |status: &str| format!(r#"{{
+            "competitions": [{{
+                "id": "401",
+                "date": "2026-10-04T20:00Z",
+                "status": {{"type": {{"name": "{status}"}}, "period": 0}},
+                "broadcasts": [
+                    {{"market": "away", "names": ["Marquee Sports Net"]}},
+                    {{"market": "national", "names": ["ESPN Unlmtd", "MLB.TV"]}}
+                ],
+                "competitors": [
+                    {{"id": "10", "homeAway": "home", "score": "0",
+                      "records": [{{"type": "total", "summary": "51-22"}}, {{"type": "home", "summary": "23-8"}}],
+                      "team": {{"abbreviation": "SEA", "shortDisplayName": "Mariners"}}}},
+                    {{"id": "11", "homeAway": "away", "score": "0",
+                      "records": [{{"type": "total", "summary": "48-25"}}],
+                      "team": {{"abbreviation": "HOU", "shortDisplayName": "Astros"}}}}
+                ]
+            }}]
+        }}"#);
+        let ev: Event = serde_json::from_str(&json("STATUS_SCHEDULED")).unwrap();
+        let p = parse_event("mlb", ev).unwrap().pregame.expect("pregame attached");
+        assert_eq!(p.away_record, "48-25");
+        assert_eq!(p.home_record, "51-22", "overall record, not the home split");
+        assert_eq!(p.broadcast, "ESPN UNLMTD", "national market, not regional");
+
+        // Live games show the situation layouts, never pregame chrome.
+        let ev: Event = serde_json::from_str(&json("STATUS_IN_PROGRESS")).unwrap();
+        assert!(parse_event("mlb", ev).unwrap().pregame.is_none());
     }
 
     /// The ESPN<->NHL abbreviation bridge for power-play matching.

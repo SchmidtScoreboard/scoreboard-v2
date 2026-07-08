@@ -94,6 +94,16 @@ pub enum Situation {
     },
 }
 
+/// Pregame context shown on the board while a game is scheduled: each team's
+/// overall record replaces its (meaningless) 0 score in the team row, and the
+/// national broadcast joins the start time in the bottom strip.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Pregame {
+    pub away_record: String, // "47-42" (soccer: "4-2-8"); "" if unknown
+    pub home_record: String,
+    pub broadcast: String, // "ESPN" — national feed only; "" if none
+}
+
 #[derive(Clone, Debug)]
 pub struct Game {
     pub id: String,
@@ -117,6 +127,8 @@ pub struct Game {
     /// Sport-specific live details (football down/possession, baseball count/
     /// bases, hockey power play), shown only while the game is Active.
     pub situation: Option<Situation>,
+    /// Records + national TV, shown only while the game is scheduled.
+    pub pregame: Option<Pregame>,
 }
 
 pub fn hex_to_rgb(hex: &str) -> Rgb888 {

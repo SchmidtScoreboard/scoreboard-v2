@@ -306,7 +306,9 @@ fn box_h(lay: &Layout) -> i32 {
 
 /// `accent_w` is normally ACCENT_W; football widens the possessing team's
 /// stripe to 8 (the original's possession cue), which also shifts the name.
-fn draw_team_box(c: &mut Canvas, team: &TeamSide, y_offset: i32, lay: &Layout, accent_w: u32) {
+/// `right_text` is the score — or the team's record while the game is
+/// scheduled, when a 0-0 line would say nothing.
+fn draw_team_box(c: &mut Canvas, team: &TeamSide, y_offset: i32, lay: &Layout, accent_w: u32, right_text: &str) {
     let bh = box_h(lay);
     fill(c, 0, y_offset, FRAME_WIDTH as u32, bh as u32, team.primary);
     // The original's rectangle x-endpoints were inclusive, so its width-8
@@ -315,8 +317,10 @@ fn draw_team_box(c: &mut Canvas, team: &TeamSide, y_offset: i32, lay: &Layout, a
     let stripe = if accent_w > ACCENT_W { accent_w + 1 } else { accent_w };
     fill(c, 0, y_offset, stripe, bh as u32, team.secondary);
     let by = centered_baseline(y_offset, bh, lay.big);
-    draw_text(c, &team.name.to_ascii_uppercase(), accent_w as i32 + 3, by, lay.big, team.secondary);
-    draw_text_right(c, &team.score.to_string(), SCORE_RIGHT, by, lay.big, team.secondary);
+    let right_x = SCORE_RIGHT - text_width(right_text, lay.big);
+    // Clip the name against the right text — records are wider than scores.
+    draw_text_clip(c, &team.name.to_ascii_uppercase(), accent_w as i32 + 3, by, right_x - 2, lay.big, team.secondary);
+    draw_text(c, right_text, right_x, by, lay.big, team.secondary);
 }
 
 fn status_for(g: &Game) -> (String, Rgb888) {
@@ -351,8 +355,15 @@ pub fn render_game(g: &Game) -> (FrameId, Vec<u8>) {
         }
         _ => (ACCENT_W, ACCENT_W),
     };
-    draw_team_box(&mut c, &g.away, 0, &lay, away_accent);
-    draw_team_box(&mut c, &g.home, box_h(&lay), &lay, home_accent);
+    let (away_right, home_right) = match &g.pregame {
+        Some(p) if g.status == GameStatus::Pregame => (
+            if p.away_record.is_empty() { g.away.score.to_string() } else { p.away_record.clone() },
+            if p.home_record.is_empty() { g.home.score.to_string() } else { p.home_record.clone() },
+        ),
+        _ => (g.away.score.to_string(), g.home.score.to_string()),
+    };
+    draw_team_box(&mut c, &g.away, 0, &lay, away_accent, &away_right);
+    draw_team_box(&mut c, &g.home, box_h(&lay), &lay, home_accent, &home_right);
 
     // Live situational layouts reproduce the ORIGINAL per-sport screens; every
     // other state keeps the centered status line.
@@ -369,12 +380,31 @@ pub fn render_game(g: &Game) -> (FrameId, Vec<u8>) {
             draw_hockey_situation(&mut c, g, &hockey_badge(g, sit).unwrap());
         }
         _ => {
-            // Status line centered (both axes) in the strip below the two team rows.
             let (s, color) = status_for(g);
             let strip_top = 2 * box_h(&lay);
-            let by = centered_baseline(strip_top, FRAME_HEIGHT as i32 - strip_top, lay.status_big);
-            let sx = (FRAME_WIDTH as i32 - text_width(&s, lay.status_big)) / 2;
-            draw_text(&mut c, &s, sx, by, lay.status_big, color);
+            let strip_h = FRAME_HEIGHT as i32 - strip_top;
+            let broadcast = g
+                .pregame
+                .as_ref()
+                .filter(|_| g.status == GameStatus::Pregame)
+                .map(|p| p.broadcast.as_str())
+                .unwrap_or("");
+            if broadcast.is_empty() {
+                // Status line centered (both axes) in the strip below the team rows.
+                let by = centered_baseline(strip_top, strip_h, lay.status_big);
+                let sx = (FRAME_WIDTH as i32 - text_width(&s, lay.status_big)) / 2;
+                draw_text(&mut c, &s, sx, by, lay.status_big, color);
+            } else {
+                // Scheduled with a national broadcast: start time over the
+                // channel, the two-line block centered in the strip. The 1px
+                // gap lets the pair fit even the NHL layout's 12px strip.
+                let (h1, h2, gap) = (cap_h(lay.status_big), cap_h(false), 1);
+                let top = strip_top + (strip_h - (h1 + gap + h2)) / 2;
+                let by1 = centered_baseline(top, h1, lay.status_big);
+                draw_text(&mut c, &s, (FRAME_WIDTH as i32 - text_width(&s, lay.status_big)) / 2, by1, lay.status_big, color);
+                let by2 = centered_baseline(top + h1 + gap, h2, false);
+                draw_text(&mut c, broadcast, (FRAME_WIDTH as i32 - text_width(broadcast, false)) / 2, by2, false, GREY);
+            }
         }
     }
 
@@ -580,6 +610,7 @@ mod kern_tests {
             leaderboard: None,
             session: None,
             situation: None,
+            pregame: None,
             champ: None,
         };
         let (_, px) = render_game(&g);
@@ -626,6 +657,7 @@ mod kern_tests {
             champ: None,
             session: Some("race".into()),
             situation: None,
+            pregame: None,
         };
         let (_, px) = render_leaderboard(&g); // 64x32 RGB565-LE, 2 bytes/pixel
         let row_lit = |y: usize| {
@@ -683,6 +715,7 @@ mod kern_tests {
             champ: None,
             session: None,
             situation: Some(sit),
+            pregame: None,
         }
     }
 
@@ -790,6 +823,58 @@ mod kern_tests {
         assert!(black_inside, "abbrev should punch black pixels through the badge");
         // Ordinal left-aligned at x=5 (not centered) while the badge shows.
         assert!((23..=28).any(|y| (5..=20).any(|x| px565(&px, x, y) == white)), "ordinal at left");
+    }
+
+    /// Scheduled games: records replace the 0-0 scores in the team rows and the
+    /// national broadcast sits under the start time (two centered bands).
+    #[test]
+    fn pregame_shows_records_and_broadcast() {
+        use crate::model::Pregame;
+        let mut g = sit_game("nfl", "", "", Situation::Football {
+            down_string: String::new(), ball_position: String::new(), home_possession: None,
+        });
+        g.situation = None;
+        g.status = GameStatus::Pregame;
+        g.start_time = "2026-10-04T20:00Z".into();
+        g.pregame = Some(Pregame {
+            away_record: "10-2".into(),
+            home_record: "9-3".into(),
+            broadcast: "ESPN".into(),
+        });
+        let (_, px) = render_game(&g);
+
+        // The record is wider than the 0 it replaces: the away row has
+        // secondary-colored ink starting at 61 - width("10-2").
+        let rx = 61 - text_width("10-2", false);
+        let away_secondary = c565(g.away.secondary);
+        assert!((1..=5).any(|y| (rx..=61).any(|x| px565(&px, x, y) == away_secondary)), "away record drawn");
+        // A bare pregame frame (no records) puts only the 4px-wide "0" there.
+        let plain = { let mut p = g.clone(); p.pregame = None; render_game(&p).1 };
+        assert!((1..=5).all(|y| (rx..rx + 6).all(|x| px565(&plain, x, y) != away_secondary || x >= 61 - 4)),
+            "without records the slot holds just the 0");
+
+        // Bottom strip: two grey text bands (time, then channel) with a gap row.
+        let row_lit = |buf: &[u8], y: i32| (0..64).any(|x| px565(buf, x, y) != 0 && y >= 14);
+        let bands = {
+            let mut n = 0; let mut prev = false;
+            for y in 14..32 {
+                let lit = row_lit(&px, y);
+                if lit && !prev { n += 1; }
+                prev = lit;
+            }
+            n
+        };
+        assert_eq!(bands, 2, "start time + broadcast bands");
+        let plain_bands = {
+            let mut n = 0; let mut prev = false;
+            for y in 14..32 {
+                let lit = row_lit(&plain, y);
+                if lit && !prev { n += 1; }
+                prev = lit;
+            }
+            n
+        };
+        assert_eq!(plain_bands, 1, "no broadcast -> single centered line");
     }
 
     /// Even strength (5v5, no flags) shows no badge — the centered status line

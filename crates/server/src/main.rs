@@ -1295,6 +1295,7 @@ fn preview() {
         champ: None,
         session: None,
         situation: None,
+        pregame: None,
     };
     let samples: Vec<(&str, Game)> = vec![
         // Tagged as a championship game so the app's big-game caption is
@@ -1325,6 +1326,16 @@ fn preview() {
             });
             game
         }),
+        ("mlb_pregame", {
+            let mut game = g("s4", "mlb", mk("HOU", "ASTROS", 0, "002D62", "EB6E1F"), mk("SEA", "MARINERS", 0, "0C2C56", "005C5C"), GameStatus::Pregame, "", "");
+            game.start_time = "2026-07-08T02:10Z".into();
+            game.pregame = Some(model::Pregame {
+                away_record: "48-25".into(),
+                home_record: "51-22".into(),
+                broadcast: "ESPN".into(),
+            });
+            game
+        }),
         ("nhl_powerplay", {
             let mut game = g("s3", "nhl", mk("DAL", "STARS", 1, "006341", "A2AAAD"), mk("STL", "BLUES", 2, "002F87", "FCB514"), GameStatus::Active, "2nd", "14:02");
             game.situation = Some(model::Situation::Hockey {
@@ -1350,6 +1361,7 @@ fn preview() {
             champ: None,
             session: None,
             situation: None,
+            pregame: None,
         }),
         ("f1", Game {
             id: "f".into(), sport_id: "f1".into(),
@@ -1365,6 +1377,7 @@ fn preview() {
             champ: None,
             session: None,
             situation: None,
+            pregame: None,
         }),
     ];
     for (name, game) in &samples {
@@ -1586,6 +1599,7 @@ mod tests {
             champ: champ_tier.map(|t| model::Champ { tier: t.into(), label: t.into() }),
             session: session.map(Into::into),
             situation: None,
+            pregame: None,
         };
         let cfg = |sport: &str, opt: &str| BoardConfig {
             sports: vec![SportConfig {
@@ -1654,6 +1668,7 @@ mod tests {
                 champ: None,
                 session: None,
                 situation: None,
+                pregame: None,
             })
             .collect();
         games.push(Game { id: "fav-game".into(), away: side("FAV"), ..games[0].clone() });
@@ -1709,6 +1724,7 @@ mod tests {
             champ: None,
             session: None,
             situation: None,
+            pregame: None,
         };
         *state.games.lock().unwrap() = vec![live.clone()];
 
@@ -1753,6 +1769,7 @@ mod tests {
             champ: None,
             session: None,
             situation: None,
+            pregame: None,
         };
         assert!(board_shows_at(&mk(10), now), "starts in 10 min -> on the board");
         assert!(board_shows_at(&mk(-5), now), "past scheduled start, not yet live -> keep showing");
@@ -1965,6 +1982,7 @@ mod tests {
             champ: None,
             session: None,
             situation: None,
+            pregame: None,
         }
     }
 
