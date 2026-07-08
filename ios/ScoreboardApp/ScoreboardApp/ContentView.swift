@@ -368,7 +368,12 @@ final class BoardViewModel: ObservableObject {
                 prefs.append(LeaguePref(sport: sport, teams: teams, bigGame: big))
             }
         }
-        return prefs.sorted { $0.sport.name < $1.sport.name }
+        // Same order as the Add League sheet: category first, then name.
+        return prefs.sorted {
+            let a = Self.categoryOrder.firstIndex(of: Self.leagueCategory($0.sport.id)) ?? .max
+            let b = Self.categoryOrder.firstIndex(of: Self.leagueCategory($1.sport.id)) ?? .max
+            return a != b ? a < b : $0.sport.name < $1.sport.name
+        }
     }
 
     /// Leagues without a card yet — offered by the "Add League" menu.
@@ -1289,7 +1294,7 @@ struct DashboardView: View {
             }
             ForEach(pref.teams, id: \.id) { team in
                 HStack(spacing: 12) {
-                    TeamColorSwatch(team: team)
+                    TeamBadge(team: team, sportId: pref.sport.id)
                     Text(team.name)
                 }
             }
@@ -1326,6 +1331,9 @@ struct DashboardView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                // The Menu paints its label with the accent color; retint so the
+                // row reads like the team rows above (chevron still hints at it).
+                .tint(.primary)
                 .swipeActions(edge: .trailing) {
                     Button(role: .destructive) {
                         model.clearBigGames(pref.sport.id)
@@ -1754,6 +1762,56 @@ extension Color {
 /// A two-tone chip standing in for a team's brand colors (primary fill, secondary
 /// ring). Falls back to a neutral dot when the catalog has no colors for this team
 /// (golf/F1/mock entries).
+/// FIFA trigram → emoji flag for World Cup national teams. Returns nil for
+/// codes we don't know so callers can fall back to the color swatch.
+private func countryFlag(_ fifa: String) -> String? {
+    // England/Scotland/Wales use Unicode tag sequences, not country codes.
+    let tagFlags = ["ENG": "🏴󠁧󠁢󠁥󠁮󠁧󠁿", "SCO": "🏴󠁧󠁢󠁳󠁣󠁴󠁿", "WAL": "🏴󠁧󠁢󠁷󠁬󠁳󠁿"]
+    if let flag = tagFlags[fifa] { return flag }
+    let iso2: [String: String] = [
+        "ALG": "DZ", "ARG": "AR", "AUS": "AU", "AUT": "AT", "BEL": "BE",
+        "BIH": "BA", "BOL": "BO", "BRA": "BR", "CAN": "CA", "CHI": "CL",
+        "CIV": "CI", "CMR": "CM", "COD": "CD", "COL": "CO", "CPV": "CV",
+        "CRC": "CR", "CRO": "HR", "CUW": "CW", "CZE": "CZ", "DEN": "DK",
+        "ECU": "EC", "EGY": "EG", "ESP": "ES", "FIN": "FI", "FRA": "FR",
+        "GER": "DE", "GHA": "GH", "GRE": "GR", "GUA": "GT", "HAI": "HT",
+        "HON": "HN", "HUN": "HU", "IRL": "IE", "IRN": "IR", "IRQ": "IQ",
+        "ISL": "IS", "ITA": "IT", "JAM": "JM", "JOR": "JO", "JPN": "JP",
+        "KOR": "KR", "KSA": "SA", "MAR": "MA", "MEX": "MX", "MLI": "ML",
+        "NED": "NL", "NGA": "NG", "NOR": "NO", "NZL": "NZ", "PAN": "PA",
+        "PAR": "PY", "PER": "PE", "POL": "PL", "POR": "PT", "QAT": "QA",
+        "ROU": "RO", "RSA": "ZA", "SEN": "SN", "SRB": "RS", "SUI": "CH",
+        "SVK": "SK", "SVN": "SI", "SWE": "SE", "TRI": "TT", "TUN": "TN",
+        "TUR": "TR", "UKR": "UA", "URU": "UY", "USA": "US", "UZB": "UZ",
+        "VEN": "VE",
+    ]
+    guard let cc = iso2[fifa] else { return nil }
+    var flag = ""
+    for u in cc.unicodeScalars {
+        guard let s = Unicode.Scalar(0x1F1E6 + u.value - 65) else { return nil }
+        flag.unicodeScalars.append(s)
+    }
+    return flag
+}
+
+/// Team identity mark: country flag for national teams (World Cup), team
+/// color swatch everywhere else.
+struct TeamBadge: View {
+    let team: UiTeam
+    let sportId: String
+
+    var body: some View {
+        if sportId == "wc", let flag = countryFlag(team.abbrev) {
+            Text(flag)
+                .font(.system(size: 22))
+                .frame(width: 24, height: 24)
+                .accessibilityHidden(true)
+        } else {
+            TeamColorSwatch(team: team)
+        }
+    }
+}
+
 struct TeamColorSwatch: View {
     let team: UiTeam
     private var primary: Color? { team.color.flatMap(Color.init(hexString:)) }
