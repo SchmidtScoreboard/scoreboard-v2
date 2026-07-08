@@ -128,7 +128,7 @@ pub struct Manifest {
     pub rotation: Vec<RotationEntry>,
     pub display_on: bool,
     pub off_state: OffState,
-    pub brightness: u8, // 0..=100, applied device-side
+    pub brightness: u8, // 10..=100, applied device-side (one value: knob and app share it)
 }
 
 // ---- per-board config ----
@@ -247,6 +247,9 @@ pub enum ClientMsg {
     Pair { code: String },
     // device reports a single knob press — the server decides sleep/wake/notice
     ButtonPress,
+    // device reports a knob turn — the server adopts this as the board's one
+    // brightness (the same value SetBrightness writes and the manifest echoes)
+    DeviceBrightness { level: u8 },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

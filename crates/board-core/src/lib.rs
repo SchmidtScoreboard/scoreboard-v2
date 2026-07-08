@@ -134,12 +134,6 @@ impl Board {
         self.local_brightness
     }
 
-    /// Server/app-controlled brightness from the latest manifest (what `SetBrightness`
-    /// changes) — distinct from the local encoder knob. 100 until a manifest arrives.
-    pub fn server_brightness(&self) -> u8 {
-        self.manifest.as_ref().map_or(100, |m| m.brightness)
-    }
-
     /// Display power from the latest manifest (what `SetPower` toggles).
     pub fn power(&self) -> bool {
         self.manifest.as_ref().map_or(true, |m| m.display_on)
@@ -187,9 +181,16 @@ impl Board {
     }
 
     /// Encoder rotation -> brightness (mirrors the real device's encoder).
+    /// While online the new level is reported to the server, which adopts it as
+    /// the board's one brightness and echoes it back in the next manifest — the
+    /// knob and the app's slider move the same value. Offline it stays a purely
+    /// local dim so the knob is never a dead end.
     pub fn encoder(&mut self, delta: i32) {
         self.local_brightness = (self.local_brightness as i32 + delta * 10).clamp(10, 100) as u8;
         self.brightness_changed_at = Some(self.clock);
+        if self.online && matches!(self.mode, Mode::Running) {
+            self.outbox.push(ClientMsg::DeviceBrightness { level: self.local_brightness });
+        }
     }
 
     // ---- server content (Running mode) ----
@@ -203,6 +204,23 @@ impl Board {
         if self.mode == Mode::Booting && !m.rotation.is_empty() {
             self.mode = Mode::Running;
         }
+        // The server owns brightness; adopt its value unless the knob was just
+        // turned (the transient bar is still up) — a manifest racing a turn in
+        // flight would rubber-band the knob.
+        if self.brightness_changed_at.is_none() {
+            self.local_brightness = m.brightness.clamp(10, 100);
+        }
+        // A same-length rotation keeps the current slot and dwell timer —
+        // content-addressed ids change on every score/clock tick, so resetting
+        // here would restart at game 1 on every server poll and starve the
+        // tail. Length is a heuristic: an equal-length lineup SWAP also keeps
+        // position (the swapped-in game gets a partial first dwell) — accepted,
+        // since frames carry no game identity to tell the two apart. A
+        // different length is a genuinely new rotation: start from the top.
+        let same_shape = self
+            .manifest
+            .as_ref()
+            .is_some_and(|old| !m.rotation.is_empty() && old.rotation.len() == m.rotation.len());
         self.manifest = Some(m);
         self.idx = 0;
         self.last_advance = self.clock;
@@ -389,8 +407,9 @@ impl Board {
                 }
             }
         };
-        // The encoder brightness dims every live screen (boot/setup/sync/running);
-        // the server "manifest" brightness is already folded into screen_running.
+        // Brightness is applied exactly once, here — `local_brightness` tracks the
+        // server's value while online (see `on_manifest`) and doubles as the local
+        // fallback offline, so it dims every screen (boot/setup/sync/running).
         scale_buf(&mut buf, self.local_brightness);
         // Transient indicator for ~2s after a knob turn, drawn at full level so it
         // stays legible even when the screen itself is dimmed.
@@ -414,15 +433,14 @@ impl Board {
         let Some(px) = px else {
             return buf;
         };
-        // Server/manifest brightness only; the encoder brightness is applied to the
-        // whole framebuffer in `framebuffer()` (so it also dims setup/boot/sync).
-        let bright = m.brightness.min(100) as u32;
-        let scale = |v: u8| ((v as u32 * bright) / 100) & 0xFF;
+        // No dimming here — brightness is applied once to the whole framebuffer
+        // in `framebuffer()`. Scaling the frame by the manifest value here too
+        // would square the dim (50% knob × 50% manifest = 25%).
         for i in 0..FRAME_PIXELS {
             if 2 * i + 1 < px.len() {
                 let c = u16::from_le_bytes([px[2 * i], px[2 * i + 1]]);
                 let (r, g, b) = rgb565_to_888(c);
-                buf[i] = (scale(r) << 16) | (scale(g) << 8) | scale(b);
+                buf[i] = ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
             }
         }
         buf
@@ -656,6 +674,52 @@ mod tests {
             "press should be queued for the server"
         );
         assert!(b.take_outgoing().is_empty(), "outbox drains once");
+    }
+
+    /// There is ONE brightness. Online knob turns are reported to the server
+    /// (which owns the value); offline turns stay local and silent.
+    #[test]
+    fn knob_reports_brightness_when_online() {
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.encoder(-2); // 100 -> 80
+        assert_eq!(b.brightness(), 80);
+        let out = b.take_outgoing();
+        assert!(
+            matches!(out.as_slice(), [ClientMsg::DeviceBrightness { level: 80 }]),
+            "turn should be queued for the server, got {out:?}"
+        );
+
+        b.set_online(false);
+        b.encoder(1);
+        assert_eq!(b.brightness(), 90, "offline turns still dim locally");
+        assert!(b.take_outgoing().is_empty(), "offline turns are not queued");
+    }
+
+    /// The manifest's brightness is adopted as the local level — except while the
+    /// knob's transient bar is up, so an echo in flight can't rubber-band a turn.
+    #[test]
+    fn manifest_brightness_adopted_unless_knob_active() {
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        let m = |bright: u8| Manifest {
+            rotation: Vec::new(),
+            display_on: true,
+            off_state: Default::default(),
+            brightness: bright,
+        };
+        b.on_manifest(m(40));
+        assert_eq!(b.brightness(), 40, "server value adopted when idle");
+
+        b.tick(1000);
+        b.encoder(1); // 40 -> 50, bar up
+        b.on_manifest(m(40)); // stale echo racing the turn
+        assert_eq!(b.brightness(), 50, "mid-turn manifests must not rubber-band");
+
+        b.tick(10_000); // bar expired
+        b.on_manifest(m(70));
+        assert_eq!(b.brightness(), 70, "adoption resumes once the knob settles");
     }
 
     #[test]

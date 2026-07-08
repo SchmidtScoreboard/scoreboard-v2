@@ -126,10 +126,10 @@ impl eframe::App for SimApp {
         });
 
         // tick + grab the framebuffer + status (incl. server/app-controlled values)
-        let (fb, mode, knob, app_bright, power) = {
+        let (fb, mode, brightness, power) = {
             let mut b = self.board.lock().unwrap();
             b.tick(now_ms);
-            (b.framebuffer(), b.mode(), b.brightness(), b.server_brightness(), b.power())
+            (b.framebuffer(), b.mode(), b.brightness(), b.power())
         };
         let img = fb_to_image(&fb);
         let tex = self
@@ -169,7 +169,7 @@ impl eframe::App for SimApp {
             let size = egui::vec2(FRAME_WIDTH as f32, FRAME_HEIGHT as f32) * 10.0;
             ui.image(egui::load::SizedTexture::new(tex_id, size));
             ui.label(format!(
-                "mode: {mode:?} · power: {} · brightness: {app_bright} · knob: {knob}",
+                "mode: {mode:?} · power: {} · brightness: {brightness}",
                 if power { "on" } else { "off" }
             ));
         });

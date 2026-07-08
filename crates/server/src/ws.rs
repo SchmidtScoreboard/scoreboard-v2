@@ -114,6 +114,9 @@ async fn device_loop(sender: WsSender, mut receiver: WsReceiver, state: AppState
                 Ok(ClientMsg::ButtonPress) => {
                     crate::handle_button(&state, &board_id);
                 }
+                Ok(ClientMsg::DeviceBrightness { level }) => {
+                    crate::handle_device_brightness(&state, &board_id, level);
+                }
                 _ => {}
             }
         }
@@ -263,7 +266,9 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
         let mut configs = state.configs.lock().unwrap();
         let cfg = configs.entry(board_id.to_string()).or_default();
         match cmd {
-            Command::SetBrightness { level } => cfg.brightness = level,
+            // Same range as the physical knob (10..=100 in steps of 10) — one
+            // brightness, one scale, whichever control set it last.
+            Command::SetBrightness { level } => cfg.brightness = level.clamp(10, 100),
             Command::SetPower { on } => {
                 cfg.power = on;
                 // Turning on from the app cancels any pending button-sleep timer.

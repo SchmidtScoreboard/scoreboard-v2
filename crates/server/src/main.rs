@@ -1344,6 +1344,19 @@ mod tests {
         assert!(!state.notices.lock().unwrap().contains_key("b1"), "games clear the notice");
     }
 
+    /// A knob turn writes the SAME brightness the app's slider does — one value,
+    /// persisted and echoed in the manifest, clamped to the knob's 10..=100 range.
+    #[test]
+    fn device_knob_sets_the_one_brightness() {
+        let state = AppState::new_ephemeral();
+        handle_device_brightness(&state, "b1", 40);
+        assert_eq!(state.config_for("b1").brightness, 40);
+        assert_eq!(manifest_for_board(&state, "b1").brightness, 40, "manifest echoes it");
+
+        handle_device_brightness(&state, "b1", 0); // below the knob floor
+        assert_eq!(state.config_for("b1").brightness, 10, "clamped to 10..=100");
+    }
+
     /// Button while powered on but idle (no live games) -> the "no games" notice,
     /// without turning the board off.
     #[test]

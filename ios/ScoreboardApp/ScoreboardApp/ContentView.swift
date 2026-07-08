@@ -259,13 +259,24 @@ final class BoardViewModel: ObservableObject {
         client?.setPower(boardId: id, on: on)
     }
 
+    /// Round to the knob's scale (steps of 10, floor 10) so the slider and the
+    /// physical dial move the same value on the same detents.
+    static func snapBrightness(_ v: Double) -> Double {
+        min(100, max(10, (v / 10).rounded() * 10))
+    }
+
+    /// Live UI update while the slider is being dragged — no wire traffic.
+    func previewBrightness(_ v: Double) {
+        guard let id = selectedBoardId else { return }
+        mutate(id) { $0.brightness = Self.snapBrightness(v) }
+    }
+
+    /// Commit a brightness (one message per gesture, sent on release).
     func setBrightness(_ v: Double) {
         guard let id = selectedBoardId else { return }
-        let level = UInt8(max(0, min(100, v)))
-        // Only hit the wire when the integer level actually changes (drag spams values).
-        let changed = UInt8(current.brightness.rounded()) != level
+        let level = UInt8(Self.snapBrightness(v))
         mutate(id) { $0.brightness = Double(level) }
-        if changed { client?.setBrightness(boardId: id, level: level) }
+        client?.setBrightness(boardId: id, level: level)
     }
 
     // ---- game focus / rotation (optimistic; server confirms via on_config) ----
@@ -1228,7 +1239,11 @@ struct DashboardView: View {
                 .accessibilityLabel("Power")
                 .accessibilityValue(model.power ? "On" : "Off")
 
-                BrightnessControl(value: model.brightness) { model.setBrightness($0) }
+                BrightnessControl(
+                    value: model.brightness,
+                    onPreview: { model.previewBrightness($0) },
+                    onCommit: { model.setBrightness($0) }
+                )
             }
         } header: {
             Text("Controls")
@@ -1684,9 +1699,16 @@ struct ConnectingSplash: View {
 }
 
 /// Custom brightness slider: a draggable capsule track with a sun icon + percentage.
+/// Moves in the same steps of 10 as the physical knob (10–100). Dragging updates
+/// the UI locally; the server is told ONCE, on release — not per drag sample.
 struct BrightnessControl: View {
-    let value: Double // 0...100
-    let onChange: (Double) -> Void
+    let value: Double // 10...100, steps of 10
+    let onPreview: (Double) -> Void
+    let onCommit: (Double) -> Void
+
+    private func level(at x: CGFloat, width: CGFloat) -> Double {
+        BoardViewModel.snapBrightness(x / width * 100)
+    }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -1696,14 +1718,26 @@ struct BrightnessControl: View {
                 ZStack(alignment: .leading) {
                     Capsule().fill(Color(.systemGray5))
                     Capsule().fill(.tint).frame(width: max(10, w * value / 100))
+                    // Tick dots at each detent (10…90; the track's end is 100) so
+                    // the stepped stops are visible before touching the slider.
+                    Canvas { ctx, size in
+                        let fillW = size.width * value / 100
+                        for i in 1...9 {
+                            let x = size.width * CGFloat(i) / 10
+                            let r: CGFloat = 1.5
+                            let dot = CGRect(x: x - r, y: size.height / 2 - r, width: 2 * r, height: 2 * r)
+                            let color: Color = x <= fillW ? .white.opacity(0.55) : Color(.systemGray2)
+                            ctx.fill(Path(ellipseIn: dot), with: .color(color))
+                        }
+                    }
                 }
                 .frame(height: 12)
                 .frame(maxHeight: .infinity)
                 .contentShape(Rectangle())
                 .gesture(
-                    DragGesture(minimumDistance: 0).onChanged { g in
-                        onChange(min(100, max(0, g.location.x / w * 100)))
-                    }
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { g in onPreview(level(at: g.location.x, width: w)) }
+                        .onEnded { g in onCommit(level(at: g.location.x, width: w)) }
                 )
             }
             .frame(height: 30)
@@ -1716,7 +1750,7 @@ struct BrightnessControl: View {
         .accessibilityLabel("Brightness")
         .accessibilityValue("\(Int(value)) percent")
         .accessibilityAdjustableAction { dir in
-            onChange(min(100, max(0, value + (dir == .increment ? 5 : -5))))
+            onCommit(value + (dir == .increment ? 10 : -10))
         }
     }
 }
