@@ -656,6 +656,23 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             situation: None,
             pregame: None,
         },
+        // Overtime: 3-on-3 shows the skater-count badge next to the "OT"
+        // ordinal (regular 5v5 draws no badge), cycling through a power play.
+        Game {
+            id: "demo-nhl-ot".into(), sport_id: "nhl".into(),
+            away: team("DET", "RED WINGS", 2, "CE1126", "FFFFFF"),
+            home: team("CHI", "BLACKHAWKS", 2, "CF0A2C", "FFD100"),
+            status: GameStatus::Active, ordinal: "OT".into(), clock: clock.clone(), start_time: String::new(),
+            leaderboard: None,
+            champ: None,
+            session: None,
+            situation: Some(match (n / 10) % 3 {
+                0 => Situation::Hockey { away_powerplay: false, home_powerplay: false, away_players: 3, home_players: 3 },
+                1 => Situation::Hockey { away_powerplay: true, home_powerplay: false, away_players: 4, home_players: 3 },
+                _ => Situation::Hockey { away_powerplay: false, home_powerplay: true, away_players: 3, home_players: 4 },
+            }),
+            pregame: None,
+        },
         Game {
             id: "demo-nba".into(), sport_id: "nba".into(),
             away: team("BOS", "CELTICS", (80 + n % 30) as u32, "007A33", "FFFFFF"),
@@ -716,7 +733,13 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             leaderboard: None,
             champ: None,
             session: None,
-            situation: None,
+            // Static max-drama frame next to demo-mlb's animated one: bases
+            // loaded, full count, two out (every diamond and square filled).
+            situation: Some(Situation::Baseball {
+                balls: 3, strikes: 2, outs: 2,
+                on_first: true, on_second: true, on_third: true,
+                is_inning_top: false,
+            }),
             pregame: None,
         },
         Game {
@@ -750,6 +773,27 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
                     format!("BUF {}", 20 + n % 30)
                 },
                 home_possession: Some((n / 8) % 2 == 1),
+            }),
+            pregame: None,
+        },
+        Game {
+            id: "demo-cfb".into(), sport_id: "cfb".into(),
+            away: team("OSU", "BUCKEYES", (n / 7 % 28) as u32, "BB0000", "666666"),
+            home: team("MICH", "WOLVERINES", (n / 6 % 31) as u32, "00274C", "FFCB05"),
+            status: GameStatus::Active, ordinal: period(1), clock: clock.clone(), start_time: String::new(),
+            leaderboard: None,
+            champ: None,
+            session: None,
+            situation: Some(Situation::Football {
+                down_string: match (n / 2) % 4 {
+                    0 => "1st + 10", 1 => "2nd + 6", 2 => "3rd + 2", _ => "4th + 8",
+                }.into(),
+                ball_position: if (n / 5) % 2 == 0 {
+                    format!("OSU {}", 15 + n % 35)
+                } else {
+                    format!("MICH {}", 15 + n % 35)
+                },
+                home_possession: Some((n / 5) % 2 == 1),
             }),
             pregame: None,
         },
@@ -859,7 +903,13 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             champ: None,
             session: None,
             situation: None,
-            pregame: None,
+            // Records with NO national broadcast — exercises the records-only
+            // variant (single centered start-time line, records in the rows).
+            pregame: Some(Pregame {
+                away_record: "39-19".into(),
+                home_record: "35-23".into(),
+                broadcast: String::new(),
+            }),
         },
     ]
 }
@@ -1677,6 +1727,30 @@ mod champ_tests {
         assert_eq!(parse_event("nhl", ev).unwrap().ordinal, "3rd");
         let ev: Event = serde_json::from_str(&json(4, "STATUS_IN_PROGRESS")).unwrap();
         assert_eq!(parse_event("nba", ev).unwrap().ordinal, "4th");
+    }
+
+    /// The demo slate must exercise every board feature: all three situational
+    /// layouts (football on both leagues), the OT badge case, and both pregame
+    /// variants — so a demo run shows everything without waiting on real games.
+    #[test]
+    fn demo_covers_the_feature_matrix() {
+        let games = demo_games(0, 0);
+        let has = |f: &dyn Fn(&Game) -> bool| games.iter().any(f);
+        assert!(has(&|g| g.sport_id == "nfl" && matches!(g.situation, Some(Situation::Football { .. }))), "nfl situation");
+        assert!(has(&|g| g.sport_id == "cfb" && matches!(g.situation, Some(Situation::Football { .. }))), "cfb situation");
+        assert!(has(&|g| g.sport_id == "mlb" && matches!(g.situation, Some(Situation::Baseball { .. }))), "mlb situation");
+        assert!(has(&|g| g.sport_id == "nhl" && matches!(g.situation, Some(Situation::Hockey { .. }))), "nhl situation");
+        assert!(has(&|g| matches!(&g.situation, Some(Situation::Baseball { on_first: true, on_second: true, on_third: true, .. }))), "bases loaded");
+        assert!(
+            has(&|g| g.ordinal == "OT"
+                && matches!(g.situation, Some(Situation::Hockey { away_players: 3, home_players: 3, .. }))),
+            "3-on-3 overtime badge"
+        );
+        assert!(has(&|g| g.pregame.as_ref().is_some_and(|p| !p.broadcast.is_empty())), "pregame with TV");
+        assert!(
+            has(&|g| g.pregame.as_ref().is_some_and(|p| p.broadcast.is_empty() && !p.away_record.is_empty())),
+            "pregame records-only"
+        );
     }
 
     /// Scheduled games carry each side's overall record and the NATIONAL
