@@ -318,6 +318,7 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
             }
             Command::SetOffState { off_state } => cfg.off_state = off_state,
             Command::SetSleepHours { hours } => cfg.sleep_hours = hours.clamp(1, 72),
+            Command::SetDwell { secs } => cfg.dwell_secs = secs.clamp(3, 60),
             // Deliberately no catch-all: a new Command variant should be a compile
             // error here, not a silently ignored no-op.
         }

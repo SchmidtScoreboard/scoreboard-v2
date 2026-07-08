@@ -91,6 +91,11 @@ pub struct GameSummary {
     /// is pushed as a binary WS message, so cards update without HTTP polling.
     #[serde(default)]
     pub frame_id: FrameId,
+    /// True when this game QUALIFIES for the board but lost its rotation slot to
+    /// the cap — the app shows it grayed with an offer to add it manually
+    /// (manual adds take top priority).
+    #[serde(default)]
+    pub bumped: bool,
     /// Championship tier label when this is a postseason/championship game
     /// ("Stanley Cup Final", "Playoffs"); None for regular-season games.
     /// Drives the app's big-game caption on game cards.
@@ -159,6 +164,9 @@ pub struct BoardConfig {
     /// How long a button-press sleep lasts before the board wakes itself.
     #[serde(default = "default_sleep_hours")]
     pub sleep_hours: u32,
+    /// Seconds each game holds the panel before the rotation advances.
+    #[serde(default = "default_dwell_secs")]
+    pub dwell_secs: u32,
     /// If sleeping via the button: unix seconds when the server turns power back on.
     #[serde(default)]
     pub wake_at: Option<u64>,
@@ -166,6 +174,10 @@ pub struct BoardConfig {
 
 fn default_sleep_hours() -> u32 {
     24
+}
+
+fn default_dwell_secs() -> u32 {
+    10
 }
 
 impl Default for BoardConfig {
@@ -180,6 +192,7 @@ impl Default for BoardConfig {
             name: None,
             off_state: OffState::default(),
             sleep_hours: default_sleep_hours(),
+            dwell_secs: default_dwell_secs(),
             wake_at: None,
         }
     }

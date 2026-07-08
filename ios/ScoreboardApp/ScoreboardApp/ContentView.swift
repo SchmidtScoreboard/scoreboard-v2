@@ -95,6 +95,7 @@ struct BoardInfo {
     var focusedGameId: String?
     var offState: UiOffState = .clock
     var sleepHours: UInt32 = 24
+    var dwellSecs: UInt32 = 10
     /// Unix seconds when a button-sleep auto-wakes (nil when not sleeping).
     var wakeAt: UInt64?
 }
@@ -321,7 +322,7 @@ final class BoardViewModel: ObservableObject {
         client?.removeGame(boardId: id, gameId: g.id)
     }
     func isShowing(_ id: String) -> Bool {
-        current.nowShowing.contains { $0.id == id } || current.extraGameIds.contains(id)
+        current.nowShowing.contains { $0.id == id && !$0.bumped } || current.extraGameIds.contains(id)
     }
 
     /// Resolve a team's display name from the catalog (team id = "{sport}-{abbrev}"),
@@ -558,6 +559,7 @@ final class BoardViewModel: ObservableObject {
             $0.championship = champ
             $0.offState = c.offState
             $0.sleepHours = c.sleepHours
+            $0.dwellSecs = c.dwellSecs
             $0.wakeAt = c.wakeAt
         }
     }
@@ -575,11 +577,22 @@ final class BoardViewModel: ObservableObject {
         client?.setSleepHours(boardId: id, hours: h)
     }
 
+    func setDwell(_ secs: UInt32) {
+        guard let id = selectedBoardId else { return }
+        mutate(id) { $0.dwellSecs = secs }
+        client?.setDwell(boardId: id, secs: secs)
+    }
+
     /// Now-showing for display: the pinned game (if any) sorted to the front.
     var displayedNowShowing: [UiGame] {
         let games = current.nowShowing
-        guard let f = current.focusedGameId else { return games }
-        return games.sorted { ($0.id == f ? 0 : 1) < ($1.id == f ? 0 : 1) }
+        let f = current.focusedGameId
+        // Pinned first, rotation next, cap-bumped games trail at the end.
+        func rank(_ g: UiGame) -> Int {
+            if g.id == f { return 0 }
+            return g.bumped ? 2 : 1
+        }
+        return games.sorted { rank($0) < rank($1) }
     }
 
     /// Display name for a league id ("nhl" -> "NHL"), from the catalog when loaded.
@@ -960,6 +973,22 @@ struct DashboardView: View {
                 .labelsHidden()
             }
 
+            HStack(spacing: 6) {
+                Text("Time per game")
+                infoButton(.dwell)
+                Spacer()
+                Picker("Time per game", selection: Binding(
+                    get: { model.current.dwellSecs },
+                    set: { model.setDwell($0) }
+                )) {
+                    ForEach([UInt32(5), 7, 10, 15, 20, 30], id: \.self) { s in
+                        Text("\(s) seconds").tag(s)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+            }
+
             Button("Remove this scoreboard", role: .destructive) {
                 showRemoveConfirm = true
             }
@@ -1047,6 +1076,11 @@ struct DashboardView: View {
     /// corner (see GameCard) rather than an extra caption line.
     private func sourceCaption(_ game: UiGame) -> some View {
         let (icon, text, color): (String, String, Color) = {
+            // Cap-bumped: qualifies but lost its rotation slot — the one thing
+            // the user must see to understand why it's not on the panel.
+            if game.bumped {
+                return ("exclamationmark.circle.fill", "Bumped — rotation full", .orange)
+            }
             switch model.gameSource(game) {
             case .favorite: return ("star.fill", "Favorite", .yellow)
             case .added: return ("plus.circle.fill", "Added manually", .cyan)
@@ -1136,7 +1170,12 @@ struct DashboardView: View {
                                 cardButton(pinned ? "Unpin" : "Pin", pinned ? "pin.slash" : "pin", tint: pinned ? .orange : .primary) {
                                     withAnimation { pinned ? model.clearFocus() : model.focusGame(game.id) }
                                 }
-                                if !dimmed {
+                                if game.bumped {
+                                    // Promote: a manual add outranks whatever bumped it.
+                                    cardButton("Add", "plus.circle", tint: .green) {
+                                        withAnimation { model.addGame(game.id) }
+                                    }
+                                } else if !dimmed {
                                     cardButton("Remove", "minus.circle", tint: .red) {
                                         withAnimation { model.removeFromRotation(game) }
                                     }
@@ -1308,13 +1347,14 @@ struct DashboardView: View {
 
 /// Settings rows that have an explainer card behind an ⓘ button.
 enum SettingsInfoTopic: String, Identifiable {
-    case whenOff, sleep
+    case whenOff, sleep, dwell
     var id: String { rawValue }
 
     var icon: String {
         switch self {
         case .whenOff: "clock"
         case .sleep: "moon.zzz.fill"
+        case .dwell: "timer"
         }
     }
 
@@ -1322,6 +1362,7 @@ enum SettingsInfoTopic: String, Identifiable {
         switch self {
         case .whenOff: "When off"
         case .sleep: "Sleep duration"
+        case .dwell: "Time per game"
         }
     }
 
@@ -1343,6 +1384,14 @@ enum SettingsInfoTopic: String, Identifiable {
 
             While it sleeps, the panel shows your "When off" choice (a dim \
             clock or nothing).
+            """
+        case .dwell:
+            """
+            How long each game stays on the panel before the rotation moves to \
+            the next one.
+
+            Shorter times cycle through more games per minute; longer times \
+            make each score easier to catch at a glance.
             """
         }
     }
@@ -1494,6 +1543,10 @@ struct AllGamesCaption: View {
 
     var body: some View {
         let (icon, text, color): (String, String, Color) = {
+            // Cap-bumped: qualifies but lost its rotation slot.
+            if game.bumped {
+                return ("exclamationmark.circle.fill", "Bumped — rotation full", .orange)
+            }
             // A scheduled game you haven't added: the start time beats a generic
             // "not on scoreboard" (the Add button already implies that).
             if game.status == "pregame", !model.isShowing(game.id) {

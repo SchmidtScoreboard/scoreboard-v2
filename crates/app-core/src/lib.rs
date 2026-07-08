@@ -66,6 +66,8 @@ pub struct UiBoardConfig {
     pub name: Option<String>,
     pub off_state: UiOffState,
     pub sleep_hours: u32,
+    /// Seconds each game holds the panel before the rotation advances.
+    pub dwell_secs: u32,
     /// Unix seconds when a button-sleep auto-wakes (None when not sleeping).
     pub wake_at: Option<u64>,
 }
@@ -82,6 +84,9 @@ pub struct UiGame {
     /// Content hash of this game's rendered frame; look it up among the frames pushed
     /// via `on_frame` to draw the card.
     pub frame_id: String,
+    /// True when the game qualifies for the board but lost its rotation slot to
+    /// the cap — show it grayed with an offer to add it manually.
+    pub bumped: bool,
     /// Championship tier label when this is a postseason/championship game
     /// ("Stanley Cup Final", "Playoffs"); nil for regular-season games.
     pub champ: Option<String>,
@@ -401,6 +406,11 @@ impl ScoreboardClient {
         let _ = self.tx.send(Out::Command(board_id, Command::SetSleepHours { hours }));
     }
 
+    /// Seconds each game holds the panel before the rotation advances.
+    pub fn set_dwell(&self, board_id: String, secs: u32) {
+        let _ = self.tx.send(Out::Command(board_id, Command::SetDwell { secs }));
+    }
+
     /// Ask the server for all live games (to browse + add to a board).
     pub fn request_games(&self) {
         let _ = self.tx.send(Out::GetGames);
@@ -584,6 +594,7 @@ fn to_ui_board_config(c: BoardConfig) -> UiBoardConfig {
             OffState::Clock => UiOffState::Clock,
         },
         sleep_hours: c.sleep_hours,
+        dwell_secs: c.dwell_secs,
         wake_at: c.wake_at,
     }
 }
@@ -601,6 +612,7 @@ fn to_ui_games(games: Vec<GameSummary>) -> Vec<UiGame> {
             status: g.status,
             detail: g.detail,
             frame_id: g.frame_id,
+            bumped: g.bumped,
             champ: g.champ,
         })
         .collect()

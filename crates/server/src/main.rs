@@ -412,6 +412,7 @@ pub(crate) fn to_summary(g: &Game) -> GameSummary {
             status: format!("{:?}", g.status).to_lowercase(),
             detail,
             frame_id: String::new(),
+            bumped: false,
             champ: g.champ.as_ref().map(|c| c.label.clone()),
         };
     }
@@ -432,6 +433,7 @@ pub(crate) fn to_summary(g: &Game) -> GameSummary {
         status: format!("{:?}", g.status).to_lowercase(),
         detail,
         frame_id: String::new(),
+        bumped: false,
         champ: g.champ.as_ref().map(|c| c.label.clone()),
     }
 }
@@ -592,6 +594,100 @@ fn league_option<'a>(cfg: &'a BoardConfig, sport_id: &str) -> Option<&'a str> {
         .filter(|o| *o != "none")
 }
 
+/// How strongly the league OPTION claims this game: Some(2) for a targeted match
+/// (championship tier, golf major, F1 session), Some(3) for the "all" blanket,
+/// None when the option doesn't cover it.
+fn game_option_priority(g: &Game, cfg: &BoardConfig) -> Option<u8> {
+    let opt = league_option(cfg, &g.sport_id)?;
+    // "all" is the universal blanket: every event/match in the league.
+    if opt == "all" {
+        return Some(3);
+    }
+    let covered = match g.sport_id.as_str() {
+        // F1 subscribes to session kinds, not championships.
+        "f1" => g.session.as_deref().is_some_and(|s| f1_option_covers(opt, s)),
+        // Everything else keys off the game's championship tier.
+        _ => g
+            .champ
+            .as_ref()
+            .is_some_and(|c| champ_option_covers(&g.sport_id, opt, &c.tier)),
+    };
+    covered.then_some(2)
+}
+
+/// Rotation slots are finite; when more games qualify than fit, the strongest
+/// claims win. 0 = manually added (an explicit "I want THIS game"), 1 = favorite
+/// team, 2 = targeted league option (big game / major / session), 3 = league
+/// blanket ("Every match"), 4 = unconfigured board showing the whole slate.
+fn game_priority(g: &Game, cfg: &BoardConfig, favs: &HashSet<String>, unconfigured: bool) -> Option<u8> {
+    if cfg.excluded_game_ids.contains(&g.id) {
+        return None;
+    }
+    if cfg.extra_game_ids.contains(&g.id) {
+        return Some(0);
+    }
+    if game_matches(g, favs) {
+        return Some(1);
+    }
+    if let Some(p) = game_option_priority(g, cfg) {
+        return Some(p);
+    }
+    if unconfigured {
+        return Some(4);
+    }
+    None
+}
+
+/// How many games fit in the board's rotation.
+const ROTATION_CAP: usize = 20;
+
+/// All games this board WANTS, split into (shown, bumped): priority-ordered, the
+/// first `ROTATION_CAP` get rotation slots; the rest are reported to the app as
+/// bumped so the user can promote them (manual adds outrank everything).
+/// Unconfigured boards sample the slate without reporting bumps — nothing there
+/// was chosen, so nothing was "lost".
+fn candidates_with_bumped(state: &AppState, cfg: &BoardConfig) -> (Vec<Game>, Vec<Game>) {
+    let games = state.games.lock().unwrap();
+    let favs: HashSet<String> = cfg
+        .sports
+        .iter()
+        .flat_map(|s| s.favorite_team_ids.iter().cloned())
+        .collect();
+    let has_champ_prefs = cfg
+        .sports
+        .iter()
+        .any(|s| s.championship_option_id.as_deref().is_some_and(|o| o != "none"));
+    let unconfigured = favs.is_empty() && cfg.extra_game_ids.is_empty() && !has_champ_prefs;
+
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut wanted: Vec<(u8, usize, Game)> = Vec::new();
+    for (i, g) in games.iter().enumerate().filter(|(_, g)| board_shows(state, g)) {
+        if !seen.insert(g.id.clone()) {
+            continue;
+        }
+        if let Some(p) = game_priority(g, cfg, &favs, unconfigured) {
+            wanted.push((p, i, g.clone()));
+        }
+    }
+    wanted.sort_by_key(|(p, i, _)| (*p, *i)); // priority, then feed order (stable)
+    let mut shown: Vec<Game> = Vec::new();
+    let mut bumped: Vec<Game> = Vec::new();
+    for (_, _, g) in wanted {
+        if shown.len() < ROTATION_CAP {
+            shown.push(g);
+        } else if !unconfigured {
+            bumped.push(g);
+        }
+    }
+    (shown, bumped)
+}
+
+/// Games this board's rotation shows (favorites + options + manual adds — or the
+/// whole live slate for an unconfigured board), IGNORING any pin.
+fn candidate_games(state: &AppState, cfg: &BoardConfig) -> Vec<Game> {
+    candidates_with_bumped(state, cfg).0
+}
+
 /// What the BOARD displays right now: the pinned game alone while a live focus is
 /// set, otherwise the full candidate rotation.
 fn chosen_games(state: &AppState, cfg: &BoardConfig) -> Vec<Game> {
@@ -605,43 +701,6 @@ fn chosen_games(state: &AppState, cfg: &BoardConfig) -> Vec<Game> {
     candidate_games(state, cfg)
 }
 
-/// Games this board WANTS (favorites + big games + manual adds — or the whole live
-/// slate for an unconfigured board), IGNORING any pin. The app's "now showing"
-/// list uses this so a pinned board still shows the rest of the rotation (grayed
-/// out client-side) instead of collapsing to a single card.
-fn candidate_games(state: &AppState, cfg: &BoardConfig) -> Vec<Game> {
-    let games = state.games.lock().unwrap();
-    let favs: HashSet<String> = cfg
-        .sports
-        .iter()
-        .flat_map(|s| s.favorite_team_ids.iter().cloned())
-        .collect();
-    let has_champ_prefs = cfg
-        .sports
-        .iter()
-        .any(|s| s.championship_option_id.as_deref().is_some_and(|o| o != "none"));
-    // Favorites' live games + big games matching the per-sport championship
-    // option + any manually-added games. An unconfigured board (no favorites,
-    // no big-games option, no extras) shows the whole live slate so it isn't
-    // blank.
-    let unconfigured = favs.is_empty() && cfg.extra_game_ids.is_empty() && !has_champ_prefs;
-    let mut out: Vec<Game> = Vec::new();
-    for g in games.iter().filter(|g| board_shows(state, g)) {
-        let wanted = (unconfigured
-            || game_matches(g, &favs)
-            || game_matches_champ(g, cfg)
-            || cfg.extra_game_ids.contains(&g.id))
-            && !cfg.excluded_game_ids.contains(&g.id);
-        if wanted && !out.iter().any(|x| x.id == g.id) {
-            out.push(g.clone());
-            if out.len() >= 8 {
-                break;
-            }
-        }
-    }
-    out
-}
-
 pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
     let cfg = state.config_for(board_id);
 
@@ -651,6 +710,7 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
         if !chosen.is_empty() {
             // Games override any lingering notice ("no games" message ends early).
             state.notices.lock().unwrap().remove(board_id);
+            let dwell_ms = cfg.dwell_secs.clamp(3, 60) * 1000;
             let mut rotation = Vec::new();
             let mut frames = state.frames.lock().unwrap();
             for g in &chosen {
@@ -897,9 +957,8 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
     // Deliberately IGNORES a pin: the app needs the whole rotation so it can gray
     // out the unpinned games (the pin itself travels in config.focused_game_id).
     let now_showing: Vec<GameSummary> = {
-        let chosen = candidate_games(state, &cfg);
-        let mut frames = state.frames.lock().unwrap();
-        chosen
+        let (shown, bumped) = candidates_with_bumped(state, &cfg);
+        let mut out: Vec<GameSummary> = shown
             .iter()
             .map(|g| {
                 let mut s = to_summary(g);
@@ -908,7 +967,15 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
                 s.frame_id = fid;
                 s
             })
-            .collect()
+            .collect();
+        // Bumped games ride along flagged, without pre-rendered frames (the app
+        // falls back to HTTP rendering for those cards).
+        out.extend(bumped.iter().map(|g| {
+            let mut s = to_summary(g);
+            s.bumped = true;
+            s
+        }));
+        out
     };
     let online = state.devices.lock().unwrap().contains_key(board_id);
     ServerMsg::BoardState {
