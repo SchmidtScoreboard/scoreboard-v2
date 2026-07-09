@@ -283,7 +283,7 @@ fn parse_golf(sport_id: &str, ev: LeaderEvent) -> Option<Game> {
     ranked.sort_by_key(|(p, _)| *p);
     // Keep enough of the field for the board's scrolling frame (it shows 4
     // at a time and glides through the rest).
-    let rows = ranked.into_iter().take(crate::render::SCROLL_MAX_ROWS).map(|(_, r)| r).collect();
+    let rows = ranked.into_iter().take(crate::render::LEADERBOARD_MAX_ROWS).map(|(_, r)| r).collect();
     let name = clean_golf_name(&ev.short_name);
     let champ = golf_major_label(sport_id, &ev.short_name)
         .map(|label| Champ { tier: "major".into(), label: label.into() });
@@ -347,7 +347,7 @@ fn parse_f1(ev: LeaderEvent) -> Vec<Game> {
                 })
                 .collect();
             drivers.sort_by_key(|(o, _)| *o);
-            let rows = drivers.into_iter().take(crate::render::SCROLL_MAX_ROWS).map(|(_, r)| r).collect();
+            let rows = drivers.into_iter().take(crate::render::LEADERBOARD_MAX_ROWS).map(|(_, r)| r).collect();
             let name = fit_words(&format!("{base}{suffix}"), 13);
             Some(Game {
                 id: format!("{}-{}", ev.id, session),
@@ -939,6 +939,16 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
                 f1_row(8, "SAI", "+24.7", 'M'),
                 f1_row(9, "GAS", "+31.0", 'I'),
                 f1_row(10, "ALB", "+38.5", 'W'),
+                f1_row(11, "HUL", "+42.0", 'H'),
+                f1_row(12, "OCO", "+44.6", 'M'),
+                f1_row(13, "STR", "+48.1", 'H'),
+                f1_row(14, "TSU", "+52.7", 'M'),
+                f1_row(15, "LAW", "+55.3", 'S'),
+                f1_row(16, "HAD", "+58.9", 'M'),
+                f1_row(17, "BEA", "+1:04", 'H'),
+                f1_row(18, "ANT", "+1:09", 'S'),
+                f1_row(19, "BOR", "+1:15", 'M'),
+                f1_row(20, "COL", "+1:22", 'W'),
             ] }),
             champ: None,
             session: Some("race".into()),

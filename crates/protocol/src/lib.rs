@@ -152,6 +152,10 @@ pub struct SportConfig {
     /// default dwell. Lets F1 scroll for 30s while baseball flashes by in 10.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dwell_secs: Option<u32>,
+    /// Leaderboard depth for golf/F1 (rows shown on the board): 4 = static
+    /// top-4 (no scrolling), up to 20 = the full field. None = default (10).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leaderboard_rows: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -242,6 +246,9 @@ pub enum Command {
     SetDwell { secs: u32 },
     /// Per-league dwell override; None reverts the league to the board default.
     SetLeagueDwell { sport_id: String, secs: Option<u32> },
+    /// Leaderboard depth for golf/F1 (4 = static top-4 .. 20 = full field);
+    /// None reverts to the default (10).
+    SetLeagueRows { sport_id: String, rows: Option<u32> },
     Rename { name: String },
 }
 

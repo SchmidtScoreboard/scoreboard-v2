@@ -48,6 +48,8 @@ pub struct UiSportConfig {
     pub championship_option_id: Option<String>,
     /// Per-league "time per event" override (seconds); None = board default.
     pub dwell_secs: Option<u32>,
+    /// Leaderboard depth for golf/F1 (4 = static top-4 .. 20 = full field).
+    pub leaderboard_rows: Option<u32>,
 }
 /// What the panel shows while off / idle.
 #[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq)]
@@ -419,6 +421,11 @@ impl ScoreboardClient {
         let _ = self.tx.send(Out::Command(board_id, Command::SetLeagueDwell { sport_id, secs }));
     }
 
+    /// Leaderboard depth for golf/F1; None reverts to the default (top 10).
+    pub fn set_league_rows(&self, board_id: String, sport_id: String, rows: Option<u32>) {
+        let _ = self.tx.send(Out::Command(board_id, Command::SetLeagueRows { sport_id, rows }));
+    }
+
     pub fn set_dwell(&self, board_id: String, secs: u32) {
         let _ = self.tx.send(Out::Command(board_id, Command::SetDwell { secs }));
     }
@@ -589,6 +596,7 @@ fn to_ui_configs(sports: Vec<PSportConfig>) -> Vec<UiSportConfig> {
             favorite_team_ids: s.favorite_team_ids,
             championship_option_id: s.championship_option_id,
             dwell_secs: s.dwell_secs,
+            leaderboard_rows: s.leaderboard_rows,
         })
         .collect()
 }

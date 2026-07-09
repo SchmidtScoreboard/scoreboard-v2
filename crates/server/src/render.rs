@@ -518,23 +518,27 @@ fn render_leaderboard(g: &Game) -> (FrameId, Vec<u8>) {
     render_leaderboard_rows(g, 4)
 }
 
-/// How many leaderboard rows the board's scrolling frame shows at most.
-/// (Row pitch is 6px, so 10 rows = a 68px frame — within the firmware's
-/// frame buffer.)
-pub const SCROLL_MAX_ROWS: usize = 10;
+/// Default and maximum leaderboard depth (rows) on the board. The max is
+/// pinned by the firmware's 16448-byte frame buffer: 20 rows = a 128px-tall
+/// frame = exactly 128*128 payload bytes.
+pub const LEADERBOARD_DEFAULT_ROWS: usize = 10;
+pub const LEADERBOARD_MAX_ROWS: usize = 20;
 
 /// The frame the PHYSICAL BOARD shows for a game. Same as `render_game`
-/// except deep leaderboard fields render TALL (up to SCROLL_MAX_ROWS on the
+/// except deep leaderboard fields render TALL (up to `rows_cap` rows on the
 /// same 6px pitch) for the board to scroll through; returns whether it
-/// scrolls. App cards and HTTP renders keep the static 4-row `render_game`.
-pub fn render_board_frame(g: &Game) -> (FrameId, Vec<u8>, bool) {
-    let deep = g.status != GameStatus::Pregame
+/// scrolls. A cap of 4 is the static panel layout — no scrolling. App cards
+/// and HTTP renders keep the static 4-row `render_game`.
+pub fn render_board_frame(g: &Game, rows_cap: usize) -> (FrameId, Vec<u8>, bool) {
+    let rows_cap = rows_cap.clamp(4, LEADERBOARD_MAX_ROWS);
+    let deep = rows_cap > 4
+        && g.status != GameStatus::Pregame
         && g.leaderboard.as_ref().is_some_and(|lb| lb.rows.len() > 4);
     if !deep {
         let (id, px) = render_game(g);
         return (id, px, false);
     }
-    let (id, px) = render_leaderboard_rows(g, SCROLL_MAX_ROWS);
+    let (id, px) = render_leaderboard_rows(g, rows_cap);
     (id, px, true)
 }
 
@@ -571,10 +575,11 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize) -> (FrameId, Vec<u8>) {
         let mut by = 12;
         for row in lb.rows.iter().take(max_rows.max(5)) {
             let ink = row.color.unwrap_or(WHITE);
-            // Tire chip flush right; the timing column moves in to make room.
+            // Tire compound: a 1px strip on the far right edge, full row pitch
+            // so consecutive rows read as one continuous color column.
             let value_right = if let Some(t) = row.tire {
-                tire_chip(&mut c, 57, by, t);
-                55
+                fill(&mut c, 63, by - 4, 1, 6, tire_color(t));
+                61
             } else {
                 63
             };
@@ -613,27 +618,11 @@ fn tire_color(compound: char) -> Rgb888 {
     }
 }
 
-/// A 7x5 compound-colored box with the tire letter centered in it, white or
-/// black — whichever reads against the compound color (black on the yellow
-/// medium and white hard, white on soft red / inter green / wet blue). The
-/// glyph gets a margin on each side so wide letters (M, H) stay legible.
-fn tire_chip(c: &mut Canvas, x: i32, by: i32, compound: char) {
-    let bg = tire_color(compound);
-    let ink = crate::model::ensure_contrast(bg, Rgb888::WHITE);
-    // Rounded 7x7 chip: a 7x5 core plus a 5px-wide 1px halo above and below.
-    // The glyph is exactly cap-height, so without the halo its top/bottom rows
-    // would sit flush on the box edge and melt into the black background —
-    // a dark M on the yellow medium chip read as stripes, not a letter.
-    fill(c, x, by - 4, 7, 5, bg);
-    fill(c, x + 1, by - 5, 5, 7, bg);
-    let letter = compound.to_ascii_uppercase().to_string();
-    let glyph_w = text_width(&letter, false) - 1; // advance includes 1px spacing
-    draw_text(c, &letter, x + (7 - glyph_w) / 2, by, false, ink);
-}
-
-/// An 8x4 checkered flag (2x2 checks) for the F1 title row corners.
+/// An 8x6 checkered flag (2x2 checks) for the F1 title row corners. Starts at
+/// row 1, preserving the layout's 1px top gap; the bottom row dips just below
+/// the title's baseline into empty space.
 fn checkered_flag(c: &mut Canvas, x0: i32) {
-    for cy in 0..2i32 {
+    for cy in 0..3i32 {
         for cx in 0..4i32 {
             if (cx + cy) % 2 == 0 {
                 fill(c, x0 + cx * 2, 1 + cy * 2, 2, 2, WHITE);
@@ -982,7 +971,7 @@ mod kern_tests {
         });
 
         g.leaderboard = rows(10);
-        let (_, px, scrolls) = render_board_frame(&g);
+        let (_, px, scrolls) = render_board_frame(&g, LEADERBOARD_DEFAULT_ROWS);
         assert!(scrolls);
         let h = px.len() / (64 * 2);
         assert_eq!(h, 12 + 9 * 6 + 2, "10 rows on the 6px pitch");
@@ -997,7 +986,7 @@ mod kern_tests {
         assert_eq!(px_static.len() / (64 * 2), 32, "app frame stays panel-sized");
 
         g.leaderboard = rows(4);
-        let (_, px, scrolls) = render_board_frame(&g);
+        let (_, px, scrolls) = render_board_frame(&g, LEADERBOARD_DEFAULT_ROWS);
         assert!(!scrolls, "a shallow field has nothing to scroll");
         assert_eq!(px.len() / (64 * 2), 32);
     }

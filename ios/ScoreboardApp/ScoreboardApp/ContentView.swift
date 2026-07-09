@@ -97,6 +97,7 @@ struct BoardInfo {
     var sleepHours: UInt32 = 24
     var dwellSecs: UInt32 = 10
     var leagueDwell: [String: UInt32] = [:]     // sportId -> per-league override
+    var leagueRows: [String: UInt32] = [:]      // sportId -> leaderboard depth (golf/F1)
     /// Unix seconds when a button-sleep auto-wakes (nil when not sleeping).
     var wakeAt: UInt64?
 }
@@ -392,7 +393,7 @@ final class BoardViewModel: ObservableObject {
             // A dwell override alone earns a card too — otherwise it would be
             // active but invisible (set via Add League without subscribing, or
             // left behind after the last favorite is removed).
-            if !teams.isEmpty || big != nil || st.leagueDwell[sport.id] != nil {
+            if !teams.isEmpty || big != nil || st.leagueDwell[sport.id] != nil || st.leagueRows[sport.id] != nil {
                 prefs.append(LeaguePref(sport: sport, teams: teams, bigGame: big))
             }
         }
@@ -596,10 +597,12 @@ final class BoardViewModel: ObservableObject {
         var fav: [String: [String]] = [:]
         var champ: [String: String] = [:]
         var dwell: [String: UInt32] = [:]
+        var rows: [String: UInt32] = [:]
         for s in c.sports {
             fav[s.sportId] = s.favoriteTeamIds
             if let o = s.championshipOptionId { champ[s.sportId] = o }
             if let d = s.dwellSecs { dwell[s.sportId] = d }
+            if let r = s.leaderboardRows { rows[s.sportId] = r }
         }
         mutate(boardId) {
             $0.brightness = Double(c.brightness)
@@ -614,6 +617,7 @@ final class BoardViewModel: ObservableObject {
             $0.sleepHours = c.sleepHours
             $0.dwellSecs = c.dwellSecs
             $0.leagueDwell = dwell
+            $0.leagueRows = rows
             $0.wakeAt = c.wakeAt
         }
     }
@@ -639,6 +643,16 @@ final class BoardViewModel: ObservableObject {
             if let secs { $0.leagueDwell[sportId] = secs } else { $0.leagueDwell.removeValue(forKey: sportId) }
         }
         client?.setLeagueDwell(boardId: id, sportId: sportId, secs: secs)
+    }
+
+    /// Leaderboard depth for golf/F1 (nil = default top 10).
+    func leagueRows(_ sportId: String) -> UInt32? { current.leagueRows[sportId] }
+    func setLeagueRows(_ sportId: String, _ rows: UInt32?) {
+        guard let id = selectedBoardId else { return }
+        mutate(id) {
+            if let rows { $0.leagueRows[sportId] = rows } else { $0.leagueRows.removeValue(forKey: sportId) }
+        }
+        client?.setLeagueRows(boardId: id, sportId: sportId, rows: rows)
     }
 
     func setDwell(_ secs: UInt32) {
@@ -1398,6 +1412,35 @@ struct DashboardView: View {
                 }
             }
 
+            // Leaderboard depth override (golf/F1) — shown only when set.
+            if let rows = model.leagueRows(pref.sport.id) {
+                Menu {
+                    Button("Top 10 (default)") { model.setLeagueRows(pref.sport.id, nil) }
+                    Button("Top 4 — no scrolling") { model.setLeagueRows(pref.sport.id, 4) }
+                    Button(pref.sport.id == "f1" ? "Full field" : "Top 20") { model.setLeagueRows(pref.sport.id, 20) }
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "list.number")
+                            .foregroundStyle(.cyan)
+                            .frame(width: 24)
+                        Text(rows == 4 ? "Top 4 — no scrolling" : rows == 20 ? (pref.sport.id == "f1" ? "Full field" : "Top 20") : "Top \(rows)")
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .tint(.primary)
+                .swipeActions(edge: .trailing) {
+                    Button(role: .destructive) {
+                        model.setLeagueRows(pref.sport.id, nil)
+                    } label: {
+                        Label("Use default", systemImage: "list.bullet")
+                    }
+                }
+            }
+
             // Per-league "time per event" override — shown only when set, so
             // cards stay clean for leagues riding the board default.
             if let secs = model.leagueDwellSecs(pref.sport.id) {
@@ -1978,6 +2021,11 @@ struct LeagueEditorView: View {
     @State private var loaded = false
     @State private var search = ""
 
+    /// Golf tours and F1 show ranked fields, not team games.
+    private var isLeaderboardLeague: Bool {
+        ["pga", "lpga", "f1"].contains(sport.id)
+    }
+
     /// What the option picker configures varies by league kind.
     private var optionsTitle: String {
         switch sport.id {
@@ -2022,6 +2070,20 @@ struct LeagueEditorView: View {
                 }
             } footer: {
                 Text("How long this league's events hold the panel — leaderboards fit a full scroll pass into it.")
+            }
+            if isLeaderboardLeague {
+                Section {
+                    Picker("Leaderboard depth", selection: Binding(
+                        get: { model.leagueRows(sport.id) ?? 10 },
+                        set: { model.setLeagueRows(sport.id, $0 == 10 ? nil : $0) }
+                    )) {
+                        Text("Top 4 — no scrolling").tag(UInt32(4))
+                        Text("Top 10").tag(UInt32(10))
+                        Text(sport.id == "f1" ? "Full field" : "Top 20").tag(UInt32(20))
+                    }
+                } footer: {
+                    Text("How much of the field the board shows. More than four rows scrolls through the list.")
+                }
             }
             if !sport.championshipOptions.isEmpty {
                 Section(optionsTitle) {

@@ -301,6 +301,7 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
                         favorite_team_ids,
                         championship_option_id,
                         dwell_secs: None,
+                        leaderboard_rows: None,
                     });
                 }
             }
@@ -347,6 +348,15 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
                     s.dwell_secs = secs;
                 } else if secs.is_some() {
                     cfg.sports.push(SportConfig { sport_id, dwell_secs: secs, ..Default::default() });
+                }
+            }
+            // Leaderboard depth for golf/F1: 4 = static top-4, 20 = full field.
+            Command::SetLeagueRows { sport_id, rows } => {
+                let rows = rows.map(|r| r.clamp(4, 20));
+                if let Some(s) = cfg.sports.iter_mut().find(|s| s.sport_id == sport_id) {
+                    s.leaderboard_rows = rows;
+                } else if rows.is_some() {
+                    cfg.sports.push(SportConfig { sport_id, leaderboard_rows: rows, ..Default::default() });
                 }
             }
             // Deliberately no catch-all: a new Command variant should be a compile

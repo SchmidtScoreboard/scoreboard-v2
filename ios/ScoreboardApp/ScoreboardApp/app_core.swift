@@ -605,6 +605,11 @@ public protocol ScoreboardClientProtocol: AnyObject {
      */
     func setLeagueDwell(boardId: String, sportId: String, secs: UInt32?)
 
+    /**
+     * Leaderboard depth for golf/F1; None reverts to the default (top 10).
+     */
+    func setLeagueRows(boardId: String, sportId: String, rows: UInt32?)
+
     func setListener(listener: ClientListener)
 
     /**
@@ -834,6 +839,17 @@ open class ScoreboardClient:
                                                                     FfiConverterString.lower(boardId),
                                                                     FfiConverterString.lower(sportId),
                                                                     FfiConverterOptionUInt32.lower(secs), $0)
+    }
+    }
+
+    /**
+     * Leaderboard depth for golf/F1; None reverts to the default (top 10).
+     */
+    open func setLeagueRows(boardId: String, sportId: String, rows: UInt32?) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_set_league_rows(self.uniffiClonePointer(),
+                                                                   FfiConverterString.lower(boardId),
+                                                                   FfiConverterString.lower(sportId),
+                                                                   FfiConverterOptionUInt32.lower(rows), $0)
     }
     }
 
@@ -1386,18 +1402,26 @@ public struct UiSportConfig {
      * Per-league "time per event" override (seconds); None = board default.
      */
     public var dwellSecs: UInt32?
+    /**
+     * Leaderboard depth for golf/F1 (4 = static top-4 .. 20 = full field).
+     */
+    public var leaderboardRows: UInt32?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(sportId: String, favoriteTeamIds: [String], championshipOptionId: String?,
                 /**
                     * Per-league "time per event" override (seconds); None = board default.
-                    */ dwellSecs: UInt32?)
+                    */ dwellSecs: UInt32?,
+                /**
+                    * Leaderboard depth for golf/F1 (4 = static top-4 .. 20 = full field).
+                    */ leaderboardRows: UInt32?)
     {
         self.sportId = sportId
         self.favoriteTeamIds = favoriteTeamIds
         self.championshipOptionId = championshipOptionId
         self.dwellSecs = dwellSecs
+        self.leaderboardRows = leaderboardRows
     }
 }
 
@@ -1415,6 +1439,9 @@ extension UiSportConfig: Equatable, Hashable {
         if lhs.dwellSecs != rhs.dwellSecs {
             return false
         }
+        if lhs.leaderboardRows != rhs.leaderboardRows {
+            return false
+        }
         return true
     }
 
@@ -1423,6 +1450,7 @@ extension UiSportConfig: Equatable, Hashable {
         hasher.combine(favoriteTeamIds)
         hasher.combine(championshipOptionId)
         hasher.combine(dwellSecs)
+        hasher.combine(leaderboardRows)
     }
 }
 
@@ -1436,7 +1464,8 @@ public struct FfiConverterTypeUiSportConfig: FfiConverterRustBuffer {
                 sportId: FfiConverterString.read(from: &buf),
                 favoriteTeamIds: FfiConverterSequenceString.read(from: &buf),
                 championshipOptionId: FfiConverterOptionString.read(from: &buf),
-                dwellSecs: FfiConverterOptionUInt32.read(from: &buf)
+                dwellSecs: FfiConverterOptionUInt32.read(from: &buf),
+                leaderboardRows: FfiConverterOptionUInt32.read(from: &buf)
             )
     }
 
@@ -1445,6 +1474,7 @@ public struct FfiConverterTypeUiSportConfig: FfiConverterRustBuffer {
         FfiConverterSequenceString.write(value.favoriteTeamIds, into: &buf)
         FfiConverterOptionString.write(value.championshipOptionId, into: &buf)
         FfiConverterOptionUInt32.write(value.dwellSecs, into: &buf)
+        FfiConverterOptionUInt32.write(value.leaderboardRows, into: &buf)
     }
 }
 
@@ -2189,6 +2219,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_league_dwell() != 25672 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_scoreboardclient_set_league_rows() != 35011 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_listener() != 33592 {
