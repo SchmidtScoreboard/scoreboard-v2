@@ -58,6 +58,79 @@ impl EspnSource {
     }
 }
 
+/// Every raw feed the debug TUI can fetch/inspect: the team-league
+/// scoreboards, the golf tours, F1, and the NHL situation aux feed.
+pub(crate) const FEEDS: &[(&str, &str)] = &[
+    ("nhl", "NHL"),
+    ("nba", "NBA"),
+    ("mlb", "MLB"),
+    ("nfl", "NFL"),
+    ("cfb", "College Football"),
+    ("cbb", "Men's College Basketball"),
+    ("wcbb", "Women's College Basketball"),
+    ("wnba", "WNBA"),
+    ("mls", "MLS"),
+    ("epl", "Premier League"),
+    ("wc", "World Cup"),
+    ("pga", "PGA Tour"),
+    ("lpga", "LPGA"),
+    ("f1", "Formula 1"),
+    ("nhl-aux", "NHL situations (api-web.nhle.com)"),
+    ("demo", "Demo slate (generated)"),
+];
+
+impl EspnSource {
+    /// The URL behind a feed id (None for "demo", which is generated).
+    pub(crate) fn feed_url(&self, feed: &str) -> Option<String> {
+        match feed {
+            "pga" | "lpga" => Some(format!(
+                "https://site.api.espn.com/apis/site/v2/sports/golf/leaderboard?league={feed}"
+            )),
+            "f1" => Some("https://site.api.espn.com/apis/site/v2/sports/racing/f1/scoreboard".into()),
+            "nhl-aux" => Some("https://api-web.nhle.com/v1/score/now".into()),
+            _ => self.leagues.iter().find(|l| l.sport_id == feed).map(|lg| {
+                format!(
+                    "https://site.api.espn.com/apis/site/v2/sports/{}/{}/scoreboard{}",
+                    lg.sport, lg.league, lg.games_query
+                )
+            }),
+        }
+    }
+
+    /// Fetch one feed's raw JSON body (the debug tool's capture path).
+    pub(crate) async fn fetch_feed_raw(&self, feed: &str) -> Result<String, String> {
+        let url = self.feed_url(feed).ok_or_else(|| format!("unknown feed '{feed}'"))?;
+        let resp = self.client.get(&url).send().await.map_err(|e| e.to_string())?;
+        resp.text().await.map_err(|e| e.to_string())
+    }
+}
+
+/// Parse one feed's raw JSON with EXACTLY the server's parse functions —
+/// what the TUI shows as "processed" is what the poll loop would produce.
+pub(crate) fn parse_feed(feed: &str, raw: &str) -> Result<Vec<Game>, String> {
+    match feed {
+        "demo" => Ok(demo_games(0, 0)),
+        "nhl-aux" => Err("nhl-aux is a situation overlay, not a game feed".into()),
+        "pga" | "lpga" => {
+            let r: LeaderboardResponse = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+            Ok(r.events.into_iter().filter_map(|ev| parse_golf(feed, ev)).collect())
+        }
+        "f1" => {
+            let r: LeaderboardResponse = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+            Ok(r.events.into_iter().flat_map(parse_f1).collect())
+        }
+        _ => {
+            let sport_id = FEEDS
+                .iter()
+                .find(|(id, _)| *id == feed)
+                .map(|(id, _)| *id)
+                .ok_or_else(|| format!("unknown feed '{feed}'"))?;
+            let sb: Scoreboard = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+            Ok(sb.events.into_iter().filter_map(|ev| parse_event(sport_id, ev)).collect())
+        }
+    }
+}
+
 #[async_trait]
 impl SportsDataSource for EspnSource {
     async fn fetch(&self) -> Vec<Game> {
@@ -1869,6 +1942,27 @@ mod champ_tests {
                     !lb.rows.is_empty() && lb.rows.iter().all(|r| r.tire.is_none()))),
             "an F1 tower WITHOUT tire data (the live-ESPN look)"
         );
+    }
+
+    /// The debug TUI's parse path is the server's parse path: parse_feed
+    /// handles every feed id, errors gracefully on garbage, and the demo feed
+    /// generates without any raw input.
+    #[test]
+    fn parse_feed_covers_every_feed() {
+        assert!(!parse_feed("demo", "").unwrap().is_empty());
+        assert!(parse_feed("nhl", "not json").is_err());
+        assert!(parse_feed("bogus-feed", "{}").is_err());
+        assert!(parse_feed("nhl-aux", "{}").is_err(), "aux feed is not a game feed");
+        // A minimal team-league scoreboard parses through parse_event.
+        let sb = r#"{"events":[{"competitions":[{"id":"1","date":"2026-10-04T20:00Z",
+            "status":{"type":{"name":"STATUS_SCHEDULED"},"period":0},
+            "competitors":[
+              {"id":"1","homeAway":"home","score":"0","team":{"abbreviation":"TOR","shortDisplayName":"Maple Leafs"}},
+              {"id":"2","homeAway":"away","score":"0","team":{"abbreviation":"BOS","shortDisplayName":"Bruins"}}
+            ]}]}]}"#;
+        let games = parse_feed("nhl", sb).unwrap();
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].away.abbrev, "BOS");
     }
 
     /// Scheduled games carry each side's overall record and the NATIONAL

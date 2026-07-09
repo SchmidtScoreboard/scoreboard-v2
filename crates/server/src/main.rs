@@ -7,6 +7,7 @@ mod espn;
 mod model;
 mod render;
 mod teams;
+mod tui;
 mod ws;
 
 use axum::{extract::State, routing::get, Json, Router};
@@ -295,6 +296,13 @@ async fn main() {
 
     if std::env::args().any(|a| a == "--preview") {
         preview();
+        return;
+    }
+
+    // Pipeline debugger: interactive TUI, or headless `tui --feed X --dump`.
+    if std::env::args().nth(1).as_deref() == Some("tui") {
+        let args: Vec<String> = std::env::args().collect();
+        tui::run(&args);
         return;
     }
 
@@ -1514,7 +1522,7 @@ fn rgb565_to_image(rgb565: &[u8], scale: u32) -> image::RgbImage {
     img
 }
 
-fn save_png(path: &str, rgb565: &[u8], scale: u32) {
+pub(crate) fn save_png(path: &str, rgb565: &[u8], scale: u32) {
     rgb565_to_image(rgb565, scale).save(path).ok();
 }
 

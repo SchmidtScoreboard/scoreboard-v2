@@ -4,6 +4,8 @@ edition.workspace = true
 version.workspace = true
 
 [dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
 scoreboard-protocol = { path = "../protocol" }
 axum = { version = "0.7", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
