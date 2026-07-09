@@ -326,14 +326,18 @@ fn parse_f1(ev: LeaderEvent) -> Vec<Game> {
                 .into_iter()
                 .enumerate()
                 .filter_map(|(i, c)| {
-                    let name = f1_last_name(&c.athlete.as_ref()?.display_name);
+                    let code = f1_code(&c.athlete.as_ref()?.display_name);
                     let order = if c.order > 0 { c.order } else { i as i64 + 1 };
+                    // Broadcast style: "P1 VER" with the gap/lap right-aligned.
+                    // The position lives in the name now, so an empty stat
+                    // (upcoming sessions) just shows the grid slot + code.
+                    let name = format!("P{order} {code}");
                     let value = c
                         .statistics
                         .first()
                         .map(|s| s.display_value.clone())
                         .filter(|v| !v.is_empty())
-                        .unwrap_or_else(|| format!("P{order}"));
+                        .unwrap_or_default();
                     Some((order, LeaderRow { name, value }))
                 })
                 .collect();
@@ -376,6 +380,18 @@ fn f1_last_name(full: &str) -> String {
         .unwrap_or("")
         .chars()
         .filter(|c| c.is_alphanumeric())
+        .collect()
+}
+
+/// Official-style broadcast code: the surname's first three letters
+/// ("Verstappen" -> VER, "Hamilton" -> HAM) — matches the FIA code for the
+/// whole current grid. Historical exceptions (Mick Schumacher was MSC, not
+/// SCH) would need an override map here if one ever reaches the feed.
+fn f1_code(display_name: &str) -> String {
+    f1_last_name(display_name)
+        .chars()
+        .filter(|c| c.is_ascii_alphabetic())
+        .take(3)
         .collect()
 }
 
@@ -874,16 +890,16 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             away: TeamSide::empty("F1"), home: TeamSide::empty(""),
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(),
             leaderboard: Some(Leaderboard { name: "MONACO GP".into(), rows: vec![
-                LeaderRow { name: "VERSTAPPEN".into(), value: "LAP 42".into() },
-                LeaderRow { name: "NORRIS".into(), value: "+2.1".into() },
-                LeaderRow { name: "LECLERC".into(), value: "+5.8".into() },
-                LeaderRow { name: "PIASTRI".into(), value: "+9.0".into() },
-                LeaderRow { name: "RUSSELL".into(), value: "+12.4".into() },
-                LeaderRow { name: "HAMILTON".into(), value: "+15.9".into() },
-                LeaderRow { name: "ALONSO".into(), value: "+21.2".into() },
-                LeaderRow { name: "SAINZ".into(), value: "+24.7".into() },
-                LeaderRow { name: "GASLY".into(), value: "+31.0".into() },
-                LeaderRow { name: "ALBON".into(), value: "+38.5".into() },
+                LeaderRow { name: "P1 VER".into(), value: "LAP 42".into() },
+                LeaderRow { name: "P2 NOR".into(), value: "+2.1".into() },
+                LeaderRow { name: "P3 LEC".into(), value: "+5.8".into() },
+                LeaderRow { name: "P4 PIA".into(), value: "+9.0".into() },
+                LeaderRow { name: "P5 RUS".into(), value: "+12.4".into() },
+                LeaderRow { name: "P6 HAM".into(), value: "+15.9".into() },
+                LeaderRow { name: "P7 ALO".into(), value: "+21.2".into() },
+                LeaderRow { name: "P8 SAI".into(), value: "+24.7".into() },
+                LeaderRow { name: "P9 GAS".into(), value: "+31.0".into() },
+                LeaderRow { name: "P10 ALB".into(), value: "+38.5".into() },
             ] }),
             champ: None,
             session: Some("race".into()),
@@ -1502,10 +1518,10 @@ mod leader_tests {
         assert_eq!(race.id, "evt1-race");
         assert_eq!(race.status, GameStatus::Active);
         assert_eq!(race.leaderboard.as_ref().unwrap().name, "BRITISH GP");
-        assert_eq!(
-            race.leaderboard.as_ref().unwrap().rows.first().map(|r| r.name.as_str()),
-            Some("VERSTAPPEN")
-        );
+        // Broadcast style: position prefix + three-letter code.
+        let rows = &race.leaderboard.as_ref().unwrap().rows;
+        assert_eq!(rows.first().map(|r| r.name.as_str()), Some("P1 VER"));
+        assert_eq!(rows.get(1).map(|r| r.name.as_str()), Some("P2 NOR"));
     }
 
     /// Golf majors get the "major" champ tier; regular tour stops don't.
