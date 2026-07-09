@@ -558,10 +558,17 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize) -> (FrameId, Vec<u8>) {
     };
     // F1 wears race-day chrome: white event title between checkered flags.
     let title_color = if f1 { WHITE } else { accent };
-    draw_text(&mut c, &lb.name, 32 - text_width(&lb.name, false) / 2, 5, false, title_color);
+    let title_w = text_width(&lb.name, false);
+    let tx = 32 - title_w / 2;
+    draw_text(&mut c, &lb.name, tx, 5, false, title_color);
     if f1 {
-        checkered_flag(&mut c, 1);
-        checkered_flag(&mut c, 55);
+        // Flags only when the title clears them by 2px on both sides — a long
+        // title ("BRITISH GP Q") otherwise collides and reads as garbage.
+        let (flag_w, gap) = (8, 2);
+        if tx >= 1 + flag_w + gap && tx + title_w <= 55 - gap {
+            checkered_flag(&mut c, 1);
+            checkered_flag(&mut c, 55);
+        }
     }
 
     if matches!(g.status, GameStatus::Pregame) {
@@ -918,6 +925,32 @@ mod kern_tests {
         assert!(black_inside, "abbrev should punch black pixels through the badge");
         // Ordinal left-aligned at x=5 (not centered) while the badge shows.
         assert!((23..=28).any(|y| (5..=20).any(|x| px565(&px, x, y) == white)), "ordinal at left");
+    }
+
+    /// Checkered flags yield to long titles: they render only when the title
+    /// clears both corners, so "BRITISH GP Q" never collides with the chrome.
+    #[test]
+    fn flags_yield_to_long_titles() {
+        use crate::model::{Leaderboard, LeaderRow};
+        let mut g = sit_game("f1", "", "", Situation::Football {
+            down_string: String::new(), ball_position: String::new(), home_possession: None,
+        });
+        g.situation = None;
+        g.home = TeamSide::empty("");
+        let lb = |name: &str| Some(Leaderboard {
+            name: name.into(),
+            rows: vec![LeaderRow { name: "VER".into(), value: "+1".into(), ..Default::default() }],
+        });
+        // Corner cell (1..=2, 1..=2) is the flag's first white check.
+        let corner_lit = |px: &[u8]| (1..=2).any(|y| (1..=2).any(|x| px565(px, x, y) != 0));
+
+        g.leaderboard = lb("MONACO GP");
+        let (_, px) = render_game(&g);
+        assert!(corner_lit(&px), "short title keeps its flags");
+
+        g.leaderboard = lb("BRITISH GP Q");
+        let (_, px) = render_game(&g);
+        assert!(!corner_lit(&px), "long title takes the corners instead");
     }
 
     /// Timing-tower alignment: ranks sit centered in a fixed two-digit column,
