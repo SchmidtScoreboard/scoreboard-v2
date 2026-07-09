@@ -241,7 +241,9 @@ async fn render(
 async fn device(stack: Stack<'static>, board: &'static SharedBoard, board_id: String, secret: [u8; 32]) {
     let mut rx = alloc::vec![0u8; 2048];
     let mut tx = alloc::vec![0u8; 2048];
-    let mut frame = alloc::vec![0u8; 5120];
+    // Sized for tall scrolling leaderboard frames (64-byte id + 128 bytes/row;
+    // 16448 fits frames up to 128px — SCROLL_MAX_ROWS needs 68px).
+    let mut frame = alloc::vec![0u8; 16448];
 
     loop {
         Timer::after(Duration::from_secs(1)).await;

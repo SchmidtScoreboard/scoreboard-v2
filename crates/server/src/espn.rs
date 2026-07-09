@@ -281,7 +281,9 @@ fn parse_golf(sport_id: &str, ev: LeaderEvent) -> Option<Game> {
         })
         .collect();
     ranked.sort_by_key(|(p, _)| *p);
-    let rows = ranked.into_iter().take(4).map(|(_, r)| r).collect();
+    // Keep enough of the field for the board's scrolling frame (it shows 4
+    // at a time and glides through the rest).
+    let rows = ranked.into_iter().take(crate::render::SCROLL_MAX_ROWS).map(|(_, r)| r).collect();
     let name = clean_golf_name(&ev.short_name);
     let champ = golf_major_label(sport_id, &ev.short_name)
         .map(|label| Champ { tier: "major".into(), label: label.into() });
@@ -336,7 +338,7 @@ fn parse_f1(ev: LeaderEvent) -> Vec<Game> {
                 })
                 .collect();
             drivers.sort_by_key(|(o, _)| *o);
-            let rows = drivers.into_iter().take(4).map(|(_, r)| r).collect();
+            let rows = drivers.into_iter().take(crate::render::SCROLL_MAX_ROWS).map(|(_, r)| r).collect();
             let name = fit_words(&format!("{base}{suffix}"), 13);
             Some(Game {
                 id: format!("{}-{}", ev.id, session),
@@ -601,7 +603,7 @@ impl SportsDataSource for DemoSource {
     }
 }
 
-fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
+pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
     // The scripted ending: live for the first five minutes of the server's life,
     // then FINAL — exercises the observed live->Final transition and the
     // half-hour linger without waiting for a real game to end.
@@ -834,11 +836,18 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             id: "demo-golf".into(), sport_id: "pga".into(),
             away: TeamSide::empty("PGA"), home: TeamSide::empty(""),
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(),
+            // Ten deep so the board's scrolling leaderboard shows in demo mode.
             leaderboard: Some(Leaderboard { name: "MASTERS".into(), rows: vec![
                 LeaderRow { name: "SCHEFFLER".into(), value: "-8".into() },
                 LeaderRow { name: "MCILROY".into(), value: "-6".into() },
                 LeaderRow { name: "MORIKAWA".into(), value: "-5".into() },
                 LeaderRow { name: "SCHAUFFELE".into(), value: "-3".into() },
+                LeaderRow { name: "RAHM".into(), value: "-2".into() },
+                LeaderRow { name: "FLEETWOOD".into(), value: "-2".into() },
+                LeaderRow { name: "HOVLAND".into(), value: "-1".into() },
+                LeaderRow { name: "THOMAS".into(), value: "E".into() },
+                LeaderRow { name: "SPIETH".into(), value: "+1".into() },
+                LeaderRow { name: "DAY".into(), value: "+2".into() },
             ] }),
             champ: Some(Champ { tier: "major".into(), label: "The Masters".into() }),
             session: None,
@@ -869,6 +878,12 @@ fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
                 LeaderRow { name: "NORRIS".into(), value: "+2.1".into() },
                 LeaderRow { name: "LECLERC".into(), value: "+5.8".into() },
                 LeaderRow { name: "PIASTRI".into(), value: "+9.0".into() },
+                LeaderRow { name: "RUSSELL".into(), value: "+12.4".into() },
+                LeaderRow { name: "HAMILTON".into(), value: "+15.9".into() },
+                LeaderRow { name: "ALONSO".into(), value: "+21.2".into() },
+                LeaderRow { name: "SAINZ".into(), value: "+24.7".into() },
+                LeaderRow { name: "GASLY".into(), value: "+31.0".into() },
+                LeaderRow { name: "ALBON".into(), value: "+38.5".into() },
             ] }),
             champ: None,
             session: Some("race".into()),
@@ -1750,6 +1765,10 @@ mod champ_tests {
         assert!(
             has(&|g| g.pregame.as_ref().is_some_and(|p| p.broadcast.is_empty() && !p.away_record.is_empty())),
             "pregame records-only"
+        );
+        assert!(
+            has(&|g| g.leaderboard.as_ref().is_some_and(|lb| lb.rows.len() > 4)),
+            "a leaderboard deep enough to scroll"
         );
     }
 

@@ -872,8 +872,8 @@ struct GameCard<Caption: View, Footer: View>: View {
         .overlay(
             RoundedRectangle(cornerRadius: 26)
                 .strokeBorder(
-                    highlighted ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary.opacity(0.08)),
-                    lineWidth: highlighted ? 2.5 : 1
+                    highlighted ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.primary.opacity(0.08)),
+                    lineWidth: highlighted ? 3 : 1
                 )
         )
     }
@@ -1568,9 +1568,9 @@ struct AllGamesView: View {
                     AllGamesCardButton(title: "Remove", icon: "minus.circle", tint: .red) {
                         model.removeFromRotation(game)
                     }
-                    AllGamesCardButton(title: "Pin", icon: "pin", tint: .primary) {
-                        model.focusGame(game.id)
-                        dismiss()
+                    let pinned = model.focusedGameId == game.id
+                    AllGamesCardButton(title: pinned ? "Unpin" : "Pin", icon: pinned ? "pin.slash" : "pin", tint: pinned ? .orange : .primary) {
+                        withAnimation { pinned ? model.clearFocus() : model.focusGame(game.id) }
                     }
                 } else {
                     AllGamesCardButton(title: "Add", icon: "plus.circle", tint: .green) {
@@ -1619,7 +1619,7 @@ struct ProvenanceCaption: View {
                         return ("trophy.fill", champ, .yellow)
                     }
                     if let label = model.championshipLabel(game.sportId) {
-                        return ("checkmark.circle.fill", "Subscribed · \(label)", .green)
+                        return ("star.fill", "Subscribed · \(label)", .green)
                     }
                 }
                 // Nothing configured anywhere: the board samples the whole slate.

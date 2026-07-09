@@ -28,15 +28,22 @@ const SCORE_RIGHT: i32 = 61; // 64 - 3
 
 struct Canvas {
     buf: Vec<Rgb888>,
+    height: usize,
 }
 impl Canvas {
     fn new() -> Self {
+        Self::with_height(FRAME_HEIGHT)
+    }
+    /// Taller-than-panel canvases back the scrolling leaderboard frames — the
+    /// board shows a 32px window and glides it up and down the frame.
+    fn with_height(height: usize) -> Self {
         Self {
-            buf: vec![Rgb888::BLACK; FRAME_PIXELS],
+            buf: vec![Rgb888::BLACK; FRAME_WIDTH * height],
+            height,
         }
     }
     fn to_rgb565(&self) -> Vec<u8> {
-        let mut v = Vec::with_capacity(FRAME_BYTES);
+        let mut v = Vec::with_capacity(self.buf.len() * 2);
         for p in &self.buf {
             v.extend_from_slice(&rgb888_to_565(p.r(), p.g(), p.b()).to_le_bytes());
         }
@@ -45,7 +52,7 @@ impl Canvas {
 }
 impl OriginDimensions for Canvas {
     fn size(&self) -> Size {
-        Size::new(FRAME_WIDTH as u32, FRAME_HEIGHT as u32)
+        Size::new(FRAME_WIDTH as u32, self.height as u32)
     }
 }
 impl DrawTarget for Canvas {
@@ -56,7 +63,7 @@ impl DrawTarget for Canvas {
         I: IntoIterator<Item = Pixel<Self::Color>>,
     {
         for Pixel(p, c) in pixels {
-            if p.x >= 0 && p.y >= 0 && (p.x as usize) < FRAME_WIDTH && (p.y as usize) < FRAME_HEIGHT
+            if p.x >= 0 && p.y >= 0 && (p.x as usize) < FRAME_WIDTH && (p.y as usize) < self.height
             {
                 self.buf[p.y as usize * FRAME_WIDTH + p.x as usize] = c;
             }
@@ -128,7 +135,9 @@ fn draw_glyph(c: &mut Canvas, g: &crate::bdf::Glyph, px: i32, by: i32, color: Rg
             if (byte >> (7 - col)) & 1 == 1 {
                 let x = px + g.xoff + col;
                 let y = by - g.yoff - g.h + 1 + row as i32;
-                if x >= 0 && y >= 0 && (x as usize) < FRAME_WIDTH && (y as usize) < FRAME_HEIGHT {
+                // Clip to the CANVAS height — tall scrolling frames draw past
+                // the panel's 32 rows.
+                if x >= 0 && y >= 0 && (x as usize) < FRAME_WIDTH && (y as usize) < c.height {
                     c.buf[y as usize * FRAME_WIDTH + x as usize] = color;
                 }
             }
@@ -269,7 +278,7 @@ fn draw_sprite(c: &mut Canvas, sprite: (&[u8], i32), x0: i32, y0: i32, color: Rg
         for dx in 0..w {
             if (row >> (w - 1 - dx)) & 1 == 1 {
                 let (x, y) = (x0 + dx, y0 + dy as i32);
-                if x >= 0 && y >= 0 && (x as usize) < FRAME_WIDTH && (y as usize) < FRAME_HEIGHT {
+                if x >= 0 && y >= 0 && (x as usize) < FRAME_WIDTH && (y as usize) < c.height {
                     c.buf[y as usize * FRAME_WIDTH + x as usize] = color;
                 }
             }
@@ -506,8 +515,37 @@ fn draw_hockey_situation(c: &mut Canvas, g: &Game, msg: &str) {
 /// Golf / F1 leaderboard (ported from the original `src/golf.rs`): event name
 /// centered up top (green for golf, red for F1), then up to 4 name/value rows.
 fn render_leaderboard(g: &Game) -> (FrameId, Vec<u8>) {
-    let mut c = Canvas::new();
+    render_leaderboard_rows(g, 4)
+}
+
+/// How many leaderboard rows the board's scrolling frame shows at most.
+/// (Row pitch is 6px, so 10 rows = a 68px frame — within the firmware's
+/// frame buffer.)
+pub const SCROLL_MAX_ROWS: usize = 10;
+
+/// The frame the PHYSICAL BOARD shows for a game. Same as `render_game`
+/// except deep leaderboard fields render TALL (up to SCROLL_MAX_ROWS on the
+/// same 6px pitch) for the board to scroll through; returns whether it
+/// scrolls. App cards and HTTP renders keep the static 4-row `render_game`.
+pub fn render_board_frame(g: &Game) -> (FrameId, Vec<u8>, bool) {
+    let deep = g.status != GameStatus::Pregame
+        && g.leaderboard.as_ref().is_some_and(|lb| lb.rows.len() > 4);
+    if !deep {
+        let (id, px) = render_game(g);
+        return (id, px, false);
+    }
+    let (id, px) = render_leaderboard_rows(g, SCROLL_MAX_ROWS);
+    (id, px, true)
+}
+
+fn render_leaderboard_rows(g: &Game, max_rows: usize) -> (FrameId, Vec<u8>) {
     let lb = g.leaderboard.as_ref().unwrap();
+    // Title baseline 5 + rows on a 6px pitch from baseline 12 (1px gap top and
+    // bottom): 4 rows land exactly on the 32px panel; more rows grow the frame
+    // by 6px each and the board scrolls the window.
+    let rows = lb.rows.len().min(max_rows);
+    let height = if rows > 4 { 12 + (rows as i32 - 1) * 6 + 2 } else { FRAME_HEIGHT as i32 };
+    let mut c = Canvas::with_height(height as usize);
     let accent = if g.sport_id == "f1" {
         Rgb888::new(225, 6, 0) // F1 red
     } else {
@@ -524,7 +562,7 @@ fn render_leaderboard(g: &Game) -> (FrameId, Vec<u8>) {
         // + 4 rows = 5 rows fit the 32px panel (the original fit 5, not 4). The whole
         // block sits one pixel down from the top so the gap is even (1px) top + bottom.
         let mut by = 12;
-        for row in lb.rows.iter().take(5) {
+        for row in lb.rows.iter().take(max_rows.max(5)) {
             let name_max_right = 63 - text_width(&row.value, false) - 2;
             draw_text_clip(&mut c, &row.name, 1, by, name_max_right, false, WHITE);
             draw_text_right(&mut c, &row.value, 63, by, false, accent);
@@ -823,6 +861,43 @@ mod kern_tests {
         assert!(black_inside, "abbrev should punch black pixels through the badge");
         // Ordinal left-aligned at x=5 (not centered) while the badge shows.
         assert!((23..=28).any(|y| (5..=20).any(|x| px565(&px, x, y) == white)), "ordinal at left");
+    }
+
+    /// Deep leaderboards render tall for the board (6px pitch past the 32px
+    /// panel); four or fewer rows stay static, and the app-facing render_game
+    /// is always static.
+    #[test]
+    fn deep_leaderboards_render_tall_for_the_board() {
+        use crate::model::{Leaderboard, LeaderRow};
+        let mut g = sit_game("pga", "", "", Situation::Football {
+            down_string: String::new(), ball_position: String::new(), home_possession: None,
+        });
+        g.situation = None;
+        g.home = TeamSide::empty("");
+        let rows = |n: usize| Some(Leaderboard {
+            name: "OPEN".into(),
+            rows: (0..n).map(|i| LeaderRow { name: format!("PLAYER{i}"), value: format!("-{i}") }).collect(),
+        });
+
+        g.leaderboard = rows(10);
+        let (_, px, scrolls) = render_board_frame(&g);
+        assert!(scrolls);
+        let h = px.len() / (64 * 2);
+        assert_eq!(h, 12 + 9 * 6 + 2, "10 rows on the 6px pitch");
+        // The BOTTOM rows must actually be drawn (draw_glyph once clipped the
+        // canvas at the panel height, silently blanking everything past row 31).
+        let lit_below_panel = (32..h).any(|y| (0..64).any(|x| {
+            let i = (y * 64 + x) * 2;
+            u16::from_le_bytes([px[i], px[i + 1]]) != 0
+        }));
+        assert!(lit_below_panel, "rows 5..10 render past the panel bound");
+        let (_, px_static) = render_game(&g);
+        assert_eq!(px_static.len() / (64 * 2), 32, "app frame stays panel-sized");
+
+        g.leaderboard = rows(4);
+        let (_, px, scrolls) = render_board_frame(&g);
+        assert!(!scrolls, "a shallow field has nothing to scroll");
+        assert_eq!(px.len() / (64 * 2), 32);
     }
 
     /// Scheduled games: records replace the 0-0 scores in the team rows and the
