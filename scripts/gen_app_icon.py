@@ -19,6 +19,10 @@ CELL = 60
 GAP = 14        # 14*60 + 13*14 = 1022; 1px margin each side
 MARGIN = (SIZE - (N * CELL + (N - 1) * GAP)) // 2
 RADIUS = 13
+# Lit content keeps one unlit cell of clearance on every side: the grid
+# texture runs to the edges (the board isn't "floating" in black), while
+# iOS's squircle mask (corner radius ~229px) only ever bites unlit cells —
+# a one-cell inset clears it exactly (corner cell distance 218px < 229px).
 
 BG = (8, 8, 12)
 UNLIT = (30, 30, 37)
@@ -26,22 +30,25 @@ WHITE = (240, 240, 244)
 PP_YELLOW = (255, 204, 0)
 
 # Team colors as the server catalog carries them (primary, secondary).
-CHI = ((0xCF, 0x0A, 0x2C), (0xFF, 0xD1, 0x00))  # Blackhawks
-STL = ((0x00, 0x2F, 0x87), (0xFC, 0xB5, 0x14))  # Blues
+CHI = ((0xCF, 0x0A, 0x2C), WHITE)               # Blackhawks (white accent)
+STL = ((0x00, 0x2F, 0x87), (0xFC, 0xB5, 0x14))  # Blues (gold accent)
 
 
 def cell_color(col: int, row: int):
-    # Team rows: 3 cells tall, 2-cell accent stripe on the LEFT (like the
-    # panel's accent), body running to the right edge.
-    for rows, (primary, secondary) in ((range(1, 4), CHI), (range(6, 9), STL)):
-        if row in rows:
-            return secondary if col < 2 else primary
-    # Clock line, left-aligned, with the power-play badge at the right edge.
-    if row == 12:
-        if col < 6:
-            return WHITE
-        if col >= 12:
-            return PP_YELLOW
+    # Team rows: 3 cells tall each and ADJACENT (one scoreboard block, not two
+    # floating stripes), 2-cell accent stripe on the LEFT like the panel's.
+    # Blackhawks accent is white so the two rows don't repeat gold.
+    if 1 <= col <= 12:
+        for rows, (primary, secondary) in ((range(1, 4), CHI), (range(4, 7), STL)):
+            if row in rows:
+                return secondary if col <= 2 else primary
+        # Clock line (2 cells tall), left-aligned, with the yellow power-play
+        # badge holding the right end.
+        if row in (11, 12):
+            if col <= 6:
+                return WHITE
+            if col >= 11:
+                return PP_YELLOW
     return UNLIT
 
 
