@@ -356,10 +356,11 @@ final class BoardViewModel: ObservableObject {
             .teams.first { $0.id == id }?.name ?? abbrev
     }
 
-    /// A human title for a game card: "Away @ Home" for team games, or the event
-    /// name for leaderboard sports (golf/F1) that have no home side.
+    /// A human title for a game card: "BOS @ TOR" for team games (abbreviations
+    /// — full names truncate at card width), or the event name for leaderboard
+    /// sports (golf/F1) that have no home side.
     func gameTitle(_ g: UiGame) -> String {
-        g.home.isEmpty ? g.away : "\(teamName(g.sportId, g.away)) @ \(teamName(g.sportId, g.home))"
+        g.home.isEmpty ? g.away : "\(g.away) @ \(g.home)"
     }
 
     // ---- league preferences (all scoped to the selected board) ----
@@ -533,6 +534,24 @@ final class BoardViewModel: ObservableObject {
         // team matching can't see it — any favorite in that league counts.
         if g.home.isEmpty, !(current.favorites[g.sportId] ?? []).isEmpty { return .favorite }
         return nil
+    }
+
+    /// The favorited team that puts this game on the board, if one does.
+    func favoriteName(_ g: UiGame) -> String? {
+        let favs = current.favorites[g.sportId] ?? []
+        for ab in [g.away, g.home] where favs.contains("\(g.sportId)-\(ab.lowercased())") {
+            return teamName(g.sportId, ab)
+        }
+        return nil
+    }
+
+    /// The label of a league's active subscription option ("Every match",
+    /// "Majors only", "GP + Qualifying"), resolved from the catalog.
+    func championshipLabel(_ sportId: String) -> String? {
+        let champId = championshipId(sportId)
+        guard champId != "none" else { return nil }
+        return sports.first { $0.id == sportId }?
+            .championshipOptions.first { $0.id == champId }?.label
     }
 
     /// League groups for the expanded "view all" carousel: leagues the user has
@@ -813,6 +832,9 @@ struct GameCard<Caption: View, Footer: View>: View {
     let httpBase: String
     var frame: CGImage? = nil
     var refresh: Int = 0
+    /// Pinned/focused: draws the accent ring so the one game overriding the
+    /// rotation is unmissable in any list.
+    var highlighted: Bool = false
     /// Small line under the title (provenance label etc.).
     @ViewBuilder var caption: Caption
     /// Action buttons row at the bottom of the card.
@@ -847,7 +869,13 @@ struct GameCard<Caption: View, Footer: View>: View {
         // Form's section cards — only the LED panel stays black, like the real
         // hardware. Radius matches the inset-grouped sections.
         .background(RoundedRectangle(cornerRadius: 26).fill(Color(.secondarySystemGroupedBackground)))
-        .overlay(RoundedRectangle(cornerRadius: 26).strokeBorder(.primary.opacity(0.08)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 26)
+                .strokeBorder(
+                    highlighted ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary.opacity(0.08)),
+                    lineWidth: highlighted ? 2.5 : 1
+                )
+        )
     }
 }
 
@@ -1098,38 +1126,9 @@ struct DashboardView: View {
         .modifier(FullBleedSection())
     }
 
-    /// The caption line under the game title: provenance only (WHY it's on the
-    /// board, or that it isn't) — every card gets exactly one line, so heights
-    /// stay uniform. Championship games get the trophy badge in the card's
-    /// corner (see GameCard) rather than an extra caption line.
+    /// The caption line under the game title — see ProvenanceCaption.
     private func sourceCaption(_ game: UiGame) -> some View {
-        let (icon, text, color): (String, String, Color) = {
-            // Cap-bumped: qualifies but lost its rotation slot — the one thing
-            // the user must see to understand why it's not on the panel.
-            if game.bumped {
-                return ("exclamationmark.circle.fill", "Bumped — rotation full", .orange)
-            }
-            switch model.gameSource(game) {
-            case .favorite: return ("star.fill", "Favorite", .yellow)
-            case .added: return ("plus.circle.fill", "Added manually", .cyan)
-            case nil:
-                // No preference explains it: it's on the board anyway (unconfigured
-                // slate / big-games selection), or just a live game you haven't added.
-                return model.isShowing(game.id)
-                    ? ("dot.radiowaves.left.and.right", "Live now", .gray)
-                    : ("circle.dashed", "Not on scoreboard", .gray)
-            }
-        }()
-        // Color only the icon; the text stays secondary so it reads in both
-        // color schemes (yellow text on a white card is illegible).
-        return HStack(spacing: 4) {
-            Image(systemName: icon)
-                .foregroundStyle(color)
-            Text(text)
-                .foregroundStyle(.secondary)
-        }
-        .font(.caption2)
-        .lineLimit(1)
+        ProvenanceCaption(model: model, game: game)
     }
 
     /// A compact labeled action button for the card footer. Hand-rolled capsule
@@ -1191,7 +1190,7 @@ struct DashboardView: View {
                     ForEach(model.displayedNowShowing, id: \.id) { game in
                         let pinned = model.focusedGameId == game.id
                         let dimmed = model.focusedGameId != nil && !pinned
-                        GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId]) {
+                        GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId], highlighted: pinned) {
                             sourceCaption(game)
                         } footer: {
                             HStack(spacing: 8) {
@@ -1561,8 +1560,8 @@ struct AllGamesView: View {
     /// pops back to the dashboard to show the result.
     private func allGamesCard(_ game: UiGame) -> some View {
         let showing = model.isShowing(game.id)
-        return GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId], refresh: refresh) {
-            AllGamesCaption(model: model, game: game)
+        return GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId], refresh: refresh, highlighted: model.focusedGameId == game.id) {
+            ProvenanceCaption(model: model, game: game)
         } footer: {
             HStack(spacing: 8) {
                 if showing {
@@ -1583,8 +1582,10 @@ struct AllGamesView: View {
     }
 }
 
-/// The provenance caption, reusable outside DashboardView.
-struct AllGamesCaption: View {
+/// The one-line provenance under a card title: WHY the game is on the board
+/// (or that it isn't), ordered by how directly the user caused it. Shared by
+/// the dashboard carousel and the All Games screen so the story never forks.
+struct ProvenanceCaption: View {
     @ObservedObject var model: BoardViewModel
     let game: UiGame
 
@@ -1600,14 +1601,33 @@ struct AllGamesCaption: View {
                 return ("clock", game.detail.isEmpty ? "Upcoming" : "Starts \(game.detail)", .gray)
             }
             switch model.gameSource(game) {
-            case .favorite: return ("star.fill", "Favorite", .yellow)
             case .added: return ("plus.circle.fill", "Added manually", .cyan)
+            case .favorite:
+                // Name the team that earned the slot.
+                if let name = model.favoriteName(game) {
+                    return ("star.fill", "Favorite · \(name)", .yellow)
+                }
+                return ("star.fill", "Favorite", .yellow)
             case nil:
-                return model.isShowing(game.id)
-                    ? ("dot.radiowaves.left.and.right", "Live now", .gray)
-                    : ("circle.dashed", "Not on scoreboard", .gray)
+                guard model.isShowing(game.id) else {
+                    return ("circle.dashed", "Not on scoreboard", .gray)
+                }
+                // A league subscription explains it: the big-game tier by name
+                // ("Stanley Cup Final"), or the option itself ("Every match").
+                if model.championshipId(game.sportId) != "none" {
+                    if let champ = game.champ {
+                        return ("trophy.fill", champ, .yellow)
+                    }
+                    if let label = model.championshipLabel(game.sportId) {
+                        return ("checkmark.circle.fill", "Subscribed · \(label)", .green)
+                    }
+                }
+                // Nothing configured anywhere: the board samples the whole slate.
+                return ("square.grid.2x2", "No preferences — showing everything", .gray)
             }
         }()
+        // Color only the icon; the text stays secondary so it reads in both
+        // color schemes (yellow text on a white card is illegible).
         return HStack(spacing: 4) {
             Image(systemName: icon).foregroundStyle(color)
             Text(text).foregroundStyle(.secondary)
