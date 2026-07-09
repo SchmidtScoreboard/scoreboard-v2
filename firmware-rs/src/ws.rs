@@ -7,6 +7,7 @@ use embedded_io_async::{Read, Write};
 
 pub const OP_TEXT: u8 = 0x1;
 pub const OP_BINARY: u8 = 0x2;
+pub const OP_PING: u8 = 0x9;
 
 /// Send the HTTP Upgrade and confirm a `101` response.
 pub async fn handshake<S: Read + Write>(sock: &mut S, host: &str) -> Result<(), ()> {
@@ -40,56 +41,120 @@ pub async fn handshake<S: Read + Write>(sock: &mut S, host: &str) -> Result<(), 
     }
 }
 
-async fn read_exact<S: Read>(sock: &mut S, buf: &mut [u8]) -> Result<(), ()> {
-    let mut got = 0;
-    while got < buf.len() {
-        let n = sock.read(&mut buf[got..]).await.map_err(|_| ())?;
-        if n == 0 {
-            return Err(());
-        }
-        got += n;
-    }
-    Ok(())
+/// Frame reader whose ENTIRE parse state lives on `self`, not in the future.
+/// The device loop races `read` against the outbox in a `select`; when the
+/// outbox wins, the read future is dropped mid-frame. A plain `async fn` loses
+/// whatever header/payload bytes it had already consumed and the stream
+/// desyncs — every later frame parses as garbage, and the failure is silent
+/// (bogus opcodes are ignored) until the socket times out. Here a dropped
+/// read resumes exactly where the stream left off on the next call.
+///
+/// `read` never writes: a cancelled inline pong would tear the OUTGOING
+/// stream the same way. Pings are returned to the caller (`OP_PING`), whose
+/// post-select writes can't be cancelled.
+pub struct FrameReader {
+    /// [0..2 base header][0/2/8 extended length][4 mask if masked].
+    hdr: [u8; 14],
+    hdr_got: usize,
+    hdr_need: usize,
+    payload_got: usize,
+    payload_need: Option<usize>,
 }
 
-/// Read the next data frame (text/binary) into `buf`, returning `(opcode, len)`.
-/// Ping is answered with pong; close/error returns `Err`.
-pub async fn read_frame<S: Read + Write>(sock: &mut S, buf: &mut [u8]) -> Result<(u8, usize), ()> {
-    loop {
-        let mut hdr = [0u8; 2];
-        read_exact(sock, &mut hdr).await?;
-        let opcode = hdr[0] & 0x0F;
-        let masked = hdr[1] & 0x80 != 0;
-        let mut len = (hdr[1] & 0x7F) as usize;
-        if len == 126 {
-            let mut e = [0u8; 2];
-            read_exact(sock, &mut e).await?;
-            len = u16::from_be_bytes(e) as usize;
-        } else if len == 127 {
-            let mut e = [0u8; 8];
-            read_exact(sock, &mut e).await?;
-            len = u64::from_be_bytes(e) as usize;
-        }
-        let mut mask = [0u8; 4];
-        if masked {
-            read_exact(sock, &mut mask).await?;
-        }
-        if len > buf.len() {
-            return Err(()); // frame larger than our buffer
-        }
-        read_exact(sock, &mut buf[..len]).await?;
-        if masked {
-            for i in 0..len {
-                buf[i] ^= mask[i % 4];
+impl FrameReader {
+    pub fn new() -> Self {
+        Self { hdr: [0; 14], hdr_got: 0, hdr_need: 2, payload_got: 0, payload_need: None }
+    }
+
+    fn reset(&mut self) {
+        self.hdr_got = 0;
+        self.hdr_need = 2;
+        self.payload_got = 0;
+        self.payload_need = None;
+    }
+
+    /// Read the next data frame (text/binary/ping) into `buf`, returning
+    /// `(opcode, len)`. Pong is swallowed; close/error returns `Err`.
+    /// Cancellation-safe: progress is recorded synchronously after every
+    /// completed socket read, so dropping the future never loses bytes.
+    pub async fn read<S: Read>(&mut self, sock: &mut S, buf: &mut [u8]) -> Result<(u8, usize), ()> {
+        loop {
+            while self.payload_need.is_none() {
+                if self.hdr_got < self.hdr_need {
+                    let n = sock
+                        .read(&mut self.hdr[self.hdr_got..self.hdr_need])
+                        .await
+                        .map_err(|_| ())?;
+                    if n == 0 {
+                        return Err(());
+                    }
+                    self.hdr_got += n;
+                    continue;
+                }
+                // Base header complete: grow to cover extended length + mask,
+                // or parse the payload length once everything is in hand.
+                let masked = self.hdr[1] & 0x80 != 0;
+                let l7 = (self.hdr[1] & 0x7F) as usize;
+                let ext = match l7 {
+                    126 => 2,
+                    127 => 8,
+                    _ => 0,
+                };
+                let full = 2 + ext + if masked { 4 } else { 0 };
+                if self.hdr_need < full {
+                    self.hdr_need = full;
+                    continue;
+                }
+                let len = match l7 {
+                    126 => u16::from_be_bytes([self.hdr[2], self.hdr[3]]) as usize,
+                    127 => u64::from_be_bytes(self.hdr[2..10].try_into().unwrap()) as usize,
+                    _ => l7,
+                };
+                if len > buf.len() {
+                    return Err(()); // frame larger than our buffer
+                }
+                self.payload_need = Some(len);
+            }
+            let len = self.payload_need.unwrap_or(0);
+            while self.payload_got < len {
+                let n = sock.read(&mut buf[self.payload_got..len]).await.map_err(|_| ())?;
+                if n == 0 {
+                    return Err(());
+                }
+                self.payload_got += n;
+            }
+            // Frame complete — unmask, reset, dispatch.
+            let opcode = self.hdr[0] & 0x0F;
+            let masked = self.hdr[1] & 0x80 != 0;
+            if masked {
+                let ext = match (self.hdr[1] & 0x7F) as usize {
+                    126 => 2,
+                    127 => 8,
+                    _ => 0,
+                };
+                let mask = [
+                    self.hdr[2 + ext],
+                    self.hdr[3 + ext],
+                    self.hdr[4 + ext],
+                    self.hdr[5 + ext],
+                ];
+                for i in 0..len {
+                    buf[i] ^= mask[i % 4];
+                }
+            }
+            self.reset();
+            match opcode {
+                0xA => {}                // pong, ignore
+                0x8 => return Err(()),   // close
+                _ => return Ok((opcode, len)),
             }
         }
-        match opcode {
-            0x9 => write_frame(sock, 0xA, &buf[..len.min(125)]).await?, // ping -> pong
-            0xA => {}                                                   // pong, ignore
-            0x8 => return Err(()),                                      // close
-            _ => return Ok((opcode, len)),
-        }
     }
+}
+
+/// Answer a ping (the caller passes the ping's payload back).
+pub async fn write_pong<S: Write>(sock: &mut S, payload: &[u8]) -> Result<(), ()> {
+    write_frame(sock, 0xA, &payload[..payload.len().min(125)]).await
 }
 
 pub async fn write_text<S: Write>(sock: &mut S, data: &[u8]) -> Result<(), ()> {

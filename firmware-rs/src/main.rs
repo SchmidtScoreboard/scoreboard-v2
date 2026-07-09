@@ -267,13 +267,15 @@ async fn device(stack: Stack<'static>, board: &'static SharedBoard, board_id: St
         }
         println!("[ws] connected");
         board.lock().await.set_online(true);
+        // Parse state lives OUTSIDE the select so a read cancelled by an outbox
+        // message resumes mid-frame instead of desyncing the stream.
+        let mut reader = ws::FrameReader::new();
 
         loop {
             // Full-duplex on one socket: wait on the next server frame OR an
-            // outgoing board message. (If both race, the cancelled read restarts;
-            // a torn mid-frame read surfaces as a read error -> normal reconnect.)
+            // outgoing board message.
             use embassy_futures::select::{select, Either};
-            let event = select(ws::read_frame(&mut sock, &mut frame), OUTBOX.receive()).await;
+            let event = select(reader.read(&mut sock, &mut frame), OUTBOX.receive()).await;
             let read = match event {
                 Either::Second(msg) => {
                     let _ = ws::write_text(&mut sock, &serde_json::to_vec(&msg).unwrap()).await;
@@ -304,6 +306,11 @@ async fn device(stack: Stack<'static>, board: &'static SharedBoard, board_id: St
                     if let Some((id, px)) = decode_frame(&frame[..n]) {
                         board.lock().await.on_frame(id, px.to_vec());
                     }
+                }
+                Ok((ws::OP_PING, n)) => {
+                    // Answered here (not inside the reader): these writes are
+                    // post-select, so they can't be cancelled mid-frame.
+                    let _ = ws::write_pong(&mut sock, &frame[..n]).await;
                 }
                 Ok(_) => {}
                 Err(_) => {
