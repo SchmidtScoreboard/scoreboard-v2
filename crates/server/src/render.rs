@@ -17,7 +17,7 @@ use embedded_graphics::{
     primitives::{PrimitiveStyle, Rectangle},
 };
 use scoreboard_protocol::{
-    frame_id, rgb888_to_565, FrameId, FRAME_BYTES, FRAME_HEIGHT, FRAME_PIXELS, FRAME_WIDTH,
+    frame_id, rgb888_to_565, FrameId, FRAME_HEIGHT, FRAME_WIDTH,
 };
 
 const WHITE: Rgb888 = Rgb888::new(255, 255, 255);
@@ -563,8 +563,25 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize) -> (FrameId, Vec<u8>) {
         // block sits one pixel down from the top so the gap is even (1px) top + bottom.
         let mut by = 12;
         for row in lb.rows.iter().take(max_rows.max(5)) {
+            let ink = row.color.unwrap_or(WHITE);
             let name_max_right = 63 - text_width(&row.value, false) - 2;
-            draw_text_clip(&mut c, &row.name, 1, by, name_max_right, false, WHITE);
+            let name_x = if row.rank.is_empty() {
+                1
+            } else {
+                // Broadcast timing tower: the rank sits centered in a fixed
+                // two-digit column so every code starts at the same x and the
+                // timings line up.
+                let col_w = text_width("20", false);
+                let rx = (col_w - text_width(&row.rank, false)) / 2;
+                draw_text(&mut c, &row.rank, rx, by, false, ink);
+                col_w + 3
+            };
+            draw_text_clip(&mut c, &row.name, name_x, by, name_max_right, false, ink);
+            // Tire compound dot, broadcast-style, tucked after the code.
+            if let Some(t) = row.tire {
+                let tx = name_x + text_width(&row.name, false) + 3;
+                fill(&mut c, tx, by - 4, 3, 3, tire_color(t));
+            }
             draw_text_right(&mut c, &row.value, 63, by, false, accent);
             by += 6;
         }
@@ -572,6 +589,17 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize) -> (FrameId, Vec<u8>) {
 
     let px = c.to_rgb565();
     (frame_id(&px), px)
+}
+
+/// Pirelli compound colors for the timing-tower tire dot.
+fn tire_color(compound: char) -> Rgb888 {
+    match compound.to_ascii_uppercase() {
+        'S' => Rgb888::new(0xDA, 0x29, 0x1C), // soft: red
+        'M' => Rgb888::new(0xFF, 0xD1, 0x00), // medium: yellow
+        'H' => Rgb888::new(0xF0, 0xF0, 0xF0), // hard: white
+        'I' => Rgb888::new(0x39, 0xB5, 0x4A), // intermediate: green
+        _ => Rgb888::new(0x00, 0x67, 0xAD),   // wet: blue
+    }
 }
 
 /// Render a centered multi-line notice (e.g. "SLEEPING / FOR 24 HOURS").
@@ -686,10 +714,10 @@ mod kern_tests {
             leaderboard: Some(Leaderboard {
                 name: "MONACO GP".into(),
                 rows: vec![
-                    LeaderRow { name: "VERSTAPPEN".into(), value: "L42".into() },
-                    LeaderRow { name: "NORRIS".into(), value: "+2.1".into() },
-                    LeaderRow { name: "LECLERC".into(), value: "+5.8".into() },
-                    LeaderRow { name: "PIASTRI".into(), value: "+3.0".into() },
+                    LeaderRow { name: "VERSTAPPEN".into(), value: "L42".into(), ..Default::default() },
+                    LeaderRow { name: "NORRIS".into(), value: "+2.1".into(), ..Default::default() },
+                    LeaderRow { name: "LECLERC".into(), value: "+5.8".into(), ..Default::default() },
+                    LeaderRow { name: "PIASTRI".into(), value: "+3.0".into(), ..Default::default() },
                 ],
             }),
             champ: None,
@@ -863,6 +891,40 @@ mod kern_tests {
         assert!((23..=28).any(|y| (5..=20).any(|x| px565(&px, x, y) == white)), "ordinal at left");
     }
 
+    /// Timing-tower alignment: ranks sit centered in a fixed two-digit column,
+    /// so the three-letter codes start at the same x for "1" and "20" and the
+    /// right-aligned timings line up.
+    #[test]
+    fn f1_rank_column_aligns_codes() {
+        use crate::model::{Leaderboard, LeaderRow};
+        let row = |rank: &str| LeaderRow {
+            rank: rank.into(),
+            name: "VER".into(),
+            value: "+1.0".into(),
+            color: None,
+            tire: Some('S'),
+        };
+        let mut g = sit_game("f1", "", "", Situation::Football {
+            down_string: String::new(), ball_position: String::new(), home_possession: None,
+        });
+        g.situation = None;
+        g.home = TeamSide::empty("");
+        g.leaderboard = Some(Leaderboard { name: "GP".into(), rows: vec![row("1"), row("20")] });
+        let (_, px) = render_game(&g);
+
+        // Leftmost lit pixel past the rank column, per row band (baselines 12, 18).
+        let code_start = |band: core::ops::RangeInclusive<i32>| {
+            (10..40)
+                .find(|&x| band.clone().any(|y| px565(&px, x, y) != 0))
+                .expect("code drawn")
+        };
+        assert_eq!(
+            code_start(7..=12),
+            code_start(13..=18),
+            "codes must start at the same x for one- and two-digit ranks"
+        );
+    }
+
     /// Deep leaderboards render tall for the board (6px pitch past the 32px
     /// panel); four or fewer rows stay static, and the app-facing render_game
     /// is always static.
@@ -876,7 +938,7 @@ mod kern_tests {
         g.home = TeamSide::empty("");
         let rows = |n: usize| Some(Leaderboard {
             name: "OPEN".into(),
-            rows: (0..n).map(|i| LeaderRow { name: format!("PLAYER{i}"), value: format!("-{i}") }).collect(),
+            rows: (0..n).map(|i| LeaderRow { name: format!("PLAYER{i}"), value: format!("-{i}"), ..Default::default() }).collect(),
         });
 
         g.leaderboard = rows(10);

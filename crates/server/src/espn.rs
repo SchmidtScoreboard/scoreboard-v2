@@ -277,7 +277,7 @@ fn parse_golf(sport_id: &str, ev: LeaderEvent) -> Option<Game> {
                 .map(|s| s.display_value.clone())
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| "E".into());
-            Some((pos, LeaderRow { name, value: score }))
+            Some((pos, LeaderRow { name, value: score, ..Default::default() }))
         })
         .collect();
     ranked.sort_by_key(|(p, _)| *p);
@@ -328,17 +328,22 @@ fn parse_f1(ev: LeaderEvent) -> Vec<Game> {
                 .filter_map(|(i, c)| {
                     let code = f1_code(&c.athlete.as_ref()?.display_name);
                     let order = if c.order > 0 { c.order } else { i as i64 + 1 };
-                    // Broadcast style: "P1 VER" with the gap/lap right-aligned.
-                    // The position lives in the name now, so an empty stat
-                    // (upcoming sessions) just shows the grid slot + code.
-                    let name = format!("P{order} {code}");
                     let value = c
                         .statistics
                         .first()
                         .map(|s| s.display_value.clone())
                         .filter(|v| !v.is_empty())
                         .unwrap_or_default();
-                    Some((order, LeaderRow { name, value }))
+                    // Broadcast timing-tower style: rank centered in a fixed
+                    // column, three-letter code in the team's color, gap/lap
+                    // right-aligned. (No tire data in ESPN's feed.)
+                    Some((order, LeaderRow {
+                        rank: order.to_string(),
+                        color: f1_team_color(&code),
+                        name: code,
+                        value,
+                        tire: None,
+                    }))
                 })
                 .collect();
             drivers.sort_by_key(|(o, _)| *o);
@@ -381,6 +386,27 @@ fn f1_last_name(full: &str) -> String {
         .chars()
         .filter(|c| c.is_alphanumeric())
         .collect()
+}
+
+/// Team colors by driver code, per the broadcast timing tower. One table per
+/// season (silly-season moves = one-line edits); unknown codes render white,
+/// so a lineup change degrades gracefully instead of mis-coloring.
+fn f1_team_color(code: &str) -> Option<embedded_graphics::pixelcolor::Rgb888> {
+    use crate::model::hex_to_rgb;
+    let hex = match code {
+        "VER" | "TSU" => "3671C6",         // Red Bull
+        "LEC" | "HAM" => "E8002D",         // Ferrari
+        "RUS" | "ANT" => "27F4D2",         // Mercedes
+        "NOR" | "PIA" => "FF8000",         // McLaren
+        "ALO" | "STR" => "229971",         // Aston Martin
+        "GAS" | "COL" => "0093CC",         // Alpine
+        "ALB" | "SAI" => "64C4FF",         // Williams
+        "LAW" | "HAD" => "6692FF",         // Racing Bulls
+        "HUL" | "BOR" => "52E252",         // Sauber
+        "OCO" | "BEA" => "B6BABD",         // Haas
+        _ => return None,
+    };
+    Some(hex_to_rgb(hex))
 }
 
 /// Official-style broadcast code: the surname's first three letters
@@ -619,6 +645,17 @@ impl SportsDataSource for DemoSource {
     }
 }
 
+/// Demo timing-tower row: rank + code + team color + tire compound.
+fn f1_row(rank: u32, code: &str, value: &str, tire: char) -> LeaderRow {
+    LeaderRow {
+        rank: rank.to_string(),
+        name: code.into(),
+        value: value.into(),
+        color: f1_team_color(code),
+        tire: Some(tire),
+    }
+}
+
 pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
     // The scripted ending: live for the first five minutes of the server's life,
     // then FINAL — exercises the observed live->Final transition and the
@@ -854,16 +891,16 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(),
             // Ten deep so the board's scrolling leaderboard shows in demo mode.
             leaderboard: Some(Leaderboard { name: "MASTERS".into(), rows: vec![
-                LeaderRow { name: "SCHEFFLER".into(), value: "-8".into() },
-                LeaderRow { name: "MCILROY".into(), value: "-6".into() },
-                LeaderRow { name: "MORIKAWA".into(), value: "-5".into() },
-                LeaderRow { name: "SCHAUFFELE".into(), value: "-3".into() },
-                LeaderRow { name: "RAHM".into(), value: "-2".into() },
-                LeaderRow { name: "FLEETWOOD".into(), value: "-2".into() },
-                LeaderRow { name: "HOVLAND".into(), value: "-1".into() },
-                LeaderRow { name: "THOMAS".into(), value: "E".into() },
-                LeaderRow { name: "SPIETH".into(), value: "+1".into() },
-                LeaderRow { name: "DAY".into(), value: "+2".into() },
+                LeaderRow { name: "SCHEFFLER".into(), value: "-8".into(), ..Default::default() },
+                LeaderRow { name: "MCILROY".into(), value: "-6".into(), ..Default::default() },
+                LeaderRow { name: "MORIKAWA".into(), value: "-5".into(), ..Default::default() },
+                LeaderRow { name: "SCHAUFFELE".into(), value: "-3".into(), ..Default::default() },
+                LeaderRow { name: "RAHM".into(), value: "-2".into(), ..Default::default() },
+                LeaderRow { name: "FLEETWOOD".into(), value: "-2".into(), ..Default::default() },
+                LeaderRow { name: "HOVLAND".into(), value: "-1".into(), ..Default::default() },
+                LeaderRow { name: "THOMAS".into(), value: "E".into(), ..Default::default() },
+                LeaderRow { name: "SPIETH".into(), value: "+1".into(), ..Default::default() },
+                LeaderRow { name: "DAY".into(), value: "+2".into(), ..Default::default() },
             ] }),
             champ: Some(Champ { tier: "major".into(), label: "The Masters".into() }),
             session: None,
@@ -875,10 +912,10 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             away: TeamSide::empty("LPGA"), home: TeamSide::empty(""),
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(),
             leaderboard: Some(Leaderboard { name: "US OPEN".into(), rows: vec![
-                LeaderRow { name: "KORDA".into(), value: "-7".into() },
-                LeaderRow { name: "THITIKUL".into(), value: "-5".into() },
-                LeaderRow { name: "VU".into(), value: "-4".into() },
-                LeaderRow { name: "SAIGO".into(), value: "-2".into() },
+                LeaderRow { name: "KORDA".into(), value: "-7".into(), ..Default::default() },
+                LeaderRow { name: "THITIKUL".into(), value: "-5".into(), ..Default::default() },
+                LeaderRow { name: "VU".into(), value: "-4".into(), ..Default::default() },
+                LeaderRow { name: "SAIGO".into(), value: "-2".into(), ..Default::default() },
             ] }),
             champ: Some(Champ { tier: "major".into(), label: "U.S. Women's Open".into() }),
             session: None,
@@ -889,17 +926,19 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             id: "demo-f1".into(), sport_id: "f1".into(),
             away: TeamSide::empty("F1"), home: TeamSide::empty(""),
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(),
+            // Full broadcast treatment: team colors + tire compounds (live
+            // ESPN rows carry no tire data, so the demo is where dots show).
             leaderboard: Some(Leaderboard { name: "MONACO GP".into(), rows: vec![
-                LeaderRow { name: "P1 VER".into(), value: "LAP 42".into() },
-                LeaderRow { name: "P2 NOR".into(), value: "+2.1".into() },
-                LeaderRow { name: "P3 LEC".into(), value: "+5.8".into() },
-                LeaderRow { name: "P4 PIA".into(), value: "+9.0".into() },
-                LeaderRow { name: "P5 RUS".into(), value: "+12.4".into() },
-                LeaderRow { name: "P6 HAM".into(), value: "+15.9".into() },
-                LeaderRow { name: "P7 ALO".into(), value: "+21.2".into() },
-                LeaderRow { name: "P8 SAI".into(), value: "+24.7".into() },
-                LeaderRow { name: "P9 GAS".into(), value: "+31.0".into() },
-                LeaderRow { name: "P10 ALB".into(), value: "+38.5".into() },
+                f1_row(1, "VER", "LAP 42", 'M'),
+                f1_row(2, "NOR", "+2.1", 'M'),
+                f1_row(3, "LEC", "+5.8", 'S'),
+                f1_row(4, "PIA", "+9.0", 'M'),
+                f1_row(5, "RUS", "+12.4", 'H'),
+                f1_row(6, "HAM", "+15.9", 'S'),
+                f1_row(7, "ALO", "+21.2", 'H'),
+                f1_row(8, "SAI", "+24.7", 'M'),
+                f1_row(9, "GAS", "+31.0", 'I'),
+                f1_row(10, "ALB", "+38.5", 'W'),
             ] }),
             champ: None,
             session: Some("race".into()),
@@ -1518,10 +1557,11 @@ mod leader_tests {
         assert_eq!(race.id, "evt1-race");
         assert_eq!(race.status, GameStatus::Active);
         assert_eq!(race.leaderboard.as_ref().unwrap().name, "BRITISH GP");
-        // Broadcast style: position prefix + three-letter code.
+        // Broadcast style: rank column + three-letter code + team color.
         let rows = &race.leaderboard.as_ref().unwrap().rows;
-        assert_eq!(rows.first().map(|r| r.name.as_str()), Some("P1 VER"));
-        assert_eq!(rows.get(1).map(|r| r.name.as_str()), Some("P2 NOR"));
+        assert_eq!(rows.first().map(|r| (r.rank.as_str(), r.name.as_str())), Some(("1", "VER")));
+        assert_eq!(rows.get(1).map(|r| r.name.as_str()), Some("NOR"));
+        assert!(rows.first().unwrap().color.is_some(), "VER maps to a team color");
     }
 
     /// Golf majors get the "major" champ tier; regular tour stops don't.

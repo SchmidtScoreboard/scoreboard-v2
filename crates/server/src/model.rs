@@ -36,10 +36,19 @@ impl TeamSide {
 }
 
 /// A ranked entry in a leaderboard sport (golfer/driver name + score/gap).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct LeaderRow {
+    /// Position label drawn centered in a fixed two-digit column ("1".."20");
+    /// empty = no rank column (golf keeps names at the left edge).
+    pub rank: String,
     pub name: String,
     pub value: String,
+    /// Team color for the rank + name (F1 broadcast style); None = white.
+    pub color: Option<embedded_graphics::pixelcolor::Rgb888>,
+    /// Tire compound indicator drawn as a colored dot after the name:
+    /// 'S'oft, 'M'edium, 'H'ard, 'I'ntermediate, 'W'et. ESPN's feed carries
+    /// no tire data, so live rows stay None (the demo shows the treatment).
+    pub tire: Option<char>,
 }
 
 /// Golf tournament / F1 race: an event name + ranked individuals (top few).
