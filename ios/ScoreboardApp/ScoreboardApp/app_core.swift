@@ -597,10 +597,13 @@ public protocol ScoreboardClientProtocol: AnyObject {
 
     func setBrightness(boardId: String, level: UInt8)
 
+    func setDwell(boardId: String, secs: UInt32)
+
     /**
      * Seconds each game holds the panel before the rotation advances.
+     * Per-league "time per event" override; None reverts to the board default.
      */
-    func setDwell(boardId: String, secs: UInt32)
+    func setLeagueDwell(boardId: String, sportId: String, secs: UInt32?)
 
     func setListener(listener: ClientListener)
 
@@ -815,13 +818,22 @@ open class ScoreboardClient:
     }
     }
 
-    /**
-     * Seconds each game holds the panel before the rotation advances.
-     */
     open func setDwell(boardId: String, secs: UInt32) { try! rustCall {
         uniffi_app_core_fn_method_scoreboardclient_set_dwell(self.uniffiClonePointer(),
                                                              FfiConverterString.lower(boardId),
                                                              FfiConverterUInt32.lower(secs), $0)
+    }
+    }
+
+    /**
+     * Seconds each game holds the panel before the rotation advances.
+     * Per-league "time per event" override; None reverts to the board default.
+     */
+    open func setLeagueDwell(boardId: String, sportId: String, secs: UInt32?) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_set_league_dwell(self.uniffiClonePointer(),
+                                                                    FfiConverterString.lower(boardId),
+                                                                    FfiConverterString.lower(sportId),
+                                                                    FfiConverterOptionUInt32.lower(secs), $0)
     }
     }
 
@@ -1370,13 +1382,22 @@ public struct UiSportConfig {
     public var sportId: String
     public var favoriteTeamIds: [String]
     public var championshipOptionId: String?
+    /**
+     * Per-league "time per event" override (seconds); None = board default.
+     */
+    public var dwellSecs: UInt32?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(sportId: String, favoriteTeamIds: [String], championshipOptionId: String?) {
+    public init(sportId: String, favoriteTeamIds: [String], championshipOptionId: String?,
+                /**
+                    * Per-league "time per event" override (seconds); None = board default.
+                    */ dwellSecs: UInt32?)
+    {
         self.sportId = sportId
         self.favoriteTeamIds = favoriteTeamIds
         self.championshipOptionId = championshipOptionId
+        self.dwellSecs = dwellSecs
     }
 }
 
@@ -1391,6 +1412,9 @@ extension UiSportConfig: Equatable, Hashable {
         if lhs.championshipOptionId != rhs.championshipOptionId {
             return false
         }
+        if lhs.dwellSecs != rhs.dwellSecs {
+            return false
+        }
         return true
     }
 
@@ -1398,6 +1422,7 @@ extension UiSportConfig: Equatable, Hashable {
         hasher.combine(sportId)
         hasher.combine(favoriteTeamIds)
         hasher.combine(championshipOptionId)
+        hasher.combine(dwellSecs)
     }
 }
 
@@ -1410,7 +1435,8 @@ public struct FfiConverterTypeUiSportConfig: FfiConverterRustBuffer {
             try UiSportConfig(
                 sportId: FfiConverterString.read(from: &buf),
                 favoriteTeamIds: FfiConverterSequenceString.read(from: &buf),
-                championshipOptionId: FfiConverterOptionString.read(from: &buf)
+                championshipOptionId: FfiConverterOptionString.read(from: &buf),
+                dwellSecs: FfiConverterOptionUInt32.read(from: &buf)
             )
     }
 
@@ -1418,6 +1444,7 @@ public struct FfiConverterTypeUiSportConfig: FfiConverterRustBuffer {
         FfiConverterString.write(value.sportId, into: &buf)
         FfiConverterSequenceString.write(value.favoriteTeamIds, into: &buf)
         FfiConverterOptionString.write(value.championshipOptionId, into: &buf)
+        FfiConverterOptionUInt32.write(value.dwellSecs, into: &buf)
     }
 }
 
@@ -1878,6 +1905,30 @@ extension FfiConverterCallbackInterfaceClientListener: FfiConverter {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = UInt32?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt32.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt32.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
     typealias SwiftType = UInt64?
 
@@ -2134,7 +2185,10 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_method_scoreboardclient_set_brightness() != 13017 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_method_scoreboardclient_set_dwell() != 50551 {
+    if uniffi_app_core_checksum_method_scoreboardclient_set_dwell() != 21881 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_scoreboardclient_set_league_dwell() != 25672 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_listener() != 33592 {

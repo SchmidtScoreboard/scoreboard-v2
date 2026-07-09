@@ -46,6 +46,8 @@ pub struct UiSportConfig {
     pub sport_id: String,
     pub favorite_team_ids: Vec<String>,
     pub championship_option_id: Option<String>,
+    /// Per-league "time per event" override (seconds); None = board default.
+    pub dwell_secs: Option<u32>,
 }
 /// What the panel shows while off / idle.
 #[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq)]
@@ -412,6 +414,11 @@ impl ScoreboardClient {
     }
 
     /// Seconds each game holds the panel before the rotation advances.
+    /// Per-league "time per event" override; None reverts to the board default.
+    pub fn set_league_dwell(&self, board_id: String, sport_id: String, secs: Option<u32>) {
+        let _ = self.tx.send(Out::Command(board_id, Command::SetLeagueDwell { sport_id, secs }));
+    }
+
     pub fn set_dwell(&self, board_id: String, secs: u32) {
         let _ = self.tx.send(Out::Command(board_id, Command::SetDwell { secs }));
     }
@@ -581,6 +588,7 @@ fn to_ui_configs(sports: Vec<PSportConfig>) -> Vec<UiSportConfig> {
             sport_id: s.sport_id,
             favorite_team_ids: s.favorite_team_ids,
             championship_option_id: s.championship_option_id,
+            dwell_secs: s.dwell_secs,
         })
         .collect()
 }

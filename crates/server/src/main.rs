@@ -726,9 +726,19 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
         if !chosen.is_empty() {
             // Games override any lingering notice ("no games" message ends early).
             state.notices.lock().unwrap().remove(board_id);
-            let dwell_ms = cfg.dwell_secs.clamp(3, 60) * 1000;
+            let base_dwell_ms = cfg.dwell_secs.clamp(3, 60) * 1000;
             let mut rotation = Vec::new();
             for g in &chosen {
+                // Per-league "time per event" override, else the board default
+                // — the scroll pass syncs to whichever applies, so a 30s F1
+                // override buys a slower, more readable leaderboard glide.
+                let dwell_ms = cfg
+                    .sports
+                    .iter()
+                    .find(|s| s.sport_id == g.sport_id)
+                    .and_then(|s| s.dwell_secs)
+                    .map(|s| s.clamp(3, 60) * 1000)
+                    .unwrap_or(base_dwell_ms);
                 // Deep leaderboards render TALL; the board scrolls a 32px
                 // window over them, one full pass per dwell (app cards keep
                 // the static 4-row frame).
@@ -1505,6 +1515,43 @@ mod tests {
         }
     }
 
+    /// A per-league dwell override retimes ONLY that league's entries; others
+    /// keep the board default. Scrolling frames sync to whichever applies.
+    #[test]
+    fn league_dwell_override_retimes_that_league_only() {
+        let state = AppState::new_ephemeral();
+        *state.games.lock().unwrap() = espn::demo_games(0, 0);
+        crate::ws::apply_command(&state, "b1", Command::SetLeagueDwell {
+            sport_id: "f1".into(),
+            secs: Some(30),
+        });
+        let m = manifest_for_board(&state, "b1");
+        let games = state.games.lock().unwrap().clone();
+        let cfg = state.config_for("b1");
+        let chosen = chosen_games(&state, &cfg);
+        assert_eq!(m.rotation.len(), chosen.len());
+        let mut saw_f1 = false;
+        for (entry, g) in m.rotation.iter().zip(&chosen) {
+            if g.sport_id == "f1" {
+                assert_eq!(entry.dwell_ms, 30_000, "override applies to F1");
+                assert!(entry.scroll, "demo F1 is deep enough to scroll");
+                saw_f1 = true;
+            } else {
+                assert_eq!(entry.dwell_ms, 10_000, "everything else keeps the default");
+            }
+        }
+        assert!(saw_f1, "demo slate should include F1");
+        drop(games);
+
+        // None reverts to the board default.
+        crate::ws::apply_command(&state, "b1", Command::SetLeagueDwell {
+            sport_id: "f1".into(),
+            secs: None,
+        });
+        let m = manifest_for_board(&state, "b1");
+        assert!(m.rotation.iter().all(|e| e.dwell_ms == 10_000), "cleared override");
+    }
+
     /// The frame cache stays bounded: ids no current manifest references are
     /// dropped after one grace generation (a device may still be fetching the
     /// manifest we just replaced), while live ids always survive.
@@ -1590,16 +1637,19 @@ mod tests {
                         sport_id: "f1".into(),
                         favorite_team_ids: vec!["f1-f1".into()], // orphan from before the split
                         championship_option_id: Some("gp".into()),
+                        dwell_secs: None,
                     },
                     SportConfig {
                         sport_id: "nhl".into(),
                         favorite_team_ids: vec!["nhl-bos".into()],
                         championship_option_id: None,
+                        dwell_secs: None,
                     },
                     SportConfig {
                         sport_id: "golf".into(), // sport no longer in the catalog at all
                         favorite_team_ids: vec!["golf-pga".into()],
                         championship_option_id: None,
+                        dwell_secs: None,
                     },
                 ],
                 ..Default::default()
@@ -1641,6 +1691,7 @@ mod tests {
                 sport_id: sport.into(),
                 favorite_team_ids: vec![],
                 championship_option_id: Some(opt.into()),
+                dwell_secs: None,
             }],
             ..Default::default()
         };
@@ -1715,6 +1766,7 @@ mod tests {
                 sport_id: "nhl".into(),
                 favorite_team_ids: vec!["nhl-fav".into()],
                 championship_option_id: Some("all".into()),
+                dwell_secs: None,
             }],
             extra_game_ids: vec!["added-game".into()],
             ..Default::default()
@@ -2045,6 +2097,7 @@ mod tests {
             sport_id: "nhl".into(),
             favorite_team_ids: vec![],
             championship_option_id: Some("conf".into()),
+            dwell_secs: None,
         });
         // "Conference Finals+" covers the cup final but not an early round,
         // and the regular-season game isn't a championship game at all.
@@ -2123,6 +2176,7 @@ mod tests {
             sport_id: "nhl".into(),
             favorite_team_ids: vec!["nhl-bos".into()],
             championship_option_id: None,
+            dwell_secs: None,
         });
         assert_eq!(ids(&cfg), vec!["g1".to_string()]);
 

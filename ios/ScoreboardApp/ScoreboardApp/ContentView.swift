@@ -96,6 +96,7 @@ struct BoardInfo {
     var offState: UiOffState = .clock
     var sleepHours: UInt32 = 24
     var dwellSecs: UInt32 = 10
+    var leagueDwell: [String: UInt32] = [:]     // sportId -> per-league override
     /// Unix seconds when a button-sleep auto-wakes (nil when not sleeping).
     var wakeAt: UInt64?
 }
@@ -388,7 +389,10 @@ final class BoardViewModel: ObservableObject {
             let teams = ids.compactMap { tid in sport.teams.first { $0.id == tid } }
             let champId = st.championship[sport.id] ?? "none"
             let big = champId == "none" ? nil : sport.championshipOptions.first { $0.id == champId }
-            if !teams.isEmpty || big != nil {
+            // A dwell override alone earns a card too — otherwise it would be
+            // active but invisible (set via Add League without subscribing, or
+            // left behind after the last favorite is removed).
+            if !teams.isEmpty || big != nil || st.leagueDwell[sport.id] != nil {
                 prefs.append(LeaguePref(sport: sport, teams: teams, bigGame: big))
             }
         }
@@ -591,9 +595,11 @@ final class BoardViewModel: ObservableObject {
         if selectedBoardId == nil { selectedBoardId = boardId }
         var fav: [String: [String]] = [:]
         var champ: [String: String] = [:]
+        var dwell: [String: UInt32] = [:]
         for s in c.sports {
             fav[s.sportId] = s.favoriteTeamIds
             if let o = s.championshipOptionId { champ[s.sportId] = o }
+            if let d = s.dwellSecs { dwell[s.sportId] = d }
         }
         mutate(boardId) {
             $0.brightness = Double(c.brightness)
@@ -607,6 +613,7 @@ final class BoardViewModel: ObservableObject {
             $0.offState = c.offState
             $0.sleepHours = c.sleepHours
             $0.dwellSecs = c.dwellSecs
+            $0.leagueDwell = dwell
             $0.wakeAt = c.wakeAt
         }
     }
@@ -622,6 +629,16 @@ final class BoardViewModel: ObservableObject {
         guard let id = selectedBoardId else { return }
         mutate(id) { $0.sleepHours = h }
         client?.setSleepHours(boardId: id, hours: h)
+    }
+
+    /// Per-league "time per event" override (nil = board default).
+    func leagueDwellSecs(_ sportId: String) -> UInt32? { current.leagueDwell[sportId] }
+    func setLeagueDwell(_ sportId: String, _ secs: UInt32?) {
+        guard let id = selectedBoardId else { return }
+        mutate(id) {
+            if let secs { $0.leagueDwell[sportId] = secs } else { $0.leagueDwell.removeValue(forKey: sportId) }
+        }
+        client?.setLeagueDwell(boardId: id, sportId: sportId, secs: secs)
     }
 
     func setDwell(_ secs: UInt32) {
@@ -1030,10 +1047,10 @@ struct DashboardView: View {
             }
 
             HStack(spacing: 6) {
-                Text("Time per game")
+                Text("Time per event")
                 infoButton(.dwell)
                 Spacer()
-                Picker("Time per game", selection: Binding(
+                Picker("Time per event", selection: Binding(
                     get: { model.current.dwellSecs },
                     set: { model.setDwell($0) }
                 )) {
@@ -1380,6 +1397,47 @@ struct DashboardView: View {
                     }
                 }
             }
+
+            // Per-league "time per event" override — shown only when set, so
+            // cards stay clean for leagues riding the board default.
+            if let secs = model.leagueDwellSecs(pref.sport.id) {
+                Menu {
+                    Button("Board default (\(model.current.dwellSecs)s)") {
+                        model.setLeagueDwell(pref.sport.id, nil)
+                    }
+                    ForEach([UInt32(5), 7, 10, 15, 20, 30], id: \.self) { s in
+                        Button {
+                            model.setLeagueDwell(pref.sport.id, s)
+                        } label: {
+                            if s == secs {
+                                Label("\(s) seconds", systemImage: "checkmark")
+                            } else {
+                                Text("\(s) seconds")
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "timer")
+                            .foregroundStyle(.cyan)
+                            .frame(width: 24)
+                        Text("\(secs) seconds per event")
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .tint(.primary)
+                .swipeActions(edge: .trailing) {
+                    Button(role: .destructive) {
+                        model.setLeagueDwell(pref.sport.id, nil)
+                    } label: {
+                        Label("Use default", systemImage: "timer.slash")
+                    }
+                }
+            }
         } header: {
             if showsAreaHeader {
                 leaguePrefsHeaderContent
@@ -1408,7 +1466,7 @@ enum SettingsInfoTopic: String, Identifiable {
         switch self {
         case .whenOff: "When off"
         case .sleep: "Sleep duration"
-        case .dwell: "Time per game"
+        case .dwell: "Time per event"
         }
     }
 
@@ -1433,11 +1491,14 @@ enum SettingsInfoTopic: String, Identifiable {
             """
         case .dwell:
             """
-            How long each game stays on the panel before the rotation moves to \
-            the next one.
+            How long each event stays on the panel before the rotation moves \
+            to the next one. Scrolling leaderboards (golf, F1) fit one full \
+            scroll pass into this time.
 
-            Shorter times cycle through more games per minute; longer times \
-            make each score easier to catch at a glance.
+            Shorter times cycle through more events per minute; longer times \
+            make each one easier to catch. Any league can override this from \
+            its League Preferences editor — give F1 30 seconds to scroll while \
+            baseball flashes by in 10.
             """
         }
     }
@@ -1949,6 +2010,19 @@ struct LeagueEditorView: View {
 
     private var editorList: some View {
         List {
+            Section {
+                Picker("Time per event", selection: Binding(
+                    get: { model.leagueDwellSecs(sport.id) ?? 0 },
+                    set: { model.setLeagueDwell(sport.id, $0 == 0 ? nil : $0) }
+                )) {
+                    Text("Board default (\(model.current.dwellSecs)s)").tag(UInt32(0))
+                    ForEach([UInt32(5), 7, 10, 15, 20, 30], id: \.self) { s in
+                        Text("\(s) seconds").tag(s)
+                    }
+                }
+            } footer: {
+                Text("How long this league's events hold the panel — leaderboards fit a full scroll pass into it.")
+            }
             if !sport.championshipOptions.isEmpty {
                 Section(optionsTitle) {
                     Picker("Show", selection: $champ) {

@@ -417,6 +417,11 @@ void uniffi_app_core_fn_method_scoreboardclient_set_brightness(void*_Nonnull ptr
 void uniffi_app_core_fn_method_scoreboardclient_set_dwell(void*_Nonnull ptr, RustBuffer board_id, uint32_t secs, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_DWELL
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_DWELL
+void uniffi_app_core_fn_method_scoreboardclient_set_league_dwell(void*_Nonnull ptr, RustBuffer board_id, RustBuffer sport_id, RustBuffer secs, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_LISTENER
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_LISTENER
 void uniffi_app_core_fn_method_scoreboardclient_set_listener(void*_Nonnull ptr, uint64_t listener, RustCallStatus *_Nonnull out_status
@@ -820,6 +825,12 @@ uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_brightness(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_DWELL
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_DWELL
 uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_dwell(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_DWELL
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_DWELL
+uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_league_dwell(void
     
 );
 #endif

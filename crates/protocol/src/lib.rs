@@ -148,6 +148,10 @@ pub struct SportConfig {
     pub sport_id: String,
     pub favorite_team_ids: Vec<String>,
     pub championship_option_id: Option<String>,
+    /// Per-league "time per event" override (seconds); None = the board's
+    /// default dwell. Lets F1 scroll for 30s while baseball flashes by in 10.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dwell_secs: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -236,6 +240,8 @@ pub enum Command {
     ClearWakeTimer,
     /// Seconds each game holds the panel before the rotation advances.
     SetDwell { secs: u32 },
+    /// Per-league dwell override; None reverts the league to the board default.
+    SetLeagueDwell { sport_id: String, secs: Option<u32> },
     Rename { name: String },
 }
 

@@ -291,6 +291,8 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
                 championship_option_id,
             } => {
                 if let Some(s) = cfg.sports.iter_mut().find(|s| s.sport_id == sport_id) {
+                    // Field-wise on purpose: a league's dwell override survives
+                    // favorite/option edits.
                     s.favorite_team_ids = favorite_team_ids;
                     s.championship_option_id = championship_option_id;
                 } else {
@@ -298,6 +300,7 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
                         sport_id,
                         favorite_team_ids,
                         championship_option_id,
+                        dwell_secs: None,
                     });
                 }
             }
@@ -335,6 +338,17 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
             // (only meaningful while asleep; harmless no-op when awake).
             Command::ClearWakeTimer => cfg.wake_at = None,
             Command::SetDwell { secs } => cfg.dwell_secs = secs.clamp(3, 60),
+            // Per-league "time per event": Some overrides the board default for
+            // that league's games (F1 can scroll 30s while MLB flashes by in
+            // 10); None reverts to the default.
+            Command::SetLeagueDwell { sport_id, secs } => {
+                let secs = secs.map(|s| s.clamp(3, 60));
+                if let Some(s) = cfg.sports.iter_mut().find(|s| s.sport_id == sport_id) {
+                    s.dwell_secs = secs;
+                } else if secs.is_some() {
+                    cfg.sports.push(SportConfig { sport_id, dwell_secs: secs, ..Default::default() });
+                }
+            }
             // Deliberately no catch-all: a new Command variant should be a compile
             // error here, not a silently ignored no-op.
         }
