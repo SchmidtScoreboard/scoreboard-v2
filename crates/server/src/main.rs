@@ -730,22 +730,11 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
             let mut rotation = Vec::new();
             for g in &chosen {
                 // Deep leaderboards render TALL; the board scrolls a 32px
-                // window over them (app cards keep the static 4-row frame).
+                // window over them, one full pass per dwell (app cards keep
+                // the static 4-row frame).
                 let (id, px, scrolls) = render::render_board_frame(g);
-                let entry_dwell = if scrolls {
-                    // At least one full down-and-up pass, whatever the dwell.
-                    let travel =
-                        (px.len() / (FRAME_WIDTH * 2) - FRAME_HEIGHT) as u32 * SCROLL_STEP_MS;
-                    dwell_ms.max(2 * (SCROLL_HOLD_MS + travel))
-                } else {
-                    dwell_ms
-                };
                 state.cache_frame(id.clone(), px);
-                rotation.push(RotationEntry {
-                    frame_id: id,
-                    dwell_ms: entry_dwell,
-                    scroll_step_ms: scrolls.then_some(SCROLL_STEP_MS),
-                });
+                rotation.push(RotationEntry { frame_id: id, dwell_ms, scroll: scrolls });
             }
             return Manifest {
                 rotation,
@@ -771,7 +760,7 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
                 let (id, px) = render::render_notice(&lines, Some(frac));
                 state.cache_frame(id.clone(), px);
                 return Manifest {
-                    rotation: vec![RotationEntry { frame_id: id, dwell_ms: 60_000, scroll_step_ms: None }],
+                    rotation: vec![RotationEntry { frame_id: id, dwell_ms: 60_000, scroll: false }],
                     display_on: true,
                     off_state: cfg.off_state,
                     brightness: cfg.brightness,
@@ -788,7 +777,7 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
         use chrono::Timelike;
         let (id, px) = render::render_clock(now.hour(), now.minute());
         state.cache_frame(id.clone(), px);
-        vec![RotationEntry { frame_id: id, dwell_ms: 60_000, scroll_step_ms: None }]
+        vec![RotationEntry { frame_id: id, dwell_ms: 60_000, scroll: false }]
     } else {
         vec![]
     };
@@ -1494,26 +1483,23 @@ mod tests {
         assert!(!cfg.power && cfg.wake_at.is_none(), "indefinite off: asleep, no timer");
     }
 
-    /// Deep leaderboards get a scrolling manifest entry whose dwell covers at
-    /// least one full down-and-up pass; team games stay static.
+    /// Deep leaderboards get a scrolling manifest entry; the dwell stays the
+    /// user's "Time per game" (the board fits one full pass INTO it), and team
+    /// games stay static.
     #[test]
     fn manifest_scrolls_deep_leaderboards() {
         let state = AppState::new_ephemeral();
         *state.games.lock().unwrap() = espn::demo_games(0, 0);
         let m = manifest_for_board(&state, "b1");
-        let ids: HashMap<FrameId, RotationEntry> =
-            m.rotation.iter().map(|e| (e.frame_id.clone(), e.clone())).collect();
-        let scrolled: Vec<&RotationEntry> =
-            ids.values().filter(|e| e.scroll_step_ms.is_some()).collect();
+        let dwell = state.config_for("b1").dwell_secs * 1000;
+        let scrolled: Vec<&RotationEntry> = m.rotation.iter().filter(|e| e.scroll).collect();
         assert!(!scrolled.is_empty(), "demo golf/F1 should scroll");
         for e in &scrolled {
             let px = state.frames.lock().unwrap().get(&e.frame_id).map(|(_, p)| p.clone()).unwrap();
-            let travel = (px.len() / (FRAME_WIDTH * 2) - FRAME_HEIGHT) as u32 * SCROLL_STEP_MS;
             assert!(px.len() > FRAME_BYTES, "scroll entries carry tall frames");
-            assert!(e.dwell_ms >= 2 * (SCROLL_HOLD_MS + travel), "dwell fits a full pass");
+            assert_eq!(e.dwell_ms, dwell, "scroll syncs to Time per game, not the reverse");
         }
-        let static_entries = m.rotation.iter().filter(|e| e.scroll_step_ms.is_none());
-        for e in static_entries {
+        for e in m.rotation.iter().filter(|e| !e.scroll) {
             let px = state.frames.lock().unwrap().get(&e.frame_id).map(|(_, p)| p.clone()).unwrap();
             assert_eq!(px.len(), FRAME_BYTES, "static entries stay panel-sized");
         }

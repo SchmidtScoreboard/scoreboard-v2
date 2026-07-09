@@ -29,7 +29,6 @@ use embedded_graphics::{
 };
 use scoreboard_protocol::{
     rgb565_to_888, ClientMsg, FrameId, Manifest, FRAME_HEIGHT, FRAME_PIXELS, FRAME_WIDTH,
-    SCROLL_HOLD_MS,
 };
 
 const DOUBLE_WINDOW_MS: u64 = 400;
@@ -437,19 +436,20 @@ impl Board {
             return buf;
         };
         // Frames taller than the panel scroll: show a 32px window whose offset
-        // ping-pongs down and back up the frame on the manifest's step timing.
+        // runs one full pass per dwell, in fifths — hold, down, hold, up, hold
+        // — so the rotation advances from a resting frame, never mid-glide.
         // The phase clock is time-in-this-entry, which same-shape manifest
         // refreshes deliberately preserve — a score update mid-scroll doesn't
         // yank the view back to the top.
         let frame_h = px.len() / (FRAME_WIDTH * 2);
-        let row0 = match entry.scroll_step_ms {
-            Some(step) if step > 0 && frame_h > FRAME_HEIGHT => scroll_offset(
+        let row0 = if entry.scroll && frame_h > FRAME_HEIGHT {
+            scroll_offset(
                 self.clock.saturating_sub(self.last_advance),
+                entry.dwell_ms as u64,
                 frame_h - FRAME_HEIGHT,
-                step as u64,
-                SCROLL_HOLD_MS as u64,
-            ),
-            _ => 0,
+            )
+        } else {
+            0
         };
         // No dimming here — brightness is applied once to the whole framebuffer
         // in `framebuffer()`. Scaling the frame by the manifest value here too
@@ -592,26 +592,24 @@ fn spinner(c: &mut Canvas, anim: u32, y: i32) {
 }
 
 /// Scale every pixel by `brightness` (10..=100) — the encoder's global dimmer.
-/// Ping-pong vertical scroll offset at time `t` (ms) into the cycle: hold at
-/// the top, glide down 1px per `step_ms`, hold at the bottom, glide back.
-/// Repeats forever; `max_off` is frame height minus the panel height.
-fn scroll_offset(t: u64, max_off: usize, step_ms: u64, hold_ms: u64) -> usize {
-    let travel = max_off as u64 * step_ms;
-    let cycle = 2 * (hold_ms + travel);
-    // step_ms == 0 would divide by zero in the glide branches — and a panic
-    // here is a device reboot. The caller guards it; stay total anyway.
-    if cycle == 0 || max_off == 0 || step_ms == 0 {
+/// Vertical scroll offset at `t` ms into a dwell: the dwell splits into five
+/// equal phases — hold top, glide down, hold bottom, glide up, hold top — so
+/// one full pass exactly fits the user's "Time per game" and the frame is at
+/// rest when the rotation advances. Repeats (via modulo) for single-entry
+/// rotations that never advance. Total for any input: a panic here is a
+/// device reboot.
+fn scroll_offset(t: u64, dwell_ms: u64, max_off: usize) -> usize {
+    let phase = dwell_ms / 5;
+    if phase == 0 || max_off == 0 {
         return 0;
     }
-    let t = t % cycle;
-    if t < hold_ms {
-        0
-    } else if t < hold_ms + travel {
-        ((t - hold_ms) / step_ms) as usize
-    } else if t < 2 * hold_ms + travel {
-        max_off
-    } else {
-        max_off - ((t - 2 * hold_ms - travel) / step_ms) as usize
+    let t = t % dwell_ms;
+    match t / phase {
+        0 => 0,                                                    // hold top
+        1 => (max_off as u64 * (t - phase) / phase) as usize,      // glide down
+        2 => max_off,                                              // hold bottom
+        3 => max_off - (max_off as u64 * (t - 3 * phase) / phase) as usize, // glide up
+        _ => 0,                                                    // hold top (+ dwell%5 remainder)
     }
 }
 
@@ -776,7 +774,7 @@ mod tests {
         let mk = |ids: &[&str]| Manifest {
             rotation: ids
                 .iter()
-                .map(|i| RotationEntry { frame_id: (*i).into(), dwell_ms: 1000, scroll_step_ms: None })
+                .map(|i| RotationEntry { frame_id: (*i).into(), dwell_ms: 1000, scroll: false })
                 .collect(),
             display_on: true,
             off_state: Default::default(),
@@ -814,13 +812,13 @@ mod tests {
         assert_eq!(b.framebuffer()[0], 0x00FF00, "new-shape rotation restarts at slot 0");
     }
 
-    /// A frame taller than the panel scrolls: hold at the top, glide down,
-    /// hold at the bottom, glide back. The window is pure clock math, so the
-    /// simulator and firmware animate identically.
+    /// A frame taller than the panel scrolls one full pass per dwell, in
+    /// fifths: hold, glide down, hold, glide up, hold — ending at rest so the
+    /// advance never cuts mid-glide. Pure clock math: simulator and firmware
+    /// animate identically.
     #[test]
     fn tall_frames_scroll_with_pingpong() {
-        use scoreboard_protocol::{RotationEntry, SCROLL_HOLD_MS};
-        let hold = SCROLL_HOLD_MS as u64;
+        use scoreboard_protocol::RotationEntry;
         // Distinct solid color per SAMPLED row: red = (8y+8) mod 256. Rows past
         // 31 wrap, but the test only ever samples rows 0..=8 (max_off = 8).
         let tall_h = 40usize; // max_off = 8
@@ -837,8 +835,8 @@ mod tests {
         b.on_manifest(Manifest {
             rotation: vec![RotationEntry {
                 frame_id: "tall".into(),
-                dwell_ms: 600_000,
-                scroll_step_ms: Some(100),
+                dwell_ms: 10_000, // fifths: 2s hold / 2s down / 2s hold / 2s up / 2s hold
+                scroll: true,
             }],
             display_on: true,
             off_state: Default::default(),
@@ -849,23 +847,25 @@ mod tests {
         // round-trip's replicated low bits).
         let top_row = |b: &Board| ((b.framebuffer()[0] >> 16 & 0xFF) >> 3) as usize;
 
-        b.tick(10); // in the top hold
+        b.tick(1_000); // mid top-hold
         let at_top = top_row(&b);
-        b.tick(hold + 350); // 3 steps into the glide
-        assert_eq!(top_row(&b), at_top + 3, "3 steps down after the top hold");
-        b.tick(hold + 100 * 8 + 10); // bottom hold (travel = 8 steps)
+        b.tick(3_000); // glide down, halfway (max_off 8 -> offset 4)
+        assert_eq!(top_row(&b), at_top + 4, "halfway down mid-glide");
+        b.tick(5_000); // bottom hold
         assert_eq!(top_row(&b), at_top + 8, "held at the bottom");
-        b.tick(2 * hold + 100 * 8 + 250); // 2 steps back up
-        assert_eq!(top_row(&b), at_top + 6, "gliding back toward the top");
+        b.tick(7_000); // glide up, halfway
+        assert_eq!(top_row(&b), at_top + 4, "halfway back up");
+        b.tick(9_500); // final top hold: at rest before the advance
+        assert_eq!(top_row(&b), at_top, "back at the top before the dwell ends");
 
         // Without the scroll flag a tall frame just shows its top window.
         b.on_manifest(Manifest {
-            rotation: vec![RotationEntry { frame_id: "tall".into(), dwell_ms: 600_000, scroll_step_ms: None }],
+            rotation: vec![RotationEntry { frame_id: "tall".into(), dwell_ms: 10_000, scroll: false }],
             display_on: true,
             off_state: Default::default(),
             brightness: 100,
         });
-        b.tick(2 * hold + 100 * 8 + 300);
+        b.tick(13_000);
         assert_eq!(top_row(&b), at_top, "no flag -> static top window");
     }
 

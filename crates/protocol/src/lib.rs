@@ -117,22 +117,21 @@ pub enum OffState {
     Clock,
 }
 
-/// Vertical scroll timing for frames taller than the 32px panel: the board
-/// holds SCROLL_HOLD_MS at each end and glides 1px per SCROLL_STEP_MS between
-/// them (ping-pong — no wrap snap, and the top rows get the longest look).
-/// Both sides need the numbers: the board animates with them, the server
-/// sizes the entry's dwell to fit at least one full down-and-up pass.
-pub const SCROLL_STEP_MS: u32 = 80;
-pub const SCROLL_HOLD_MS: u32 = 1200;
+fn is_false(b: &bool) -> bool {
+    !*b
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RotationEntry {
     pub frame_id: FrameId,
     pub dwell_ms: u32,
-    /// Set on frames taller than the panel: ms per 1-pixel scroll step.
-    /// Absent for static frames, so pre-scroll manifests read identically.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scroll_step_ms: Option<u32>,
+    /// Frames taller than the panel scroll vertically, synced to the dwell in
+    /// fifths: hold at the top, glide down, hold at the bottom, glide back,
+    /// hold at the top — one full pass per dwell, ending at rest so the
+    /// rotation advance never cuts a scroll mid-glide. (At the 10s default:
+    /// 2s per phase.) Omitted when false, so static manifests read identically.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub scroll: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
