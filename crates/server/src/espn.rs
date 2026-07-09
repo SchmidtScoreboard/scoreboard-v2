@@ -947,6 +947,29 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
         },
         // Upcoming games: one inside the 30-min pregame window (appears on the
         // board with its start time), one hours out (View-all browse only).
+        // The same tower WITHOUT tire data — exactly what live ESPN rows look
+        // like (no tire feed): team colors, no chip column, timings at the edge.
+        Game {
+            id: "demo-f1-quali".into(), sport_id: "f1".into(),
+            away: TeamSide::empty("F1"), home: TeamSide::empty(""),
+            status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(),
+            leaderboard: Some(Leaderboard { name: "BRITISH GP Q".into(), rows: vec![
+                LeaderRow { rank: "1".into(), name: "NOR".into(), value: "1:24.8".into(), color: f1_team_color("NOR"), tire: None },
+                LeaderRow { rank: "2".into(), name: "VER".into(), value: "+0.093".into(), color: f1_team_color("VER"), tire: None },
+                LeaderRow { rank: "3".into(), name: "HAM".into(), value: "+0.210".into(), color: f1_team_color("HAM"), tire: None },
+                LeaderRow { rank: "4".into(), name: "RUS".into(), value: "+0.286".into(), color: f1_team_color("RUS"), tire: None },
+                LeaderRow { rank: "5".into(), name: "PIA".into(), value: "+0.334".into(), color: f1_team_color("PIA"), tire: None },
+                LeaderRow { rank: "6".into(), name: "ALO".into(), value: "+0.412".into(), color: f1_team_color("ALO"), tire: None },
+                LeaderRow { rank: "7".into(), name: "LEC".into(), value: "+0.501".into(), color: f1_team_color("LEC"), tire: None },
+                LeaderRow { rank: "8".into(), name: "HUL".into(), value: "+0.688".into(), color: f1_team_color("HUL"), tire: None },
+                LeaderRow { rank: "9".into(), name: "ALB".into(), value: "+0.719".into(), color: f1_team_color("ALB"), tire: None },
+                LeaderRow { rank: "10".into(), name: "GAS".into(), value: "+0.854".into(), color: f1_team_color("GAS"), tire: None },
+            ] }),
+            champ: None,
+            session: Some("quali".into()),
+            situation: None,
+            pregame: None,
+        },
         Game {
             id: "demo-nhl-soon".into(), sport_id: "nhl".into(),
             away: team("NYR", "RANGERS", 0, "0038A8", "CE1126"),
@@ -1825,6 +1848,16 @@ mod champ_tests {
         assert!(
             has(&|g| g.leaderboard.as_ref().is_some_and(|lb| lb.rows.len() > 4)),
             "a leaderboard deep enough to scroll"
+        );
+        assert!(
+            has(&|g| g.leaderboard.as_ref().is_some_and(|lb| lb.rows.iter().any(|r| r.tire.is_some()))),
+            "a timing tower WITH tire chips"
+        );
+        assert!(
+            has(&|g| g.sport_id == "f1"
+                && g.leaderboard.as_ref().is_some_and(|lb|
+                    !lb.rows.is_empty() && lb.rows.iter().all(|r| r.tire.is_none()))),
+            "an F1 tower WITHOUT tire data (the live-ESPN look)"
         );
     }
 
