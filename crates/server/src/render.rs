@@ -546,12 +546,19 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize) -> (FrameId, Vec<u8>) {
     let rows = lb.rows.len().min(max_rows);
     let height = if rows > 4 { 12 + (rows as i32 - 1) * 6 + 2 } else { FRAME_HEIGHT as i32 };
     let mut c = Canvas::with_height(height as usize);
-    let accent = if g.sport_id == "f1" {
+    let f1 = g.sport_id == "f1";
+    let accent = if f1 {
         Rgb888::new(225, 6, 0) // F1 red
     } else {
         Rgb888::new(52, 162, 35) // golf green
     };
-    draw_text(&mut c, &lb.name, 32 - text_width(&lb.name, false) / 2, 5, false, accent);
+    // F1 wears race-day chrome: white event title between checkered flags.
+    let title_color = if f1 { WHITE } else { accent };
+    draw_text(&mut c, &lb.name, 32 - text_width(&lb.name, false) / 2, 5, false, title_color);
+    if f1 {
+        checkered_flag(&mut c, 1);
+        checkered_flag(&mut c, 55);
+    }
 
     if matches!(g.status, GameStatus::Pregame) {
         let (s, _) = status_for(g);
@@ -564,7 +571,14 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize) -> (FrameId, Vec<u8>) {
         let mut by = 12;
         for row in lb.rows.iter().take(max_rows.max(5)) {
             let ink = row.color.unwrap_or(WHITE);
-            let name_max_right = 63 - text_width(&row.value, false) - 2;
+            // Tire chip flush right; the timing column moves in to make room.
+            let value_right = if let Some(t) = row.tire {
+                tire_chip(&mut c, 57, by, t);
+                55
+            } else {
+                63
+            };
+            let name_max_right = value_right - text_width(&row.value, false) - 2;
             let name_x = if row.rank.is_empty() {
                 1
             } else {
@@ -577,12 +591,9 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize) -> (FrameId, Vec<u8>) {
                 col_w + 3
             };
             draw_text_clip(&mut c, &row.name, name_x, by, name_max_right, false, ink);
-            // Tire compound dot, broadcast-style, tucked after the code.
-            if let Some(t) = row.tire {
-                let tx = name_x + text_width(&row.name, false) + 3;
-                fill(&mut c, tx, by - 4, 3, 3, tire_color(t));
-            }
-            draw_text_right(&mut c, &row.value, 63, by, false, accent);
+            // The timing wears the team color too; golf (no row color) keeps
+            // its green accent values.
+            draw_text_right(&mut c, &row.value, value_right, by, false, row.color.unwrap_or(accent));
             by += 6;
         }
     }
@@ -591,7 +602,7 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize) -> (FrameId, Vec<u8>) {
     (frame_id(&px), px)
 }
 
-/// Pirelli compound colors for the timing-tower tire dot.
+/// Pirelli compound colors for the timing-tower tire chip.
 fn tire_color(compound: char) -> Rgb888 {
     match compound.to_ascii_uppercase() {
         'S' => Rgb888::new(0xDA, 0x29, 0x1C), // soft: red
@@ -599,6 +610,35 @@ fn tire_color(compound: char) -> Rgb888 {
         'H' => Rgb888::new(0xF0, 0xF0, 0xF0), // hard: white
         'I' => Rgb888::new(0x39, 0xB5, 0x4A), // intermediate: green
         _ => Rgb888::new(0x00, 0x67, 0xAD),   // wet: blue
+    }
+}
+
+/// A 7x5 compound-colored box with the tire letter centered in it, white or
+/// black — whichever reads against the compound color (black on the yellow
+/// medium and white hard, white on soft red / inter green / wet blue). The
+/// glyph gets a margin on each side so wide letters (M, H) stay legible.
+fn tire_chip(c: &mut Canvas, x: i32, by: i32, compound: char) {
+    let bg = tire_color(compound);
+    let ink = crate::model::ensure_contrast(bg, Rgb888::WHITE);
+    // Rounded 7x7 chip: a 7x5 core plus a 5px-wide 1px halo above and below.
+    // The glyph is exactly cap-height, so without the halo its top/bottom rows
+    // would sit flush on the box edge and melt into the black background —
+    // a dark M on the yellow medium chip read as stripes, not a letter.
+    fill(c, x, by - 4, 7, 5, bg);
+    fill(c, x + 1, by - 5, 5, 7, bg);
+    let letter = compound.to_ascii_uppercase().to_string();
+    let glyph_w = text_width(&letter, false) - 1; // advance includes 1px spacing
+    draw_text(c, &letter, x + (7 - glyph_w) / 2, by, false, ink);
+}
+
+/// An 8x4 checkered flag (2x2 checks) for the F1 title row corners.
+fn checkered_flag(c: &mut Canvas, x0: i32) {
+    for cy in 0..2i32 {
+        for cx in 0..4i32 {
+            if (cx + cy) % 2 == 0 {
+                fill(c, x0 + cx * 2, 1 + cy * 2, 2, 2, WHITE);
+            }
+        }
     }
 }
 
