@@ -98,6 +98,12 @@ struct BoardInfo {
     var dwellSecs: UInt32 = 10
     var leagueDwell: [String: UInt32] = [:]     // sportId -> per-league override
     var leagueRows: [String: UInt32] = [:]      // sportId -> leaderboard depth (golf/F1)
+    var strictSpoilers = false                   // spoiled games: strict vs normal display
+    var spoilerAll = false                       // protect every game on this board
+    var leagueSpoiler: [String: Bool] = [:]      // sportId -> league-wide protection
+    var teamSpoilers: [String: Set<String>] = [:] // sportId -> protected team ids
+    var spoilerGameIds: Set<String> = []          // one-off hides
+    var revealedGameIds: Set<String> = []         // one-off reveals
     /// Unix seconds when a button-sleep auto-wakes (nil when not sleeping).
     var wakeAt: UInt64?
 }
@@ -294,7 +300,7 @@ final class BoardViewModel: ObservableObject {
     }
 
     // ---- game focus / rotation (optimistic; server confirms via on_config) ----
-    func requestGames() { client?.requestGames() }
+    func requestGames() { client?.requestGames(boardId: selectedBoardId) }
     func focusGame(_ gid: String) {
         guard let id = selectedBoardId else { return }
         mutate(id) { $0.focusedGameId = gid }
@@ -331,6 +337,7 @@ final class BoardViewModel: ObservableObject {
     /// Whether Reset has anything to undo: a pin, an addition, or a removal.
     var rotationModified: Bool {
         current.focusedGameId != nil || !current.extraGameIds.isEmpty || !current.excludedGameIds.isEmpty
+            || !current.spoilerGameIds.isEmpty || !current.revealedGameIds.isEmpty
     }
 
     /// Remove a game from the rotation regardless of WHY it's there. A one-off add
@@ -393,7 +400,8 @@ final class BoardViewModel: ObservableObject {
             // A dwell override alone earns a card too — otherwise it would be
             // active but invisible (set via Add League without subscribing, or
             // left behind after the last favorite is removed).
-            if !teams.isEmpty || big != nil || st.leagueDwell[sport.id] != nil || st.leagueRows[sport.id] != nil {
+            if !teams.isEmpty || big != nil || st.leagueDwell[sport.id] != nil || st.leagueRows[sport.id] != nil
+                || st.leagueSpoiler[sport.id] == true || !(st.teamSpoilers[sport.id] ?? []).isEmpty {
                 prefs.append(LeaguePref(sport: sport, teams: teams, bigGame: big))
             }
         }
@@ -598,11 +606,15 @@ final class BoardViewModel: ObservableObject {
         var champ: [String: String] = [:]
         var dwell: [String: UInt32] = [:]
         var rows: [String: UInt32] = [:]
+        var lspoil: [String: Bool] = [:]
+        var tspoil: [String: Set<String>] = [:]
         for s in c.sports {
             fav[s.sportId] = s.favoriteTeamIds
             if let o = s.championshipOptionId { champ[s.sportId] = o }
             if let d = s.dwellSecs { dwell[s.sportId] = d }
             if let r = s.leaderboardRows { rows[s.sportId] = r }
+            if s.spoiler { lspoil[s.sportId] = true }
+            if !s.spoilerTeamIds.isEmpty { tspoil[s.sportId] = Set(s.spoilerTeamIds) }
         }
         mutate(boardId) {
             $0.brightness = Double(c.brightness)
@@ -618,6 +630,12 @@ final class BoardViewModel: ObservableObject {
             $0.dwellSecs = c.dwellSecs
             $0.leagueDwell = dwell
             $0.leagueRows = rows
+            $0.strictSpoilers = c.strictSpoilers
+            $0.spoilerAll = c.spoilerAll
+            $0.leagueSpoiler = lspoil
+            $0.teamSpoilers = tspoil
+            $0.spoilerGameIds = Set(c.spoilerGameIds)
+            $0.revealedGameIds = Set(c.revealedGameIds)
             $0.wakeAt = c.wakeAt
         }
     }
@@ -653,6 +671,43 @@ final class BoardViewModel: ObservableObject {
             if let rows { $0.leagueRows[sportId] = rows } else { $0.leagueRows.removeValue(forKey: sportId) }
         }
         client?.setLeagueRows(boardId: id, sportId: sportId, rows: rows)
+    }
+
+    // ---- spoiler protection ----
+    func leagueSpoiler(_ sportId: String) -> Bool { current.leagueSpoiler[sportId] ?? false }
+    func teamSpoiled(_ sportId: String, _ teamId: String) -> Bool {
+        current.teamSpoilers[sportId]?.contains(teamId) ?? false
+    }
+    func setStrictSpoilers(_ strict: Bool) {
+        guard let id = selectedBoardId else { return }
+        mutate(id) { $0.strictSpoilers = strict }
+        client?.setSpoilerMode(boardId: id, strict: strict)
+    }
+    func setSpoilerAll(_ on: Bool) {
+        guard let id = selectedBoardId else { return }
+        mutate(id) { $0.spoilerAll = on }
+        client?.setSpoilerAll(boardId: id, on: on)
+    }
+    func setLeagueSpoiler(_ sportId: String, _ on: Bool) {
+        guard let id = selectedBoardId else { return }
+        mutate(id) { $0.leagueSpoiler[sportId] = on }
+        client?.setLeagueSpoiler(boardId: id, sportId: sportId, on: on)
+    }
+    func setTeamSpoiler(_ sportId: String, _ teamId: String, _ on: Bool) {
+        guard let id = selectedBoardId else { return }
+        mutate(id) {
+            var set = $0.teamSpoilers[sportId] ?? []
+            if on { set.insert(teamId) } else { set.remove(teamId) }
+            $0.teamSpoilers[sportId] = set
+        }
+        client?.setTeamSpoiler(boardId: id, sportId: sportId, teamId: teamId, on: on)
+    }
+    /// Per-game toggle; the server pushes fresh board state, and the browse
+    /// list refetches so its cards re-sanitize too.
+    func setGameSpoiler(_ gid: String, hidden: Bool) {
+        guard let id = selectedBoardId else { return }
+        client?.setGameSpoiler(boardId: id, gameId: gid, hidden: hidden)
+        requestGames()
     }
 
     func setDwell(_ secs: UInt32) {
@@ -819,13 +874,16 @@ struct GameFrame: View {
     var frame: CGImage? = nil
     /// Bump to force the HTTP card to refetch (Browse's refresh button / on-appear).
     var refresh: Int = 0
+    /// Board id: the HTTP render applies that board's spoiler rules.
+    var board: String = ""
 
     private var url: URL? {
         let id = game.id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? game.id
         // Scores change the render; `refresh` forces a manual refetch in the moment.
-        let v = "\(game.awayScore)-\(game.homeScore)-\(game.status)-\(game.detail)"
+        // `spoiled` participates so a reveal/hide toggle busts the cache.
+        let v = "\(game.awayScore)-\(game.homeScore)-\(game.status)-\(game.detail)-\(game.spoiled)"
             .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        return URL(string: "\(httpBase)/render/\(id).png?v=\(v)&r=\(refresh)")
+        return URL(string: "\(httpBase)/render/\(id).png?v=\(v)&r=\(refresh)&board=\(board)")
     }
 
     var body: some View {
@@ -863,6 +921,8 @@ struct GameCard<Caption: View, Footer: View>: View {
     let httpBase: String
     var frame: CGImage? = nil
     var refresh: Int = 0
+    /// Board id, forwarded to the HTTP render fallback for spoiler scoping.
+    var board: String = ""
     /// Pinned/focused: draws the accent ring so the one game overriding the
     /// rotation is unmissable in any list.
     var highlighted: Bool = false
@@ -891,7 +951,7 @@ struct GameCard<Caption: View, Footer: View>: View {
                 }
                 caption
             }
-            GameFrame(game: game, httpBase: httpBase, frame: frame, refresh: refresh)
+            GameFrame(game: game, httpBase: httpBase, frame: frame, refresh: refresh, board: board)
             footer
         }
         .padding(10)
@@ -1076,6 +1136,30 @@ struct DashboardView: View {
                 .labelsHidden()
             }
 
+            Toggle(isOn: Binding(
+                get: { model.current.spoilerAll },
+                set: { model.setSpoilerAll($0) }
+            )) {
+                HStack(spacing: 6) {
+                    Text("Hide all results")
+                    infoButton(.spoilers)
+                }
+            }
+
+            HStack(spacing: 6) {
+                Text("Spoiler display")
+                Spacer()
+                Picker("Spoiler display", selection: Binding(
+                    get: { model.current.strictSpoilers },
+                    set: { model.setStrictSpoilers($0) }
+                )) {
+                    Text("Normal — period only").tag(false)
+                    Text("Strict — matchup only").tag(true)
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+            }
+
             Button("Remove this scoreboard", role: .destructive) {
                 showRemoveConfirm = true
             }
@@ -1166,6 +1250,7 @@ struct DashboardView: View {
     /// (the stock bordered style balloons and wraps its label at this width);
     /// fills the width it's given so side-by-side buttons come out equal.
     private func cardButton(_ title: String, _ icon: String, tint: Color = .primary, action: @escaping () -> Void) -> some View {
+        // 3-up footers leave ~59pt per capsule; scale down before truncating.
         Button(action: action) {
             HStack(spacing: 4) {
                 Image(systemName: icon)
@@ -1173,6 +1258,7 @@ struct DashboardView: View {
             }
             .font(.caption.weight(.semibold))
             .lineLimit(1)
+            .minimumScaleFactor(0.75)
             .fixedSize(horizontal: false, vertical: true)
             .foregroundStyle(tint)
             .frame(maxWidth: .infinity)
@@ -1221,12 +1307,15 @@ struct DashboardView: View {
                     ForEach(model.displayedNowShowing, id: \.id) { game in
                         let pinned = model.focusedGameId == game.id
                         let dimmed = model.focusedGameId != nil && !pinned
-                        GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId], highlighted: pinned) {
+                        GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId], board: model.selectedBoardId ?? "", highlighted: pinned) {
                             sourceCaption(game)
                         } footer: {
                             HStack(spacing: 8) {
                                 cardButton(pinned ? "Unpin" : "Pin", pinned ? "pin.slash" : "pin", tint: pinned ? .orange : .primary) {
                                     withAnimation { pinned ? model.clearFocus() : model.focusGame(game.id) }
+                                }
+                                cardButton(game.spoiled ? "Reveal" : "Spoiler", game.spoiled ? "eye" : "eye.slash", tint: game.spoiled ? .indigo : .primary) {
+                                    withAnimation { model.setGameSpoiler(game.id, hidden: !game.spoiled) }
                                 }
                                 if game.bumped {
                                     // Promote: a manual add outranks whatever bumped it.
@@ -1365,6 +1454,20 @@ struct DashboardView: View {
                 HStack(spacing: 12) {
                     TeamBadge(team: team, sportId: pref.sport.id)
                     Text(team.name)
+                    if model.teamSpoiled(pref.sport.id, team.id) {
+                        Image(systemName: "eye.slash.fill")
+                            .font(.caption)
+                            .foregroundStyle(.indigo)
+                    }
+                }
+                .swipeActions(edge: .leading) {
+                    let hidden = model.teamSpoiled(pref.sport.id, team.id)
+                    Button {
+                        model.setTeamSpoiler(pref.sport.id, team.id, !hidden)
+                    } label: {
+                        Label(hidden ? "Show results" : "Hide results", systemImage: hidden ? "eye" : "eye.slash")
+                    }
+                    .tint(.indigo)
                 }
             }
             .onDelete { offsets in
@@ -1372,6 +1475,30 @@ struct DashboardView: View {
             }
             .onMove { source, destination in
                 model.moveFavorite(pref.sport.id, from: source, to: destination)
+            }
+
+            // Spoiler-protected teams that AREN'T favorites — without these
+            // rows, unfavoriting a protected team would leave an invisible,
+            // unclearable rule silently hiding its games.
+            let favIds = Set(pref.teams.map(\.id))
+            let orphaned = (model.current.teamSpoilers[pref.sport.id] ?? [])
+                .subtracting(favIds).sorted()
+            ForEach(orphaned, id: \.self) { teamId in
+                let team = pref.sport.teams.first { $0.id == teamId }
+                HStack(spacing: 12) {
+                    Image(systemName: "eye.slash.fill")
+                        .foregroundStyle(.indigo)
+                        .frame(width: 24)
+                    Text("\(team?.name ?? teamId) — results hidden")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Show") {
+                        model.setTeamSpoiler(pref.sport.id, teamId, false)
+                    }
+                    .font(.footnote.weight(.semibold))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.tint)
+                }
             }
 
             if let big = pref.bigGame {
@@ -1408,6 +1535,25 @@ struct DashboardView: View {
                         model.clearBigGames(pref.sport.id)
                     } label: {
                         Label("Turn off", systemImage: "trophy.slash")
+                    }
+                }
+            }
+
+            // League-wide spoiler protection — shown only when on.
+            if model.leagueSpoiler(pref.sport.id) {
+                Button {
+                    model.setLeagueSpoiler(pref.sport.id, false)
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "eye.slash.fill")
+                            .foregroundStyle(.indigo)
+                            .frame(width: 24)
+                        Text("Results hidden")
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        Text("Show")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.tint)
                     }
                 }
             }
@@ -1494,7 +1640,7 @@ struct DashboardView: View {
 
 /// Settings rows that have an explainer card behind an ⓘ button.
 enum SettingsInfoTopic: String, Identifiable {
-    case whenOff, sleep, dwell
+    case whenOff, sleep, dwell, spoilers
     var id: String { rawValue }
 
     var icon: String {
@@ -1502,6 +1648,7 @@ enum SettingsInfoTopic: String, Identifiable {
         case .whenOff: "clock"
         case .sleep: "moon.zzz.fill"
         case .dwell: "timer"
+        case .spoilers: "eye.slash"
         }
     }
 
@@ -1510,6 +1657,7 @@ enum SettingsInfoTopic: String, Identifiable {
         case .whenOff: "When off"
         case .sleep: "Sleep duration"
         case .dwell: "Time per event"
+        case .spoilers: "Spoilers"
         }
     }
 
@@ -1542,6 +1690,19 @@ enum SettingsInfoTopic: String, Identifiable {
             make each one easier to catch. Any league can override this from \
             its League Preferences editor — give F1 30 seconds to scroll while \
             baseball flashes by in 10.
+            """
+        case .spoilers:
+            """
+            Spoiler-protected games stay in the rotation but hide their scores \
+            until you reveal them — for the game you recorded and haven't \
+            watched yet.
+
+            Protect everything with this switch, a whole league from its \
+            editor, or one team with a swipe on its row. Each game card has a \
+            Reveal / Spoiler button to override either way. "Spoiler display" \
+            picks what protected games still show: basic progress (period, \
+            quarter, lap count) or, in strict mode, just the matchup and start \
+            time. Finished games show FINAL — never the score.
             """
         }
     }
@@ -1664,7 +1825,7 @@ struct AllGamesView: View {
     /// pops back to the dashboard to show the result.
     private func allGamesCard(_ game: UiGame) -> some View {
         let showing = model.isShowing(game.id)
-        return GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId], refresh: refresh, highlighted: model.focusedGameId == game.id) {
+        return GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId], refresh: refresh, board: model.selectedBoardId ?? "", highlighted: model.focusedGameId == game.id) {
             ProvenanceCaption(model: model, game: game)
         } footer: {
             HStack(spacing: 8) {
@@ -1680,6 +1841,9 @@ struct AllGamesView: View {
                     AllGamesCardButton(title: "Add", icon: "plus.circle", tint: .green) {
                         model.addGame(game.id)
                     }
+                }
+                AllGamesCardButton(title: game.spoiled ? "Reveal" : "Spoiler", icon: game.spoiled ? "eye" : "eye.slash", tint: game.spoiled ? .indigo : .primary) {
+                    model.setGameSpoiler(game.id, hidden: !game.spoiled)
                 }
             }
         }
@@ -1756,6 +1920,7 @@ struct AllGamesCardButton: View {
             }
             .font(.caption.weight(.semibold))
             .lineLimit(1)
+            .minimumScaleFactor(0.75)
             .fixedSize(horizontal: false, vertical: true)
             .foregroundStyle(tint)
             .frame(maxWidth: .infinity)
@@ -2084,6 +2249,14 @@ struct LeagueEditorView: View {
                 } footer: {
                     Text("How much of the field the board shows. More than four rows scrolls through the list.")
                 }
+            }
+            Section {
+                Toggle("Hide results (spoilers)", isOn: Binding(
+                    get: { model.leagueSpoiler(sport.id) },
+                    set: { model.setLeagueSpoiler(sport.id, $0) }
+                ))
+            } footer: {
+                Text("Scores in this league stay hidden on the board until revealed per game.")
             }
             if !sport.championshipOptions.isEmpty {
                 Section(optionsTitle) {

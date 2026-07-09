@@ -9,7 +9,7 @@ use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use scoreboard_protocol::{
     decode_frame, pubkey_hex, rgb565_to_888, sign_hex, BoardConfig, Catalog, ClientMsg, Command,
-    GameSummary, OffState, Role, ServerMsg, SportConfig as PSportConfig,
+    GameSummary, OffState, Role, ServerMsg, SpoilerMode, SportConfig as PSportConfig,
 };
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -50,6 +50,10 @@ pub struct UiSportConfig {
     pub dwell_secs: Option<u32>,
     /// Leaderboard depth for golf/F1 (4 = static top-4 .. 20 = full field).
     pub leaderboard_rows: Option<u32>,
+    /// Spoiler-protect every game in this league.
+    pub spoiler: bool,
+    /// Spoiler-protect games involving these teams.
+    pub spoiler_team_ids: Vec<String>,
 }
 /// What the panel shows while off / idle.
 #[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +78,14 @@ pub struct UiBoardConfig {
     pub dwell_secs: u32,
     /// Unix seconds when a button-sleep auto-wakes (None when not sleeping).
     pub wake_at: Option<u64>,
+    /// Spoiler display: true = strict (matchup + time only), false = normal.
+    pub strict_spoilers: bool,
+    /// Spoiler-protect every game on this board.
+    pub spoiler_all: bool,
+    /// One-off spoiler-hidden games (cleared by Reset, pruned as games end).
+    pub spoiler_game_ids: Vec<String>,
+    /// One-off revealed games (exceptions that beat every protection rule).
+    pub revealed_game_ids: Vec<String>,
 }
 #[derive(uniffi::Record, Clone)]
 pub struct UiGame {
@@ -94,6 +106,8 @@ pub struct UiGame {
     /// Championship tier label when this is a postseason/championship game
     /// ("Stanley Cup Final", "Playoffs"); nil for regular-season games.
     pub champ: Option<String>,
+    /// True when spoiler protection sanitized this game (scores zeroed).
+    pub spoiled: bool,
 }
 
 /// Implemented on the Swift/Kotlin side to receive pushed state.
@@ -113,7 +127,7 @@ pub trait ClientListener: Send + Sync {
 enum Out {
     Command(String, Command), // (board_id, command)
     GetCatalog,
-    GetGames,
+    GetGames(Option<String>),
     Pair(String),
 }
 
@@ -326,8 +340,9 @@ impl ScoreboardClient {
                             Some(Out::GetCatalog) => {
                                 let _ = write.send(Message::Text(serde_json::to_string(&ClientMsg::GetCatalog).unwrap())).await;
                             }
-                            Some(Out::GetGames) => {
-                                let _ = write.send(Message::Text(serde_json::to_string(&ClientMsg::GetGames).unwrap())).await;
+                            Some(Out::GetGames(board_id)) => {
+                                let m = ClientMsg::GetGames { board_id };
+                                let _ = write.send(Message::Text(serde_json::to_string(&m).unwrap())).await;
                             }
                             Some(Out::Pair(code)) => {
                                 let m = ClientMsg::Pair { code };
@@ -431,8 +446,37 @@ impl ScoreboardClient {
     }
 
     /// Ask the server for all live games (to browse + add to a board).
-    pub fn request_games(&self) {
-        let _ = self.tx.send(Out::GetGames);
+    /// Browse all live/upcoming games. Pass the viewing board's id so its
+    /// spoiler rules sanitize the summaries.
+    pub fn request_games(&self, board_id: Option<String>) {
+        let _ = self.tx.send(Out::GetGames(board_id));
+    }
+
+    /// How spoiler-protected games render: strict = matchup + time only.
+    pub fn set_spoiler_mode(&self, board_id: String, strict: bool) {
+        let mode = if strict { SpoilerMode::Strict } else { SpoilerMode::Normal };
+        let _ = self.tx.send(Out::Command(board_id, Command::SetSpoilerMode { mode }));
+    }
+
+    /// Spoiler-protect every game on the board.
+    pub fn set_spoiler_all(&self, board_id: String, on: bool) {
+        let _ = self.tx.send(Out::Command(board_id, Command::SetSpoilerAll { on }));
+    }
+
+    /// Spoiler-protect a whole league.
+    pub fn set_league_spoiler(&self, board_id: String, sport_id: String, on: bool) {
+        let _ = self.tx.send(Out::Command(board_id, Command::SetLeagueSpoiler { sport_id, on }));
+    }
+
+    /// Spoiler-protect one team's games.
+    pub fn set_team_spoiler(&self, board_id: String, sport_id: String, team_id: String, on: bool) {
+        let _ = self.tx.send(Out::Command(board_id, Command::SetTeamSpoiler { sport_id, team_id, on }));
+    }
+
+    /// Per-game toggle: hidden=true protects; hidden=false reveals even when
+    /// team/league/board rules protect it.
+    pub fn set_game_spoiler(&self, board_id: String, game_id: String, hidden: bool) {
+        let _ = self.tx.send(Out::Command(board_id, Command::SetGameSpoiler { game_id, hidden }));
     }
 
     /// Pin a board to a single game (overrides the rotation).
@@ -576,7 +620,7 @@ mod wss_tests {
         client.set_listener(Box::new(Probe { tx: std::sync::Mutex::new(tx) }));
         client.connect();
         std::thread::sleep(std::time::Duration::from_secs(4));
-        client.request_games();
+        client.request_games(None);
         std::thread::sleep(std::time::Duration::from_secs(4));
         let msgs: Vec<String> = rx.try_iter().collect();
         println!("listener messages: {msgs:?}");
@@ -597,6 +641,8 @@ fn to_ui_configs(sports: Vec<PSportConfig>) -> Vec<UiSportConfig> {
             championship_option_id: s.championship_option_id,
             dwell_secs: s.dwell_secs,
             leaderboard_rows: s.leaderboard_rows,
+            spoiler: s.spoiler,
+            spoiler_team_ids: s.spoiler_team_ids,
         })
         .collect()
 }
@@ -617,6 +663,10 @@ fn to_ui_board_config(c: BoardConfig) -> UiBoardConfig {
         sleep_hours: c.sleep_hours,
         dwell_secs: c.dwell_secs,
         wake_at: c.wake_at,
+        strict_spoilers: c.spoiler_mode == SpoilerMode::Strict,
+        spoiler_all: c.spoiler_all,
+        spoiler_game_ids: c.spoiler_game_ids,
+        revealed_game_ids: c.revealed_game_ids,
     }
 }
 
@@ -635,6 +685,7 @@ fn to_ui_games(games: Vec<GameSummary>) -> Vec<UiGame> {
             frame_id: g.frame_id,
             bumped: g.bumped,
             champ: g.champ,
+            spoiled: g.spoiled,
         })
         .collect()
 }

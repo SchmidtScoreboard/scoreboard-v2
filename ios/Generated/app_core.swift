@@ -580,8 +580,10 @@ public protocol ScoreboardClientProtocol: AnyObject {
 
     /**
      * Ask the server for all live games (to browse + add to a board).
+     * Browse all live/upcoming games. Pass the viewing board's id so its
+     * spoiler rules sanitize the summaries.
      */
-    func requestGames()
+    func requestGames(boardId: String?)
 
     /**
      * Back to the preference-driven rotation: clears the pin, one-off additions,
@@ -600,6 +602,12 @@ public protocol ScoreboardClientProtocol: AnyObject {
     func setDwell(boardId: String, secs: UInt32)
 
     /**
+     * Per-game toggle: hidden=true protects; hidden=false reveals even when
+     * team/league/board rules protect it.
+     */
+    func setGameSpoiler(boardId: String, gameId: String, hidden: Bool)
+
+    /**
      * Seconds each game holds the panel before the rotation advances.
      * Per-league "time per event" override; None reverts to the board default.
      */
@@ -609,6 +617,11 @@ public protocol ScoreboardClientProtocol: AnyObject {
      * Leaderboard depth for golf/F1; None reverts to the default (top 10).
      */
     func setLeagueRows(boardId: String, sportId: String, rows: UInt32?)
+
+    /**
+     * Spoiler-protect a whole league.
+     */
+    func setLeagueSpoiler(boardId: String, sportId: String, on: Bool)
 
     func setListener(listener: ClientListener)
 
@@ -624,7 +637,22 @@ public protocol ScoreboardClientProtocol: AnyObject {
      */
     func setSleepHours(boardId: String, hours: UInt32)
 
+    /**
+     * Spoiler-protect every game on the board.
+     */
+    func setSpoilerAll(boardId: String, on: Bool)
+
+    /**
+     * How spoiler-protected games render: strict = matchup + time only.
+     */
+    func setSpoilerMode(boardId: String, strict: Bool)
+
     func setSportConfig(boardId: String, sportId: String, favoriteTeamIds: [String], championshipOptionId: String?)
+
+    /**
+     * Spoiler-protect one team's games.
+     */
+    func setTeamSpoiler(boardId: String, sportId: String, teamId: String, on: Bool)
 }
 
 open class ScoreboardClient:
@@ -790,9 +818,12 @@ open class ScoreboardClient:
 
     /**
      * Ask the server for all live games (to browse + add to a board).
+     * Browse all live/upcoming games. Pass the viewing board's id so its
+     * spoiler rules sanitize the summaries.
      */
-    open func requestGames() { try! rustCall {
-        uniffi_app_core_fn_method_scoreboardclient_request_games(self.uniffiClonePointer(), $0)
+    open func requestGames(boardId: String?) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_request_games(self.uniffiClonePointer(),
+                                                                 FfiConverterOptionString.lower(boardId), $0)
     }
     }
 
@@ -831,6 +862,18 @@ open class ScoreboardClient:
     }
 
     /**
+     * Per-game toggle: hidden=true protects; hidden=false reveals even when
+     * team/league/board rules protect it.
+     */
+    open func setGameSpoiler(boardId: String, gameId: String, hidden: Bool) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_set_game_spoiler(self.uniffiClonePointer(),
+                                                                    FfiConverterString.lower(boardId),
+                                                                    FfiConverterString.lower(gameId),
+                                                                    FfiConverterBool.lower(hidden), $0)
+    }
+    }
+
+    /**
      * Seconds each game holds the panel before the rotation advances.
      * Per-league "time per event" override; None reverts to the board default.
      */
@@ -850,6 +893,17 @@ open class ScoreboardClient:
                                                                    FfiConverterString.lower(boardId),
                                                                    FfiConverterString.lower(sportId),
                                                                    FfiConverterOptionUInt32.lower(rows), $0)
+    }
+    }
+
+    /**
+     * Spoiler-protect a whole league.
+     */
+    open func setLeagueSpoiler(boardId: String, sportId: String, on: Bool) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_set_league_spoiler(self.uniffiClonePointer(),
+                                                                      FfiConverterString.lower(boardId),
+                                                                      FfiConverterString.lower(sportId),
+                                                                      FfiConverterBool.lower(on), $0)
     }
     }
 
@@ -886,12 +940,44 @@ open class ScoreboardClient:
     }
     }
 
+    /**
+     * Spoiler-protect every game on the board.
+     */
+    open func setSpoilerAll(boardId: String, on: Bool) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_set_spoiler_all(self.uniffiClonePointer(),
+                                                                   FfiConverterString.lower(boardId),
+                                                                   FfiConverterBool.lower(on), $0)
+    }
+    }
+
+    /**
+     * How spoiler-protected games render: strict = matchup + time only.
+     */
+    open func setSpoilerMode(boardId: String, strict: Bool) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_set_spoiler_mode(self.uniffiClonePointer(),
+                                                                    FfiConverterString.lower(boardId),
+                                                                    FfiConverterBool.lower(strict), $0)
+    }
+    }
+
     open func setSportConfig(boardId: String, sportId: String, favoriteTeamIds: [String], championshipOptionId: String?) { try! rustCall {
         uniffi_app_core_fn_method_scoreboardclient_set_sport_config(self.uniffiClonePointer(),
                                                                     FfiConverterString.lower(boardId),
                                                                     FfiConverterString.lower(sportId),
                                                                     FfiConverterSequenceString.lower(favoriteTeamIds),
                                                                     FfiConverterOptionString.lower(championshipOptionId), $0)
+    }
+    }
+
+    /**
+     * Spoiler-protect one team's games.
+     */
+    open func setTeamSpoiler(boardId: String, sportId: String, teamId: String, on: Bool) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_set_team_spoiler(self.uniffiClonePointer(),
+                                                                    FfiConverterString.lower(boardId),
+                                                                    FfiConverterString.lower(sportId),
+                                                                    FfiConverterString.lower(teamId),
+                                                                    FfiConverterBool.lower(on), $0)
     }
     }
 }
@@ -967,6 +1053,22 @@ public struct UiBoardConfig {
      * Unix seconds when a button-sleep auto-wakes (None when not sleeping).
      */
     public var wakeAt: UInt64?
+    /**
+     * Spoiler display: true = strict (matchup + time only), false = normal.
+     */
+    public var strictSpoilers: Bool
+    /**
+     * Spoiler-protect every game on this board.
+     */
+    public var spoilerAll: Bool
+    /**
+     * One-off spoiler-hidden games (cleared by Reset, pruned as games end).
+     */
+    public var spoilerGameIds: [String]
+    /**
+     * One-off revealed games (exceptions that beat every protection rule).
+     */
+    public var revealedGameIds: [String]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -979,7 +1081,19 @@ public struct UiBoardConfig {
                     */ dwellSecs: UInt32,
                 /**
                     * Unix seconds when a button-sleep auto-wakes (None when not sleeping).
-                    */ wakeAt: UInt64?)
+                    */ wakeAt: UInt64?,
+                /**
+                    * Spoiler display: true = strict (matchup + time only), false = normal.
+                    */ strictSpoilers: Bool,
+                /**
+                    * Spoiler-protect every game on this board.
+                    */ spoilerAll: Bool,
+                /**
+                    * One-off spoiler-hidden games (cleared by Reset, pruned as games end).
+                    */ spoilerGameIds: [String],
+                /**
+                    * One-off revealed games (exceptions that beat every protection rule).
+                    */ revealedGameIds: [String])
     {
         self.sports = sports
         self.brightness = brightness
@@ -992,6 +1106,10 @@ public struct UiBoardConfig {
         self.sleepHours = sleepHours
         self.dwellSecs = dwellSecs
         self.wakeAt = wakeAt
+        self.strictSpoilers = strictSpoilers
+        self.spoilerAll = spoilerAll
+        self.spoilerGameIds = spoilerGameIds
+        self.revealedGameIds = revealedGameIds
     }
 }
 
@@ -1030,6 +1148,18 @@ extension UiBoardConfig: Equatable, Hashable {
         if lhs.wakeAt != rhs.wakeAt {
             return false
         }
+        if lhs.strictSpoilers != rhs.strictSpoilers {
+            return false
+        }
+        if lhs.spoilerAll != rhs.spoilerAll {
+            return false
+        }
+        if lhs.spoilerGameIds != rhs.spoilerGameIds {
+            return false
+        }
+        if lhs.revealedGameIds != rhs.revealedGameIds {
+            return false
+        }
         return true
     }
 
@@ -1045,6 +1175,10 @@ extension UiBoardConfig: Equatable, Hashable {
         hasher.combine(sleepHours)
         hasher.combine(dwellSecs)
         hasher.combine(wakeAt)
+        hasher.combine(strictSpoilers)
+        hasher.combine(spoilerAll)
+        hasher.combine(spoilerGameIds)
+        hasher.combine(revealedGameIds)
     }
 }
 
@@ -1065,7 +1199,11 @@ public struct FfiConverterTypeUiBoardConfig: FfiConverterRustBuffer {
                 offState: FfiConverterTypeUiOffState.read(from: &buf),
                 sleepHours: FfiConverterUInt32.read(from: &buf),
                 dwellSecs: FfiConverterUInt32.read(from: &buf),
-                wakeAt: FfiConverterOptionUInt64.read(from: &buf)
+                wakeAt: FfiConverterOptionUInt64.read(from: &buf),
+                strictSpoilers: FfiConverterBool.read(from: &buf),
+                spoilerAll: FfiConverterBool.read(from: &buf),
+                spoilerGameIds: FfiConverterSequenceString.read(from: &buf),
+                revealedGameIds: FfiConverterSequenceString.read(from: &buf)
             )
     }
 
@@ -1081,6 +1219,10 @@ public struct FfiConverterTypeUiBoardConfig: FfiConverterRustBuffer {
         FfiConverterUInt32.write(value.sleepHours, into: &buf)
         FfiConverterUInt32.write(value.dwellSecs, into: &buf)
         FfiConverterOptionUInt64.write(value.wakeAt, into: &buf)
+        FfiConverterBool.write(value.strictSpoilers, into: &buf)
+        FfiConverterBool.write(value.spoilerAll, into: &buf)
+        FfiConverterSequenceString.write(value.spoilerGameIds, into: &buf)
+        FfiConverterSequenceString.write(value.revealedGameIds, into: &buf)
     }
 }
 
@@ -1183,6 +1325,10 @@ public struct UiGame {
      * ("Stanley Cup Final", "Playoffs"); nil for regular-season games.
      */
     public var champ: String?
+    /**
+     * True when spoiler protection sanitized this game (scores zeroed).
+     */
+    public var spoiled: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1198,7 +1344,10 @@ public struct UiGame {
                 /**
                     * Championship tier label when this is a postseason/championship game
                     * ("Stanley Cup Final", "Playoffs"); nil for regular-season games.
-                    */ champ: String?)
+                    */ champ: String?,
+                /**
+                    * True when spoiler protection sanitized this game (scores zeroed).
+                    */ spoiled: Bool)
     {
         self.id = id
         self.sportId = sportId
@@ -1211,6 +1360,7 @@ public struct UiGame {
         self.frameId = frameId
         self.bumped = bumped
         self.champ = champ
+        self.spoiled = spoiled
     }
 }
 
@@ -1249,6 +1399,9 @@ extension UiGame: Equatable, Hashable {
         if lhs.champ != rhs.champ {
             return false
         }
+        if lhs.spoiled != rhs.spoiled {
+            return false
+        }
         return true
     }
 
@@ -1264,6 +1417,7 @@ extension UiGame: Equatable, Hashable {
         hasher.combine(frameId)
         hasher.combine(bumped)
         hasher.combine(champ)
+        hasher.combine(spoiled)
     }
 }
 
@@ -1284,7 +1438,8 @@ public struct FfiConverterTypeUiGame: FfiConverterRustBuffer {
                 detail: FfiConverterString.read(from: &buf),
                 frameId: FfiConverterString.read(from: &buf),
                 bumped: FfiConverterBool.read(from: &buf),
-                champ: FfiConverterOptionString.read(from: &buf)
+                champ: FfiConverterOptionString.read(from: &buf),
+                spoiled: FfiConverterBool.read(from: &buf)
             )
     }
 
@@ -1300,6 +1455,7 @@ public struct FfiConverterTypeUiGame: FfiConverterRustBuffer {
         FfiConverterString.write(value.frameId, into: &buf)
         FfiConverterBool.write(value.bumped, into: &buf)
         FfiConverterOptionString.write(value.champ, into: &buf)
+        FfiConverterBool.write(value.spoiled, into: &buf)
     }
 }
 
@@ -1406,6 +1562,14 @@ public struct UiSportConfig {
      * Leaderboard depth for golf/F1 (4 = static top-4 .. 20 = full field).
      */
     public var leaderboardRows: UInt32?
+    /**
+     * Spoiler-protect every game in this league.
+     */
+    public var spoiler: Bool
+    /**
+     * Spoiler-protect games involving these teams.
+     */
+    public var spoilerTeamIds: [String]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1415,13 +1579,21 @@ public struct UiSportConfig {
                     */ dwellSecs: UInt32?,
                 /**
                     * Leaderboard depth for golf/F1 (4 = static top-4 .. 20 = full field).
-                    */ leaderboardRows: UInt32?)
+                    */ leaderboardRows: UInt32?,
+                /**
+                    * Spoiler-protect every game in this league.
+                    */ spoiler: Bool,
+                /**
+                    * Spoiler-protect games involving these teams.
+                    */ spoilerTeamIds: [String])
     {
         self.sportId = sportId
         self.favoriteTeamIds = favoriteTeamIds
         self.championshipOptionId = championshipOptionId
         self.dwellSecs = dwellSecs
         self.leaderboardRows = leaderboardRows
+        self.spoiler = spoiler
+        self.spoilerTeamIds = spoilerTeamIds
     }
 }
 
@@ -1442,6 +1614,12 @@ extension UiSportConfig: Equatable, Hashable {
         if lhs.leaderboardRows != rhs.leaderboardRows {
             return false
         }
+        if lhs.spoiler != rhs.spoiler {
+            return false
+        }
+        if lhs.spoilerTeamIds != rhs.spoilerTeamIds {
+            return false
+        }
         return true
     }
 
@@ -1451,6 +1629,8 @@ extension UiSportConfig: Equatable, Hashable {
         hasher.combine(championshipOptionId)
         hasher.combine(dwellSecs)
         hasher.combine(leaderboardRows)
+        hasher.combine(spoiler)
+        hasher.combine(spoilerTeamIds)
     }
 }
 
@@ -1465,7 +1645,9 @@ public struct FfiConverterTypeUiSportConfig: FfiConverterRustBuffer {
                 favoriteTeamIds: FfiConverterSequenceString.read(from: &buf),
                 championshipOptionId: FfiConverterOptionString.read(from: &buf),
                 dwellSecs: FfiConverterOptionUInt32.read(from: &buf),
-                leaderboardRows: FfiConverterOptionUInt32.read(from: &buf)
+                leaderboardRows: FfiConverterOptionUInt32.read(from: &buf),
+                spoiler: FfiConverterBool.read(from: &buf),
+                spoilerTeamIds: FfiConverterSequenceString.read(from: &buf)
             )
     }
 
@@ -1475,6 +1657,8 @@ public struct FfiConverterTypeUiSportConfig: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.championshipOptionId, into: &buf)
         FfiConverterOptionUInt32.write(value.dwellSecs, into: &buf)
         FfiConverterOptionUInt32.write(value.leaderboardRows, into: &buf)
+        FfiConverterBool.write(value.spoiler, into: &buf)
+        FfiConverterSequenceString.write(value.spoilerTeamIds, into: &buf)
     }
 }
 
@@ -2203,7 +2387,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_method_scoreboardclient_request_catalog() != 54212 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_method_scoreboardclient_request_games() != 11447 {
+    if uniffi_app_core_checksum_method_scoreboardclient_request_games() != 26785 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_reset_rotation() != 23733 {
@@ -2218,10 +2402,16 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_method_scoreboardclient_set_dwell() != 21881 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_app_core_checksum_method_scoreboardclient_set_game_spoiler() != 7018 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_method_scoreboardclient_set_league_dwell() != 25672 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_league_rows() != 35011 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_scoreboardclient_set_league_spoiler() != 26835 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_listener() != 33592 {
@@ -2236,7 +2426,16 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_method_scoreboardclient_set_sleep_hours() != 40272 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_app_core_checksum_method_scoreboardclient_set_spoiler_all() != 41727 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_scoreboardclient_set_spoiler_mode() != 36638 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_method_scoreboardclient_set_sport_config() != 63032 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_scoreboardclient_set_team_spoiler() != 60408 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_constructor_scoreboardclient_new() != 19144 {

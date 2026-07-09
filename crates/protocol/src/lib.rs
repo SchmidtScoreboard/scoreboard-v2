@@ -101,6 +101,10 @@ pub struct GameSummary {
     /// Drives the app's big-game caption on game cards.
     #[serde(default)]
     pub champ: Option<String>,
+    /// True when this summary was sanitized by spoiler protection: scores are
+    /// zeroed and `detail` carries only spoiler-safe status.
+    #[serde(default)]
+    pub spoiled: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -119,6 +123,16 @@ pub enum OffState {
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+/// How spoiler-protected games render on the board and in app summaries.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SpoilerMode {
+    /// Matchup + start time only; a FINAL marker once the game ends.
+    Strict,
+    /// Adds basic progress (period / quarter / lap count) — still no scores.
+    #[default]
+    Normal,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -156,6 +170,12 @@ pub struct SportConfig {
     /// top-4 (no scrolling), up to 20 = the full field. None = default (10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leaderboard_rows: Option<u32>,
+    /// Spoiler-protect every game in this league.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub spoiler: bool,
+    /// Spoiler-protect games involving these teams (team ids).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spoiler_team_ids: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -189,6 +209,19 @@ pub struct BoardConfig {
     /// If sleeping via the button: unix seconds when the server turns power back on.
     #[serde(default)]
     pub wake_at: Option<u64>,
+    /// How spoiler-protected games render (strict = matchup + time only).
+    #[serde(default)]
+    pub spoiler_mode: SpoilerMode,
+    /// Spoiler-protect EVERY game on this board.
+    #[serde(default)]
+    pub spoiler_all: bool,
+    /// One-off spoiler-protected games (the app's "Hide spoilers" button).
+    #[serde(default)]
+    pub spoiler_game_ids: Vec<String>,
+    /// One-off revealed games — exceptions that beat every protection rule
+    /// (the app's "Reveal" button on a protected game).
+    #[serde(default)]
+    pub revealed_game_ids: Vec<String>,
 }
 
 fn default_sleep_hours() -> u32 {
@@ -213,6 +246,10 @@ impl Default for BoardConfig {
             sleep_hours: default_sleep_hours(),
             dwell_secs: default_dwell_secs(),
             wake_at: None,
+            spoiler_mode: SpoilerMode::default(),
+            spoiler_all: false,
+            spoiler_game_ids: Vec::new(),
+            revealed_game_ids: Vec::new(),
         }
     }
 }
@@ -249,6 +286,17 @@ pub enum Command {
     /// Leaderboard depth for golf/F1 (4 = static top-4 .. 20 = full field);
     /// None reverts to the default (10).
     SetLeagueRows { sport_id: String, rows: Option<u32> },
+    /// How spoiler-protected games render (strict vs normal).
+    SetSpoilerMode { mode: SpoilerMode },
+    /// Spoiler-protect every game on the board.
+    SetSpoilerAll { on: bool },
+    /// Spoiler-protect a whole league.
+    SetLeagueSpoiler { sport_id: String, on: bool },
+    /// Spoiler-protect one team's games.
+    SetTeamSpoiler { sport_id: String, team_id: String, on: bool },
+    /// Per-game toggle: hidden=true protects one game; hidden=false reveals it
+    /// even when team/league/board rules would protect it.
+    SetGameSpoiler { game_id: String, hidden: bool },
     Rename { name: String },
 }
 
@@ -269,7 +317,12 @@ pub enum ClientMsg {
     Command { req_id: u64, board_id: String, cmd: Command },
     GetCatalog,
     // controller asks for all live games (to browse + add to a board)
-    GetGames,
+    GetGames {
+        /// Scope summaries to a board so its spoiler rules apply. Absent from
+        /// old clients (unit-variant JSON) — deserializes as None.
+        #[serde(default)]
+        board_id: Option<String>,
+    },
     // device announces it's in setup showing this pairing code
     EnterSetup { code: String },
     // controller asks to pair with whichever board is showing this code

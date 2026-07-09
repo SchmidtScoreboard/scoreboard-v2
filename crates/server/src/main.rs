@@ -347,7 +347,6 @@ async fn main() {
 
     let app = Router::new()
         .route("/catalog", get(get_catalog))
-        .route("/schedule", get(get_schedule))
         .route("/render/:id", get(get_render))
         .route("/ws", get(ws::ws_handler))
         .with_state(state);
@@ -370,13 +369,21 @@ async fn get_catalog(State(s): State<AppState>) -> Json<Catalog> {
 /// `id` may carry a trailing `.png`. 64x32 source; the app scales it up crisply.
 async fn get_render(
     axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
     State(s): State<AppState>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     let id = id.strip_suffix(".png").unwrap_or(&id);
+    // `?board=` scopes the render to that board's spoiler rules — without it a
+    // protected game's card image would leak the score around the sanitized
+    // summaries and frames.
+    let cfg = q.get("board").map(|b| s.config_for(b));
     let px = {
         let games = s.games.lock().unwrap();
-        games.iter().find(|g| g.id == id).map(|g| render::render_game(g).1)
+        games.iter().find(|g| g.id == id).map(|g| {
+            let spoiler = cfg.as_ref().and_then(|c| spoiler_for(c, g));
+            render::render_frame(g, spoiler).1
+        })
     };
     match px {
         Some(rgb565) => (
@@ -388,18 +395,18 @@ async fn get_render(
     }
 }
 
-async fn get_schedule(State(s): State<AppState>) -> Json<Schedule> {
-    let games = s.games.lock().unwrap();
-    let mut live = Vec::new();
-    let mut upcoming = Vec::new();
-    for g in games.iter() {
-        let summary = to_summary(g);
-        match g.status {
-            GameStatus::Active | GameStatus::Intermission => live.push(summary),
-            _ => upcoming.push(summary),
-        }
+/// Board-scoped summary: spoiler protection zeroes the scores and swaps the
+/// detail for spoiler-safe status, so protected results can't leak through
+/// the app's data model even if the UI mishandled them.
+pub(crate) fn to_summary_for(g: &Game, spoiler: Option<SpoilerMode>) -> GameSummary {
+    let mut s = to_summary(g);
+    if let Some(mode) = spoiler {
+        s.away_score = 0;
+        s.home_score = 0;
+        s.detail = spoiler_detail(g, mode);
+        s.spoiled = true;
     }
-    Json(Schedule { live, upcoming })
+    s
 }
 
 pub(crate) fn to_summary(g: &Game) -> GameSummary {
@@ -430,6 +437,7 @@ pub(crate) fn to_summary(g: &Game) -> GameSummary {
             frame_id: String::new(),
             bumped: false,
             champ: g.champ.as_ref().map(|c| c.label.clone()),
+            spoiled: false,
         };
     }
     let detail = pregame_detail().unwrap_or_else(|| {
@@ -451,6 +459,7 @@ pub(crate) fn to_summary(g: &Game) -> GameSummary {
         frame_id: String::new(),
         bumped: false,
         champ: g.champ.as_ref().map(|c| c.label.clone()),
+        spoiled: false,
     }
 }
 
@@ -745,7 +754,7 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
                     .and_then(|s| s.leaderboard_rows)
                     .map(|r| r as usize)
                     .unwrap_or(render::LEADERBOARD_DEFAULT_ROWS);
-                let (id, px, scrolls) = render::render_board_frame(g, rows_cap);
+                let (id, px, scrolls) = render::render_board_frame(g, rows_cap, spoiler_for(&cfg, g));
                 state.cache_frame(id.clone(), px);
                 rotation.push(RotationEntry { frame_id: id, dwell_ms, scroll: scrolls });
             }
@@ -894,6 +903,55 @@ pub fn handle_button(state: &AppState, board_id: &str) {
     push_board_state(state, board_id);
 }
 
+/// Whether a board spoiler-protects this game, and in which display mode.
+/// Precedence: a one-off REVEAL beats everything; then any protection rule
+/// (one-off hide, protect-all, league, team) engages the board's mode.
+pub fn spoiler_for(cfg: &BoardConfig, g: &Game) -> Option<SpoilerMode> {
+    if cfg.revealed_game_ids.contains(&g.id) {
+        return None;
+    }
+    let league = cfg.sports.iter().find(|s| s.sport_id == g.sport_id);
+    let team_hit = league.is_some_and(|s| {
+        s.spoiler_team_ids.iter().any(|tid| {
+            *tid == format!("{}-{}", g.sport_id, g.away.abbrev.to_lowercase())
+                || *tid == format!("{}-{}", g.sport_id, g.home.abbrev.to_lowercase())
+        })
+    });
+    let protected = cfg.spoiler_game_ids.contains(&g.id)
+        || cfg.spoiler_all
+        || league.is_some_and(|s| s.spoiler)
+        || team_hit;
+    protected.then_some(cfg.spoiler_mode)
+}
+
+/// The spoiler-safe replacement for a summary's `detail` line.
+fn spoiler_detail(g: &Game, mode: SpoilerMode) -> String {
+    match g.status {
+        GameStatus::Final => "FINAL".into(),
+        GameStatus::Pregame => start_time_label(&g.start_time).unwrap_or_default(),
+        _ => match mode {
+            SpoilerMode::Strict => start_time_label(&g.start_time)
+                .map(|t| format!("Started {t}"))
+                .unwrap_or_else(|| "LIVE".into()),
+            SpoilerMode::Normal => {
+                // Basic progress only: period/quarter for team games, the lap
+                // count for F1 (never names/gaps), plain LIVE otherwise.
+                if let Some(lb) = &g.leaderboard {
+                    lb.rows
+                        .first()
+                        .filter(|r| r.value.starts_with("LAP"))
+                        .map(|r| r.value.clone())
+                        .unwrap_or_else(|| "LIVE".into())
+                } else if g.ordinal.is_empty() {
+                    "LIVE".into()
+                } else {
+                    g.ordinal.clone()
+                }
+            }
+        },
+    }
+}
+
 /// The device knob turned. There is ONE brightness per board — the knob writes
 /// the same config field the app's slider does; the next manifest echoes it back
 /// to the device and the app sees it in the board state.
@@ -934,6 +992,29 @@ pub(crate) fn unix_now() -> u64 {
 /// One housekeeping pass: wake any boards whose sleep timer lapsed, and re-push
 /// manifests to connected boards so the idle clock advances. The identical-manifest
 /// dedup in `push_board` makes the blanket re-push free for boards showing games.
+/// Drop per-game spoiler one-offs whose games left the slate — ids are
+/// per-event, so without this the persisted lists grow forever.
+pub fn prune_spoiler_lists(state: &AppState) {
+    let ids: HashSet<String> = state.games.lock().unwrap().iter().map(|g| g.id.clone()).collect();
+    let stale: Vec<(String, BoardConfig)> = {
+        let configs = state.configs.lock().unwrap();
+        configs
+            .iter()
+            .filter(|(_, c)| {
+                c.spoiler_game_ids.iter().any(|id| !ids.contains(id))
+                    || c.revealed_game_ids.iter().any(|id| !ids.contains(id))
+            })
+            .map(|(b, c)| (b.clone(), c.clone()))
+            .collect()
+    };
+    for (bid, mut cfg) in stale {
+        cfg.spoiler_game_ids.retain(|id| ids.contains(id));
+        cfg.revealed_game_ids.retain(|id| ids.contains(id));
+        state.configs.lock().unwrap().insert(bid.clone(), cfg.clone());
+        state.persist_config(&bid, &cfg);
+    }
+}
+
 pub fn tick_once(state: &AppState) {
     // Wake-timer check covers ALL configured boards (a board can be offline when
     // its timer lapses; the config should still flip so the app shows it awake).
@@ -959,6 +1040,7 @@ pub fn tick_once(state: &AppState) {
         push_board(state, &bid);
     }
     evict_stale_frames(state);
+    prune_spoiler_lists(state);
 }
 
 /// Frames are content-addressed and every score/clock/situation change mints new
@@ -1035,8 +1117,9 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
         let mut out: Vec<GameSummary> = shown
             .iter()
             .map(|g| {
-                let mut s = to_summary(g);
-                let (fid, px) = render::render_game(g);
+                let spoiler = spoiler_for(&cfg, g);
+                let mut s = to_summary_for(g, spoiler);
+                let (fid, px) = render::render_frame(g, spoiler);
                 state.cache_frame(fid.clone(), px);
                 s.frame_id = fid;
                 s
@@ -1045,7 +1128,7 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
         // Bumped games ride along flagged, without pre-rendered frames (the app
         // falls back to HTTP rendering for those cards).
         out.extend(bumped.iter().map(|g| {
-            let mut s = to_summary(g);
+            let mut s = to_summary_for(g, spoiler_for(&cfg, g));
             s.bumped = true;
             s
         }));
@@ -1404,7 +1487,7 @@ fn preview() {
     }
     // The board-facing tall leaderboard (app cards keep the 4-row static frame).
     if let Some(golf) = espn::demo_games(0, 0).into_iter().find(|g| g.id == "demo-golf") {
-        let (_, px, scrolls) = render::render_board_frame(&golf, render::LEADERBOARD_DEFAULT_ROWS);
+        let (_, px, scrolls) = render::render_board_frame(&golf, render::LEADERBOARD_DEFAULT_ROWS, None);
         assert!(scrolls, "demo golf should be deep enough to scroll");
         let path = format!("{dir}/pga_scroll_tall.png");
         save_png(&path, &px, 12);
@@ -1561,6 +1644,72 @@ mod tests {
         b.tick(now + dwell * 3 / 10); // t = 30%: halfway through the glide
         let gliding = b.framebuffer();
         assert_ne!(held, gliding, "scroll window should have moved mid-glide");
+    }
+
+    /// Spoiler precedence: a one-off reveal beats every rule; team, league,
+    /// board-wide, and one-off hides all engage the board's display mode; and
+    /// sanitized summaries carry no scores in any mode.
+    #[test]
+    fn spoiler_rules_and_sanitized_summaries() {
+        let state = AppState::new_ephemeral();
+        let g = state.games.lock().unwrap().iter().find(|g| g.status == GameStatus::Active && g.leaderboard.is_none()).unwrap().clone();
+        let mut cfg = BoardConfig::default();
+        assert!(spoiler_for(&cfg, &g).is_none(), "nothing protected by default");
+
+        // Board-wide.
+        cfg.spoiler_all = true;
+        assert_eq!(spoiler_for(&cfg, &g), Some(SpoilerMode::Normal));
+        cfg.spoiler_mode = SpoilerMode::Strict;
+        assert_eq!(spoiler_for(&cfg, &g), Some(SpoilerMode::Strict));
+
+        // Reveal beats everything.
+        cfg.revealed_game_ids.push(g.id.clone());
+        assert!(spoiler_for(&cfg, &g).is_none(), "reveal wins over protect-all");
+        cfg.revealed_game_ids.clear();
+        cfg.spoiler_all = false;
+
+        // League + team rules.
+        cfg.sports.push(SportConfig { sport_id: g.sport_id.clone(), spoiler: true, ..Default::default() });
+        assert!(spoiler_for(&cfg, &g).is_some(), "league rule engages");
+        cfg.sports[0].spoiler = false;
+        cfg.sports[0].spoiler_team_ids =
+            vec![format!("{}-{}", g.sport_id, g.away.abbrev.to_lowercase())];
+        assert!(spoiler_for(&cfg, &g).is_some(), "team rule engages");
+        cfg.sports[0].spoiler_team_ids.clear();
+        assert!(spoiler_for(&cfg, &g).is_none());
+
+        // One-off hide.
+        cfg.spoiler_game_ids.push(g.id.clone());
+        assert!(spoiler_for(&cfg, &g).is_some());
+
+        // Sanitized summary: no scores, no live detail, flagged.
+        let s = to_summary_for(&g, Some(SpoilerMode::Normal));
+        assert!(s.spoiled);
+        assert_eq!((s.away_score, s.home_score), (0, 0));
+        assert_eq!(s.detail, g.ordinal, "normal mode keeps period only");
+        let s = to_summary_for(&g, Some(SpoilerMode::Strict));
+        assert!(!s.detail.contains(&g.clock), "strict never leaks the clock");
+    }
+
+    /// Spoiler-protected games render without scores in the manifest AND the
+    /// board-state frames; deep leaderboards collapse to a static frame.
+    #[test]
+    fn spoiled_manifest_hides_scores_and_scrolling() {
+        let state = AppState::new_ephemeral();
+        *state.games.lock().unwrap() = espn::demo_games(0, 0);
+        crate::ws::apply_command(&state, "b1", Command::SetSpoilerAll { on: true });
+        let m = manifest_for_board(&state, "b1");
+        assert!(m.rotation.iter().all(|e| !e.scroll), "no leaderboard scrolls while spoiled");
+        for e in &m.rotation {
+            let len = state.frames.lock().unwrap().get(&e.frame_id).map(|(_, p)| p.len()).unwrap();
+            assert_eq!(len, FRAME_BYTES, "every spoiled frame is panel-sized");
+        }
+        // The reveal exception restores the game's normal frame.
+        let live_id = state.games.lock().unwrap().iter().find(|g| g.status == GameStatus::Active).unwrap().id.clone();
+        crate::ws::apply_command(&state, "b1", Command::SetGameSpoiler { game_id: live_id.clone(), hidden: false });
+        let cfg = state.config_for("b1");
+        let g = state.games.lock().unwrap().iter().find(|g| g.id == live_id).unwrap().clone();
+        assert!(spoiler_for(&cfg, &g).is_none(), "revealed game escapes protect-all");
     }
 
     /// A per-league dwell override retimes ONLY that league's entries; others
@@ -1729,6 +1878,8 @@ mod tests {
                         championship_option_id: Some("gp".into()),
                         dwell_secs: None,
                         leaderboard_rows: None,
+                        spoiler: false,
+                        spoiler_team_ids: vec![],
                     },
                     SportConfig {
                         sport_id: "nhl".into(),
@@ -1736,6 +1887,8 @@ mod tests {
                         championship_option_id: None,
                         dwell_secs: None,
                         leaderboard_rows: None,
+                        spoiler: false,
+                        spoiler_team_ids: vec![],
                     },
                     SportConfig {
                         sport_id: "golf".into(), // sport no longer in the catalog at all
@@ -1743,6 +1896,8 @@ mod tests {
                         championship_option_id: None,
                         dwell_secs: None,
                         leaderboard_rows: None,
+                        spoiler: false,
+                        spoiler_team_ids: vec![],
                     },
                 ],
                 ..Default::default()
@@ -1786,6 +1941,8 @@ mod tests {
                 championship_option_id: Some(opt.into()),
                 dwell_secs: None,
                 leaderboard_rows: None,
+                spoiler: false,
+                spoiler_team_ids: vec![],
             }],
             ..Default::default()
         };
@@ -1862,6 +2019,8 @@ mod tests {
                 championship_option_id: Some("all".into()),
                 dwell_secs: None,
                 leaderboard_rows: None,
+                spoiler: false,
+                spoiler_team_ids: vec![],
             }],
             extra_game_ids: vec!["added-game".into()],
             ..Default::default()
@@ -2194,6 +2353,8 @@ mod tests {
             championship_option_id: Some("conf".into()),
             dwell_secs: None,
             leaderboard_rows: None,
+            spoiler: false,
+            spoiler_team_ids: vec![],
         });
         // "Conference Finals+" covers the cup final but not an early round,
         // and the regular-season game isn't a championship game at all.
@@ -2274,6 +2435,8 @@ mod tests {
             championship_option_id: None,
             dwell_secs: None,
             leaderboard_rows: None,
+            spoiler: false,
+            spoiler_team_ids: vec![],
         });
         assert_eq!(ids(&cfg), vec!["g1".to_string()]);
 

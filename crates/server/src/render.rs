@@ -9,6 +9,7 @@
 //!  - per-character kerning overrides Mark used (5x8: I,T->4 Y->6 ; 4x6: N->5).
 
 use crate::model::{Game, GameStatus, Situation, TeamSide};
+use scoreboard_protocol::SpoilerMode;
 use embedded_graphics::{
     draw_target::DrawTarget,
     geometry::{OriginDimensions, Size},
@@ -349,6 +350,77 @@ fn status_for(g: &Game) -> (String, Rgb888) {
     }
 }
 
+/// Board-scoped render: spoiler protection hides scores, situations, and
+/// leaderboard rows. `None` = the normal frame. Pregame frames are already
+/// spoiler-free (no result exists yet), so they always render normally.
+pub fn render_frame(g: &Game, spoiler: Option<SpoilerMode>) -> (FrameId, Vec<u8>) {
+    match spoiler {
+        Some(mode) if g.status != GameStatus::Pregame => render_spoiled(g, mode),
+        _ => render_game(g),
+    }
+}
+
+/// The spoiler-protected frame: matchup stays (team rows / event title), the
+/// result goes. Strict shows only when the game started (and FINAL when done);
+/// Normal adds basic progress — period/quarter for team games, the lap count
+/// for F1 — never scores, situations, or leaderboard rows.
+fn render_spoiled(g: &Game, mode: SpoilerMode) -> (FrameId, Vec<u8>) {
+    let (text, color) = match g.status {
+        GameStatus::Final => ("FINAL".to_string(), YELLOW),
+        _ => match mode {
+            SpoilerMode::Strict => (
+                crate::start_time_label(&g.start_time)
+                    .map(|t| format!("STARTED {t}"))
+                    .unwrap_or_else(|| "LIVE".into()),
+                GREY,
+            ),
+            SpoilerMode::Normal => {
+                if let Some(lb) = &g.leaderboard {
+                    // Lap count is sanctioned basic progress; anything richer
+                    // (positions, gaps) is a spoiler.
+                    let lap = lb.rows.first().filter(|r| r.value.starts_with("LAP"));
+                    (lap.map(|r| r.value.clone()).unwrap_or_else(|| "LIVE".into()), WHITE)
+                } else if g.ordinal.is_empty() {
+                    ("LIVE".into(), WHITE)
+                } else {
+                    (g.ordinal.clone(), WHITE)
+                }
+            }
+        },
+    };
+
+    if let Some(lb) = &g.leaderboard {
+        // Event title (F1 keeps its chrome), no rows, centered status.
+        let mut c = Canvas::new();
+        let f1 = g.sport_id == "f1";
+        let accent = if f1 { Rgb888::new(225, 6, 0) } else { Rgb888::new(52, 162, 35) };
+        let title_color = if f1 { WHITE } else { accent };
+        let title_w = text_width(&lb.name, false);
+        let tx = 32 - title_w / 2;
+        draw_text(&mut c, &lb.name, tx, 5, false, title_color);
+        if f1 && tx >= 11 && tx + title_w <= 53 {
+            checkered_flag(&mut c, 1);
+            checkered_flag(&mut c, 55);
+        }
+        let by = centered_baseline(8, FRAME_HEIGHT as i32 - 8, true);
+        draw_text(&mut c, &text, 32 - text_width(&text, true) / 2, by, true, color);
+        let px = c.to_rgb565();
+        return (frame_id(&px), px);
+    }
+
+    // Team game: rows keep colors and names — the matchup is not a spoiler —
+    // but the score slots stay empty and no situation layout is drawn.
+    let mut c = Canvas::new();
+    let lay = layout_for(&g.sport_id);
+    draw_team_box(&mut c, &g.away, 0, &lay, ACCENT_W, "");
+    draw_team_box(&mut c, &g.home, box_h(&lay), &lay, ACCENT_W, "");
+    let strip_top = 2 * box_h(&lay);
+    let by = centered_baseline(strip_top, FRAME_HEIGHT as i32 - strip_top, lay.status_big);
+    draw_text(&mut c, &text, (FRAME_WIDTH as i32 - text_width(&text, lay.status_big)) / 2, by, lay.status_big, color);
+    let px = c.to_rgb565();
+    (frame_id(&px), px)
+}
+
 pub fn render_game(g: &Game) -> (FrameId, Vec<u8>) {
     if g.leaderboard.is_some() {
         return render_leaderboard(g);
@@ -529,7 +601,13 @@ pub const LEADERBOARD_MAX_ROWS: usize = 20;
 /// same 6px pitch) for the board to scroll through; returns whether it
 /// scrolls. A cap of 4 is the static panel layout — no scrolling. App cards
 /// and HTTP renders keep the static 4-row `render_game`.
-pub fn render_board_frame(g: &Game, rows_cap: usize) -> (FrameId, Vec<u8>, bool) {
+pub fn render_board_frame(g: &Game, rows_cap: usize, spoiler: Option<SpoilerMode>) -> (FrameId, Vec<u8>, bool) {
+    // Spoiler-protected leaderboards hide their rows entirely — nothing tall
+    // to scroll, and the panel-sized spoiled frame is the whole story.
+    if spoiler.is_some() && g.status != GameStatus::Pregame {
+        let (id, px) = render_frame(g, spoiler);
+        return (id, px, false);
+    }
     let rows_cap = rows_cap.clamp(4, LEADERBOARD_MAX_ROWS);
     let deep = rows_cap > 4
         && g.status != GameStatus::Pregame
@@ -927,6 +1005,44 @@ mod kern_tests {
         assert!((23..=28).any(|y| (5..=20).any(|x| px565(&px, x, y) == white)), "ordinal at left");
     }
 
+    /// The spoiled frame keeps the matchup but drops the score: the team rows'
+    /// score slots stay dark, situations vanish, and the strip shows only the
+    /// sanctioned status (FINAL / period / start time).
+    #[test]
+    fn spoiled_frames_hide_scores_and_situations() {
+        use scoreboard_protocol::SpoilerMode;
+        let g = sit_game("mlb", "Top 7th", "", Situation::Baseball {
+            balls: 3, strikes: 2, outs: 2,
+            on_first: true, on_second: true, on_third: true,
+            is_inning_top: true,
+        });
+        let (_, normal) = render_frame(&g, None);
+        let (_, spoiled) = render_frame(&g, Some(SpoilerMode::Normal));
+        assert_ne!(normal, spoiled);
+        // Score digits draw in the team's SECONDARY color, right-aligned around
+        // x 56..=61; the row's primary-color background fill is lit either way,
+        // so the check is for secondary-colored ink specifically.
+        let away_ink = c565(g.away.secondary);
+        let score_ink = |px: &[u8], ys: core::ops::Range<i32>| {
+            ys.clone().any(|y| (56..=61).any(|x| px565(px, x, y) == away_ink))
+        };
+        assert!(score_ink(&normal, 1..6), "normal frame shows the score");
+        assert!(!score_ink(&spoiled, 1..6), "spoiled frame hides the away score");
+        // Normal mode keeps the period in the strip.
+        let strip_lit = (16..32).any(|y| (0..64).any(|x| px565(&spoiled, x, y) != 0));
+        assert!(strip_lit, "normal spoiler mode still shows the period");
+        // Strict mode differs from normal (start time instead of period).
+        let (_, strict) = render_frame(&g, Some(SpoilerMode::Strict));
+        assert_ne!(spoiled, strict);
+        // Finals show FINAL even when spoiled.
+        let mut done = g.clone();
+        done.status = GameStatus::Final;
+        done.situation = None;
+        let (_, final_px) = render_frame(&done, Some(SpoilerMode::Strict));
+        let final_strip_lit = (16..32).any(|y| (0..64).any(|x| px565(&final_px, x, y) != 0));
+        assert!(final_strip_lit, "FINAL marker renders");
+    }
+
     /// Checkered flags yield to long titles: they render only when the title
     /// clears both corners, so "BRITISH GP Q" never collides with the chrome.
     #[test]
@@ -1004,7 +1120,7 @@ mod kern_tests {
         });
 
         g.leaderboard = rows(10);
-        let (_, px, scrolls) = render_board_frame(&g, LEADERBOARD_DEFAULT_ROWS);
+        let (_, px, scrolls) = render_board_frame(&g, LEADERBOARD_DEFAULT_ROWS, None);
         assert!(scrolls);
         let h = px.len() / (64 * 2);
         assert_eq!(h, 12 + 9 * 6 + 2, "10 rows on the 6px pitch");
@@ -1019,7 +1135,7 @@ mod kern_tests {
         assert_eq!(px_static.len() / (64 * 2), 32, "app frame stays panel-sized");
 
         g.leaderboard = rows(4);
-        let (_, px, scrolls) = render_board_frame(&g, LEADERBOARD_DEFAULT_ROWS);
+        let (_, px, scrolls) = render_board_frame(&g, LEADERBOARD_DEFAULT_ROWS, None);
         assert!(!scrolls, "a shallow field has nothing to scroll");
         assert_eq!(px.len() / (64 * 2), 32);
     }

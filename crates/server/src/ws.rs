@@ -210,10 +210,20 @@ async fn controller_loop(
                     let cat = ServerMsg::Catalog((*state.catalog).clone());
                     let _ = out.send(Message::Text(serde_json::to_string(&cat).unwrap()));
                 }
-                Ok(ClientMsg::GetGames) => {
+                Ok(ClientMsg::GetGames { board_id }) => {
+                    // Board-scoped so spoiler rules sanitize the browse list too
+                    // — otherwise All Games would leak the very scores the
+                    // rotation hides.
+                    let cfg = board_id.as_deref().map(|b| state.config_for(b));
                     let games: Vec<GameSummary> = {
                         let g = state.games.lock().unwrap();
-                        g.iter().filter(|g| crate::browse_shows(g)).map(crate::to_summary).collect()
+                        g.iter()
+                            .filter(|g| crate::browse_shows(g))
+                            .map(|g| {
+                                let spoiler = cfg.as_ref().and_then(|c| crate::spoiler_for(c, g));
+                                crate::to_summary_for(g, spoiler)
+                            })
+                            .collect()
                     };
                     let _ = out.send(Message::Text(
                         serde_json::to_string(&ServerMsg::Games { games }).unwrap(),
@@ -300,8 +310,7 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
                         sport_id,
                         favorite_team_ids,
                         championship_option_id,
-                        dwell_secs: None,
-                        leaderboard_rows: None,
+                        ..Default::default()
                     });
                 }
             }
@@ -328,6 +337,9 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
                 cfg.focused_game_id = None;
                 cfg.extra_game_ids.clear();
                 cfg.excluded_game_ids.clear();
+                // Per-game spoiler one-offs are rotation tweaks too.
+                cfg.spoiler_game_ids.clear();
+                cfg.revealed_game_ids.clear();
             }
             Command::Rename { name } => {
                 let trimmed = name.trim();
@@ -357,6 +369,40 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
                     s.leaderboard_rows = rows;
                 } else if rows.is_some() {
                     cfg.sports.push(SportConfig { sport_id, leaderboard_rows: rows, ..Default::default() });
+                }
+            }
+            Command::SetSpoilerMode { mode } => cfg.spoiler_mode = mode,
+            Command::SetSpoilerAll { on } => cfg.spoiler_all = on,
+            Command::SetLeagueSpoiler { sport_id, on } => {
+                if let Some(s) = cfg.sports.iter_mut().find(|s| s.sport_id == sport_id) {
+                    s.spoiler = on;
+                } else if on {
+                    cfg.sports.push(SportConfig { sport_id, spoiler: true, ..Default::default() });
+                }
+            }
+            Command::SetTeamSpoiler { sport_id, team_id, on } => {
+                if let Some(s) = cfg.sports.iter_mut().find(|s| s.sport_id == sport_id) {
+                    s.spoiler_team_ids.retain(|t| t != &team_id);
+                    if on {
+                        s.spoiler_team_ids.push(team_id);
+                    }
+                } else if on {
+                    cfg.sports.push(SportConfig {
+                        sport_id,
+                        spoiler_team_ids: vec![team_id],
+                        ..Default::default()
+                    });
+                }
+            }
+            // Per-game toggle. The two lists are mutually exclusive: hiding
+            // clears a reveal and vice versa, so the button always flips state.
+            Command::SetGameSpoiler { game_id, hidden } => {
+                cfg.spoiler_game_ids.retain(|id| id != &game_id);
+                cfg.revealed_game_ids.retain(|id| id != &game_id);
+                if hidden {
+                    cfg.spoiler_game_ids.push(game_id);
+                } else {
+                    cfg.revealed_game_ids.push(game_id);
                 }
             }
             // Deliberately no catch-all: a new Command variant should be a compile
