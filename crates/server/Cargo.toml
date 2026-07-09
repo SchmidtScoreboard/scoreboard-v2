@@ -22,4 +22,5 @@ hex = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
+board-core = { path = "../board-core" }
 tokio-tungstenite = "0.21"

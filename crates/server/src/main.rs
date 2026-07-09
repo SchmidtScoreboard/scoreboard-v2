@@ -1515,6 +1515,51 @@ mod tests {
         }
     }
 
+    /// END-TO-END scroll: the demo manifest, serialized exactly as the wire
+    /// carries it, drives a real Board through a full dwell — the leaderboard
+    /// window must actually MOVE. Guards the server/board contract that unit
+    /// tests on either side can miss.
+    #[test]
+    fn board_scrolls_the_demo_leaderboard_through_the_wire() {
+        let state = AppState::new_ephemeral();
+        *state.games.lock().unwrap() = espn::demo_games(0, 0);
+        push_board(&state, "b1");
+        let json = state.last_manifest.lock().unwrap().get("b1").cloned().unwrap();
+        // The wire round-trip the device performs.
+        let ServerMsg::Manifest(m) = serde_json::from_str::<ServerMsg>(&json).unwrap() else {
+            panic!("stored manifest should parse")
+        };
+        let scroll_idx = m.rotation.iter().position(|e| e.scroll).expect("a scrolling entry");
+        let dwell = m.rotation[scroll_idx].dwell_ms as u64;
+
+        let mut b = board_core::Board::new();
+        b.gesture(board_core::Gesture::Long); // -> Setup (any non-boot mode)
+        b.setup_done(); // -> Running? Setup stays; use manifest path instead
+        b.set_online(true);
+        b.tick(0);
+        b.on_manifest(m.clone());
+        // Feed every frame the manifest references, exactly as NeedFrames would.
+        {
+            let frames = state.frames.lock().unwrap();
+            for e in &m.rotation {
+                let (_, px) = frames.get(&e.frame_id).cloned().unwrap();
+                b.on_frame(e.frame_id.clone(), px);
+            }
+        }
+        // Walk to the scrolling entry: advance happens at each entry's dwell.
+        let mut now = 0u64;
+        for e in m.rotation.iter().take(scroll_idx) {
+            now += e.dwell_ms as u64;
+            b.tick(now);
+        }
+        // Mid top-hold vs mid glide-down: the visible window must differ.
+        b.tick(now + dwell / 10); // t = 10% of dwell: inside the first fifth (hold)
+        let held = b.framebuffer();
+        b.tick(now + dwell * 3 / 10); // t = 30%: halfway through the glide
+        let gliding = b.framebuffer();
+        assert_ne!(held, gliding, "scroll window should have moved mid-glide");
+    }
+
     /// A per-league dwell override retimes ONLY that league's entries; others
     /// keep the board default. Scrolling frames sync to whichever applies.
     #[test]
