@@ -367,9 +367,14 @@ final class BoardViewModel: ObservableObject {
 
     /// A human title for a game card: "BOS @ TOR" for team games (abbreviations
     /// — full names truncate at card width), or the event name for leaderboard
-    /// sports (golf/F1) that have no home side.
+    /// sports (golf/F1). Event names arrive panel-style ALL CAPS; the card
+    /// title reads better as "Monaco GP" — short words (GP, Q) stay caps.
     func gameTitle(_ g: UiGame) -> String {
-        g.home.isEmpty ? g.away : "\(g.away) @ \(g.home)"
+        guard g.home.isEmpty else { return "\(g.away) @ \(g.home)" }
+        return g.away
+            .split(separator: " ")
+            .map { w in w.count <= 2 ? String(w) : w.prefix(1) + w.dropFirst().lowercased() }
+            .joined(separator: " ")
     }
 
     // ---- league preferences (all scoped to the selected board) ----
@@ -915,7 +920,7 @@ struct GameFrame: View {
 /// full LED frame, and a footer row of action buttons — all ON the card. The card
 /// is a dark bezel so the black LED panel sits as a distinct, clearly-centered
 /// rectangle inside it; the frame keeps square corners so no pixels are clipped.
-struct GameCard<Caption: View, Footer: View>: View {
+struct GameCard<Footer: View>: View {
     let game: UiGame
     let title: String
     let httpBase: String
@@ -923,41 +928,41 @@ struct GameCard<Caption: View, Footer: View>: View {
     var refresh: Int = 0
     /// Board id, forwarded to the HTTP render fallback for spoiler scoping.
     var board: String = ""
-    /// Pinned/focused: draws the accent ring so the one game overriding the
-    /// rotation is unmissable in any list.
+    /// On the board (View All) or pinned (carousel): accent ring + tinted fill.
     var highlighted: Bool = false
-    /// Small line under the title (provenance label etc.).
-    @ViewBuilder var caption: Caption
+    /// Shows the pin badge in the header (independent of the ring).
+    var pinned: Bool = false
     /// Action buttons row at the bottom of the card.
     @ViewBuilder var footer: Footer
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(title)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
-                    // Pinned badge: the ring alone can read as decoration —
-                    // the pin in the header names the state.
-                    if highlighted {
-                        Image(systemName: "pin.fill")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                            .accessibilityLabel("Pinned")
-                    }
-                    // Championship badge in the card's corner — a caption
-                    // line would change the card height for big games only.
-                    if let champ = game.champ {
-                        Image(systemName: "trophy.fill")
-                            .font(.caption)
-                            .foregroundStyle(.yellow)
-                            .accessibilityLabel(champ)
-                    }
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                // Header badges carry the card's state — no caption line.
+                if pinned {
+                    Image(systemName: "pin.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .accessibilityLabel("Pinned")
                 }
-                caption
+                if game.spoiled {
+                    // Only the hidden state earns a badge; visible is the norm.
+                    Image(systemName: "eye.slash.fill")
+                        .font(.caption)
+                        .foregroundStyle(.indigo)
+                        .accessibilityLabel("Spoilers hidden")
+                }
+                if let champ = game.champ {
+                    Image(systemName: "trophy.fill")
+                        .font(.caption)
+                        .foregroundStyle(.yellow)
+                        .accessibilityLabel(champ)
+                }
             }
             GameFrame(game: game, httpBase: httpBase, frame: frame, refresh: refresh, board: board)
             footer
@@ -1229,11 +1234,6 @@ struct DashboardView: View {
         .modifier(FullBleedSection())
     }
 
-    /// The caption line under the game title — see ProvenanceCaption.
-    private func sourceCaption(_ game: UiGame) -> some View {
-        ProvenanceCaption(model: model, game: game)
-    }
-
     /// A compact labeled action button for the card footer. Hand-rolled capsule
     /// (the stock bordered style balloons and wraps its label at this width);
     /// fills the width it's given so side-by-side buttons come out equal.
@@ -1295,9 +1295,7 @@ struct DashboardView: View {
                     ForEach(model.displayedNowShowing, id: \.id) { game in
                         let pinned = model.focusedGameId == game.id
                         let dimmed = model.focusedGameId != nil && !pinned
-                        GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId], board: model.selectedBoardId ?? "", highlighted: pinned) {
-                            sourceCaption(game)
-                        } footer: {
+                        GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId], board: model.selectedBoardId ?? "", highlighted: pinned, pinned: pinned) {
                             HStack(spacing: 8) {
                                 // One primary action owns the width; pin and
                                 // spoilers tuck into the "…" menu.
@@ -1391,43 +1389,34 @@ struct DashboardView: View {
         }
     }
 
-    /// The global spoiler choice, drawn with the receipts: each option shows
+    /// Spoiler settings, drawn with the receipts: the two display modes show
     /// the SAME example game rendered exactly as the board would show it.
     private var spoilerSection: some View {
         Section {
-            spoilerOptionRow(
-                "No spoilers",
-                "Scores and situations show live.",
-                variant: "off",
-                selected: !model.current.spoilerAll
-            ) {
-                model.setSpoilerAll(false)
-            }
+            Toggle("Hide all spoilers", isOn: Binding(
+                get: { model.current.spoilerAll },
+                set: { model.setSpoilerAll($0) }
+            ))
             spoilerOptionRow(
                 "Hide results",
-                "Matchup and period only — no scores.",
+                "Matchup and period — no scores.",
                 variant: "normal",
-                selected: model.current.spoilerAll && !model.current.strictSpoilers
+                selected: !model.current.strictSpoilers
             ) {
-                model.setSpoilerAll(true)
                 model.setStrictSpoilers(false)
             }
             spoilerOptionRow(
                 "Hide everything",
-                "Matchup and start time; FINAL when done.",
+                "Matchup only; FINAL when done.",
                 variant: "strict",
-                selected: model.current.spoilerAll && model.current.strictSpoilers
+                selected: model.current.strictSpoilers
             ) {
-                model.setSpoilerAll(true)
                 model.setStrictSpoilers(true)
             }
         } header: {
-            HStack(spacing: 6) {
-                Text("Spoilers")
-                infoButton(.spoilers).textCase(nil)
-            }
+            Text("Spoilers")
         } footer: {
-            Text("Applies to every game. Single teams and leagues have their own spoiler chips in League Preferences; each game card can reveal or hide one game.")
+            Text("The display mode applies to any game marked no-spoilers — via the toggle above, a chip in League Preferences, or a game card's menu.")
         }
     }
 
@@ -1454,7 +1443,7 @@ struct DashboardView: View {
                     Color.black
                 }
                 .frame(width: 96, height: 48)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(Rectangle().strokeBorder(.primary.opacity(0.15)))
             }
         }
     }
@@ -1546,6 +1535,7 @@ struct DashboardView: View {
             }
 
             if let big = pref.bigGame {
+                HStack(spacing: 8) {
                 Menu {
                     ForEach(pref.sport.championshipOptions, id: \.id) { opt in
                         Button {
@@ -1574,25 +1564,19 @@ struct DashboardView: View {
                 // The Menu paints its label with the accent color; retint so the
                 // row reads like the team rows above (chevron still hints at it).
                 .tint(.primary)
+
+                // League spoiler state rides on the same row as the big-game
+                // subscription (a Menu label can't host a tappable chip, so
+                // the chip sits beside the menu).
+                SpoilerChip(hidden: model.leagueSpoiler(pref.sport.id)) {
+                    model.setLeagueSpoiler(pref.sport.id, !model.leagueSpoiler(pref.sport.id))
+                }
+                }
                 .swipeActions(edge: .trailing) {
                     Button(role: .destructive) {
                         model.clearBigGames(pref.sport.id)
                     } label: {
                         Label("Turn off", systemImage: "trophy.slash")
-                    }
-                }
-
-                // Spoiler state for the big-game subscription rides the same
-                // league-wide flag; the chip shows and toggles it in place.
-                HStack(spacing: 12) {
-                    Image(systemName: "eye.slash")
-                        .foregroundStyle(.secondary)
-                        .frame(width: 24)
-                    Text("Spoilers")
-                        .foregroundStyle(.primary)
-                    Spacer()
-                    SpoilerChip(hidden: model.leagueSpoiler(pref.sport.id)) {
-                        model.setLeagueSpoiler(pref.sport.id, !model.leagueSpoiler(pref.sport.id))
                     }
                 }
             }
@@ -1695,7 +1679,7 @@ struct DashboardView: View {
 
 /// Settings rows that have an explainer card behind an ⓘ button.
 enum SettingsInfoTopic: String, Identifiable {
-    case whenOff, sleep, dwell, spoilers
+    case whenOff, sleep, dwell
     var id: String { rawValue }
 
     var icon: String {
@@ -1703,7 +1687,6 @@ enum SettingsInfoTopic: String, Identifiable {
         case .whenOff: "clock"
         case .sleep: "moon.zzz.fill"
         case .dwell: "timer"
-        case .spoilers: "eye.slash"
         }
     }
 
@@ -1712,7 +1695,6 @@ enum SettingsInfoTopic: String, Identifiable {
         case .whenOff: "When off"
         case .sleep: "Sleep duration"
         case .dwell: "Time per event"
-        case .spoilers: "Spoilers"
         }
     }
 
@@ -1720,44 +1702,22 @@ enum SettingsInfoTopic: String, Identifiable {
         switch self {
         case .whenOff:
             """
-            What the panel shows whenever the scoreboard is off — after you tap \
-            the power button here, or after it puts itself to sleep.
-
-            Clock keeps a dim clock on the panel so the board still earns its \
-            spot on the shelf. Blank turns the panel fully dark.
+            What the panel shows while the scoreboard is off — a dim clock, \
+            or nothing at all.
             """
         case .sleep:
             """
-            Pressing the button on the scoreboard while games are showing puts \
-            it to sleep for this long. It wakes back up on its own when the \
-            timer runs out — or press the button again to wake it early.
-
-            While it sleeps, the panel shows your "When off" choice (a dim \
-            clock or nothing).
+            Pressing the scoreboard's button puts it to sleep for this long. \
+            It wakes on its own when the timer ends; press again to wake it \
+            early. While asleep, the panel shows your "When off" choice.
             """
         case .dwell:
             """
-            How long each event stays on the panel before the rotation moves \
-            to the next one. Scrolling leaderboards (golf, F1) fit one full \
-            scroll pass into this time.
+            How long each event holds the panel before the rotation moves on. \
+            Scrolling leaderboards fit one full pass into this time.
 
-            Shorter times cycle through more events per minute; longer times \
-            make each one easier to catch. Any league can override this from \
-            its League Preferences editor — give F1 30 seconds to scroll while \
-            baseball flashes by in 10.
-            """
-        case .spoilers:
-            """
-            Spoiler-protected games stay in the rotation but hide their scores \
-            until you reveal them — for the game you recorded and haven't \
-            watched yet.
-
-            Protect everything with this switch, a whole league from its \
-            editor, or one team with a swipe on its row. Each game card has a \
-            Reveal / Spoiler button to override either way. "Spoiler display" \
-            picks what protected games still show: basic progress (period, \
-            quarter, lap count) or, in strict mode, just the matchup and start \
-            time. Finished games show FINAL — never the score.
+            Any league can override this from its editor — give F1 30 seconds \
+            while baseball flashes by in 10.
             """
         }
     }
@@ -1770,7 +1730,7 @@ struct SettingsInfoCard: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 12) {
                 Image(systemName: topic.icon)
                     .font(.title2)
@@ -1781,11 +1741,15 @@ struct SettingsInfoCard: View {
                     .font(.title3.weight(.semibold))
                 Spacer()
             }
-            Text(topic.explanation)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
+            // Scrolls when needed — a fixed sheet height was clipping the
+            // longer explanations (and even the title at some type sizes).
+            ScrollView {
+                Text(topic.explanation)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             Button {
                 dismiss()
             } label: {
@@ -1796,8 +1760,9 @@ struct SettingsInfoCard: View {
             }
             .buttonStyle(.borderedProminent)
         }
-        .padding(20)
-        .presentationDetents([.height(300)])
+        .padding([.horizontal, .bottom], 20)
+        .padding(.top, 24)
+        .presentationDetents([.medium])
         .presentationDragIndicator(.visible)
     }
 }
@@ -1880,9 +1845,9 @@ struct AllGamesView: View {
     /// pops back to the dashboard to show the result.
     private func allGamesCard(_ game: UiGame) -> some View {
         let showing = model.isShowing(game.id)
-        return GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId], refresh: refresh, board: model.selectedBoardId ?? "", highlighted: model.focusedGameId == game.id) {
-            ProvenanceCaption(model: model, game: game)
-        } footer: {
+        // Highlight = the game is ON the scoreboard; the pin badge marks the
+        // one game overriding the rotation.
+        return GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId], refresh: refresh, board: model.selectedBoardId ?? "", highlighted: showing, pinned: model.focusedGameId == game.id) {
             HStack(spacing: 8) {
                 if showing {
                     AllGamesCardButton(title: "Remove", icon: "minus.circle", tint: .red) {
@@ -1899,61 +1864,6 @@ struct AllGamesView: View {
     }
 }
 
-/// The one-line provenance under a card title: WHY the game is on the board
-/// (or that it isn't), ordered by how directly the user caused it. Shared by
-/// the dashboard carousel and the All Games screen so the story never forks.
-struct ProvenanceCaption: View {
-    @ObservedObject var model: BoardViewModel
-    let game: UiGame
-
-    var body: some View {
-        let (icon, text, color): (String, String, Color) = {
-            // Cap-bumped: qualifies but lost its rotation slot.
-            if game.bumped {
-                return ("exclamationmark.circle.fill", "Bumped — rotation full", .orange)
-            }
-            // A scheduled game you haven't added: the start time beats a generic
-            // "not on scoreboard" (the Add button already implies that).
-            if game.status == "pregame", !model.isShowing(game.id) {
-                return ("clock", game.detail.isEmpty ? "Upcoming" : "Starts \(game.detail)", .gray)
-            }
-            switch model.gameSource(game) {
-            case .added: return ("plus.circle.fill", "Added manually", .cyan)
-            case .favorite:
-                // Name the team that earned the slot.
-                if let name = model.favoriteName(game) {
-                    return ("star.fill", "Favorite · \(name)", .yellow)
-                }
-                return ("star.fill", "Favorite", .yellow)
-            case nil:
-                guard model.isShowing(game.id) else {
-                    return ("circle.dashed", "Not on scoreboard", .gray)
-                }
-                // A league subscription explains it: the big-game tier by name
-                // ("Stanley Cup Final"), or the option itself ("Every match").
-                if model.championshipId(game.sportId) != "none" {
-                    if let champ = game.champ {
-                        return ("trophy.fill", champ, .yellow)
-                    }
-                    if let label = model.championshipLabel(game.sportId) {
-                        return ("star.fill", "Subscribed · \(label)", .green)
-                    }
-                }
-                // Nothing configured anywhere: the board samples the whole slate.
-                return ("square.grid.2x2", "No preferences — showing everything", .gray)
-            }
-        }()
-        // Color only the icon; the text stays secondary so it reads in both
-        // color schemes (yellow text on a white card is illegible).
-        return HStack(spacing: 4) {
-            Image(systemName: icon).foregroundStyle(color)
-            Text(text).foregroundStyle(.secondary)
-        }
-        .font(.caption2)
-        .lineLimit(1)
-    }
-}
-
 /// Tappable spoiler state chip: crossed-out eye = results hidden, plain eye =
 /// visible. One tap toggles — no swipe gestures to discover.
 struct SpoilerChip: View {
@@ -1964,7 +1874,9 @@ struct SpoilerChip: View {
         Button(action: action) {
             HStack(spacing: 3) {
                 Image(systemName: hidden ? "eye.slash.fill" : "eye")
-                Text(hidden ? "hidden" : "visible")
+                if hidden {
+                    Text("no spoilers")
+                }
             }
             .font(.caption2.weight(.semibold))
             .foregroundStyle(hidden ? Color.indigo : Color.secondary)

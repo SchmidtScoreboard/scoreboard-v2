@@ -368,12 +368,8 @@ fn render_spoiled(g: &Game, mode: SpoilerMode) -> (FrameId, Vec<u8>) {
     let (text, color) = match g.status {
         GameStatus::Final => ("FINAL".to_string(), YELLOW),
         _ => match mode {
-            SpoilerMode::Strict => (
-                crate::start_time_label(&g.start_time)
-                    .map(|t| format!("STARTED {t}"))
-                    .unwrap_or_else(|| "LIVE".into()),
-                GREY,
-            ),
+            // "STARTED 6:00 PM" overflows the panel; LIVE NOW says enough.
+            SpoilerMode::Strict => ("LIVE NOW".into(), GREY),
             SpoilerMode::Normal => {
                 if let Some(lb) = &g.leaderboard {
                     // Lap count is sanctioned basic progress; anything richer
