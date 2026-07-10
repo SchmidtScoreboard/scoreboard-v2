@@ -1311,22 +1311,19 @@ struct DashboardView: View {
                             sourceCaption(game)
                         } footer: {
                             HStack(spacing: 8) {
-                                cardButton(pinned ? "Unpin" : "Pin", pinned ? "pin.slash" : "pin", tint: pinned ? .orange : .primary) {
-                                    withAnimation { pinned ? model.clearFocus() : model.focusGame(game.id) }
-                                }
-                                cardButton(game.spoiled ? "Reveal" : "Spoiler", game.spoiled ? "eye" : "eye.slash", tint: game.spoiled ? .indigo : .primary) {
-                                    withAnimation { model.setGameSpoiler(game.id, hidden: !game.spoiled) }
-                                }
+                                // One primary action owns the width; pin and
+                                // spoilers tuck into the "…" menu.
                                 if game.bumped {
                                     // Promote: a manual add outranks whatever bumped it.
                                     cardButton("Add", "plus.circle", tint: .green) {
                                         withAnimation { model.addGame(game.id) }
                                     }
-                                } else if !dimmed {
+                                } else {
                                     cardButton("Remove", "minus.circle", tint: .red) {
                                         withAnimation { model.removeFromRotation(game) }
                                     }
                                 }
+                                CardMenu(model: model, game: game)
                             }
                         }
                         // While something else is pinned, cards go monochrome —
@@ -1833,18 +1830,12 @@ struct AllGamesView: View {
                     AllGamesCardButton(title: "Remove", icon: "minus.circle", tint: .red) {
                         model.removeFromRotation(game)
                     }
-                    let pinned = model.focusedGameId == game.id
-                    AllGamesCardButton(title: pinned ? "Unpin" : "Pin", icon: pinned ? "pin.slash" : "pin", tint: pinned ? .orange : .primary) {
-                        withAnimation { pinned ? model.clearFocus() : model.focusGame(game.id) }
-                    }
                 } else {
                     AllGamesCardButton(title: "Add", icon: "plus.circle", tint: .green) {
                         model.addGame(game.id)
                     }
                 }
-                AllGamesCardButton(title: game.spoiled ? "Reveal" : "Spoiler", icon: game.spoiled ? "eye" : "eye.slash", tint: game.spoiled ? .indigo : .primary) {
-                    model.setGameSpoiler(game.id, hidden: !game.spoiled)
-                }
+                CardMenu(model: model, game: game, canPin: showing)
             }
         }
     }
@@ -1902,6 +1893,46 @@ struct ProvenanceCaption: View {
         }
         .font(.caption2)
         .lineLimit(1)
+    }
+}
+
+/// The card footer's "…" menu: secondary actions (pin, spoilers) live here so
+/// the primary Add/Remove button keeps most of the width. The hidden Text sets
+/// the same line height as the text capsules, so all footer pills match.
+struct CardMenu: View {
+    @ObservedObject var model: BoardViewModel
+    let game: UiGame
+    /// Pinning only applies to games on the board.
+    var canPin: Bool = true
+
+    var body: some View {
+        let pinned = model.focusedGameId == game.id
+        Menu {
+            if canPin {
+                Button {
+                    withAnimation { pinned ? model.clearFocus() : model.focusGame(game.id) }
+                } label: {
+                    Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
+                }
+            }
+            Button {
+                withAnimation { model.setGameSpoiler(game.id, hidden: !game.spoiled) }
+            } label: {
+                Label(
+                    game.spoiled ? "Reveal result" : "Hide spoilers",
+                    systemImage: game.spoiled ? "eye" : "eye.slash"
+                )
+            }
+        } label: {
+            Text(" ")
+                .font(.caption.weight(.semibold))
+                .overlay(Image(systemName: "ellipsis").font(.caption.weight(.semibold)))
+                .foregroundStyle(.primary)
+                .frame(width: 40)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(.primary.opacity(0.06)))
+        }
+        .buttonStyle(.plain)
     }
 }
 
