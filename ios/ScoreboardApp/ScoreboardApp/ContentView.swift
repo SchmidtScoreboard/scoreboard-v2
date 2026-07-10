@@ -928,10 +928,10 @@ struct GameCard<Footer: View>: View {
     var refresh: Int = 0
     /// Board id, forwarded to the HTTP render fallback for spoiler scoping.
     var board: String = ""
-    /// On the board (View All) or pinned (carousel): accent ring + tinted fill.
-    var highlighted: Bool = false
-    /// Shows the pin badge in the header (independent of the ring).
-    var pinned: Bool = false
+    /// Card emphasis: `.included` (on the scoreboard — teal ring) or `.pinned`
+    /// (overriding the rotation — orange ring + pin badge).
+    enum Highlight { case none, included, pinned }
+    var highlight: Highlight = .none
     /// Action buttons row at the bottom of the card.
     @ViewBuilder var footer: Footer
 
@@ -944,7 +944,7 @@ struct GameCard<Footer: View>: View {
                     .lineLimit(1)
                 Spacer(minLength: 0)
                 // Header badges carry the card's state — no caption line.
-                if pinned {
+                if highlight == .pinned {
                     Image(systemName: "pin.fill")
                         .font(.caption)
                         .foregroundStyle(.orange)
@@ -974,13 +974,15 @@ struct GameCard<Footer: View>: View {
         // hardware. Radius matches the inset-grouped sections.
         .background(
             RoundedRectangle(cornerRadius: 26)
-                .fill(highlighted ? AnyShapeStyle(Color.orange.opacity(0.14)) : AnyShapeStyle(Color(.secondarySystemGroupedBackground)))
+                .fill(highlight == .pinned ? AnyShapeStyle(Color.orange.opacity(0.14)) : AnyShapeStyle(Color(.secondarySystemGroupedBackground)))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 26)
                 .strokeBorder(
-                    highlighted ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.primary.opacity(0.08)),
-                    lineWidth: highlighted ? 3 : 1
+                    highlight == .pinned
+                        ? AnyShapeStyle(Color.orange)
+                        : highlight == .included ? AnyShapeStyle(Color.teal.opacity(0.8)) : AnyShapeStyle(.primary.opacity(0.08)),
+                    lineWidth: highlight == .none ? 1 : 3
                 )
         )
     }
@@ -1093,6 +1095,7 @@ struct DashboardView: View {
             }
             settingsSection
             spoilerSection
+            removeSection
         }
         // One uniform gap between top-level sections. Individual sections that
         // belong to the section above them (the league cards under the
@@ -1153,16 +1156,6 @@ struct DashboardView: View {
                 .labelsHidden()
             }
 
-            Button("Remove this scoreboard", role: .destructive) {
-                showRemoveConfirm = true
-            }
-            .confirmationDialog("Remove this scoreboard?", isPresented: $showRemoveConfirm, titleVisibility: .visible) {
-                Button("Remove", role: .destructive) {
-                    if let id = model.selectedBoardId { model.unpair(id) }
-                }
-            } message: {
-                Text("It stays paired on the server — add it again anytime with a new code.")
-            }
         }
         .sheet(item: $settingsInfo) { topic in
             SettingsInfoCard(topic: topic)
@@ -1295,7 +1288,7 @@ struct DashboardView: View {
                     ForEach(model.displayedNowShowing, id: \.id) { game in
                         let pinned = model.focusedGameId == game.id
                         let dimmed = model.focusedGameId != nil && !pinned
-                        GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId], board: model.selectedBoardId ?? "", highlighted: pinned, pinned: pinned) {
+                        GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId], board: model.selectedBoardId ?? "", highlight: pinned ? .pinned : .none) {
                             HStack(spacing: 8) {
                                 // One primary action owns the width; pin and
                                 // spoilers tuck into the "…" menu.
@@ -1389,6 +1382,21 @@ struct DashboardView: View {
         }
     }
 
+    private var removeSection: some View {
+        Section {
+            Button("Remove this scoreboard", role: .destructive) {
+                showRemoveConfirm = true
+            }
+            .confirmationDialog("Remove this scoreboard?", isPresented: $showRemoveConfirm, titleVisibility: .visible) {
+                Button("Remove", role: .destructive) {
+                    if let id = model.selectedBoardId { model.unpair(id) }
+                }
+            } message: {
+                Text("It stays paired on the server — add it again anytime with a new code.")
+            }
+        }
+    }
+
     /// Spoiler settings, drawn with the receipts: the two display modes show
     /// the SAME example game rendered exactly as the board would show it.
     private var spoilerSection: some View {
@@ -1397,6 +1405,10 @@ struct DashboardView: View {
                 get: { model.current.spoilerAll },
                 set: { model.setSpoilerAll($0) }
             ))
+            Text("When spoilers are hidden…")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .listRowSeparator(.hidden, edges: .bottom)
             spoilerOptionRow(
                 "Hide results",
                 "Matchup and period — no scores.",
@@ -1415,8 +1427,6 @@ struct DashboardView: View {
             }
         } header: {
             Text("Spoilers")
-        } footer: {
-            Text("The display mode applies to any game marked no-spoilers — via the toggle above, a chip in League Preferences, or a game card's menu.")
         }
     }
 
@@ -1830,14 +1840,17 @@ struct AllGamesView: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
-                    refresh += 1
+                    refresh = Int(Date().timeIntervalSince1970)
                     model.requestGames()
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
             }
         }
-        .onAppear { refresh += 1; model.requestGames() }
+        // A unique value per visit: `refresh` participates in the render URLs,
+        // and a CONSTANT value let URLCache pin a stale/failed response (e.g.
+        // a 404 cached from before a server restart knew a demo game) forever.
+        .onAppear { refresh = Int(Date().timeIntervalSince1970); model.requestGames() }
     }
 
     /// One game card with its provenance caption and Add / Remove+Pin footer.
@@ -1845,9 +1858,11 @@ struct AllGamesView: View {
     /// pops back to the dashboard to show the result.
     private func allGamesCard(_ game: UiGame) -> some View {
         let showing = model.isShowing(game.id)
-        // Highlight = the game is ON the scoreboard; the pin badge marks the
-        // one game overriding the rotation.
-        return GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId], refresh: refresh, board: model.selectedBoardId ?? "", highlighted: showing, pinned: model.focusedGameId == game.id) {
+        let pinned = model.focusedGameId == game.id
+        // Teal ring = on the scoreboard; orange ring + badge = pinned. While a
+        // pin is active everything else grays out, exactly like the carousel.
+        let dimmed = model.focusedGameId != nil && !pinned
+        return GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId], refresh: refresh, board: model.selectedBoardId ?? "", highlight: pinned ? .pinned : showing ? .included : .none) {
             HStack(spacing: 8) {
                 if showing {
                     AllGamesCardButton(title: "Remove", icon: "minus.circle", tint: .red) {
@@ -1861,6 +1876,8 @@ struct AllGamesView: View {
                 CardMenu(model: model, game: game, canPin: showing)
             }
         }
+        .saturation(dimmed ? 0 : 1)
+        .opacity(dimmed ? 0.5 : 1)
     }
 }
 
@@ -2246,33 +2263,6 @@ struct LeagueEditorView: View {
 
     private var editorList: some View {
         List {
-            Section {
-                Picker("Time per event", selection: Binding(
-                    get: { model.leagueDwellSecs(sport.id) ?? 0 },
-                    set: { model.setLeagueDwell(sport.id, $0 == 0 ? nil : $0) }
-                )) {
-                    Text("Board default (\(model.current.dwellSecs)s)").tag(UInt32(0))
-                    ForEach([UInt32(5), 7, 10, 15, 20, 30], id: \.self) { s in
-                        Text("\(s) seconds").tag(s)
-                    }
-                }
-            } footer: {
-                Text("How long this league's events hold the panel — leaderboards fit a full scroll pass into it.")
-            }
-            if isLeaderboardLeague {
-                Section {
-                    Picker("Leaderboard depth", selection: Binding(
-                        get: { model.leagueRows(sport.id) ?? 10 },
-                        set: { model.setLeagueRows(sport.id, $0 == 10 ? nil : $0) }
-                    )) {
-                        Text("Top 4 — no scrolling").tag(UInt32(4))
-                        Text("Top 10").tag(UInt32(10))
-                        Text(sport.id == "f1" ? "Full field" : "Top 20").tag(UInt32(20))
-                    }
-                } footer: {
-                    Text("How much of the field the board shows. More than four rows scrolls through the list.")
-                }
-            }
             if !sport.championshipOptions.isEmpty {
                 Section(optionsTitle) {
                     Picker("Show", selection: $champ) {
@@ -2296,6 +2286,33 @@ struct LeagueEditorView: View {
                 } footer: {
                     Text("Scores in this league stay hidden on the board until revealed per game.")
                 }
+            }
+            if isLeaderboardLeague {
+                Section {
+                    Picker("Leaderboard depth", selection: Binding(
+                        get: { model.leagueRows(sport.id) ?? 10 },
+                        set: { model.setLeagueRows(sport.id, $0 == 10 ? nil : $0) }
+                    )) {
+                        Text("Top 4 — no scrolling").tag(UInt32(4))
+                        Text("Top 10").tag(UInt32(10))
+                        Text(sport.id == "f1" ? "Full field" : "Top 20").tag(UInt32(20))
+                    }
+                } footer: {
+                    Text("How much of the field the board shows. More than four rows scrolls through the list.")
+                }
+            }
+            Section {
+                Picker("Time per event", selection: Binding(
+                    get: { model.leagueDwellSecs(sport.id) ?? 0 },
+                    set: { model.setLeagueDwell(sport.id, $0 == 0 ? nil : $0) }
+                )) {
+                    Text("Board default (\(model.current.dwellSecs)s)").tag(UInt32(0))
+                    ForEach([UInt32(5), 7, 10, 15, 20, 30], id: \.self) { s in
+                        Text("\(s) seconds").tag(s)
+                    }
+                }
+            } footer: {
+                Text("How long this league's events hold the panel — leaderboards fit a full scroll pass into it.")
             }
             // Subscription leagues (PGA/LPGA/F1) have no teams — just the picker.
             if !sport.teams.isEmpty {

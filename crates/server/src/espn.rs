@@ -926,6 +926,17 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             pregame: None,
         },
         Game {
+            id: "demo-wnba".into(), sport_id: "wnba".into(),
+            away: team("LVA", "ACES", (n / 6 % 22) as u32, "CE0E2D", "000000"),
+            home: team("NYL", "LIBERTY", (n / 7 % 24) as u32, "6ECEB2", "000000"),
+            status: GameStatus::Active, ordinal: period(2), clock: clock.clone(), start_time: String::new(),
+            leaderboard: None,
+            champ: None,
+            session: None,
+            situation: None,
+            pregame: None,
+        },
+        Game {
             id: "demo-mls".into(), sport_id: "mls".into(),
             away: team("LAFC", "LAFC", (n / 6 % 4) as u32, "000000", "C39E6D"),
             home: team("MIA", "INTER MIAMI", (n / 4 % 4) as u32, "F7B5CD", "231F20"),

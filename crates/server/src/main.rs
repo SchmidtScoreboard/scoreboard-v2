@@ -393,19 +393,21 @@ async fn get_sample(
         id: "sample".into(),
         sport_id: "nhl".into(),
         away: team("CHI", "BLACKHAWKS", 3, "CF0A2C", "FFD100"),
-        home: team("STL", "BLUES", 2, "002F87", "FCB514"),
+        home: team("STL", "BLUES", 3, "002F87", "FCB514"),
+        // Overtime, tied — exactly the state someone doesn't want spoiled.
+        // Normal mode still shows "OT"; strict hides even that (LIVE NOW).
         status: GameStatus::Active,
-        ordinal: "2nd".into(),
-        clock: "12:34".into(),
+        ordinal: "OT".into(),
+        clock: "2:41".into(),
         start_time: "2026-07-08T23:00Z".into(),
         leaderboard: None,
         champ: None,
         session: None,
         situation: Some(model::Situation::Hockey {
-            away_powerplay: true,
+            away_powerplay: false,
             home_powerplay: false,
-            away_players: 5,
-            home_players: 4,
+            away_players: 3,
+            home_players: 3,
         }),
         pregame: None,
     };

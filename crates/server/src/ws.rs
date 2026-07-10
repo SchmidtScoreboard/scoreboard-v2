@@ -318,9 +318,14 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
             // user removed earlier (or appends an extra); removing un-adds an extra
             // (or excludes a preference-driven game WITHOUT touching the preference).
             Command::AddGame { game_id } => {
-                if cfg.excluded_game_ids.contains(&game_id) {
-                    cfg.excluded_game_ids.retain(|id| id != &game_id);
-                } else if !cfg.extra_game_ids.contains(&game_id) {
+                cfg.excluded_game_ids.retain(|id| id != &game_id);
+                // Un-excluding restores the game only if preferences still
+                // cover it; otherwise the add MUST become an extra — the old
+                // "un-exclude only" behavior made the first tap a silent
+                // no-op on uncovered games (the app's optimistic add then
+                // visibly reverted, and only a second tap stuck).
+                let covered = crate::candidate_games(&state, cfg).iter().any(|g| g.id == game_id);
+                if !covered && !cfg.extra_game_ids.contains(&game_id) {
                     cfg.extra_game_ids.push(game_id);
                 }
             }
