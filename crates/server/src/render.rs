@@ -24,6 +24,9 @@ use scoreboard_protocol::{
 const WHITE: Rgb888 = Rgb888::new(255, 255, 255);
 const YELLOW: Rgb888 = Rgb888::new(255, 255, 0);
 const GREY: Rgb888 = Rgb888::new(160, 160, 160);
+/// Public aliases for callers outside this module (diagnostic frames).
+pub const YELLOW_PUB: Rgb888 = YELLOW;
+pub const GREY_PUB: Rgb888 = GREY;
 const ACCENT_W: u32 = 2;
 const SCORE_RIGHT: i32 = 61; // 64 - 3
 

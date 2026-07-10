@@ -900,6 +900,13 @@ struct GameFrame: View {
                 AsyncImage(url: url) { phase in
                     if let img = phase.image {
                         img.resizable().interpolation(.none).aspectRatio(2, contentMode: .fit)
+                    } else if case .failure = phase {
+                        // A failed fetch must LOOK different from a black frame,
+                        // or network bugs masquerade as render bugs.
+                        Rectangle().fill(.black).overlay {
+                            Image(systemName: "wifi.exclamationmark")
+                                .foregroundStyle(.orange)
+                        }
                     } else {
                         Rectangle().fill(.black)
                     }

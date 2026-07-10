@@ -444,14 +444,26 @@ async fn get_render(
             render::render_frame(g, spoiler).1
         })
     };
-    match px {
-        Some(rgb565) => (
-            [(axum::http::header::CONTENT_TYPE, "image/png")],
-            render_png(&rgb565),
+    tracing::info!(
+        "render {id} board={} -> {}",
+        q.get("board").map(String::as_str).unwrap_or("-"),
+        if px.is_some() { "ok" } else { "UNKNOWN GAME" }
+    );
+    // Unknown ids get a VISIBLE error frame, not a 404: the app's image
+    // failure state is a black rectangle — indistinguishable from a black
+    // frame — which made a stale-id bug look like a rendering bug.
+    let rgb565 = px.unwrap_or_else(|| {
+        render::render_notice(
+            &[("NO GAME", true, render::YELLOW_PUB), (id, false, render::GREY_PUB)],
+            None,
         )
-            .into_response(),
-        None => axum::http::StatusCode::NOT_FOUND.into_response(),
-    }
+        .1
+    });
+    (
+        [(axum::http::header::CONTENT_TYPE, "image/png")],
+        render_png(&rgb565),
+    )
+        .into_response()
 }
 
 /// Board-scoped summary: spoiler protection zeroes the scores and swaps the
