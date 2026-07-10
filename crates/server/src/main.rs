@@ -356,6 +356,7 @@ async fn main() {
     let app = Router::new()
         .route("/catalog", get(get_catalog))
         .route("/render/:id", get(get_render))
+        .route("/sample/:variant", get(get_sample))
         .route("/ws", get(ws::ws_handler))
         .with_state(state);
 
@@ -371,6 +372,54 @@ async fn main() {
 
 async fn get_catalog(State(s): State<AppState>) -> Json<Catalog> {
     Json((*s.catalog).clone())
+}
+
+/// A canned example frame for the app's spoiler-settings rows: the same game
+/// rendered plain ("off"), spoiled-normal, or spoiled-strict, so the choice
+/// shows exactly what the board will do. Variant is off|normal|strict.
+async fn get_sample(
+    axum::extract::Path(variant): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let variant = variant.strip_suffix(".png").unwrap_or(&variant).to_string();
+    let team = |abbrev: &str, name: &str, score: u32, p: &str, sec: &str| model::TeamSide {
+        abbrev: abbrev.into(),
+        name: name.into(),
+        score,
+        primary: model::hex_to_rgb(p),
+        secondary: model::ensure_contrast(model::hex_to_rgb(p), model::hex_to_rgb(sec)),
+    };
+    let g = model::Game {
+        id: "sample".into(),
+        sport_id: "nhl".into(),
+        away: team("CHI", "BLACKHAWKS", 3, "CF0A2C", "FFD100"),
+        home: team("STL", "BLUES", 2, "002F87", "FCB514"),
+        status: GameStatus::Active,
+        ordinal: "2nd".into(),
+        clock: "12:34".into(),
+        start_time: "2026-07-08T23:00Z".into(),
+        leaderboard: None,
+        champ: None,
+        session: None,
+        situation: Some(model::Situation::Hockey {
+            away_powerplay: true,
+            home_powerplay: false,
+            away_players: 5,
+            home_players: 4,
+        }),
+        pregame: None,
+    };
+    let spoiler = match variant.as_str() {
+        "normal" => Some(SpoilerMode::Normal),
+        "strict" => Some(SpoilerMode::Strict),
+        _ => None,
+    };
+    let (_, px) = render::render_frame(&g, spoiler);
+    (
+        [(axum::http::header::CONTENT_TYPE, "image/png")],
+        render_png(&px),
+    )
+        .into_response()
 }
 
 /// Render a game to a PNG — the app's "actual rendered content" cards fetch this.

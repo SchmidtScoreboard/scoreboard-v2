@@ -940,6 +940,14 @@ struct GameCard<Caption: View, Footer: View>: View {
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                     Spacer(minLength: 0)
+                    // Pinned badge: the ring alone can read as decoration —
+                    // the pin in the header names the state.
+                    if highlighted {
+                        Image(systemName: "pin.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .accessibilityLabel("Pinned")
+                    }
                     // Championship badge in the card's corner — a caption
                     // line would change the card height for big games only.
                     if let champ = game.champ {
@@ -959,7 +967,10 @@ struct GameCard<Caption: View, Footer: View>: View {
         // Adaptive card chrome (white in light mode, dark in dark) matching the
         // Form's section cards — only the LED panel stays black, like the real
         // hardware. Radius matches the inset-grouped sections.
-        .background(RoundedRectangle(cornerRadius: 26).fill(Color(.secondarySystemGroupedBackground)))
+        .background(
+            RoundedRectangle(cornerRadius: 26)
+                .fill(highlighted ? AnyShapeStyle(Color.orange.opacity(0.14)) : AnyShapeStyle(Color(.secondarySystemGroupedBackground)))
+        )
         .overlay(
             RoundedRectangle(cornerRadius: 26)
                 .strokeBorder(
@@ -1076,6 +1087,7 @@ struct DashboardView: View {
                 leagueCard(pref, showsAreaHeader: index == 0)
             }
             settingsSection
+            spoilerSection
         }
         // One uniform gap between top-level sections. Individual sections that
         // belong to the section above them (the league cards under the
@@ -1131,30 +1143,6 @@ struct DashboardView: View {
                     ForEach([UInt32(5), 7, 10, 15, 20, 30], id: \.self) { s in
                         Text("\(s) seconds").tag(s)
                     }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-            }
-
-            Toggle(isOn: Binding(
-                get: { model.current.spoilerAll },
-                set: { model.setSpoilerAll($0) }
-            )) {
-                HStack(spacing: 6) {
-                    Text("Hide all results")
-                    infoButton(.spoilers)
-                }
-            }
-
-            HStack(spacing: 6) {
-                Text("Spoiler display")
-                Spacer()
-                Picker("Spoiler display", selection: Binding(
-                    get: { model.current.strictSpoilers },
-                    set: { model.setStrictSpoilers($0) }
-                )) {
-                    Text("Normal — period only").tag(false)
-                    Text("Strict — matchup only").tag(true)
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
@@ -1403,6 +1391,74 @@ struct DashboardView: View {
         }
     }
 
+    /// The global spoiler choice, drawn with the receipts: each option shows
+    /// the SAME example game rendered exactly as the board would show it.
+    private var spoilerSection: some View {
+        Section {
+            spoilerOptionRow(
+                "No spoilers",
+                "Scores and situations show live.",
+                variant: "off",
+                selected: !model.current.spoilerAll
+            ) {
+                model.setSpoilerAll(false)
+            }
+            spoilerOptionRow(
+                "Hide results",
+                "Matchup and period only — no scores.",
+                variant: "normal",
+                selected: model.current.spoilerAll && !model.current.strictSpoilers
+            ) {
+                model.setSpoilerAll(true)
+                model.setStrictSpoilers(false)
+            }
+            spoilerOptionRow(
+                "Hide everything",
+                "Matchup and start time; FINAL when done.",
+                variant: "strict",
+                selected: model.current.spoilerAll && model.current.strictSpoilers
+            ) {
+                model.setSpoilerAll(true)
+                model.setStrictSpoilers(true)
+            }
+        } header: {
+            HStack(spacing: 6) {
+                Text("Spoilers")
+                infoButton(.spoilers).textCase(nil)
+            }
+        } footer: {
+            Text("Applies to every game. Single teams and leagues have their own spoiler chips in League Preferences; each game card can reveal or hide one game.")
+        }
+    }
+
+    private func spoilerOptionRow(
+        _ title: String,
+        _ subtitle: String,
+        variant: String,
+        selected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).foregroundStyle(.primary)
+                    Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                // The example frame, rendered by the server's real pipeline.
+                AsyncImage(url: URL(string: "\(model.httpBase)/sample/\(variant).png")) { image in
+                    image.resizable().interpolation(.none)
+                } placeholder: {
+                    Color.black
+                }
+                .frame(width: 96, height: 48)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+        }
+    }
+
     /// The League Preferences title row + Add League menu. Rendered as the
     /// first league card's section header (or the empty-state section's).
     private var leaguePrefsHeaderContent: some View {
@@ -1448,23 +1504,14 @@ struct DashboardView: View {
                     .font(.subheadline.weight(.semibold))
             }
             ForEach(pref.teams, id: \.id) { team in
+                let hidden = model.teamSpoiled(pref.sport.id, team.id)
                 HStack(spacing: 12) {
                     TeamBadge(team: team, sportId: pref.sport.id)
                     Text(team.name)
-                    if model.teamSpoiled(pref.sport.id, team.id) {
-                        Image(systemName: "eye.slash.fill")
-                            .font(.caption)
-                            .foregroundStyle(.indigo)
-                    }
-                }
-                .swipeActions(edge: .leading) {
-                    let hidden = model.teamSpoiled(pref.sport.id, team.id)
-                    Button {
+                    Spacer()
+                    SpoilerChip(hidden: hidden) {
                         model.setTeamSpoiler(pref.sport.id, team.id, !hidden)
-                    } label: {
-                        Label(hidden ? "Show results" : "Hide results", systemImage: hidden ? "eye" : "eye.slash")
                     }
-                    .tint(.indigo)
                 }
             }
             .onDelete { offsets in
@@ -1534,23 +1581,34 @@ struct DashboardView: View {
                         Label("Turn off", systemImage: "trophy.slash")
                     }
                 }
+
+                // Spoiler state for the big-game subscription rides the same
+                // league-wide flag; the chip shows and toggles it in place.
+                HStack(spacing: 12) {
+                    Image(systemName: "eye.slash")
+                        .foregroundStyle(.secondary)
+                        .frame(width: 24)
+                    Text("Spoilers")
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    SpoilerChip(hidden: model.leagueSpoiler(pref.sport.id)) {
+                        model.setLeagueSpoiler(pref.sport.id, !model.leagueSpoiler(pref.sport.id))
+                    }
+                }
             }
 
-            // League-wide spoiler protection — shown only when on.
-            if model.leagueSpoiler(pref.sport.id) {
-                Button {
-                    model.setLeagueSpoiler(pref.sport.id, false)
-                } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: "eye.slash.fill")
-                            .foregroundStyle(.indigo)
-                            .frame(width: 24)
-                        Text("Results hidden")
-                            .foregroundStyle(.primary)
-                        Spacer()
-                        Text("Show")
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(.tint)
+            // League-wide spoiler state for leagues with no big-game row (the
+            // trophy row carries the chip otherwise) — shown only when hidden.
+            if pref.bigGame == nil && model.leagueSpoiler(pref.sport.id) {
+                HStack(spacing: 12) {
+                    Image(systemName: "eye.slash")
+                        .foregroundStyle(.secondary)
+                        .frame(width: 24)
+                    Text("League spoilers")
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    SpoilerChip(hidden: true) {
+                        model.setLeagueSpoiler(pref.sport.id, false)
                     }
                 }
             }
@@ -1893,6 +1951,28 @@ struct ProvenanceCaption: View {
         }
         .font(.caption2)
         .lineLimit(1)
+    }
+}
+
+/// Tappable spoiler state chip: crossed-out eye = results hidden, plain eye =
+/// visible. One tap toggles — no swipe gestures to discover.
+struct SpoilerChip: View {
+    let hidden: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                Image(systemName: hidden ? "eye.slash.fill" : "eye")
+                Text(hidden ? "hidden" : "visible")
+            }
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(hidden ? Color.indigo : Color.secondary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(hidden ? Color.indigo.opacity(0.16) : Color.primary.opacity(0.05)))
+        }
+        .buttonStyle(.borderless)
     }
 }
 
@@ -2281,14 +2361,6 @@ struct LeagueEditorView: View {
                     Text("How much of the field the board shows. More than four rows scrolls through the list.")
                 }
             }
-            Section {
-                Toggle("Hide results (spoilers)", isOn: Binding(
-                    get: { model.leagueSpoiler(sport.id) },
-                    set: { model.setLeagueSpoiler(sport.id, $0) }
-                ))
-            } footer: {
-                Text("Scores in this league stay hidden on the board until revealed per game.")
-            }
             if !sport.championshipOptions.isEmpty {
                 Section(optionsTitle) {
                     Picker("Show", selection: $champ) {
@@ -2296,6 +2368,21 @@ struct LeagueEditorView: View {
                             Text(opt.label).tag(opt.id)
                         }
                     }
+                    // Spoilers for this league's games (incl. the subscription
+                    // above) — the same flag the chips on the main page toggle.
+                    Toggle("Hide results (spoilers)", isOn: Binding(
+                        get: { model.leagueSpoiler(sport.id) },
+                        set: { model.setLeagueSpoiler(sport.id, $0) }
+                    ))
+                }
+            } else {
+                Section {
+                    Toggle("Hide results (spoilers)", isOn: Binding(
+                        get: { model.leagueSpoiler(sport.id) },
+                        set: { model.setLeagueSpoiler(sport.id, $0) }
+                    ))
+                } footer: {
+                    Text("Scores in this league stay hidden on the board until revealed per game.")
                 }
             }
             // Subscription leagues (PGA/LPGA/F1) have no teams — just the picker.
@@ -2309,7 +2396,12 @@ struct LeagueEditorView: View {
                                 TeamBadge(team: team, sportId: sport.id)
                                 Text(team.name).foregroundStyle(.primary)
                                 Spacer()
+                                // Spoiler chip only for teams in the focus —
+                                // it's meaningless for teams the board ignores.
                                 if selection.contains(team.id) {
+                                    SpoilerChip(hidden: model.teamSpoiled(sport.id, team.id)) {
+                                        model.setTeamSpoiler(sport.id, team.id, !model.teamSpoiled(sport.id, team.id))
+                                    }
                                     Image(systemName: "checkmark")
                                         .fontWeight(.semibold)
                                         .foregroundStyle(.tint)
