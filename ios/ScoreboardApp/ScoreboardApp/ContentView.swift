@@ -897,20 +897,7 @@ struct GameFrame: View {
                 Image(decorative: frame, scale: 1)
                     .resizable().interpolation(.none).aspectRatio(2, contentMode: .fit)
             } else {
-                AsyncImage(url: url) { phase in
-                    if let img = phase.image {
-                        img.resizable().interpolation(.none).aspectRatio(2, contentMode: .fit)
-                    } else if case .failure = phase {
-                        // A failed fetch must LOOK different from a black frame,
-                        // or network bugs masquerade as render bugs.
-                        Rectangle().fill(.black).overlay {
-                            Image(systemName: "wifi.exclamationmark")
-                                .foregroundStyle(.orange)
-                        }
-                    } else {
-                        Rectangle().fill(.black)
-                    }
-                }
+                FetchedFrameImage(url: url)
             }
         }
         .frame(width: 192, height: 96)
@@ -920,6 +907,54 @@ struct GameFrame: View {
         // it, the black frame melts into a dark card and centered text (e.g. the period
         // ordinal along the bottom) looks off-center against the wider card.
         .overlay(Rectangle().strokeBorder(.white.opacity(0.10), lineWidth: 1))
+    }
+}
+
+/// HTTP-rendered frame image with honest lifecycle behavior. AsyncImage gets
+/// permanently stuck on .failure when a lazy container cancels its in-flight
+/// request during a scroll (NSURLErrorCancelled) — it never retries on
+/// re-appear, which showed up as one arbitrary card rendering black/badged in
+/// View All. `.task(id:)` cancels on disappear like AsyncImage, but RE-RUNS
+/// when the card scrolls back in, so a cancelled load heals itself.
+struct FetchedFrameImage: View {
+    let url: URL?
+    @State private var image: UIImage?
+    @State private var failed = false
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(uiImage: image)
+                    .resizable().interpolation(.none).aspectRatio(2, contentMode: .fit)
+            } else if failed {
+                // A failed fetch must LOOK different from a black frame, or
+                // network bugs masquerade as render bugs.
+                Rectangle().fill(.black).overlay {
+                    Image(systemName: "wifi.exclamationmark")
+                        .foregroundStyle(.orange)
+                }
+            } else {
+                Rectangle().fill(.black)
+            }
+        }
+        .task(id: url?.absoluteString ?? "") {
+            guard let url else { return }
+            failed = false
+            do {
+                let (data, _) = try await URLSession.shared.data(from: url)
+                if let ui = UIImage(data: data) {
+                    image = ui
+                } else {
+                    failed = true
+                }
+            } catch is CancellationError {
+                // Scrolled away mid-load; the next appear re-runs this task.
+            } catch let e as URLError where e.code == .cancelled {
+                // Same: cancellation is a lifecycle event, not a failure.
+            } catch {
+                failed = true
+            }
+        }
     }
 }
 
