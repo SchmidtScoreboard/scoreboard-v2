@@ -184,6 +184,16 @@ async fn controller_loop(
                     let _ = out.send(Message::Text(serde_json::to_string(&reply).unwrap()));
                 }
                 Ok(ClientMsg::Subscribe { board_ids }) => {
+                    // Subscribe REPLACES this connection's set: purge our sender
+                    // from every board first, so re-subscribing with fewer boards
+                    // (the app removed one) actually stops its pushes.
+                    {
+                        let mut controllers = state.controllers.lock().unwrap();
+                        for subs in controllers.values_mut() {
+                            subs.retain(|tx| !tx.same_channel(&out));
+                        }
+                        controllers.retain(|_, subs| !subs.is_empty());
+                    }
                     // A controller can watch several boards at once; subscribe to each
                     // it's paired with and push that board's current state.
                     for bid in &board_ids {

@@ -566,6 +566,14 @@ public protocol ScoreboardClientProtocol: AnyObject {
     func pubkey() -> String
 
     /**
+     * Forget a board: drop it from the subscription set and tell the server,
+     * so its pushes stop. Without this, "Remove this scoreboard" was app-UI
+     * only — the still-subscribed connection kept receiving board state and
+     * the next push resurrected the board.
+     */
+    func removeBoard(boardId: String)
+
+    /**
      * Remove a game from a board's rotation (un-adds an extra, or one-off
      * excludes a preference-driven game without touching the preference).
      */
@@ -788,6 +796,18 @@ open class ScoreboardClient:
         return try! FfiConverterString.lift(try! rustCall {
             uniffi_app_core_fn_method_scoreboardclient_pubkey(self.uniffiClonePointer(), $0)
         })
+    }
+
+    /**
+     * Forget a board: drop it from the subscription set and tell the server,
+     * so its pushes stop. Without this, "Remove this scoreboard" was app-UI
+     * only — the still-subscribed connection kept receiving board state and
+     * the next push resurrected the board.
+     */
+    open func removeBoard(boardId: String) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_remove_board(self.uniffiClonePointer(),
+                                                                FfiConverterString.lower(boardId), $0)
+    }
     }
 
     /**
@@ -2376,6 +2396,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_pubkey() != 28199 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_scoreboardclient_remove_board() != 4192 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_remove_game() != 42137 {

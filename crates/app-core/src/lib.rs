@@ -129,6 +129,8 @@ enum Out {
     GetCatalog,
     GetGames(Option<String>),
     Pair(String),
+    /// Re-send Subscribe with the CURRENT board list (after a removal).
+    Resubscribe,
 }
 
 #[derive(uniffi::Object)]
@@ -348,6 +350,10 @@ impl ScoreboardClient {
                                 let m = ClientMsg::Pair { code };
                                 let _ = write.send(Message::Text(serde_json::to_string(&m).unwrap())).await;
                             }
+                            Some(Out::Resubscribe) => {
+                                let sub = ClientMsg::Subscribe { board_ids: boards.lock().unwrap().clone() };
+                                let _ = write.send(Message::Text(serde_json::to_string(&sub).unwrap())).await;
+                            }
                             // The client object was dropped — end the task for good.
                             None => break 'reconnect,
                         }
@@ -386,6 +392,15 @@ impl ScoreboardClient {
 
     pub fn set_power(&self, board_id: String, on: bool) {
         let _ = self.tx.send(Out::Command(board_id, Command::SetPower { on }));
+    }
+
+    /// Forget a board: drop it from the subscription set and tell the server,
+    /// so its pushes stop. Without this, "Remove this scoreboard" was app-UI
+    /// only — the still-subscribed connection kept receiving board state and
+    /// the next push resurrected the board.
+    pub fn remove_board(&self, board_id: String) {
+        self.boards.lock().unwrap().retain(|b| b != &board_id);
+        let _ = self.tx.send(Out::Resubscribe);
     }
 
     /// Keep the board off with no auto-wake (cancels a running sleep timer).

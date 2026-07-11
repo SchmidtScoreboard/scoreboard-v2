@@ -377,6 +377,11 @@ void uniffi_app_core_fn_method_scoreboardclient_pair(void*_Nonnull ptr, RustBuff
 RustBuffer uniffi_app_core_fn_method_scoreboardclient_pubkey(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_REMOVE_BOARD
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_REMOVE_BOARD
+void uniffi_app_core_fn_method_scoreboardclient_remove_board(void*_Nonnull ptr, RustBuffer board_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_REMOVE_GAME
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_REMOVE_GAME
 void uniffi_app_core_fn_method_scoreboardclient_remove_game(void*_Nonnull ptr, RustBuffer board_id, RustBuffer game_id, RustCallStatus *_Nonnull out_status
@@ -807,6 +812,12 @@ uint16_t uniffi_app_core_checksum_method_scoreboardclient_pair(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_PUBKEY
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_PUBKEY
 uint16_t uniffi_app_core_checksum_method_scoreboardclient_pubkey(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_REMOVE_BOARD
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_REMOVE_BOARD
+uint16_t uniffi_app_core_checksum_method_scoreboardclient_remove_board(void
     
 );
 #endif

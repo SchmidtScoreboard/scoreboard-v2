@@ -248,6 +248,9 @@ final class BoardViewModel: ObservableObject {
         boards[boardId] = nil
         saveBoardIds()
         if selectedBoardId == boardId { selectedBoardId = boardIds.first }
+        // Drop the subscription too — otherwise the server keeps pushing this
+        // board's state and the next push would resurrect it.
+        client?.removeBoard(boardId: boardId)
     }
 
     func selectBoard(_ id: String) { selectedBoardId = id }
@@ -597,7 +600,9 @@ final class BoardViewModel: ObservableObject {
     // ---- listener callbacks (already hopped to main) ----
 
     func applyBoardState(_ boardId: String, _ nowShowing: [UiGame], _ online: Bool) {
-        if !boardIds.contains(boardId) { boardIds.append(boardId); saveBoardIds() }
+        // Pushes never ADD boards — pairing does (handlePaired). A stray push
+        // for a removed board must not resurrect it out of the setup screen.
+        guard boardIds.contains(boardId) else { return }
         if selectedBoardId == nil { selectedBoardId = boardId }
         mutate(boardId) {
             $0.nowShowing = nowShowing
@@ -606,6 +611,7 @@ final class BoardViewModel: ObservableObject {
     }
 
     func applyConfig(_ boardId: String, _ c: UiBoardConfig) {
+        guard boardIds.contains(boardId) else { return }
         if selectedBoardId == nil { selectedBoardId = boardId }
         var fav: [String: [String]] = [:]
         var champ: [String: String] = [:]
