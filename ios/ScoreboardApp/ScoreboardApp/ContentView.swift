@@ -2517,6 +2517,10 @@ final class BluetoothProvisioner: NSObject, ObservableObject {
 
     @Published var status: Status = .searching
 
+    /// Whether the connected board exposes the server characteristic (older
+    /// firmware, or a stale iOS GATT cache of it, won't).
+    var canSetServer: Bool { serverChar != nil }
+
     private let serviceUUID = CBUUID(string: "21BA0000-5363-6F72-6562-6F6172640001")
     private let ssidUUID    = CBUUID(string: "21BA0000-5363-6F72-6562-6F6172640002")
     private let passUUID    = CBUUID(string: "21BA0000-5363-6F72-6562-6F6172640003")
@@ -2623,6 +2627,10 @@ extension BluetoothProvisioner: CBCentralManagerDelegate {
         peripheral.delegate = self
         status = .connecting
         central.connect(peripheral, options: nil)
+    }
+
+    func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        peripheral.discoverServices([serviceUUID])
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
@@ -2764,6 +2772,11 @@ struct BluetoothSetupView: View {
         case .ready:
             Label("Connected to board", systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
+            if !ble.canSetServer {
+                Label("This board's firmware won't accept a server address — it will use its built-in default", systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+                    .font(.footnote)
+            }
         case .sending:
             HStack { ProgressView(); Text("Sending Wi-Fi…") }
         case .success:
