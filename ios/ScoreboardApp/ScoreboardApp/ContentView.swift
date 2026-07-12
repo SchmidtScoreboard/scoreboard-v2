@@ -2114,20 +2114,67 @@ struct AllGamesView: View {
     @Environment(\.dismiss) private var dismiss
     /// Bumps the cards' HTTP render URLs to force a refetch.
     @State private var refresh = 0
+    /// Live filter typed into the bottom search bar; empty = show everything.
+    @State private var searchText = ""
+
+    /// League sections that survive the search: each keeps only its matching
+    /// games, and sections left with none drop out entirely. Team lookups go
+    /// through a dictionary built once per evaluation — scanning a ~500-team
+    /// CFB catalog per game per keystroke visibly drops frames while typing.
+    private var filteredLeagueGroups: [(String, [UiGame])] {
+        let query = searchText.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else { return model.expandedLeagueGroups }
+        let teamsBySport: [String: [String: UiTeam]] = model.sports.reduce(into: [:]) { acc, sport in
+            acc[sport.id] = Dictionary(
+                sport.teams.map { ($0.id, $0) },
+                uniquingKeysWith: { first, _ in first }
+            )
+        }
+        return model.expandedLeagueGroups.compactMap { league, games in
+            let hits = games.filter { matches($0, query, teamsBySport) }
+            return hits.isEmpty ? nil : (league, hits)
+        }
+    }
+
+    /// True when the query hits the game's league, either team, championship
+    /// label, or the detail line. `localizedStandardContains` folds case and
+    /// diacritics, so "montreal" finds Montréal.
+    private func matches(_ game: UiGame, _ query: String, _ teamsBySport: [String: [String: UiTeam]]) -> Bool {
+        var haystack = [
+            model.leagueName(game.sportId), game.sportId,
+            game.away, game.home,
+            game.champ ?? "",
+            game.detail,
+        ]
+        // The card says "NY @ TOR" but the user types "liberty" or "toronto" —
+        // resolve both abbreviations against the catalog for full names too.
+        if let teams = teamsBySport[game.sportId] {
+            for ab in [game.away, game.home] where !ab.isEmpty {
+                if let team = teams["\(game.sportId)-\(ab.lowercased())"] {
+                    haystack.append(team.name)
+                    haystack.append(team.abbrev)
+                }
+            }
+        }
+        return haystack.contains { $0.localizedStandardContains(query) }
+    }
 
     var body: some View {
+        // One evaluation per render — the computed filter is O(games) with
+        // localized matching, and body references it in two places.
+        let groups = filteredLeagueGroups
         ScrollView {
             if model.liveGames.isEmpty {
                 ContentUnavailableView("No live games", systemImage: "sportscourt", description: Text("Tap refresh to check again."))
                     .padding(.top, 60)
+            } else if groups.isEmpty {
+                ContentUnavailableView("No matches for “\(searchText)”", systemImage: "magnifyingglass", description: Text("Try a team, league, or event name."))
+                    .padding(.top, 60)
             } else {
                 LazyVStack(alignment: .leading, spacing: 18) {
-                    ForEach(model.expandedLeagueGroups, id: \.0) { league, games in
+                    ForEach(groups, id: \.0) { league, games in
                         VStack(alignment: .leading, spacing: 6) {
-                            Text(model.leagueName(league).uppercased())
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 20)
+                            leagueHeader(league)
                             ScrollView(.horizontal, showsIndicators: false) {
                                 HStack(alignment: .top, spacing: 12) {
                                     ForEach(games, id: \.id) { game in
@@ -2144,7 +2191,11 @@ struct AllGamesView: View {
                 .padding(.vertical, 12)
             }
         }
+        .scrollDismissesKeyboard(.interactively)
         .background(Color(.systemGroupedBackground))
+        // Pinned at the BOTTOM, not .searchable's nav-bar slot — thumb-reachable,
+        // and safeAreaInset rides up with the keyboard for free.
+        .safeAreaInset(edge: .bottom) { searchBar }
         .navigationTitle("All games")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -2167,6 +2218,62 @@ struct AllGamesView: View {
         // and a CONSTANT value let URLCache pin a stale/failed response (e.g.
         // a 404 cached from before a server restart knew a demo game) forever.
         .onAppear { refresh = Int(Date().timeIntervalSince1970); model.requestGames() }
+    }
+
+    /// Section header: league name plus a trailing shortcut into that league's
+    /// editor — the same screen the dashboard's preference cards push. Only the
+    /// icon is the link; the text stays inert.
+    private func leagueHeader(_ league: String) -> some View {
+        HStack {
+            Text(model.leagueName(league).uppercased())
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Spacer()
+            if let sport = model.sports.first(where: { $0.id == league }) {
+                NavigationLink {
+                    LeagueEditorView(model: model, sport: sport)
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        // A caption glyph alone is a sub-20pt target; pad the
+                        // hit area without moving the visual edge.
+                        .padding(6)
+                        .contentShape(Rectangle())
+                        .padding(-6)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 20)
+    }
+
+    /// The bottom-pinned search field: live, case- and diacritic-insensitive,
+    /// with a clear button once there's anything to clear.
+    private var searchBar: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField("Search games…", text: $searchText)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .font(.subheadline)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(Capsule().fill(Color(.secondarySystemGroupedBackground)))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .background(.bar)
     }
 
     /// One game card with its provenance caption and Add / Remove+Pin footer.

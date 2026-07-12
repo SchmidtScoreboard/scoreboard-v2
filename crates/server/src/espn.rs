@@ -1955,6 +1955,27 @@ mod champ_tests {
         );
     }
 
+    /// The demo source flows through the same poll-loop ingestion filter as
+    /// live ESPN, so every demo game — including the synthetic Pregame pair
+    /// (+20m / +3h start times) — must pass it, at tick 0 and after the
+    /// scripted ending has flipped to Final. If a demo game ever grows a
+    /// far-future start time, this catches it before `--demo` goes blank.
+    #[test]
+    fn demo_slate_survives_ingestion_filter() {
+        let now = chrono::Utc::now();
+        for (n, elapsed) in [(0, 0), (7, 10 * 60)] {
+            let games = demo_games(n, elapsed);
+            assert!(!games.is_empty());
+            for g in &games {
+                assert!(
+                    crate::ingest_keeps(g, now),
+                    "demo game '{}' (tick {n}) must survive the ingestion filter",
+                    g.id
+                );
+            }
+        }
+    }
+
     /// The debug TUI's parse path is the server's parse path: parse_feed
     /// handles every feed id, errors gracefully on garbage, and the demo feed
     /// generates without any raw input.

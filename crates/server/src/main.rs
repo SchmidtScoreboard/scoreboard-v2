@@ -634,6 +634,27 @@ pub(crate) fn start_time_label(iso: &str, tz: Option<chrono_tz::Tz>) -> Option<S
     })
 }
 
+/// How far ahead a scheduled game may start and still enter `state.games`.
+/// 24h ≈ "starting today" without timezone hair: tonight and tomorrow morning
+/// stay; next week's slate never enters state at all.
+const INGEST_HORIZON: chrono::Duration = chrono::Duration::hours(24);
+
+/// Ingestion gate: should a fetched game enter `state.games` at all? Anything
+/// NOT Pregame is kept — live and intermission obviously, Finals because the
+/// linger rules own their exit, and multi-day golf events whose (past) start
+/// date no longer matters once play began. A Pregame game must start within
+/// `INGEST_HORIZON`; an UNPARSEABLE start time is kept, so a feed quirk can
+/// never blank a league.
+pub(crate) fn ingest_keeps(g: &Game, now: chrono::DateTime<chrono::Utc>) -> bool {
+    if g.status != GameStatus::Pregame {
+        return true;
+    }
+    match parse_espn_time(&g.start_time) {
+        Some(start) => start - now <= INGEST_HORIZON,
+        None => true,
+    }
+}
+
 /// Should the BOARD show this game? Live always; scheduled only inside the
 /// pregame window. (The app's browse feed is broader — see `browse_shows`.)
 fn board_shows_at(g: &Game, now: chrono::DateTime<chrono::Utc>) -> bool {
@@ -1355,7 +1376,18 @@ async fn poll_loop(state: AppState, source: Arc<dyn SportsDataSource>) {
                 continue;
             }
         }
-        let games = source.fetch().await;
+        let mut games = source.fetch().await;
+        // Ingestion filter: far-future scheduled games (a GP two weeks out,
+        // week-one CFB) never enter state — no render work, no browse clutter.
+        // The demo source flows through here too; its slate stays within the
+        // horizon by construction (see demo_slate_survives_ingestion_filter).
+        let fetched = games.len();
+        let now = chrono::Utc::now();
+        games.retain(|g| ingest_keeps(g, now));
+        let dropped = fetched - games.len();
+        if dropped > 0 {
+            tracing::info!("ingestion: dropped {dropped} game(s) starting >24h out");
+        }
         if games.is_empty() {
             // Honest empty slate: boards fall through to their no-games
             // behavior. (This used to substitute fake mock games, which
@@ -2309,6 +2341,44 @@ mod tests {
         let mut odd = mk(10);
         odd.start_time = "not-a-time".into();
         assert!(!board_shows_at(&odd, now));
+    }
+
+    /// The ingestion filter drops only far-future Pregame games: anything
+    /// underway or final stays (multi-day golf, linger-owned Finals), and an
+    /// unparseable start time is kept so a feed quirk can't blank a league.
+    #[test]
+    fn ingestion_drops_only_far_future_pregames() {
+        use chrono::{Duration as D, Utc};
+        let now = Utc::now();
+        let mk = |status: GameStatus, mins_from_now: i64| Game {
+            id: "g".into(),
+            sport_id: "cfb".into(),
+            away: TeamSide::empty("A"),
+            home: TeamSide::empty("B"),
+            status,
+            ordinal: String::new(),
+            clock: String::new(),
+            start_time: (now + D::minutes(mins_from_now)).format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            leaderboard: None,
+            champ: None,
+            session: None,
+            situation: None,
+            pregame: None,
+        };
+        // Pregame two weeks out (the Belgian GP problem): never enters state.
+        assert!(!ingest_keeps(&mk(GameStatus::Pregame, 14 * 24 * 60), now), "2 weeks out -> dropped");
+        // Pregame tonight: kept.
+        assert!(ingest_keeps(&mk(GameStatus::Pregame, 3 * 60), now), "3h out -> kept");
+        // Active with a start date two days AGO: a multi-day golf event, kept.
+        assert!(ingest_keeps(&mk(GameStatus::Active, -2 * 24 * 60), now), "underway -> kept regardless of start");
+        // Final: the linger rules own its exit, ingestion never drops it.
+        assert!(ingest_keeps(&mk(GameStatus::Final, -3 * 60), now), "final -> kept");
+        // Intermission is live too.
+        assert!(ingest_keeps(&mk(GameStatus::Intermission, -60), now), "intermission -> kept");
+        // Unparseable start time: KEPT — a feed quirk must not blank a league.
+        let mut odd = mk(GameStatus::Pregame, 0);
+        odd.start_time = "not-a-time".into();
+        assert!(ingest_keeps(&odd, now), "unparseable start -> kept");
     }
 
     /// ESPN timestamps (with and without seconds) parse; labels render local time.
