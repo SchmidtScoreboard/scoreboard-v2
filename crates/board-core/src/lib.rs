@@ -369,7 +369,11 @@ impl Board {
             Gesture::Single => {
                 if self.online && matches!(self.mode, Mode::Running) {
                     self.outbox.push(ClientMsg::ButtonPress);
-                } else {
+                } else if matches!(self.mode, Mode::Running | Mode::Asleep) {
+                    // Sleep toggle only makes sense between running and asleep;
+                    // a press on the setup/pairing screens must NOT yank the
+                    // board out of provisioning (the hold-to-reset still works
+                    // everywhere — that's the guaranteed escape hatch).
                     self.mode = if self.mode == Mode::Running {
                         Mode::Asleep
                     } else {

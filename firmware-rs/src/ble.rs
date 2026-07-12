@@ -30,6 +30,10 @@ struct Provisioning {
     /// WiFi password (UTF-8).
     #[characteristic(uuid = "21ba0000-5363-6f72-6562-6f6172640003", write, value = [0u8; 64])]
     password: [u8; 64],
+    /// Server "host:port" (UTF-8, optional — write BEFORE the password, which
+    /// triggers the save). Empty = the firmware's compiled default server.
+    #[characteristic(uuid = "21ba0000-5363-6f72-6562-6f6172640004", write, value = [0u8; 96])]
+    server: [u8; 96],
 }
 
 pub async fn provision(bt: BT<'static>, flash: &mut FlashStorage<'_>) -> ! {
@@ -79,8 +83,10 @@ async fn gatt_loop<P: PacketPool>(
 ) {
     let ssid_h = server.prov.ssid;
     let pass_h = server.prov.password;
+    let server_h = server.prov.server;
     let mut ssid_v: Option<String> = None;
     let mut pass_v: Option<String> = None;
+    let mut server_v: Option<String> = None;
     let clean = |b: &[u8]| core::str::from_utf8(b).ok().map(|s| String::from(s.trim_end_matches('\0')));
     loop {
         match conn.next().await {
@@ -93,15 +99,27 @@ async fn gatt_loop<P: PacketPool>(
                     } else if e.handle() == pass_h.handle {
                         pass_v = clean(e.data());
                         println!("[ble] password received");
+                    } else if e.handle() == server_h.handle {
+                        server_v = clean(e.data());
+                        println!("[ble] server received");
                     }
                 }
                 if let Ok(reply) = event.accept() {
                     reply.send().await;
                 }
-                // Save + reboot once both SSID and password have been written.
+                // Save + reboot once both SSID and password have been written
+                // (the server characteristic is optional and must come first).
                 if let (Some(s), Some(p)) = (&ssid_v, &pass_v) {
-                    if !s.is_empty() && creds::save(flash, s, p) {
-                        println!("[ble] saved creds for '{}' — rebooting into WiFi mode", s);
+                    // "host:port" -> (host, port); malformed/absent = default.
+                    let (host, port) = server_v
+                        .as_deref()
+                        .and_then(|sv| {
+                            let (h, pt) = sv.rsplit_once(':')?;
+                            Some((String::from(h), pt.parse::<u16>().ok()?))
+                        })
+                        .unwrap_or((String::new(), 0));
+                    if !s.is_empty() && creds::save(flash, s, p, &host, port) {
+                        println!("[ble] saved creds for '{}' (server '{}') — rebooting", s, host);
                         esp_hal::system::software_reset();
                     }
                 }

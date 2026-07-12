@@ -122,19 +122,35 @@ async fn main(spawner: Spawner) -> ! {
 
     match stored_creds {
         // Provisioned: connect WiFi, run the device protocol + encoder.
-        Some((ssid, pass)) => {
-            println!("[creds] loaded from flash; connecting to '{}'…", ssid);
+        Some(creds) => {
+            println!("[creds] loaded from flash; connecting to '{}'…", creds.ssid);
             // Mint-or-load this board's Ed25519 identity; its pubkey is the board_id.
             let mut id_rng = Rng::new();
             let secret = identity::load_or_create(&mut flash, &mut id_rng);
             let board_id = pubkey_hex(&secret);
             println!("[id] board {}", board_id);
+
+            // Fresh 6-digit pairing code per boot: shown on the pairing screen
+            // (double-press) and registered with the server via EnterSetup so
+            // the app's code entry actually resolves to this board.
+            let code = format!("{:06}", Rng::new().random() % 1_000_000);
+            board.lock().await.set_setup_code(code.clone());
+            println!("[pair] code {code}");
+
+            // Server: BLE-provisioned host:port, else the compiled default.
+            let (server_host, server_port) = if creds.server_host.is_empty() {
+                (format!("{}", config::SERVER_IP), config::SERVER_PORT)
+            } else {
+                (creds.server_host.clone(), creds.server_port)
+            };
+            println!("[ws] server {server_host}:{server_port}");
+
             let (mut controller, interfaces) =
                 esp_radio::wifi::new(p.WIFI, Default::default()).unwrap();
             let station = Config::Station(
                 StationConfig::default()
-                    .with_ssid(ssid.as_str())
-                    .with_password(pass),
+                    .with_ssid(creds.ssid.as_str())
+                    .with_password(creds.pass.clone()),
             );
             controller.set_config(&station).unwrap();
 
@@ -150,14 +166,14 @@ async fn main(spawner: Spawner) -> ! {
 
             spawner.spawn(connection(controller).unwrap());
             spawner.spawn(net_task(runner).unwrap());
-            spawner.spawn(device(stack, board, board_id, secret).unwrap());
+            spawner.spawn(device(stack, board, board_id, secret, code, server_host, server_port).unwrap());
 
             // encoder (seesaw over I2C / STEMMA QT: SDA=16, SCL=17)
             let i2c = I2c::new(p.I2C0, I2cConfig::default())
                 .expect("i2c")
                 .with_sda(p.GPIO16)
                 .with_scl(p.GPIO17);
-            spawner.spawn(encoder_task(Encoder::new(i2c), board, true).unwrap());
+            spawner.spawn(encoder_task(Encoder::new(i2c), board).unwrap());
             // Owns flash in WiFi mode: persists brightness + handles hold-to-reset.
             spawner.spawn(flash_task(flash, board).unwrap());
         }
@@ -165,13 +181,15 @@ async fn main(spawner: Spawner) -> ! {
         None => {
             println!("[creds] none — starting BLE provisioning");
             board.lock().await.gesture(Gesture::Long); // -> Setup screen
-            // The encoder still dims the panel during setup (rotation only — there's
-            // no screen to navigate to, so the button is suppressed).
             let i2c = I2c::new(p.I2C0, I2cConfig::default())
                 .expect("i2c")
                 .with_sda(p.GPIO16)
                 .with_scl(p.GPIO17);
-            spawner.spawn(encoder_task(Encoder::new(i2c), board, false).unwrap());
+            // Button stays live in BLE mode too — the board must NEVER be in a
+            // state where hold-to-reset doesn't work. (Single press is inert on
+            // the setup screen; board-core guards it.)
+            spawner.spawn(encoder_task(Encoder::new(i2c), board).unwrap());
+            spawner.spawn(setup_reset_task(board).unwrap());
             ble::provision(p.BT, &mut flash).await;
         }
     }
@@ -238,7 +256,15 @@ async fn render(
 
 /// WebSocket device-protocol loop feeding board-core.
 #[embassy_executor::task]
-async fn device(stack: Stack<'static>, board: &'static SharedBoard, board_id: String, secret: [u8; 32]) {
+async fn device(
+    stack: Stack<'static>,
+    board: &'static SharedBoard,
+    board_id: String,
+    secret: [u8; 32],
+    pair_code: String,
+    server_host: String,
+    server_port: u16,
+) {
     let mut rx = alloc::vec![0u8; 2048];
     let mut tx = alloc::vec![0u8; 2048];
     // Sized for tall scrolling leaderboard frames (64-byte id + 128 bytes/row;
@@ -250,16 +276,33 @@ async fn device(stack: Stack<'static>, board: &'static SharedBoard, board_id: St
         if stack.config_v4().is_none() {
             continue;
         }
+        // DNS-resolve the host unless it's an IP literal (prod servers are
+        // names; the LAN dev server is an address).
+        let ip: core::net::Ipv4Addr = match server_host.parse() {
+            Ok(ip) => ip,
+            Err(_) => {
+                match stack.dns_query(&server_host, embassy_net::dns::DnsQueryType::A).await {
+                    Ok(addrs) if !addrs.is_empty() => match addrs[0] {
+                        embassy_net::IpAddress::Ipv4(v4) => v4,
+                    },
+                    _ => {
+                        println!("[ws] dns failed for {server_host}; retry");
+                        Timer::after(Duration::from_secs(5)).await;
+                        continue;
+                    }
+                }
+            }
+        };
         let mut sock = TcpSocket::new(stack, &mut rx[..], &mut tx[..]);
         sock.set_timeout(Some(Duration::from_secs(45)));
 
-        println!("[ws] connecting to {}:{}", config::SERVER_IP, config::SERVER_PORT);
-        if sock.connect((config::SERVER_IP, config::SERVER_PORT)).await.is_err() {
+        println!("[ws] connecting to {server_host} ({ip}:{server_port})");
+        if sock.connect((ip, server_port)).await.is_err() {
             println!("[ws] tcp connect failed; retry");
             Timer::after(Duration::from_secs(2)).await;
             continue;
         }
-        let host = format!("{}:{}", config::SERVER_IP, config::SERVER_PORT);
+        let host = format!("{server_host}:{server_port}");
         if ws::handshake(&mut sock, &host).await.is_err() {
             println!("[ws] handshake failed; retry");
             Timer::after(Duration::from_secs(2)).await;
@@ -292,7 +335,15 @@ async fn device(stack: Stack<'static>, board: &'static SharedBoard, board_id: St
                             sig: sign_hex(&secret, challenge.as_bytes()),
                         };
                         let _ = ws::write_text(&mut sock, &serde_json::to_vec(&auth).unwrap()).await;
-                        println!("[ws] authed");
+                        // Register the pairing code on every connect so the
+                        // app's code entry always resolves to this board.
+                        let setup = ClientMsg::EnterSetup { code: pair_code.clone() };
+                        let _ = ws::write_text(&mut sock, &serde_json::to_vec(&setup).unwrap()).await;
+                        println!("[ws] authed (pair code {pair_code})");
+                    }
+                    Ok(ServerMsg::SetupDone) => {
+                        // Paired: leave the pairing screen if it's up.
+                        board.lock().await.setup_done();
                     }
                     Ok(ServerMsg::Manifest(m)) => {
                         let need = board.lock().await.on_manifest(m);
@@ -324,8 +375,9 @@ async fn device(stack: Stack<'static>, board: &'static SharedBoard, board_id: St
 }
 
 /// Poll the seesaw encoder: rotation -> brightness, push -> board-core gesture.
+/// The button is live in EVERY mode — hold-to-reset must always work.
 #[embassy_executor::task]
-async fn encoder_task(mut enc: Encoder, board: &'static SharedBoard, handle_button: bool) {
+async fn encoder_task(mut enc: Encoder, board: &'static SharedBoard) {
     if enc.init() {
         println!("[enc] seesaw ready");
     } else {
@@ -344,19 +396,16 @@ async fn encoder_task(mut enc: Encoder, board: &'static SharedBoard, handle_butt
             last_pos = Some(pos);
         }
         // The render task's tick() resolves single/double/long from these events.
-        // Suppressed during BLE setup — there's no screen to navigate to there.
-        if handle_button {
-            let pressed = enc.pressed().await;
-            if pressed != was_pressed {
-                let now_ms = Instant::now().as_millis();
-                let mut b = board.lock().await;
-                if pressed {
-                    b.button_down(now_ms);
-                } else {
-                    b.button_up(now_ms);
-                }
-                was_pressed = pressed;
+        let pressed = enc.pressed().await;
+        if pressed != was_pressed {
+            let now_ms = Instant::now().as_millis();
+            let mut b = board.lock().await;
+            if pressed {
+                b.button_down(now_ms);
+            } else {
+                b.button_up(now_ms);
             }
+            was_pressed = pressed;
         }
     }
 }
@@ -397,6 +446,21 @@ async fn flash_task(mut flash: FlashStorage<'static>, board: &'static SharedBoar
                 }
                 dirty_at = None;
             }
+        }
+    }
+}
+
+/// Hold-to-reset watcher for BLE provisioning mode (flash_task owns the reset
+/// in WiFi mode). No creds exist in this mode, so reset = reboot — but the
+/// GESTURE must work everywhere, or the board can get stuck un-resettable.
+#[embassy_executor::task]
+async fn setup_reset_task(board: &'static SharedBoard) {
+    loop {
+        Timer::after(Duration::from_millis(400)).await;
+        if board.lock().await.reset_triggered() {
+            println!("[reset] reboot from setup mode");
+            Timer::after(Duration::from_millis(1000)).await;
+            esp_hal::system::software_reset();
         }
     }
 }

@@ -49,13 +49,18 @@ enum Keychain {
     }
 }
 
-/// Bridges uniffi `ClientListener` callbacks (background thread) onto the main actor.
+/// Bridges uniffi `ClientListener` callbacks (background thread) onto the main
+/// actor, tagged with the server they came from (one adapter per server).
 final class ListenerAdapter: ClientListener {
     weak var model: BoardViewModel?
-    init(model: BoardViewModel) { self.model = model }
+    let serverUrl: String
+    init(model: BoardViewModel, serverUrl: String) {
+        self.model = model
+        self.serverUrl = serverUrl
+    }
 
     func onConnection(connected: Bool) {
-        Task { @MainActor in self.model?.connected = connected }
+        Task { @MainActor in self.model?.setConnected(self.serverUrl, connected) }
     }
     func onBoardState(boardId: String, nowShowing: [UiGame], online: Bool) {
         Task { @MainActor in self.model?.applyBoardState(boardId, nowShowing, online) }
@@ -74,7 +79,7 @@ final class ListenerAdapter: ClientListener {
         Task { @MainActor in if let img { self.model?.frames[frameId] = img } }
     }
     func onPaired(boardId: String) {
-        Task { @MainActor in self.model?.handlePaired(boardId) }
+        Task { @MainActor in self.model?.handlePaired(boardId, server: self.serverUrl) }
     }
     func onPairFailed(reason: String) {
         Task { @MainActor in self.model?.handlePairFailed(reason) }
@@ -110,7 +115,10 @@ struct BoardInfo {
 
 @MainActor
 final class BoardViewModel: ObservableObject {
-    @Published var connected = false
+    @Published var connectedServers: Set<String> = []
+    /// Connection state of the SELECTED board's server (or the default server
+    /// while no board is selected — the pairing splash keys off this).
+    var connected: Bool { connectedServers.contains(serverURL(of: selectedBoardId)) }
     /// Paired boards (ids) in display order; persisted across launches.
     @Published var boardIds: [String] = []
     /// Which board the dashboard is currently showing/controlling.
@@ -156,17 +164,54 @@ final class BoardViewModel: ObservableObject {
     var focusedGameId: String? { current.focusedGameId }
     var extraGameIds: Set<String> { current.extraGameIds }
 
-    /// HTTP(S) base for the /render endpoint, derived from the WebSocket URL.
+    /// HTTP(S) base for the /render endpoint — the SELECTED board's server.
     var httpBase: String {
-        var u = serverUrl
+        var u = serverURL(of: selectedBoardId)
         if u.hasSuffix("/ws") { u = String(u.dropLast(3)) }
         if u.hasPrefix("wss://") { return "https://" + String(u.dropFirst(6)) }
         if u.hasPrefix("ws://") { return "http://" + String(u.dropFirst(5)) }
         return u
     }
 
-    private var client: ScoreboardClient?
-    private var adapter: ListenerAdapter?
+    /// boardId -> ws URL. Boards without an entry ride the default `serverUrl`
+    /// (which is also how pre-multi-server boards migrate).
+    private var boardServers: [String: String] = {
+        (UserDefaults.standard.dictionary(forKey: "boardServers") as? [String: String]) ?? [:]
+    }()
+    private func saveBoardServers() {
+        UserDefaults.standard.set(boardServers, forKey: "boardServers")
+    }
+    func serverURL(of boardId: String?) -> String {
+        guard let boardId else { return serverUrl }
+        return boardServers[boardId] ?? serverUrl
+    }
+
+    /// One client per distinct server; the active one follows the selection.
+    private var clients: [String: (client: ScoreboardClient, adapter: ListenerAdapter)] = [:]
+    private var client: ScoreboardClient? { clients[serverURL(of: selectedBoardId)]?.client }
+    /// Where an in-flight pairing will file the new board.
+    private var pendingPairServer: String?
+
+    func setConnected(_ server: String, _ up: Bool) {
+        if up { connectedServers.insert(server) } else { connectedServers.remove(server) }
+    }
+
+    /// Get-or-create the client for a server URL and connect it.
+    @discardableResult
+    private func ensureClient(_ url: String) -> ScoreboardClient {
+        if let existing = clients[url] { return existing.client }
+        let secret = Keychain.loadSecret()
+        let ids = boardIds.filter { serverURL(of: $0) == url }
+        let c = ScoreboardClient(serverUrl: url, boardIds: ids, secretKeyHex: secret)
+        let actual = c.secretKeyHex()
+        if actual != secret { Keychain.saveSecret(actual) }
+        let a = ListenerAdapter(model: self, serverUrl: url)
+        c.setListener(listener: a)
+        c.connect()
+        c.requestCatalog()
+        clients[url] = (c, a)
+        return c
+    }
 
     /// Load the saved board ids, migrating the old single-board key if present.
     private static func loadBoardIds() -> [String] {
@@ -188,30 +233,24 @@ final class BoardViewModel: ObservableObject {
     }
 
     func start() {
-        guard client == nil else { return }
-        // Reuse our persisted identity, or let the core mint one and store it back.
-        let secret = Keychain.loadSecret()
-        let c = ScoreboardClient(serverUrl: serverUrl, boardIds: boardIds, secretKeyHex: secret)
-        let actual = c.secretKeyHex()
-        if actual != secret { Keychain.saveSecret(actual) }
-        let a = ListenerAdapter(model: self)
-        c.setListener(listener: a)
-        c.connect()
-        c.requestCatalog()
-        client = c
-        adapter = a
+        guard clients.isEmpty else { return }
+        // One client per distinct server across all boards, plus the default
+        // (pairing + the no-boards splash live there).
+        var urls = Set(boardIds.map { serverURL(of: $0) })
+        urls.insert(serverUrl)
+        for url in urls { ensureClient(url) }
     }
 
-    /// Change the server URL, persist it, and reconnect with a fresh client.
+    /// Change the DEFAULT server (new pairings + boards without an explicit
+    /// server). Boards pinned to other servers are unaffected.
     func setServer(_ url: String) {
         let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed != serverUrl else { return }
         serverUrl = trimmed
         UserDefaults.standard.set(trimmed, forKey: "serverUrl")
-        // app-core has no disconnect API; dropping the client stops its task.
-        client = nil
-        adapter = nil
-        connected = false
+        // app-core has no disconnect API; dropping a client stops its task.
+        clients = [:]
+        connectedServers = []
         boards = [:]
         for id in boardIds { boards[id] = BoardInfo() }
         sports = []
@@ -220,13 +259,22 @@ final class BoardViewModel: ObservableObject {
     }
 
     // ---- pairing ----
-    func pair(_ code: String) {
+    /// Pair against a specific server (defaults to the default server); the new
+    /// board is remembered as living there.
+    func pair(_ code: String, server: String? = nil) {
         pairError = nil
         isPairing = true
-        client?.pair(code: code)
+        let url = (server?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 } ?? serverUrl
+        pendingPairServer = url
+        ensureClient(url).pair(code: code)
     }
 
-    func handlePaired(_ boardId: String) {
+    func handlePaired(_ boardId: String, server: String) {
+        // File the board under the server that paired it (adapter-tagged, with
+        // the pending choice as fallback for exotic race timings).
+        let url = pendingPairServer ?? server
+        pendingPairServer = nil
+        if url != serverUrl { boardServers[boardId] = url; saveBoardServers() }
         if !boardIds.contains(boardId) { boardIds.append(boardId) }
         if boards[boardId] == nil { boards[boardId] = BoardInfo() }
         selectedBoardId = boardId   // jump to the newly added board
@@ -244,16 +292,24 @@ final class BoardViewModel: ObservableObject {
     /// Forget one board, but KEEP the Keychain identity — the same pubkey lets us
     /// re-pair, and a re-paired board still trusts us.
     func unpair(_ boardId: String) {
+        // Drop the subscription FIRST (on the board's own server) — otherwise
+        // that server keeps pushing state and the push would resurrect it.
+        clients[serverURL(of: boardId)]?.client.removeBoard(boardId: boardId)
         boardIds.removeAll { $0 == boardId }
         boards[boardId] = nil
+        boardServers.removeValue(forKey: boardId)
+        saveBoardServers()
         saveBoardIds()
         if selectedBoardId == boardId { selectedBoardId = boardIds.first }
-        // Drop the subscription too — otherwise the server keeps pushing this
-        // board's state and the next push would resurrect it.
-        client?.removeBoard(boardId: boardId)
     }
 
-    func selectBoard(_ id: String) { selectedBoardId = id }
+    func selectBoard(_ id: String) {
+        selectedBoardId = id
+        // The catalog and browse list are server-scoped; refresh from the
+        // selected board's server so cross-server boards don't show stale data.
+        client?.requestCatalog()
+        requestGames()
+    }
 
     /// Rename the selected board (optimistic; persisted server-side).
     func rename(_ name: String) {
@@ -765,6 +821,8 @@ struct SetupView: View {
     @State private var code = ""
     @State private var showBluetoothSetup = false
     @State private var showServerSettings = false
+    @State private var pairServer = ""
+    @State private var serverPreset: ServerPreset = .custom
 
     var body: some View {
         VStack(spacing: 20) {
@@ -774,6 +832,31 @@ struct SetupView: View {
                 .foregroundStyle(.tint)
             Text("Add your scoreboard")
                 .font(.title2).bold()
+
+            // Which server this board will live on — different boards can use
+            // different servers (dev board on the Mac, living room on prod).
+            HStack(spacing: 8) {
+                Text("Server")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Picker("Server", selection: $serverPreset) {
+                    ForEach(ServerPreset.allCases) { p in
+                        Text(p.label).tag(p)
+                    }
+                }
+                .pickerStyle(.menu)
+                .onChange(of: serverPreset) { _, p in
+                    if let url = p.url { pairServer = url }
+                }
+            }
+            if serverPreset == .custom {
+                TextField("ws://host:7878/ws", text: $pairServer)
+                    .textFieldStyle(.roundedBorder)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .font(.callout.monospaced())
+                    .padding(.horizontal, 40)
+            }
 
             // Step 1 — get a new board onto Wi-Fi over Bluetooth.
             VStack(spacing: 8) {
@@ -817,7 +900,7 @@ struct SetupView: View {
             }
 
             Button {
-                model.pair(code)
+                model.pair(code, server: pairServer)
             } label: {
                 if model.isPairing {
                     ProgressView()
@@ -844,7 +927,13 @@ struct SetupView: View {
         }
         .padding()
         .sheet(isPresented: $showBluetoothSetup) {
-            BluetoothSetupView()
+            BluetoothSetupView(server: pairServer)
+        }
+        .onAppear {
+            if pairServer.isEmpty {
+                pairServer = model.serverUrl
+                serverPreset = ServerPreset.matching(model.serverUrl)
+            }
         }
         .sheet(isPresented: $showServerSettings) {
             SettingsView(model: model)
@@ -2431,12 +2520,15 @@ final class BluetoothProvisioner: NSObject, ObservableObject {
     private let serviceUUID = CBUUID(string: "21BA0000-5363-6F72-6562-6F6172640001")
     private let ssidUUID    = CBUUID(string: "21BA0000-5363-6F72-6562-6F6172640002")
     private let passUUID    = CBUUID(string: "21BA0000-5363-6F72-6562-6F6172640003")
+    private let serverUUID  = CBUUID(string: "21BA0000-5363-6F72-6562-6F6172640004")
     private let deviceName  = "Scoreboard Setup"
 
     private var central: CBCentralManager?
     private var board: CBPeripheral?
     private var ssidChar: CBCharacteristic?
     private var passChar: CBCharacteristic?
+    private var serverChar: CBCharacteristic?
+    private var ssidToSend: Data?
     private var passwordToSend: Data?
     private var sentPassword = false
 
@@ -2455,6 +2547,7 @@ final class BluetoothProvisioner: NSObject, ObservableObject {
         board = nil
         ssidChar = nil
         passChar = nil
+        serverChar = nil
     }
 
     func retry() {
@@ -2462,9 +2555,10 @@ final class BluetoothProvisioner: NSObject, ObservableObject {
         start()
     }
 
-    /// Write SSID, then (on its ack) the password. The board saves + reboots once
-    /// both are received, which we observe as a disconnect = success.
-    func send(ssid: String, password: String) {
+    /// Write server (optional) -> SSID -> password, each on the previous ack.
+    /// The password write is the firmware's save trigger, so it must be last;
+    /// the board saves + reboots, which we observe as a disconnect = success.
+    func send(ssid: String, password: String, server: String) {
         guard status == .ready, let board, let ssidChar else {
             status = .failed("Not connected to a board yet")
             return
@@ -2477,10 +2571,29 @@ final class BluetoothProvisioner: NSObject, ObservableObject {
             status = .failed("Password is too long")
             return
         }
+        ssidToSend = ssidData
         passwordToSend = passData
         sentPassword = false
         status = .sending
-        board.writeValue(ssidData, for: ssidChar, type: .withResponse)
+        // "host:port" for the board (it speaks plain ws over TCP). Old firmware
+        // without the characteristic just gets ssid+pass and keeps its default.
+        let hostPort = Self.hostPort(fromWs: server)
+        if let serverChar, !hostPort.isEmpty, let data = hostPort.data(using: .utf8), data.count <= 96 {
+            board.writeValue(data, for: serverChar, type: .withResponse)
+        } else {
+            board.writeValue(ssidData, for: ssidChar, type: .withResponse)
+        }
+    }
+
+    /// ws://host:port/ws -> "host:port" (default port 7878 when unspecified).
+    static func hostPort(fromWs url: String) -> String {
+        var u = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        for p in ["ws://", "wss://", "http://", "https://"] where u.hasPrefix(p) {
+            u = String(u.dropFirst(p.count))
+        }
+        if let slash = u.firstIndex(of: "/") { u = String(u[..<slash]) }
+        guard !u.isEmpty else { return "" }
+        return u.contains(":") ? u : "\(u):7878"
     }
 
     private func beginScan() {
@@ -2535,7 +2648,7 @@ extension BluetoothProvisioner: CBPeripheralDelegate {
             status = .failed("This board isn't in setup mode")
             return
         }
-        peripheral.discoverCharacteristics([ssidUUID, passUUID], for: service)
+        peripheral.discoverCharacteristics([ssidUUID, passUUID, serverUUID], for: service)
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
@@ -2543,6 +2656,7 @@ extension BluetoothProvisioner: CBPeripheralDelegate {
         for ch in service.characteristics ?? [] {
             if ch.uuid == ssidUUID { ssidChar = ch }
             if ch.uuid == passUUID { passChar = ch }
+            if ch.uuid == serverUUID { serverChar = ch }
         }
         status = (ssidChar != nil && passChar != nil) ? .ready
             : .failed("Provisioning characteristics missing")
@@ -2550,8 +2664,13 @@ extension BluetoothProvisioner: CBPeripheralDelegate {
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
         if let error { status = .failed(error.localizedDescription); return }
-        if characteristic.uuid == ssidUUID {
-            // SSID acknowledged → send the password.
+        if characteristic.uuid == serverUUID {
+            // Server acknowledged → send the SSID.
+            if let ssidChar, let ssidData = ssidToSend {
+                peripheral.writeValue(ssidData, for: ssidChar, type: .withResponse)
+            }
+        } else if characteristic.uuid == ssidUUID {
+            // SSID acknowledged → send the password (the save trigger).
             if let passChar, let passData = passwordToSend {
                 peripheral.writeValue(passData, for: passChar, type: .withResponse)
             }
@@ -2567,6 +2686,8 @@ struct BluetoothSetupView: View {
     @StateObject private var ble = BluetoothProvisioner()
     @State private var ssid = ""
     @State private var password = ""
+    /// ws URL of the server this board should connect to (written over BLE).
+    var server: String = ""
 
     var body: some View {
         NavigationStack {
@@ -2591,7 +2712,7 @@ struct BluetoothSetupView: View {
 
                 Section {
                     Button {
-                        ble.send(ssid: ssid, password: password)
+                        ble.send(ssid: ssid, password: password, server: server)
                     } label: {
                         HStack {
                             Spacer()

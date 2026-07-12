@@ -32,7 +32,7 @@ esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32s3"] }
 esp-rtos = { version = "0.3.0", features = ["embassy", "esp-alloc", "esp-radio", "esp32s3"] }
 esp-radio = { version = "0.18.0", features = ["ble", "esp-alloc", "esp32s3", "unstable", "wifi"] }
 esp-alloc = "0.10.0"
-embassy-net = { version = "0.9.1", features = ["dhcpv4", "medium-ethernet", "tcp", "udp"] }
+embassy-net = { version = "0.9.1", features = ["dhcpv4", "dns", "medium-ethernet", "tcp", "udp"] }
 embassy-executor = "0.10.0"
 embassy-time = "0.5.0"
 embassy-sync = "0.7"
