@@ -247,6 +247,46 @@ async fn controller_loop(
                         serde_json::to_string(&ServerMsg::Games { games }).unwrap(),
                     ));
                 }
+                Ok(ClientMsg::ExportSettings { board_id }) => {
+                    // Same per-board guard as commands: only a paired controller
+                    // may read a board's preferences. Answer with an error (via
+                    // ImportResult) instead of going silent — a stale pairing
+                    // (server DB reset) would otherwise be a dead button.
+                    if !state.is_allowed(&board_id, &pubkey) {
+                        tracing::warn!("controller '{pubkey}' denied settings export for '{board_id}' (not paired)");
+                        let _ = out.send(Message::Text(
+                            serde_json::to_string(&ServerMsg::ImportResult {
+                                board_id,
+                                error: Some("this server doesn't recognize the pairing — re-pair the board".into()),
+                            })
+                            .unwrap(),
+                        ));
+                        continue;
+                    }
+                    let settings = PortableSettings::from(&state.config_for(&board_id));
+                    let json = serde_json::to_string_pretty(&settings).unwrap();
+                    let _ = out.send(Message::Text(
+                        serde_json::to_string(&ServerMsg::SettingsExport { board_id, json }).unwrap(),
+                    ));
+                }
+                Ok(ClientMsg::ImportSettings { board_id, json }) => {
+                    let error = if !state.is_allowed(&board_id, &pubkey) {
+                        Some("not paired with this board".to_string())
+                    } else {
+                        apply_settings_import(&state, &board_id, &json).err()
+                    };
+                    let ok = error.is_none();
+                    let _ = out.send(Message::Text(
+                        serde_json::to_string(&ServerMsg::ImportResult { board_id: board_id.clone(), error })
+                            .unwrap(),
+                    ));
+                    if ok {
+                        // Reflect the updated config back to the app (mirrors Command).
+                        let _ = out.send(Message::Text(
+                            serde_json::to_string(&board_state_msg(&state, &board_id)).unwrap(),
+                        ));
+                    }
+                }
                 Ok(ClientMsg::Command { req_id, board_id, cmd }) => {
                     if !state.is_allowed(&board_id, &pubkey) {
                         let ack = ServerMsg::CommandAck {
@@ -304,6 +344,53 @@ fn spawn_keepalive(tx: mpsc::UnboundedSender<Message>) -> tokio::task::JoinHandl
             }
         }
     })
+}
+
+/// Apply an exported settings blob to one board: parse + version-check it,
+/// overwrite the durable preferences (and nothing else), then persist and push
+/// through the exact path `apply_command` uses. Errors are human-readable —
+/// they go straight into the app's import-failed alert.
+pub(crate) fn apply_settings_import(state: &AppState, board_id: &str, json: &str) -> Result<(), String> {
+    // Import is the one single-message bulk write into a config (commands only
+    // grow it one entry at a time), and the blob is persisted whole and cloned
+    // on every render — so bound it before parsing.
+    if json.len() > 128 * 1024 {
+        return Err("settings blob is implausibly large".to_string());
+    }
+    let mut settings: PortableSettings = serde_json::from_str(json)
+        .map_err(|e| format!("that isn't a settings export ({e})"))?;
+    if settings.version != PORTABLE_SETTINGS_VERSION {
+        return Err(format!(
+            "unsupported settings version {} (this server understands version {})",
+            settings.version, PORTABLE_SETTINGS_VERSION
+        ));
+    }
+    // Every command path is find-or-push by sport_id, so duplicates are
+    // structurally impossible there — and a duplicate smuggled in here would be
+    // half-active but uneditable (commands rewrite only the first match).
+    // Keep first occurrence, drop the rest.
+    let mut seen = std::collections::HashSet::new();
+    settings.sports.retain(|s| seen.insert(s.sport_id.clone()));
+    let updated = {
+        let mut configs = state.configs.lock().unwrap();
+        let cfg = configs.entry(board_id.to_string()).or_default();
+        settings.apply_to(cfg);
+        // The blob is user-portable text: re-apply the same bounds the
+        // equivalent commands enforce, so a hand-edited export can't smuggle
+        // out-of-range values into the config.
+        cfg.brightness = cfg.brightness.clamp(10, 100);
+        cfg.dwell_secs = cfg.dwell_secs.clamp(3, 60);
+        cfg.sleep_hours = cfg.sleep_hours.clamp(1, 72);
+        for s in &mut cfg.sports {
+            s.dwell_secs = s.dwell_secs.map(|v| v.clamp(3, 60));
+            s.leaderboard_rows = s.leaderboard_rows.map(|v| v.clamp(4, 20));
+        }
+        cfg.clone()
+    };
+    push_board(state, board_id);
+    push_board_state(state, board_id);
+    state.persist_config(board_id, &updated);
+    Ok(())
 }
 
 pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
@@ -472,14 +559,15 @@ mod tests {
 
     type Client = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-    async fn spawn_server() -> String {
+    async fn spawn_server() -> (String, AppState) {
+        let state = AppState::new_ephemeral();
         let app = Router::new()
             .route("/ws", get(ws_handler))
-            .with_state(AppState::new_ephemeral());
+            .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        format!("ws://{addr}/ws")
+        (format!("ws://{addr}/ws"), state)
     }
 
     async fn send(ws: &mut Client, m: &ClientMsg) {
@@ -528,7 +616,7 @@ mod tests {
 
     #[tokio::test]
     async fn pair_flow_end_to_end() {
-        let url = spawn_server().await;
+        let (url, _state) = spawn_server().await;
 
         // Device authenticates (its pubkey IS its board_id) and announces a code.
         let (mut dev, board_id) = auth(&url, Role::Device, &[1u8; 32]).await;
@@ -570,5 +658,135 @@ mod tests {
         }).await;
         let ack2 = recv_until(&mut other, |m| matches!(m, ServerMsg::CommandAck { .. })).await;
         assert!(matches!(ack2, Some(ServerMsg::CommandAck { ok: false, .. })));
+    }
+
+    /// Export from one board, import onto a second: the durable preferences
+    /// (leagues, spoilers, timing) transfer; the target board's identity (name)
+    /// and rotation one-offs survive untouched. Bad blobs are rejected with a
+    /// readable error and change nothing.
+    #[tokio::test]
+    async fn settings_export_import_round_trip() {
+        let (url, state) = spawn_server().await;
+
+        // Two boards; one controller paired with both.
+        let (mut dev_a, board_a) = auth(&url, Role::Device, &[1u8; 32]).await;
+        send(&mut dev_a, &ClientMsg::EnterSetup { code: "111111".into() }).await;
+        let (mut dev_b, board_b) = auth(&url, Role::Device, &[4u8; 32]).await;
+        send(&mut dev_b, &ClientMsg::EnterSetup { code: "222222".into() }).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let (mut ctrl, _me) = auth(&url, Role::Controller, &[2u8; 32]).await;
+        send(&mut ctrl, &ClientMsg::Pair { code: "111111".into() }).await;
+        assert!(recv_until(&mut ctrl, |m| matches!(m, ServerMsg::Paired { .. })).await.is_some());
+        send(&mut ctrl, &ClientMsg::Pair { code: "222222".into() }).await;
+        assert!(recv_until(&mut ctrl, |m| matches!(m, ServerMsg::Paired { .. })).await.is_some());
+
+        // Board A carries the preferences to transfer; board B has its own name
+        // and rotation tweaks that the import must NOT touch.
+        {
+            let mut configs = state.configs.lock().unwrap();
+            let a = configs.entry(board_a.clone()).or_default();
+            a.brightness = 40;
+            a.dwell_secs = 20;
+            a.sleep_hours = 8;
+            a.off_state = OffState::Blank;
+            a.spoiler_mode = SpoilerMode::Strict;
+            a.spoiler_all = true;
+            a.sports = vec![SportConfig {
+                sport_id: "nhl".into(),
+                favorite_team_ids: vec!["nhl-bos".into()],
+                championship_option_id: Some("playoffs".into()),
+                dwell_secs: Some(30),
+                leaderboard_rows: None,
+                spoiler: true,
+                spoiler_team_ids: vec!["nhl-tor".into()],
+            }];
+            let b = configs.entry(board_b.clone()).or_default();
+            b.name = Some("Living room".into());
+            b.extra_game_ids = vec!["extra-1".into()];
+            b.excluded_game_ids = vec!["excluded-1".into()];
+            b.focused_game_id = Some("focus-1".into());
+        }
+
+        // Export board A's settings.
+        send(&mut ctrl, &ClientMsg::ExportSettings { board_id: board_a.clone() }).await;
+        let json = match recv_until(&mut ctrl, |m| matches!(m, ServerMsg::SettingsExport { .. })).await {
+            Some(ServerMsg::SettingsExport { board_id, json }) => {
+                assert_eq!(board_id, board_a);
+                json
+            }
+            other => panic!("expected SettingsExport, got {other:?}"),
+        };
+        assert!(json.contains("\"scoreboard_settings\": 1"), "export is version-tagged: {json}");
+
+        // Import them onto board B.
+        send(&mut ctrl, &ClientMsg::ImportSettings { board_id: board_b.clone(), json: json.clone() }).await;
+        let res = recv_until(&mut ctrl, |m| matches!(m, ServerMsg::ImportResult { .. })).await;
+        assert!(
+            matches!(&res, Some(ServerMsg::ImportResult { board_id, error: None }) if *board_id == board_b),
+            "import should succeed: {res:?}"
+        );
+
+        let a = state.config_for(&board_a);
+        let b = state.config_for(&board_b);
+        // The durable half matches the source board exactly...
+        assert_eq!(PortableSettings::from(&b), PortableSettings::from(&a));
+        assert_eq!(b.dwell_secs, 20);
+        assert_eq!(b.spoiler_mode, SpoilerMode::Strict);
+        assert!(b.spoiler_all);
+        assert_eq!(b.sports, a.sports);
+        // ...while B's identity + rotation one-offs survive untouched.
+        assert_eq!(b.name.as_deref(), Some("Living room"));
+        assert_eq!(b.extra_game_ids, vec!["extra-1".to_string()]);
+        assert_eq!(b.excluded_game_ids, vec!["excluded-1".to_string()]);
+        assert_eq!(b.focused_game_id.as_deref(), Some("focus-1"));
+        assert!(b.power);
+        // And the source board's name never travels.
+        assert_eq!(a.name, None);
+
+        // Malformed JSON: readable error, config untouched.
+        let before = serde_json::to_string(&b).unwrap();
+        send(&mut ctrl, &ClientMsg::ImportSettings { board_id: board_b.clone(), json: "{not json".into() }).await;
+        match recv_until(&mut ctrl, |m| matches!(m, ServerMsg::ImportResult { .. })).await {
+            Some(ServerMsg::ImportResult { error: Some(e), .. }) => {
+                assert!(e.contains("settings export"), "unexpected error text: {e}")
+            }
+            other => panic!("expected ImportResult with an error, got {other:?}"),
+        }
+        assert_eq!(serde_json::to_string(&state.config_for(&board_b)).unwrap(), before);
+
+        // Wrong version: rejected too.
+        send(&mut ctrl, &ClientMsg::ImportSettings {
+            board_id: board_b.clone(),
+            json: "{\"scoreboard_settings\": 2}".into(),
+        }).await;
+        match recv_until(&mut ctrl, |m| matches!(m, ServerMsg::ImportResult { .. })).await {
+            Some(ServerMsg::ImportResult { error: Some(e), .. }) => {
+                assert!(e.contains("version"), "unexpected error text: {e}")
+            }
+            other => panic!("expected ImportResult with an error, got {other:?}"),
+        }
+        assert_eq!(serde_json::to_string(&state.config_for(&board_b)).unwrap(), before);
+
+        // An unpaired controller can neither import...
+        let (mut other, _) = auth(&url, Role::Controller, &[3u8; 32]).await;
+        send(&mut other, &ClientMsg::ImportSettings { board_id: board_b.clone(), json }).await;
+        match recv_until(&mut other, |m| matches!(m, ServerMsg::ImportResult { .. })).await {
+            Some(ServerMsg::ImportResult { error: Some(e), .. }) => assert!(e.contains("not paired")),
+            other => panic!("expected ImportResult with an error, got {other:?}"),
+        }
+        // ...nor export — and the refusal is an explicit error, not silence
+        // (a stale pairing would otherwise be a dead button in the app).
+        send(&mut other, &ClientMsg::ExportSettings { board_id: board_a.clone() }).await;
+        match recv_until(&mut other, |m| {
+            matches!(m, ServerMsg::SettingsExport { .. } | ServerMsg::ImportResult { .. })
+        })
+        .await
+        {
+            Some(ServerMsg::ImportResult { error: Some(e), .. }) => {
+                assert!(e.contains("pairing"), "unexpected error text: {e}")
+            }
+            other => panic!("expected an ImportResult error (no export for unpaired), got {other:?}"),
+        }
     }
 }

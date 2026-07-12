@@ -2,6 +2,7 @@ import SwiftUI
 import CoreBluetooth
 import Security
 import CoreGraphics
+import UIKit
 
 /// The app's Ed25519 identity (32-byte secret seed, hex) lives in the Keychain so it
 /// survives app restarts AND unpairing — losing it would mean re-pairing every board.
@@ -83,6 +84,12 @@ final class ListenerAdapter: ClientListener {
     }
     func onPairFailed(reason: String) {
         Task { @MainActor in self.model?.handlePairFailed(reason) }
+    }
+    func onSettingsExport(boardId: String, json: String) {
+        Task { @MainActor in self.model?.handleSettingsExport(boardId, json) }
+    }
+    func onImportResult(boardId: String, error: String?) {
+        Task { @MainActor in self.model?.handleImportResult(boardId, error) }
     }
 }
 
@@ -783,6 +790,46 @@ final class BoardViewModel: ObservableObject {
         client?.setDwell(boardId: id, secs: secs)
     }
 
+    // ---- settings transfer (export/import a portable blob between boards,
+    //      possibly living on different servers) ----
+
+    /// An export that arrived and is waiting to be shared/copied.
+    struct SettingsExport: Identifiable {
+        let id = UUID()
+        let boardId: String
+        let json: String
+    }
+    /// The server's verdict on an import (error == nil means it applied).
+    struct ImportOutcome: Identifiable {
+        let id = UUID()
+        let boardId: String
+        let error: String?
+    }
+    @Published var settingsExport: SettingsExport?
+    @Published var importOutcome: ImportOutcome?
+
+    /// Ask the selected board's server for its durable settings blob; the reply
+    /// lands in `settingsExport` (which drives the share sheet).
+    func exportSettings() {
+        guard let id = selectedBoardId else { return }
+        client?.exportSettings(boardId: id)
+    }
+
+    /// Apply a previously exported blob to the selected board; the verdict
+    /// lands in `importOutcome` (which drives the result alert).
+    func importSettings(_ json: String) {
+        guard let id = selectedBoardId else { return }
+        client?.importSettings(boardId: id, json: json)
+    }
+
+    func handleSettingsExport(_ boardId: String, _ json: String) {
+        settingsExport = SettingsExport(boardId: boardId, json: json)
+    }
+
+    func handleImportResult(_ boardId: String, _ error: String?) {
+        importOutcome = ImportOutcome(boardId: boardId, error: error)
+    }
+
     /// Now-showing for display: the pinned game (if any) sorted to the front.
     var displayedNowShowing: [UiGame] {
         let games = current.nowShowing
@@ -1163,6 +1210,8 @@ struct DashboardView: View {
     @State private var showRename = false
     @State private var renameText = ""
     @State private var showRemoveConfirm = false
+    /// Import tapped with nothing usable on the clipboard.
+    @State private var showImportEmptyAlert = false
     /// Which settings-row explainer card is up (nil = none).
     @State private var settingsInfo: SettingsInfoTopic?
     /// Pushes the All-games screen (the "View all" button).
@@ -1232,6 +1281,7 @@ struct DashboardView: View {
             }
             settingsSection
             spoilerSection
+            transferSection
             removeSection
         }
         // One uniform gap between top-level sections. Individual sections that
@@ -1516,6 +1566,58 @@ struct DashboardView: View {
             } else {
                 Text("Asleep until turned back on.")
             }
+        }
+    }
+
+    /// Export/import the board's durable preferences as a portable blob — the
+    /// way to clone a setup onto a second scoreboard, even one that lives on a
+    /// different server. Export presents a share/copy sheet; import reads the
+    /// clipboard and reports the server's verdict.
+    private var transferSection: some View {
+        Section {
+            // Disabled offline: the request would queue in the client's outbox
+            // and fire whenever the socket returns — a share sheet popping up
+            // minutes later, over whatever the user is doing by then.
+            Button("Export settings") {
+                model.exportSettings()
+            }
+            .disabled(!model.connected)
+            Button("Import settings") {
+                let text = UIPasteboard.general.string?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if text.isEmpty {
+                    showImportEmptyAlert = true
+                } else {
+                    model.importSettings(text)
+                }
+            }
+            .disabled(!model.connected)
+        } header: {
+            Text("Transfer settings")
+        } footer: {
+            Text(model.connected
+                ? "Exports league preferences, spoiler rules, brightness, and timing for another scoreboard. Pinned or manually added games and this board's name don't transfer."
+                : "Unavailable while disconnected from this scoreboard's server.")
+        }
+        .sheet(item: $model.settingsExport) { export in
+            SettingsExportSheet(json: export.json)
+        }
+        .alert("Nothing to import", isPresented: $showImportEmptyAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Copy an export from another scoreboard first (Export settings → Copy), then come back and tap Import settings.")
+        }
+        .alert(
+            model.importOutcome?.error == nil ? "Settings imported" : "Import failed",
+            isPresented: Binding(
+                get: { model.importOutcome != nil },
+                set: { if !$0 { model.importOutcome = nil } }
+            ),
+            presenting: model.importOutcome
+        ) { _ in
+            Button("OK", role: .cancel) {}
+        } message: { outcome in
+            Text(outcome.error ?? "This scoreboard now uses the transferred settings.")
         }
     }
 
@@ -1911,6 +2013,64 @@ struct SettingsInfoCard: View {
         .padding(.top, 24)
         .presentationDetents([.medium])
         .presentationDragIndicator(.visible)
+    }
+}
+
+/// The exported-settings blob, ready to leave the phone: copy it for the
+/// in-app Import on another scoreboard, or share it (AirDrop, Messages, Notes)
+/// to reach a scoreboard managed from a different device.
+struct SettingsExportSheet: View {
+    let json: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var copied = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.title2)
+                    .foregroundStyle(.yellow)
+                    .frame(width: 36, height: 36)
+                    .background(Color(white: 0.2), in: RoundedRectangle(cornerRadius: 9))
+                Text("Export settings")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+            }
+            Text("League preferences, spoiler rules, brightness, and timing. On the other scoreboard, tap Import settings with this on the clipboard.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ScrollView {
+                Text(json)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+            }
+            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+            Button {
+                UIPasteboard.general.string = json
+                copied = true
+            } label: {
+                Label(copied ? "Copied" : "Copy for import", systemImage: copied ? "checkmark" : "doc.on.doc")
+                    .font(.body.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+            }
+            .buttonStyle(.borderedProminent)
+            ShareLink(item: json) {
+                Label("Share…", systemImage: "square.and.arrow.up")
+                    .font(.body.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding([.horizontal, .bottom], 20)
+        .padding(.top, 24)
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .onDisappear { copied = false }
     }
 }
 

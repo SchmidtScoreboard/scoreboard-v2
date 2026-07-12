@@ -122,6 +122,11 @@ pub trait ClientListener: Send + Sync {
     fn on_frame(&self, frame_id: String, rgba: Vec<u8>);
     fn on_paired(&self, board_id: String);
     fn on_pair_failed(&self, reason: String);
+    /// A board's exported settings arrived (the reply to `export_settings`);
+    /// `json` is the portable blob to share/copy.
+    fn on_settings_export(&self, board_id: String, json: String);
+    /// Outcome of `import_settings`: `None` = applied, `Some` = readable error.
+    fn on_import_result(&self, board_id: String, error: Option<String>);
 }
 
 enum Out {
@@ -131,6 +136,10 @@ enum Out {
     Pair(String),
     /// Re-send Subscribe with the CURRENT board list (after a removal).
     Resubscribe,
+    /// Ask for a board's durable settings as a portable JSON blob.
+    ExportSettings(String),
+    /// Apply a previously exported blob to a board: (board_id, json).
+    ImportSettings(String, String),
 }
 
 #[derive(uniffi::Object)]
@@ -311,6 +320,12 @@ impl ScoreboardClient {
                                                 l.on_config(bid, to_ui_board_config(config));
                                             }
                                         }
+                                        ServerMsg::SettingsExport { board_id: bid, json } => {
+                                            if let Some(l) = listener.lock().unwrap().as_ref() { l.on_settings_export(bid, json); }
+                                        }
+                                        ServerMsg::ImportResult { board_id: bid, error } => {
+                                            if let Some(l) = listener.lock().unwrap().as_ref() { l.on_import_result(bid, error); }
+                                        }
                                         _ => {}
                                     }
                                 }
@@ -353,6 +368,14 @@ impl ScoreboardClient {
                             Some(Out::Resubscribe) => {
                                 let sub = ClientMsg::Subscribe { board_ids: boards.lock().unwrap().clone() };
                                 let _ = write.send(Message::Text(serde_json::to_string(&sub).unwrap())).await;
+                            }
+                            Some(Out::ExportSettings(bid)) => {
+                                let m = ClientMsg::ExportSettings { board_id: bid };
+                                let _ = write.send(Message::Text(serde_json::to_string(&m).unwrap())).await;
+                            }
+                            Some(Out::ImportSettings(bid, json)) => {
+                                let m = ClientMsg::ImportSettings { board_id: bid, json };
+                                let _ = write.send(Message::Text(serde_json::to_string(&m).unwrap())).await;
                             }
                             // The client object was dropped — end the task for good.
                             None => break 'reconnect,
@@ -520,6 +543,18 @@ impl ScoreboardClient {
     pub fn reset_rotation(&self, board_id: String) {
         let _ = self.tx.send(Out::Command(board_id, Command::ResetRotation));
     }
+
+    /// Ask for a board's durable settings (leagues, spoilers, timing) as a
+    /// portable JSON blob; the reply arrives via `on_settings_export`.
+    pub fn export_settings(&self, board_id: String) {
+        let _ = self.tx.send(Out::ExportSettings(board_id));
+    }
+
+    /// Apply a previously exported settings blob to a board (possibly on a
+    /// different server); the outcome arrives via `on_import_result`.
+    pub fn import_settings(&self, board_id: String, json: String) {
+        let _ = self.tx.send(Out::ImportSettings(board_id, json));
+    }
 }
 
 fn to_ui_sports(cat: Catalog) -> Vec<UiSport> {
@@ -569,6 +604,8 @@ mod wss_tests {
         fn on_frame(&self, _: String, _: Vec<u8>) {}
         fn on_paired(&self, _: String) {}
         fn on_pair_failed(&self, _: String) {}
+        fn on_settings_export(&self, _: String, _: String) {}
+        fn on_import_result(&self, _: String, _: Option<String>) {}
     }
 
     /// The order-of-operations regression: the app launches while the server is

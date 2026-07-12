@@ -307,6 +307,20 @@ typedef void (*UniffiCallbackInterfaceClientListenerMethod7)(uint64_t, RustBuffe
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD8
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD8
+typedef void (*UniffiCallbackInterfaceClientListenerMethod8)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD9
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD9
+typedef void (*UniffiCallbackInterfaceClientListenerMethod9)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_CLIENT_LISTENER
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_CLIENT_LISTENER
 typedef struct UniffiVTableCallbackInterfaceClientListener {
@@ -318,6 +332,8 @@ typedef struct UniffiVTableCallbackInterfaceClientListener {
     UniffiCallbackInterfaceClientListenerMethod5 _Nonnull onFrame;
     UniffiCallbackInterfaceClientListenerMethod6 _Nonnull onPaired;
     UniffiCallbackInterfaceClientListenerMethod7 _Nonnull onPairFailed;
+    UniffiCallbackInterfaceClientListenerMethod8 _Nonnull onSettingsExport;
+    UniffiCallbackInterfaceClientListenerMethod9 _Nonnull onImportResult;
     UniffiCallbackInterfaceFree _Nonnull uniffiFree;
 } UniffiVTableCallbackInterfaceClientListener;
 
@@ -362,9 +378,19 @@ void uniffi_app_core_fn_method_scoreboardclient_clear_wake_timer(void*_Nonnull p
 void uniffi_app_core_fn_method_scoreboardclient_connect(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_EXPORT_SETTINGS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_EXPORT_SETTINGS
+void uniffi_app_core_fn_method_scoreboardclient_export_settings(void*_Nonnull ptr, RustBuffer board_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_FOCUS_GAME
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_FOCUS_GAME
 void uniffi_app_core_fn_method_scoreboardclient_focus_game(void*_Nonnull ptr, RustBuffer board_id, RustBuffer game_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_IMPORT_SETTINGS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_IMPORT_SETTINGS
+void uniffi_app_core_fn_method_scoreboardclient_import_settings(void*_Nonnull ptr, RustBuffer board_id, RustBuffer json, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_PAIR
@@ -797,9 +823,21 @@ uint16_t uniffi_app_core_checksum_method_scoreboardclient_connect(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_EXPORT_SETTINGS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_EXPORT_SETTINGS
+uint16_t uniffi_app_core_checksum_method_scoreboardclient_export_settings(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_FOCUS_GAME
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_FOCUS_GAME
 uint16_t uniffi_app_core_checksum_method_scoreboardclient_focus_game(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_IMPORT_SETTINGS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_IMPORT_SETTINGS
+uint16_t uniffi_app_core_checksum_method_scoreboardclient_import_settings(void
     
 );
 #endif
@@ -992,6 +1030,18 @@ uint16_t uniffi_app_core_checksum_method_clientlistener_on_paired(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_PAIR_FAILED
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_PAIR_FAILED
 uint16_t uniffi_app_core_checksum_method_clientlistener_on_pair_failed(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_SETTINGS_EXPORT
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_SETTINGS_EXPORT
+uint16_t uniffi_app_core_checksum_method_clientlistener_on_settings_export(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_IMPORT_RESULT
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_IMPORT_RESULT
+uint16_t uniffi_app_core_checksum_method_clientlistener_on_import_result(void
     
 );
 #endif

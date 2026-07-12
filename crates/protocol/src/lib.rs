@@ -157,7 +157,7 @@ pub struct Manifest {
 }
 
 // ---- per-board config ----
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct SportConfig {
     pub sport_id: String,
     pub favorite_team_ids: Vec<String>,
@@ -230,6 +230,78 @@ fn default_sleep_hours() -> u32 {
 
 fn default_dwell_secs() -> u32 {
     10
+}
+
+fn default_brightness() -> u8 {
+    80
+}
+
+/// Version stamped into every settings export (`scoreboard_settings` field).
+pub const PORTABLE_SETTINGS_VERSION: u32 = 1;
+
+/// The DURABLE half of a `BoardConfig`, as a portable blob: the preferences a
+/// user would want to carry to another scoreboard (possibly on a different
+/// server). Deliberately excludes board identity (`name`), live state
+/// (`power`/`wake_at`), and per-game one-offs (extra/excluded/focused/spoiler
+/// game ids — those ids expire with the games they point at).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PortableSettings {
+    /// Format marker + version. Named `scoreboard_settings` so an exported blob
+    /// is self-identifying; always `PORTABLE_SETTINGS_VERSION` on export. The
+    /// serde default (0) makes arbitrary JSON parse but fail the version check.
+    #[serde(rename = "scoreboard_settings", default)]
+    pub version: u32,
+    #[serde(default = "default_brightness")]
+    pub brightness: u8,
+    /// Seconds each game holds the panel before the rotation advances.
+    #[serde(default = "default_dwell_secs")]
+    pub dwell_secs: u32,
+    /// How long a button-press sleep lasts before the board wakes itself.
+    #[serde(default = "default_sleep_hours")]
+    pub sleep_hours: u32,
+    /// What the panel shows while the display is off / idle.
+    #[serde(default)]
+    pub off_state: OffState,
+    /// How spoiler-protected games render (strict = matchup + time only).
+    #[serde(default)]
+    pub spoiler_mode: SpoilerMode,
+    /// Spoiler-protect EVERY game on the board.
+    #[serde(default)]
+    pub spoiler_all: bool,
+    /// Per-league preferences: favorites, big games, dwell/rows overrides,
+    /// league + team spoiler rules.
+    #[serde(default)]
+    pub sports: Vec<SportConfig>,
+}
+
+impl From<&BoardConfig> for PortableSettings {
+    fn from(cfg: &BoardConfig) -> Self {
+        Self {
+            version: PORTABLE_SETTINGS_VERSION,
+            brightness: cfg.brightness,
+            dwell_secs: cfg.dwell_secs,
+            sleep_hours: cfg.sleep_hours,
+            off_state: cfg.off_state,
+            spoiler_mode: cfg.spoiler_mode,
+            spoiler_all: cfg.spoiler_all,
+            sports: cfg.sports.clone(),
+        }
+    }
+}
+
+impl PortableSettings {
+    /// Overwrite exactly the durable preferences on `cfg` — nothing else. The
+    /// board keeps its identity (name), live state (power/wake), and per-game
+    /// rotation/spoiler one-offs.
+    pub fn apply_to(&self, cfg: &mut BoardConfig) {
+        cfg.brightness = self.brightness;
+        cfg.dwell_secs = self.dwell_secs;
+        cfg.sleep_hours = self.sleep_hours;
+        cfg.off_state = self.off_state;
+        cfg.spoiler_mode = self.spoiler_mode;
+        cfg.spoiler_all = self.spoiler_all;
+        cfg.sports = self.sports.clone();
+    }
 }
 
 impl Default for BoardConfig {
@@ -332,6 +404,12 @@ pub enum ClientMsg {
     // device reports a knob turn — the server adopts this as the board's one
     // brightness (the same value SetBrightness writes and the manifest echoes)
     DeviceBrightness { level: u8 },
+    // controller asks for this board's durable settings as a portable JSON blob
+    // (a `PortableSettings`), answered by `ServerMsg::SettingsExport`
+    ExportSettings { board_id: String },
+    // controller applies a previously exported blob to this board, answered by
+    // `ServerMsg::ImportResult`
+    ImportSettings { board_id: String, json: String },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -360,6 +438,11 @@ pub enum ServerMsg {
     PairFailed { reason: String },
     // to a device: you've been paired, leave setup
     SetupDone,
+    // this board's durable settings as a portable JSON blob (pretty-printed
+    // `PortableSettings`) — the reply to `ClientMsg::ExportSettings`
+    SettingsExport { board_id: String, json: String },
+    // outcome of `ClientMsg::ImportSettings` (None = applied successfully)
+    ImportResult { board_id: String, error: Option<String> },
 }
 
 // ---- binary frame framing ----

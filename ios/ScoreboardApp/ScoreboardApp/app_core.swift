@@ -551,9 +551,21 @@ public protocol ScoreboardClientProtocol: AnyObject {
     func connect()
 
     /**
+     * Ask for a board's durable settings (leagues, spoilers, timing) as a
+     * portable JSON blob; the reply arrives via `on_settings_export`.
+     */
+    func exportSettings(boardId: String)
+
+    /**
      * Pin a board to a single game (overrides the rotation).
      */
     func focusGame(boardId: String, gameId: String)
+
+    /**
+     * Apply a previously exported settings blob to a board (possibly on a
+     * different server); the outcome arrives via `on_import_result`.
+     */
+    func importSettings(boardId: String, json: String)
 
     /**
      * Pair with whichever board is currently showing this code.
@@ -771,12 +783,33 @@ open class ScoreboardClient:
     }
 
     /**
+     * Ask for a board's durable settings (leagues, spoilers, timing) as a
+     * portable JSON blob; the reply arrives via `on_settings_export`.
+     */
+    open func exportSettings(boardId: String) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_export_settings(self.uniffiClonePointer(),
+                                                                   FfiConverterString.lower(boardId), $0)
+    }
+    }
+
+    /**
      * Pin a board to a single game (overrides the rotation).
      */
     open func focusGame(boardId: String, gameId: String) { try! rustCall {
         uniffi_app_core_fn_method_scoreboardclient_focus_game(self.uniffiClonePointer(),
                                                               FfiConverterString.lower(boardId),
                                                               FfiConverterString.lower(gameId), $0)
+    }
+    }
+
+    /**
+     * Apply a previously exported settings blob to a board (possibly on a
+     * different server); the outcome arrives via `on_import_result`.
+     */
+    open func importSettings(boardId: String, json: String) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_import_settings(self.uniffiClonePointer(),
+                                                                   FfiConverterString.lower(boardId),
+                                                                   FfiConverterString.lower(json), $0)
     }
     }
 
@@ -1871,6 +1904,17 @@ public protocol ClientListener: AnyObject {
     func onPaired(boardId: String)
 
     func onPairFailed(reason: String)
+
+    /**
+     * A board's exported settings arrived (the reply to `export_settings`);
+     * `json` is the portable blob to share/copy.
+     */
+    func onSettingsExport(boardId: String, json: String)
+
+    /**
+     * Outcome of `import_settings`: `None` = applied, `Some` = readable error.
+     */
+    func onImportResult(boardId: String, error: String?)
 }
 
 // Magic number for the Rust proxy to call using the same mechanism as every other method,
@@ -2068,6 +2112,56 @@ private enum UniffiCallbackInterfaceClientListener {
                 }
                 return try uniffiObj.onPairFailed(
                     reason: FfiConverterString.lift(reason)
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onSettingsExport: { (
+            uniffiHandle: UInt64,
+            boardId: RustBuffer,
+            json: RustBuffer,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceClientListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.onSettingsExport(
+                    boardId: FfiConverterString.lift(boardId),
+                    json: FfiConverterString.lift(json)
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onImportResult: { (
+            uniffiHandle: UInt64,
+            boardId: RustBuffer,
+            error: RustBuffer,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceClientListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.onImportResult(
+                    boardId: FfiConverterString.lift(boardId),
+                    error: FfiConverterOptionString.lift(error)
                 )
             }
 
@@ -2389,7 +2483,13 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_method_scoreboardclient_connect() != 42838 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_app_core_checksum_method_scoreboardclient_export_settings() != 48845 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_method_scoreboardclient_focus_game() != 28079 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_scoreboardclient_import_settings() != 6260 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_pair() != 62791 {
@@ -2486,6 +2586,12 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_clientlistener_on_pair_failed() != 36441 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_clientlistener_on_settings_export() != 36127 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_clientlistener_on_import_result() != 34671 {
         return InitializationResult.apiChecksumMismatch
     }
 
