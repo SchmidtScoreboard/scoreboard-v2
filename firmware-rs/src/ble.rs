@@ -56,7 +56,18 @@ pub async fn provision(
     let controller = ExternalController::<_, 20>::new(transport);
     let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
         HostResources::new();
-    let address = Address::random([0x42, 0x6f, 0x61, 0x72, 0x64, 0xf5]);
+    // Fresh random address EVERY boot: iOS caches the GATT table per address,
+    // so a fixed one makes phones that met an older firmware silently miss any
+    // characteristic added since (there's no app-side way to flush the cache).
+    // A new address = a new device = a fresh discovery. Top two bits must be
+    // 11 for a valid static random address (the array is little-endian).
+    let mut rng = esp_hal::rng::Rng::new();
+    let mut addr = [0u8; 6];
+    for b in addr.iter_mut() {
+        *b = rng.random() as u8;
+    }
+    addr[5] |= 0b1100_0000;
+    let address = Address::random(addr);
     let stack = trouble_host::new(controller, &mut resources).set_random_address(address);
     let Host { mut peripheral, runner, .. } = stack.build();
     println!("[ble] stack built");
