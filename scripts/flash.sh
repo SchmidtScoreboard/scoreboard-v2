@@ -1,20 +1,33 @@
 #!/usr/bin/env bash
-# Flash the MatrixPortal S3 firmware over USB.
+# Build + flash the CURRENT firmware (firmware-rs) to the MatrixPortal S3 over USB.
 #
-# Frees the serial port first (a running monitor locks it -> esptool Errno 35),
-# then uploads. NOTE: this native-USB S3 does NOT auto-boot after flashing, so
-# you must TAP RESET when it finishes. If it can't enter the bootloader to flash,
-# hold BOOT + tap RESET on the board, then re-run this.
+# (The old v1 PlatformIO project in ../firmware is retired — flashing it leaves
+# the panel dark: it joins Wi-Fi with baked-in creds and waits on a server that
+# no longer exists.)
+#
+# Frees the serial port first (a running monitor locks it -> connect errors),
+# then builds and uploads. NOTE: this native-USB S3 does NOT auto-boot after
+# flashing, so TAP RESET when it finishes. If it can't enter the bootloader to
+# flash, hold BOOT + tap RESET on the board, then re-run this.
 set -euo pipefail
-cd "$(dirname "$0")/../firmware"
+cd "$(dirname "$0")/../firmware-rs"
+
+PORT="${1:-$(ls /dev/cu.usbmodem* 2>/dev/null | head -1)}"
+if [[ -z "$PORT" ]]; then
+    echo "No /dev/cu.usbmodem* port found — is the board plugged in?" >&2
+    exit 1
+fi
+
+echo "==> building"
+cargo build --release
 
 echo "==> freeing serial port (closing any monitors)"
 pkill -f "device monitor" 2>/dev/null || true
 lsof -t /dev/cu.usbmodem* 2>/dev/null | xargs -r kill 2>/dev/null || true
 sleep 1
 
-echo "==> flashing"
-pio run -e matrixportal_s3 -t upload
+echo "==> flashing via $PORT"
+espflash flash -p "$PORT" target/xtensa-esp32s3-none-elf/release/firmware-rs
 
 echo
 echo "=============================================================="
