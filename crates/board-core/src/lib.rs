@@ -407,9 +407,13 @@ impl Board {
             }
             // double press: show the pairing code — but only while online.
             // Offline (or in BLE provisioning) the server doesn't know any
-            // code, so the screen would just be a dead end.
+            // code, so the screen would just be a dead end. A second double
+            // press closes the code screen again (even if the connection
+            // dropped while it was up — leaving must never be gated).
             Gesture::Double => {
-                if self.online {
+                if self.mode == Mode::Syncing {
+                    self.mode = Mode::Running;
+                } else if self.online {
                     self.mode = Mode::Syncing;
                 }
             }
@@ -830,6 +834,26 @@ mod tests {
         b.button_down(3120);
         b.button_up(3160);
         assert_eq!(b.mode(), Mode::Syncing);
+
+        // A second double press closes it again…
+        b.button_down(4000);
+        b.button_up(4040);
+        b.button_down(4120);
+        b.button_up(4160);
+        assert_eq!(b.mode(), Mode::Running, "double-press toggles the code screen off");
+
+        // …and closing works even if the connection dropped while it was up.
+        b.button_down(5000);
+        b.button_up(5040);
+        b.button_down(5120);
+        b.button_up(5160);
+        assert_eq!(b.mode(), Mode::Syncing);
+        b.set_online(false);
+        b.button_down(6000);
+        b.button_up(6040);
+        b.button_down(6120);
+        b.button_up(6160);
+        assert_eq!(b.mode(), Mode::Running, "leaving the code screen is never gated");
     }
 
     /// Animations are a function of WALL TIME, not tick count — ticking faster
