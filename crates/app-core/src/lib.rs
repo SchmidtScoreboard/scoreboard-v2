@@ -622,15 +622,15 @@ mod wss_tests {
         assert!(connected, "client must retry and connect once the server appears");
     }
 
-    /// Exercises the exact controller path the iOS app uses: connect over wss to the
-    /// live Railway dummy, then browse. `#[ignore]` (network) — run explicitly:
+    /// Exercises the exact controller path the iOS app uses: connect to the
+    /// Railway dummy TCP proxy, then browse. `#[ignore]` (network) — run explicitly:
     /// `cargo test -p app-core -- --ignored --nocapture wss`
     #[test]
     #[ignore]
     fn connects_over_wss_and_browses() {
         let (tx, rx) = mpsc::channel();
         let url = std::env::var("SB_TEST_URL")
-            .unwrap_or_else(|_| "wss://dummy-production-2e6f.up.railway.app/ws".into());
+            .unwrap_or_else(|_| "ws://tokaido.proxy.rlwy.net:33343/ws".into());
         let client = ScoreboardClient::new(url, vec![], None);
         client.set_listener(Box::new(Probe { tx: std::sync::Mutex::new(tx) }));
         client.connect();

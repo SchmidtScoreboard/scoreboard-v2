@@ -2793,8 +2793,8 @@ private enum ServerPreset: String, CaseIterable, Identifiable {
     /// Fixed WebSocket URL, or nil for Custom.
     var url: String? {
         switch self {
-        case .prod: return "wss://live-production-118c.up.railway.app/ws"
-        case .demo: return "wss://dummy-production-2e6f.up.railway.app/ws"
+        case .prod: return "ws://hayabusa.proxy.rlwy.net:47958/ws"
+        case .demo: return "ws://tokaido.proxy.rlwy.net:33343/ws"
         case .localhost: return "ws://127.0.0.1:7878/ws"
         case .custom: return nil
         }
