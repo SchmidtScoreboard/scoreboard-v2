@@ -105,6 +105,11 @@ pub struct GameSummary {
     /// zeroed and `detail` carries only spoiler-safe status.
     #[serde(default)]
     pub spoiled: bool,
+    /// True when this game's BOARD rendering scrolls (a leaderboard field
+    /// deeper than the static 4 rows, at an effective league depth > 4) —
+    /// the app offers its per-game scroll toggle only for these.
+    #[serde(default)]
+    pub scrolls: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -154,6 +159,13 @@ pub struct Manifest {
     pub display_on: bool,
     pub off_state: OffState,
     pub brightness: u8, // 10..=100, applied device-side (one value: knob and app share it)
+    /// Program identity. The board keeps its rotation slot across same-length
+    /// refreshes (content-addressed ids change every score tick) — but that
+    /// heuristic can't tell a 4-game rotation from a 4-step notice sweep. A
+    /// changed epoch says "different program: start from the top". 0 = the
+    /// games rotation; notices mint a fresh nonzero value per showing.
+    #[serde(default)]
+    pub epoch: u64,
 }
 
 // ---- per-board config ----
@@ -222,6 +234,15 @@ pub struct BoardConfig {
     /// (the app's "Reveal" button on a protected game).
     #[serde(default)]
     pub revealed_game_ids: Vec<String>,
+    /// Leaderboard games (golf/F1) whose scrolling the user turned OFF: they
+    /// render as the static top-4 frame regardless of the league depth setting.
+    #[serde(default)]
+    pub no_scroll_game_ids: Vec<String>,
+    /// Board-local IANA timezone name ("America/New_York"); None = server-local.
+    /// Set automatically by the app (`Command::SetTimezone`) so the idle clock
+    /// and game start-time labels track where the BOARD lives.
+    #[serde(default)]
+    pub timezone: Option<String>,
 }
 
 fn default_sleep_hours() -> u32 {
@@ -272,6 +293,11 @@ pub struct PortableSettings {
     /// league + team spoiler rules.
     #[serde(default)]
     pub sports: Vec<SportConfig>,
+    /// Board-local IANA timezone. Optional in the blob: absent/None means
+    /// "keep the target board's timezone" — boards live in places, so an old
+    /// export must never erase a zone the board already knows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
 }
 
 impl From<&BoardConfig> for PortableSettings {
@@ -285,6 +311,7 @@ impl From<&BoardConfig> for PortableSettings {
             spoiler_mode: cfg.spoiler_mode,
             spoiler_all: cfg.spoiler_all,
             sports: cfg.sports.clone(),
+            timezone: cfg.timezone.clone(),
         }
     }
 }
@@ -301,6 +328,11 @@ impl PortableSettings {
         cfg.spoiler_mode = self.spoiler_mode;
         cfg.spoiler_all = self.spoiler_all;
         cfg.sports = self.sports.clone();
+        // Timezone travels only when the export carried one — an old (or
+        // hand-trimmed) blob must not move a board's clock.
+        if let Some(tz) = &self.timezone {
+            cfg.timezone = Some(tz.clone());
+        }
     }
 }
 
@@ -322,6 +354,8 @@ impl Default for BoardConfig {
             spoiler_all: false,
             spoiler_game_ids: Vec::new(),
             revealed_game_ids: Vec::new(),
+            no_scroll_game_ids: Vec::new(),
+            timezone: None,
         }
     }
 }
@@ -369,6 +403,13 @@ pub enum Command {
     /// Per-game toggle: hidden=true protects one game; hidden=false reveals it
     /// even when team/league/board rules would protect it.
     SetGameSpoiler { game_id: String, hidden: bool },
+    /// Per-game scroll toggle for leaderboard games (golf/F1): scroll=false
+    /// pins the game to the static top-4 frame; scroll=true restores the
+    /// league depth setting.
+    SetGameScroll { game_id: String, scroll: bool },
+    /// Board-local IANA timezone ("America/New_York") — drives the idle clock
+    /// and game start-time labels. Unparseable names are ignored.
+    SetTimezone { tz: String },
     Rename { name: String },
 }
 
@@ -404,6 +445,11 @@ pub enum ClientMsg {
     // device reports a knob turn — the server adopts this as the board's one
     // brightness (the same value SetBrightness writes and the manifest echoes)
     DeviceBrightness { level: u8 },
+    // device reports its self-discovered IANA timezone (IP-geolocated at boot)
+    // — the server adopts it for this board's clock and start-time labels, so
+    // the zone tracks where the BOARD lives with no phone involved (and DST is
+    // automatic: the zone NAME doesn't change, only its offset does)
+    DeviceTimezone { tz: String },
     // controller asks for this board's durable settings as a portable JSON blob
     // (a `PortableSettings`), answered by `ServerMsg::SettingsExport`
     ExportSettings { board_id: String },

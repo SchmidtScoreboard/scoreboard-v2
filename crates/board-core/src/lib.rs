@@ -39,6 +39,11 @@ const BOOT_TIME_MS: u64 = 1500;
 // end the firmware wipes the Wi-Fi credentials and reboots into BLE provisioning.
 const RESET_GRACE_MS: u64 = 500;
 const RESET_FILL_MS: u64 = 9500;
+// Offline grace: a dropped websocket usually re-establishes within a second or
+// two, and flashing "CONNECTING" for every blip is jarring. While there's
+// content on screen, keep showing it until the connection has been down this
+// long; only then admit the outage with the connect-progress screen.
+const OFFLINE_GRACE_MS: u64 = 5000;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -84,6 +89,7 @@ pub struct Board {
     prev_release: Option<u64>,
     local_brightness: u8, // encoder-controlled, 10..=100
     online: bool,         // is the websocket currently connected
+    offline_since: Option<u64>, // when it dropped (starts the offline grace window)
     wifi_up: bool,        // host-reported Wi-Fi link/DHCP state (connect screen)
     setup_phase: SetupPhase, // which BLE-provisioning stage the setup screen shows
     brightness_changed_at: Option<u64>, // transient brightness-bar overlay window
@@ -122,6 +128,7 @@ impl Board {
             prev_release: None,
             local_brightness: 100,
             online: false,
+            offline_since: None,
             wifi_up: false,
             setup_phase: SetupPhase::WaitingBluetooth,
             brightness_changed_at: None,
@@ -169,7 +176,15 @@ impl Board {
     }
 
     /// Host reports websocket connectivity; drives the reconnecting screen.
+    /// A drop starts the offline grace window (see `framebuffer`) — timed from
+    /// the true->false transition only, so a host that re-reports "offline"
+    /// every poll can't keep extending the window forever.
     pub fn set_online(&mut self, online: bool) {
+        if online {
+            self.offline_since = None;
+        } else if self.online {
+            self.offline_since = Some(self.clock);
+        }
         self.online = online;
     }
 
@@ -240,11 +255,15 @@ impl Board {
         // tail. Length is a heuristic: an equal-length lineup SWAP also keeps
         // position (the swapped-in game gets a partial first dwell) — accepted,
         // since frames carry no game identity to tell the two apart. A
-        // different length is a genuinely new rotation: start from the top.
-        let same_shape = self
-            .manifest
-            .as_ref()
-            .is_some_and(|old| !m.rotation.is_empty() && old.rotation.len() == m.rotation.len());
+        // different length is a genuinely new rotation: start from the top —
+        // and so is a different EPOCH, which is how the server marks a program
+        // change the length can't reveal (a 4-step notice sweep arriving over a
+        // 4-game rotation must start at step one, not mid-bar).
+        let same_shape = self.manifest.as_ref().is_some_and(|old| {
+            !m.rotation.is_empty()
+                && old.rotation.len() == m.rotation.len()
+                && old.epoch == m.epoch
+        });
         self.manifest = Some(m);
         if !same_shape {
             self.idx = 0;
@@ -442,7 +461,17 @@ impl Board {
             Mode::Syncing => self.screen_syncing(),
             Mode::Asleep => return vec![0u32; FRAME_PIXELS],
             Mode::Running => {
-                if self.online {
+                // A dropped websocket often re-establishes within a second or
+                // two; swapping screens instantly makes every blip flash
+                // "CONNECTING / FINDING SERVER". While there's content to show,
+                // hold it through the grace window and only admit the outage
+                // once it's real. No content (fresh boot, nothing cached) means
+                // nothing to hold — connect screen right away.
+                let holding = self.has_content()
+                    && self
+                        .offline_since
+                        .is_some_and(|t| self.clock.saturating_sub(t) < OFFLINE_GRACE_MS);
+                if self.online || holding {
                     self.screen_running()
                 } else {
                     self.screen_connecting()
@@ -459,6 +488,22 @@ impl Board {
             overlay_brightness_bar(&mut buf, self.local_brightness);
         }
         buf
+    }
+
+    /// Does the board know what the server wants on the panel — a blittable
+    /// frame, or deliberate darkness/idle? This is what the offline grace
+    /// window holds on to. An intentionally dark panel (`display_on: false` —
+    /// which the server always ships with an EMPTY rotation) counts: staying
+    /// dark through a blip beats lighting up with the connect screen at 3am.
+    /// Only a board with no manifest at all (fresh boot) has nothing to hold.
+    fn has_content(&self) -> bool {
+        let Some(m) = &self.manifest else { return false };
+        if !m.display_on || m.rotation.is_empty() {
+            return true; // deliberate blank — black IS the content
+        }
+        let entry = &m.rotation[self.idx.min(m.rotation.len() - 1)];
+        self.cache.contains_key(&entry.frame_id)
+            || self.last_good.as_ref().is_some_and(|id| self.cache.contains_key(id))
     }
 
     fn screen_running(&self) -> Vec<u32> {
@@ -925,6 +970,7 @@ mod tests {
             rotation: Vec::new(),
             display_on: true,
             off_state: Default::default(),
+            epoch: 0,
             brightness: bright,
         };
         b.on_manifest(m(40));
@@ -954,6 +1000,7 @@ mod tests {
                 .collect(),
             display_on: true,
             off_state: Default::default(),
+            epoch: 0,
             brightness: 100,
         };
         // Solid-color frames; the colors survive the RGB565 round-trip exactly.
@@ -1016,6 +1063,7 @@ mod tests {
             }],
             display_on: true,
             off_state: Default::default(),
+            epoch: 0,
             brightness: 100,
         });
         b.on_frame("tall".into(), px);
@@ -1039,6 +1087,7 @@ mod tests {
             rotation: vec![RotationEntry { frame_id: "tall".into(), dwell_ms: 10_000, scroll: false }],
             display_on: true,
             off_state: Default::default(),
+            epoch: 0,
             brightness: 100,
         });
         b.tick(13_000);
@@ -1139,6 +1188,138 @@ mod tests {
                 "wall time advances the connect animation (wifi={wifi})"
             );
         }
+    }
+
+    /// A brief ws drop must not flash the connect screen: with content up, the
+    /// board holds it through the ~5s grace window and only then falls back to
+    /// connect-progress. Repeated offline reports from the host don't restart
+    /// the window — it's timed from the true->false transition.
+    #[test]
+    fn offline_grace_holds_content_then_shows_connect() {
+        use scoreboard_protocol::RotationEntry;
+        let solid = |r: u8, g: u8, b: u8| -> Vec<u8> {
+            let px = scoreboard_protocol::rgb888_to_565(r, g, b).to_le_bytes();
+            (0..FRAME_PIXELS).flat_map(|_| px).collect()
+        };
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.tick(0);
+        b.on_manifest(Manifest {
+            rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 1000, scroll: false }],
+            display_on: true,
+            off_state: Default::default(),
+            epoch: 0,
+            brightness: 100,
+        });
+        b.on_frame("a".into(), solid(255, 0, 0));
+        b.tick(1000);
+        let content = b.framebuffer();
+        assert_eq!(content[0], 0xFF0000, "content frame up while online");
+
+        // The connection drops: the content stays put through the window…
+        b.set_online(false);
+        assert_eq!(b.framebuffer(), content, "right after the drop: content held");
+        b.tick(3000);
+        assert_eq!(b.framebuffer(), content, "mid-window: still held");
+        b.set_online(false); // host re-reports offline — must NOT extend the window
+        // …right up to the edge (drop was at 1000; window is OFFLINE_GRACE_MS)…
+        b.tick(1000 + OFFLINE_GRACE_MS - 100);
+        assert_eq!(b.framebuffer(), content, "just inside the window: still held");
+        // …and just past it the outage is real: connect-progress screen.
+        b.tick(1000 + OFFLINE_GRACE_MS + 100);
+        let mut reference = Board::new(); // never-online board = pure connect screen
+        reference.mode = Mode::Running;
+        reference.tick(1000 + OFFLINE_GRACE_MS + 100);
+        assert_eq!(b.framebuffer(), reference.framebuffer(), "grace expired -> connect screen");
+    }
+
+    /// A deliberately dark panel (display_on: false — the server always ships
+    /// that with an empty rotation) is content too: a ws blip at 3am must not
+    /// light the bedroom up with the connect screen.
+    #[test]
+    fn offline_grace_holds_a_deliberately_dark_panel() {
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.tick(0);
+        b.on_manifest(Manifest {
+            rotation: vec![],
+            display_on: false,
+            off_state: Default::default(),
+            epoch: 0,
+            brightness: 100,
+        });
+        b.tick(1000);
+        let dark = b.framebuffer();
+        assert!(dark.iter().all(|&p| p == 0), "asleep panel is black");
+        b.set_online(false);
+        b.tick(2000);
+        assert_eq!(b.framebuffer(), dark, "blip mid-sleep: stays dark");
+        b.tick(1000 + OFFLINE_GRACE_MS + 100);
+        assert_ne!(b.framebuffer(), dark, "a real outage still surfaces eventually");
+    }
+
+    /// A same-LENGTH manifest with a different EPOCH is a different program
+    /// (e.g. a 4-step notice sweep landing over a 4-game rotation): the board
+    /// must restart at entry 0 instead of keeping its old slot mid-sweep.
+    #[test]
+    fn epoch_change_restarts_a_same_length_rotation() {
+        use scoreboard_protocol::RotationEntry;
+        let solid = |r: u8, g: u8, b: u8| -> Vec<u8> {
+            let px = scoreboard_protocol::rgb888_to_565(r, g, b).to_le_bytes();
+            (0..FRAME_PIXELS).flat_map(|_| px).collect()
+        };
+        let mk = |ids: &[&str], epoch: u64| Manifest {
+            rotation: ids
+                .iter()
+                .map(|id| RotationEntry { frame_id: (*id).into(), dwell_ms: 1000, scroll: false })
+                .collect(),
+            display_on: true,
+            off_state: Default::default(),
+            epoch,
+            brightness: 100,
+        };
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.tick(0);
+        b.on_manifest(mk(&["a", "b"], 0));
+        b.on_frame("a".into(), solid(255, 0, 0));
+        b.on_frame("b".into(), solid(0, 255, 0));
+        b.tick(1500); // past the first dwell -> slot 1 (green)
+        assert_eq!(b.framebuffer()[0], 0x00FF00, "advanced to slot 1");
+
+        // Same length, same epoch: slot kept (the score-tick refresh case).
+        b.on_manifest(mk(&["c", "d"], 0));
+        b.on_frame("c".into(), solid(0, 0, 255));
+        b.on_frame("d".into(), solid(255, 255, 255));
+        assert_eq!(b.framebuffer()[0], 0xFFFFFF, "same epoch: slot 1 kept");
+
+        // Same length, NEW epoch: a different program — restart at slot 0.
+        b.on_manifest(mk(&["e", "f"], 7));
+        b.on_frame("e".into(), solid(255, 255, 0));
+        b.on_frame("f".into(), solid(0, 255, 255));
+        assert_eq!(b.framebuffer()[0], 0xFFFF00, "new epoch: restarted at slot 0");
+    }
+
+    /// With nothing cached (fresh boot) there is no content to hold, so going
+    /// offline shows the connect screen immediately — no blank grace window.
+    #[test]
+    fn offline_without_content_shows_connect_immediately() {
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.tick(1000);
+        b.set_online(false);
+        let mut reference = Board::new();
+        reference.mode = Mode::Running;
+        reference.tick(1000);
+        assert_eq!(
+            b.framebuffer(),
+            reference.framebuffer(),
+            "no content: connect screen with no grace delay"
+        );
     }
 
     /// Not a test — renders the new screens to raw RGB888 files for eyeballing.

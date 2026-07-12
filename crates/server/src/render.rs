@@ -336,7 +336,8 @@ fn draw_team_box(c: &mut Canvas, team: &TeamSide, y_offset: i32, lay: &Layout, a
     draw_text(c, right_text, right_x, by, lay.big, team.secondary);
 }
 
-fn status_for(g: &Game) -> (String, Rgb888) {
+/// `tz` is the BOARD's timezone for start-time labels (None = server-local).
+fn status_for(g: &Game, tz: Option<chrono_tz::Tz>) -> (String, Rgb888) {
     match g.status {
         GameStatus::Final => ("FINAL".to_string(), YELLOW),
         GameStatus::Active => (format!("{} {}", g.ordinal, g.clock).trim().to_string(), WHITE),
@@ -347,7 +348,7 @@ fn status_for(g: &Game) -> (String, Rgb888) {
         // Scheduled games show WHEN they start (like the original scoreboard);
         // "PREGAME" only if ESPN's timestamp doesn't parse.
         GameStatus::Pregame => (
-            crate::start_time_label(&g.start_time).unwrap_or_else(|| "PREGAME".to_string()),
+            crate::start_time_label(&g.start_time, tz).unwrap_or_else(|| "PREGAME".to_string()),
             GREY,
         ),
     }
@@ -356,10 +357,11 @@ fn status_for(g: &Game) -> (String, Rgb888) {
 /// Board-scoped render: spoiler protection hides scores, situations, and
 /// leaderboard rows. `None` = the normal frame. Pregame frames are already
 /// spoiler-free (no result exists yet), so they always render normally.
-pub fn render_frame(g: &Game, spoiler: Option<SpoilerMode>) -> (FrameId, Vec<u8>) {
+/// `tz` localizes start-time labels to the board's zone.
+pub fn render_frame(g: &Game, spoiler: Option<SpoilerMode>, tz: Option<chrono_tz::Tz>) -> (FrameId, Vec<u8>) {
     match spoiler {
         Some(mode) if g.status != GameStatus::Pregame => render_spoiled(g, mode),
-        _ => render_game(g),
+        _ => render_game(g, tz),
     }
 }
 
@@ -420,9 +422,9 @@ fn render_spoiled(g: &Game, mode: SpoilerMode) -> (FrameId, Vec<u8>) {
     (frame_id(&px), px)
 }
 
-pub fn render_game(g: &Game) -> (FrameId, Vec<u8>) {
+pub fn render_game(g: &Game, tz: Option<chrono_tz::Tz>) -> (FrameId, Vec<u8>) {
     if g.leaderboard.is_some() {
-        return render_leaderboard(g);
+        return render_leaderboard(g, tz);
     }
     let mut c = Canvas::new();
     let lay = layout_for(&g.sport_id);
@@ -460,7 +462,7 @@ pub fn render_game(g: &Game) -> (FrameId, Vec<u8>) {
             draw_hockey_situation(&mut c, g, &hockey_badge(g, sit).unwrap());
         }
         _ => {
-            let (s, color) = status_for(g);
+            let (s, color) = status_for(g, tz);
             let strip_top = 2 * box_h(&lay);
             let strip_h = FRAME_HEIGHT as i32 - strip_top;
             let broadcast = g
@@ -585,8 +587,8 @@ fn draw_hockey_situation(c: &mut Canvas, g: &Game, msg: &str) {
 
 /// Golf / F1 leaderboard (ported from the original `src/golf.rs`): event name
 /// centered up top (green for golf, red for F1), then up to 4 name/value rows.
-fn render_leaderboard(g: &Game) -> (FrameId, Vec<u8>) {
-    render_leaderboard_rows(g, 4)
+fn render_leaderboard(g: &Game, tz: Option<chrono_tz::Tz>) -> (FrameId, Vec<u8>) {
+    render_leaderboard_rows(g, 4, tz)
 }
 
 /// Default and maximum leaderboard depth (rows) on the board. The max is
@@ -600,11 +602,11 @@ pub const LEADERBOARD_MAX_ROWS: usize = 20;
 /// same 6px pitch) for the board to scroll through; returns whether it
 /// scrolls. A cap of 4 is the static panel layout — no scrolling. App cards
 /// and HTTP renders keep the static 4-row `render_game`.
-pub fn render_board_frame(g: &Game, rows_cap: usize, spoiler: Option<SpoilerMode>) -> (FrameId, Vec<u8>, bool) {
+pub fn render_board_frame(g: &Game, rows_cap: usize, spoiler: Option<SpoilerMode>, tz: Option<chrono_tz::Tz>) -> (FrameId, Vec<u8>, bool) {
     // Spoiler-protected leaderboards hide their rows entirely — nothing tall
     // to scroll, and the panel-sized spoiled frame is the whole story.
     if spoiler.is_some() && g.status != GameStatus::Pregame {
-        let (id, px) = render_frame(g, spoiler);
+        let (id, px) = render_frame(g, spoiler, tz);
         return (id, px, false);
     }
     let rows_cap = rows_cap.clamp(4, LEADERBOARD_MAX_ROWS);
@@ -612,14 +614,14 @@ pub fn render_board_frame(g: &Game, rows_cap: usize, spoiler: Option<SpoilerMode
         && g.status != GameStatus::Pregame
         && g.leaderboard.as_ref().is_some_and(|lb| lb.rows.len() > 4);
     if !deep {
-        let (id, px) = render_game(g);
+        let (id, px) = render_game(g, tz);
         return (id, px, false);
     }
-    let (id, px) = render_leaderboard_rows(g, rows_cap);
+    let (id, px) = render_leaderboard_rows(g, rows_cap, tz);
     (id, px, true)
 }
 
-fn render_leaderboard_rows(g: &Game, max_rows: usize) -> (FrameId, Vec<u8>) {
+fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>) -> (FrameId, Vec<u8>) {
     let lb = g.leaderboard.as_ref().unwrap();
     // Title baseline 5 + rows on a 6px pitch from baseline 12 (1px gap top and
     // bottom): 4 rows land exactly on the 32px panel; more rows grow the frame
@@ -649,7 +651,7 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize) -> (FrameId, Vec<u8>) {
     }
 
     if matches!(g.status, GameStatus::Pregame) {
-        let (s, _) = status_for(g);
+        let (s, _) = status_for(g, tz);
         let by = centered_baseline(8, FRAME_HEIGHT as i32 - 8, true);
         draw_text(&mut c, &s, 32 - text_width(&s, true) / 2, by, true, WHITE);
     } else {
@@ -792,7 +794,7 @@ mod kern_tests {
             pregame: None,
             champ: None,
         };
-        let (_, px) = render_game(&g);
+        let (_, px) = render_game(&g, None);
         // Scan the bottom strip (clear of the two team boxes) for the status text.
         let (mut left, mut right, mut any) = (FRAME_WIDTH, 0usize, false);
         for y in 24..FRAME_HEIGHT {
@@ -838,7 +840,7 @@ mod kern_tests {
             situation: None,
             pregame: None,
         };
-        let (_, px) = render_leaderboard(&g); // 64x32 RGB565-LE, 2 bytes/pixel
+        let (_, px) = render_leaderboard(&g, None); // 64x32 RGB565-LE, 2 bytes/pixel
         let row_lit = |y: usize| {
             (0..FRAME_WIDTH).any(|x| {
                 let i = (y * FRAME_WIDTH + x) * 2;
@@ -908,7 +910,7 @@ mod kern_tests {
             ball_position: "SEA 25".into(),
             home_possession: Some(false), // away has the ball
         });
-        let (_, px) = render_game(&g);
+        let (_, px) = render_game(&g, None);
 
         let away_primary = c565(g.away.primary);
         let away_secondary = c565(g.away.secondary);
@@ -945,7 +947,7 @@ mod kern_tests {
             on_first: false, on_second: true, on_third: false,
             is_inning_top: true,
         });
-        let (_, px) = render_game(&g);
+        let (_, px) = render_game(&g, None);
         let white = c565(WHITE);
 
         // Second base (runner on): filled diamond centered at (34+3, 17+3).
@@ -985,7 +987,7 @@ mod kern_tests {
             away_powerplay: true, home_powerplay: false,
             away_players: 5, home_players: 4,
         });
-        let (_, px) = render_game(&g);
+        let (_, px) = render_game(&g, None);
         let yellow = c565(YELLOW);
         let white = c565(WHITE);
 
@@ -1015,8 +1017,8 @@ mod kern_tests {
             on_first: true, on_second: true, on_third: true,
             is_inning_top: true,
         });
-        let (_, normal) = render_frame(&g, None);
-        let (_, spoiled) = render_frame(&g, Some(SpoilerMode::Normal));
+        let (_, normal) = render_frame(&g, None, None);
+        let (_, spoiled) = render_frame(&g, Some(SpoilerMode::Normal), None);
         assert_ne!(normal, spoiled);
         // Score digits draw in the team's SECONDARY color, right-aligned around
         // x 56..=61; the row's primary-color background fill is lit either way,
@@ -1031,13 +1033,13 @@ mod kern_tests {
         let strip_lit = (16..32).any(|y| (0..64).any(|x| px565(&spoiled, x, y) != 0));
         assert!(strip_lit, "normal spoiler mode still shows the period");
         // Strict mode differs from normal (start time instead of period).
-        let (_, strict) = render_frame(&g, Some(SpoilerMode::Strict));
+        let (_, strict) = render_frame(&g, Some(SpoilerMode::Strict), None);
         assert_ne!(spoiled, strict);
         // Finals show FINAL even when spoiled.
         let mut done = g.clone();
         done.status = GameStatus::Final;
         done.situation = None;
-        let (_, final_px) = render_frame(&done, Some(SpoilerMode::Strict));
+        let (_, final_px) = render_frame(&done, Some(SpoilerMode::Strict), None);
         let final_strip_lit = (16..32).any(|y| (0..64).any(|x| px565(&final_px, x, y) != 0));
         assert!(final_strip_lit, "FINAL marker renders");
     }
@@ -1060,11 +1062,11 @@ mod kern_tests {
         let corner_lit = |px: &[u8]| (1..=2).any(|y| (1..=2).any(|x| px565(px, x, y) != 0));
 
         g.leaderboard = lb("MONACO GP");
-        let (_, px) = render_game(&g);
+        let (_, px) = render_game(&g, None);
         assert!(corner_lit(&px), "short title keeps its flags");
 
         g.leaderboard = lb("BRITISH GP Q");
-        let (_, px) = render_game(&g);
+        let (_, px) = render_game(&g, None);
         assert!(!corner_lit(&px), "long title takes the corners instead");
     }
 
@@ -1087,7 +1089,7 @@ mod kern_tests {
         g.situation = None;
         g.home = TeamSide::empty("");
         g.leaderboard = Some(Leaderboard { name: "GP".into(), rows: vec![row("1"), row("20")] });
-        let (_, px) = render_game(&g);
+        let (_, px) = render_game(&g, None);
 
         // Leftmost lit pixel past the rank column, per row band (baselines 12, 18).
         let code_start = |band: core::ops::RangeInclusive<i32>| {
@@ -1119,7 +1121,7 @@ mod kern_tests {
         });
 
         g.leaderboard = rows(10);
-        let (_, px, scrolls) = render_board_frame(&g, LEADERBOARD_DEFAULT_ROWS, None);
+        let (_, px, scrolls) = render_board_frame(&g, LEADERBOARD_DEFAULT_ROWS, None, None);
         assert!(scrolls);
         let h = px.len() / (64 * 2);
         assert_eq!(h, 12 + 9 * 6 + 2, "10 rows on the 6px pitch");
@@ -1130,11 +1132,11 @@ mod kern_tests {
             u16::from_le_bytes([px[i], px[i + 1]]) != 0
         }));
         assert!(lit_below_panel, "rows 5..10 render past the panel bound");
-        let (_, px_static) = render_game(&g);
+        let (_, px_static) = render_game(&g, None);
         assert_eq!(px_static.len() / (64 * 2), 32, "app frame stays panel-sized");
 
         g.leaderboard = rows(4);
-        let (_, px, scrolls) = render_board_frame(&g, LEADERBOARD_DEFAULT_ROWS, None);
+        let (_, px, scrolls) = render_board_frame(&g, LEADERBOARD_DEFAULT_ROWS, None, None);
         assert!(!scrolls, "a shallow field has nothing to scroll");
         assert_eq!(px.len() / (64 * 2), 32);
     }
@@ -1155,7 +1157,7 @@ mod kern_tests {
             home_record: "9-3".into(),
             broadcast: "ESPN".into(),
         });
-        let (_, px) = render_game(&g);
+        let (_, px) = render_game(&g, None);
 
         // The record is wider than the 0 it replaces: the away row has
         // secondary-colored ink starting at 61 - width("10-2").
@@ -1163,7 +1165,7 @@ mod kern_tests {
         let away_secondary = c565(g.away.secondary);
         assert!((1..=5).any(|y| (rx..=61).any(|x| px565(&px, x, y) == away_secondary)), "away record drawn");
         // A bare pregame frame (no records) puts only the 4px-wide "0" there.
-        let plain = { let mut p = g.clone(); p.pregame = None; render_game(&p).1 };
+        let plain = { let mut p = g.clone(); p.pregame = None; render_game(&p, None).1 };
         assert!((1..=5).all(|y| (rx..rx + 6).all(|x| px565(&plain, x, y) != away_secondary || x >= 61 - 4)),
             "without records the slot holds just the 0");
 
@@ -1199,7 +1201,7 @@ mod kern_tests {
             away_powerplay: false, home_powerplay: false,
             away_players: 5, home_players: 5,
         });
-        let (_, px) = render_game(&g);
+        let (_, px) = render_game(&g, None);
         let yellow = c565(YELLOW);
         for y in 20..32 {
             for x in 0..FRAME_WIDTH as i32 {

@@ -86,6 +86,11 @@ pub struct UiBoardConfig {
     pub spoiler_game_ids: Vec<String>,
     /// One-off revealed games (exceptions that beat every protection rule).
     pub revealed_game_ids: Vec<String>,
+    /// Leaderboard games whose scrolling the user turned OFF (they render the
+    /// static top-4 frame). Cleared by Reset, pruned as games end.
+    pub no_scroll_game_ids: Vec<String>,
+    /// Board-local IANA timezone name ("America/New_York"); nil = server-local.
+    pub timezone: Option<String>,
 }
 #[derive(uniffi::Record, Clone)]
 pub struct UiGame {
@@ -108,6 +113,9 @@ pub struct UiGame {
     pub champ: Option<String>,
     /// True when spoiler protection sanitized this game (scores zeroed).
     pub spoiled: bool,
+    /// True when this game's board rendering scrolls (deep golf/F1 leaderboard)
+    /// — the card menu offers its scroll toggle only for these.
+    pub scrolls: bool,
 }
 
 /// Implemented on the Swift/Kotlin side to receive pushed state.
@@ -517,6 +525,18 @@ impl ScoreboardClient {
         let _ = self.tx.send(Out::Command(board_id, Command::SetGameSpoiler { game_id, hidden }));
     }
 
+    /// Per-game scroll toggle for leaderboard games (golf/F1): scroll=false
+    /// pins the static top-4 frame; scroll=true restores the league depth.
+    pub fn set_game_scroll(&self, board_id: String, game_id: String, scroll: bool) {
+        let _ = self.tx.send(Out::Command(board_id, Command::SetGameScroll { game_id, scroll }));
+    }
+
+    /// Board-local IANA timezone ("America/New_York") — drives the board's
+    /// idle clock and start-time labels. Invalid names are ignored server-side.
+    pub fn set_timezone(&self, board_id: String, tz: String) {
+        let _ = self.tx.send(Out::Command(board_id, Command::SetTimezone { tz }));
+    }
+
     /// Pin a board to a single game (overrides the rotation).
     pub fn focus_game(&self, board_id: String, game_id: String) {
         let _ = self.tx.send(Out::Command(board_id, Command::FocusGame { game_id }));
@@ -719,6 +739,8 @@ fn to_ui_board_config(c: BoardConfig) -> UiBoardConfig {
         spoiler_all: c.spoiler_all,
         spoiler_game_ids: c.spoiler_game_ids,
         revealed_game_ids: c.revealed_game_ids,
+        no_scroll_game_ids: c.no_scroll_game_ids,
+        timezone: c.timezone,
     }
 }
 
@@ -738,6 +760,7 @@ fn to_ui_games(games: Vec<GameSummary>) -> Vec<UiGame> {
             bumped: g.bumped,
             champ: g.champ,
             spoiled: g.spoiled,
+            scrolls: g.scrolls,
         })
         .collect()
 }

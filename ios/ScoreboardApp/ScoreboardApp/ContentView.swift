@@ -116,6 +116,7 @@ struct BoardInfo {
     var teamSpoilers: [String: Set<String>] = [:] // sportId -> protected team ids
     var spoilerGameIds: Set<String> = []          // one-off hides
     var revealedGameIds: Set<String> = []         // one-off reveals
+    var noScrollGameIds: Set<String> = []         // leaderboards pinned to the static top-4
     /// Unix seconds when a button-sleep auto-wakes (nil when not sleeping).
     var wakeAt: UInt64?
 }
@@ -198,6 +199,9 @@ final class BoardViewModel: ObservableObject {
     private var client: ScoreboardClient? { clients[serverURL(of: selectedBoardId)]?.client }
     /// Where an in-flight pairing will file the new board.
     private var pendingPairServer: String?
+    /// Boards whose timezone this app session already synced — one shot per
+    /// board per session, so two phones in different zones can't ping-pong the
+    /// board's clock forever (whoever's app saw it last wins).
 
     func setConnected(_ server: String, _ up: Bool) {
         if up { connectedServers.insert(server) } else { connectedServers.remove(server) }
@@ -404,6 +408,7 @@ final class BoardViewModel: ObservableObject {
     var rotationModified: Bool {
         current.focusedGameId != nil || !current.extraGameIds.isEmpty || !current.excludedGameIds.isEmpty
             || !current.spoilerGameIds.isEmpty || !current.revealedGameIds.isEmpty
+            || !current.noScrollGameIds.isEmpty
     }
 
     /// Remove a game from the rotation regardless of WHY it's there. A one-off add
@@ -710,8 +715,12 @@ final class BoardViewModel: ObservableObject {
             $0.teamSpoilers = tspoil
             $0.spoilerGameIds = Set(c.spoilerGameIds)
             $0.revealedGameIds = Set(c.revealedGameIds)
+            $0.noScrollGameIds = Set(c.noScrollGameIds)
             $0.wakeAt = c.wakeAt
         }
+        // The board's timezone is NOT set from the phone: the board discovers
+        // its own zone (IP geolocation at boot) and reports it — a phone that
+        // travels must never re-zone the living-room clock.
     }
 
     // ---- off behavior + sleep duration (selected board; optimistic) ----
@@ -782,6 +791,16 @@ final class BoardViewModel: ObservableObject {
         guard let id = selectedBoardId else { return }
         client?.setGameSpoiler(boardId: id, gameId: gid, hidden: hidden)
         requestGames()
+    }
+
+    /// Per-game scroll toggle for leaderboard games (golf/F1): scroll=false
+    /// pins the static top-4 frame; scroll=true restores the league depth.
+    func setGameScroll(_ gid: String, scroll: Bool) {
+        guard let id = selectedBoardId else { return }
+        mutate(id) {
+            if scroll { $0.noScrollGameIds.remove(gid) } else { $0.noScrollGameIds.insert(gid) }
+        }
+        client?.setGameScroll(boardId: id, gameId: gid, scroll: scroll)
     }
 
     func setDwell(_ secs: UInt32) {
@@ -2213,6 +2232,7 @@ struct CardMenu: View {
 
     var body: some View {
         let pinned = model.focusedGameId == game.id
+        let noScroll = model.current.noScrollGameIds.contains(game.id)
         Menu {
             if canPin {
                 Button {
@@ -2228,6 +2248,18 @@ struct CardMenu: View {
                     game.spoiled ? "Reveal result" : "Hide spoilers",
                     systemImage: game.spoiled ? "eye" : "eye.slash"
                 )
+            }
+            // Deep leaderboards (F1/golf) scroll on the board; this pins one
+            // event to the static top-4 frame without touching the league depth.
+            if game.scrolls {
+                Button {
+                    withAnimation { model.setGameScroll(game.id, scroll: noScroll) }
+                } label: {
+                    Label(
+                        noScroll ? "Enable scrolling" : "Disable scrolling",
+                        systemImage: noScroll ? "rectangle.expand.vertical" : "rectangle.compress.vertical"
+                    )
+                }
             }
         } label: {
             Text(" ")

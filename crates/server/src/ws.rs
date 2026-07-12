@@ -122,6 +122,9 @@ async fn device_loop(sender: WsSender, mut receiver: WsReceiver, state: AppState
                 Ok(ClientMsg::DeviceBrightness { level }) => {
                     crate::handle_device_brightness(&state, &board_id, level);
                 }
+                Ok(ClientMsg::DeviceTimezone { tz }) => {
+                    crate::handle_device_timezone(&state, &board_id, &tz);
+                }
                 _ => {}
             }
         }
@@ -231,15 +234,22 @@ async fn controller_loop(
                 Ok(ClientMsg::GetGames { board_id }) => {
                     // Board-scoped so spoiler rules sanitize the browse list too
                     // — otherwise All Games would leak the very scores the
-                    // rotation hides.
-                    let cfg = board_id.as_deref().map(|b| state.config_for(b));
+                    // rotation hides. (No board = default config: server-local
+                    // times, default leaderboard depth.)
+                    let cfg = board_id
+                        .as_deref()
+                        .map(|b| state.config_for(b))
+                        .unwrap_or_default();
+                    let tz = crate::board_tz(&cfg);
                     let games: Vec<GameSummary> = {
                         let g = state.games.lock().unwrap();
                         g.iter()
                             .filter(|g| crate::browse_shows(g))
                             .map(|g| {
-                                let spoiler = cfg.as_ref().and_then(|c| crate::spoiler_for(c, g));
-                                crate::to_summary_for(g, spoiler)
+                                let spoiler = crate::spoiler_for(&cfg, g);
+                                let mut s = crate::to_summary_for(g, spoiler, tz);
+                                s.scrolls = crate::game_scrolls(&cfg, g);
+                                s
                             })
                             .collect()
                     };
@@ -371,6 +381,11 @@ pub(crate) fn apply_settings_import(state: &AppState, board_id: &str, json: &str
     // Keep first occurrence, drop the rest.
     let mut seen = std::collections::HashSet::new();
     settings.sports.retain(|s| seen.insert(s.sport_id.clone()));
+    // An unparseable timezone in a hand-edited blob is dropped BEFORE applying
+    // — `apply_to` skips None, so the board keeps its current (valid) zone.
+    if settings.timezone.as_deref().is_some_and(|t| t.parse::<chrono_tz::Tz>().is_err()) {
+        settings.timezone = None;
+    }
     let updated = {
         let mut configs = state.configs.lock().unwrap();
         let cfg = configs.entry(board_id.to_string()).or_default();
@@ -465,9 +480,10 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
                 cfg.focused_game_id = None;
                 cfg.extra_game_ids.clear();
                 cfg.excluded_game_ids.clear();
-                // Per-game spoiler one-offs are rotation tweaks too.
+                // Per-game spoiler + scroll one-offs are rotation tweaks too.
                 cfg.spoiler_game_ids.clear();
                 cfg.revealed_game_ids.clear();
+                cfg.no_scroll_game_ids.clear();
             }
             Command::Rename { name } => {
                 let trimmed = name.trim();
@@ -531,6 +547,21 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
                     cfg.spoiler_game_ids.push(game_id);
                 } else {
                     cfg.revealed_game_ids.push(game_id);
+                }
+            }
+            // Per-game scroll toggle for leaderboard games: OFF pins the game
+            // to the static top-4 frame; ON restores the league depth.
+            Command::SetGameScroll { game_id, scroll } => {
+                cfg.no_scroll_game_ids.retain(|id| id != &game_id);
+                if !scroll {
+                    cfg.no_scroll_game_ids.push(game_id);
+                }
+            }
+            // Board-local IANA timezone. An unparseable name is ignored — the
+            // board keeps whatever zone it already had.
+            Command::SetTimezone { tz } => {
+                if tz.parse::<chrono_tz::Tz>().is_ok() {
+                    cfg.timezone = Some(tz);
                 }
             }
             // Deliberately no catch-all: a new Command variant should be a compile

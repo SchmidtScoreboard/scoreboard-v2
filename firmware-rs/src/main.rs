@@ -330,6 +330,12 @@ async fn device(
     // Sized for tall scrolling leaderboard frames (64-byte id + 128 bytes/row;
     // 16448 fits frames up to 128px — SCROLL_MAX_ROWS needs 68px).
     let mut frame = alloc::vec![0u8; 16448];
+    // This board's IANA timezone, IP-geolocated once Wi-Fi is up and reported
+    // to the server after every auth. No phone involved: the zone tracks where
+    // the BOARD lives, and a move self-corrects on the next boot. A few
+    // attempts, then give up — the server just keeps its stored zone.
+    let mut timezone: Option<String> = None;
+    let mut tz_tries = 0u8;
 
     loop {
         Timer::after(Duration::from_secs(1)).await;
@@ -339,6 +345,14 @@ async fn device(
         board.lock().await.set_wifi(wifi_up);
         if !wifi_up {
             continue;
+        }
+        if timezone.is_none() && tz_tries < 3 {
+            tz_tries += 1;
+            timezone = fetch_timezone(stack, &mut rx, &mut tx).await;
+            match &timezone {
+                Some(tz) => println!("[tz] discovered {tz}"),
+                None => println!("[tz] lookup failed (attempt {tz_tries}/3)"),
+            }
         }
         // DNS-resolve the host unless it's an IP literal (prod servers are
         // names; the LAN dev server is an address).
@@ -403,6 +417,12 @@ async fn device(
                         // app's code entry always resolves to this board.
                         let setup = ClientMsg::EnterSetup { code: pair_code.clone() };
                         let _ = ws::write_text(&mut sock, &serde_json::to_vec(&setup).unwrap()).await;
+                        // Report the discovered timezone (idempotent server-side)
+                        // so the clock + start times render board-local.
+                        if let Some(tz) = &timezone {
+                            let msg = ClientMsg::DeviceTimezone { tz: tz.clone() };
+                            let _ = ws::write_text(&mut sock, &serde_json::to_vec(&msg).unwrap()).await;
+                        }
                         println!("[ws] authed (pair code {pair_code})");
                     }
                     Ok(ServerMsg::SetupDone) => {
@@ -436,6 +456,46 @@ async fn device(
             }
         }
     }
+}
+
+/// IP-geolocate this board's IANA timezone: plain-HTTP GET to ip-api.com (the
+/// board has no TLS stack), answer like {"timezone":"America/Chicago"}. The
+/// caller's ws buffers are borrowed — this runs strictly before the ws socket
+/// exists each pass. Any failure returns None; the server keeps its stored
+/// zone, so this can never make things worse.
+async fn fetch_timezone(stack: Stack<'static>, rx: &mut [u8], tx: &mut [u8]) -> Option<String> {
+    use embedded_io_async::Write;
+    let ip = match stack.dns_query("ip-api.com", embassy_net::dns::DnsQueryType::A).await {
+        Ok(addrs) if !addrs.is_empty() => match addrs[0] {
+            embassy_net::IpAddress::Ipv4(v4) => v4,
+        },
+        _ => return None,
+    };
+    let mut sock = TcpSocket::new(stack, rx, tx);
+    sock.set_timeout(Some(Duration::from_secs(10)));
+    sock.connect((ip, 80)).await.ok()?;
+    sock.write_all(b"GET /json/?fields=timezone HTTP/1.1\r\nHost: ip-api.com\r\nConnection: close\r\n\r\n")
+        .await
+        .ok()?;
+    // Tiny response (headers + ~35-byte body); read until close or buffer full.
+    let mut buf = [0u8; 1024];
+    let mut n = 0;
+    loop {
+        match sock.read(&mut buf[n..]).await {
+            Ok(0) | Err(_) => break,
+            Ok(k) => {
+                n += k;
+                if n == buf.len() {
+                    break;
+                }
+            }
+        }
+    }
+    let body = core::str::from_utf8(&buf[..n]).ok()?;
+    let start = body.find("\"timezone\":\"")? + "\"timezone\":\"".len();
+    let end = body[start..].find('"')? + start;
+    let tz = &body[start..end];
+    (!tz.is_empty() && tz.len() < 64).then(|| String::from(tz))
 }
 
 /// Poll the seesaw encoder: rotation -> brightness, push -> board-core gesture.

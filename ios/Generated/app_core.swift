@@ -622,6 +622,12 @@ public protocol ScoreboardClientProtocol: AnyObject {
     func setDwell(boardId: String, secs: UInt32)
 
     /**
+     * Per-game scroll toggle for leaderboard games (golf/F1): scroll=false
+     * pins the static top-4 frame; scroll=true restores the league depth.
+     */
+    func setGameScroll(boardId: String, gameId: String, scroll: Bool)
+
+    /**
      * Per-game toggle: hidden=true protects; hidden=false reveals even when
      * team/league/board rules protect it.
      */
@@ -673,6 +679,12 @@ public protocol ScoreboardClientProtocol: AnyObject {
      * Spoiler-protect one team's games.
      */
     func setTeamSpoiler(boardId: String, sportId: String, teamId: String, on: Bool)
+
+    /**
+     * Board-local IANA timezone ("America/New_York") — drives the board's
+     * idle clock and start-time labels. Invalid names are ignored server-side.
+     */
+    func setTimezone(boardId: String, tz: String)
 }
 
 open class ScoreboardClient:
@@ -915,6 +927,18 @@ open class ScoreboardClient:
     }
 
     /**
+     * Per-game scroll toggle for leaderboard games (golf/F1): scroll=false
+     * pins the static top-4 frame; scroll=true restores the league depth.
+     */
+    open func setGameScroll(boardId: String, gameId: String, scroll: Bool) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_set_game_scroll(self.uniffiClonePointer(),
+                                                                   FfiConverterString.lower(boardId),
+                                                                   FfiConverterString.lower(gameId),
+                                                                   FfiConverterBool.lower(scroll), $0)
+    }
+    }
+
+    /**
      * Per-game toggle: hidden=true protects; hidden=false reveals even when
      * team/league/board rules protect it.
      */
@@ -1033,6 +1057,17 @@ open class ScoreboardClient:
                                                                     FfiConverterBool.lower(on), $0)
     }
     }
+
+    /**
+     * Board-local IANA timezone ("America/New_York") — drives the board's
+     * idle clock and start-time labels. Invalid names are ignored server-side.
+     */
+    open func setTimezone(boardId: String, tz: String) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_set_timezone(self.uniffiClonePointer(),
+                                                                FfiConverterString.lower(boardId),
+                                                                FfiConverterString.lower(tz), $0)
+    }
+    }
 }
 
 #if swift(>=5.8)
@@ -1122,6 +1157,15 @@ public struct UiBoardConfig {
      * One-off revealed games (exceptions that beat every protection rule).
      */
     public var revealedGameIds: [String]
+    /**
+     * Leaderboard games whose scrolling the user turned OFF (they render the
+     * static top-4 frame). Cleared by Reset, pruned as games end.
+     */
+    public var noScrollGameIds: [String]
+    /**
+     * Board-local IANA timezone name ("America/New_York"); nil = server-local.
+     */
+    public var timezone: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1146,7 +1190,14 @@ public struct UiBoardConfig {
                     */ spoilerGameIds: [String],
                 /**
                     * One-off revealed games (exceptions that beat every protection rule).
-                    */ revealedGameIds: [String])
+                    */ revealedGameIds: [String],
+                /**
+                    * Leaderboard games whose scrolling the user turned OFF (they render the
+                    * static top-4 frame). Cleared by Reset, pruned as games end.
+                    */ noScrollGameIds: [String],
+                /**
+                    * Board-local IANA timezone name ("America/New_York"); nil = server-local.
+                    */ timezone: String?)
     {
         self.sports = sports
         self.brightness = brightness
@@ -1163,6 +1214,8 @@ public struct UiBoardConfig {
         self.spoilerAll = spoilerAll
         self.spoilerGameIds = spoilerGameIds
         self.revealedGameIds = revealedGameIds
+        self.noScrollGameIds = noScrollGameIds
+        self.timezone = timezone
     }
 }
 
@@ -1213,6 +1266,12 @@ extension UiBoardConfig: Equatable, Hashable {
         if lhs.revealedGameIds != rhs.revealedGameIds {
             return false
         }
+        if lhs.noScrollGameIds != rhs.noScrollGameIds {
+            return false
+        }
+        if lhs.timezone != rhs.timezone {
+            return false
+        }
         return true
     }
 
@@ -1232,6 +1291,8 @@ extension UiBoardConfig: Equatable, Hashable {
         hasher.combine(spoilerAll)
         hasher.combine(spoilerGameIds)
         hasher.combine(revealedGameIds)
+        hasher.combine(noScrollGameIds)
+        hasher.combine(timezone)
     }
 }
 
@@ -1256,7 +1317,9 @@ public struct FfiConverterTypeUiBoardConfig: FfiConverterRustBuffer {
                 strictSpoilers: FfiConverterBool.read(from: &buf),
                 spoilerAll: FfiConverterBool.read(from: &buf),
                 spoilerGameIds: FfiConverterSequenceString.read(from: &buf),
-                revealedGameIds: FfiConverterSequenceString.read(from: &buf)
+                revealedGameIds: FfiConverterSequenceString.read(from: &buf),
+                noScrollGameIds: FfiConverterSequenceString.read(from: &buf),
+                timezone: FfiConverterOptionString.read(from: &buf)
             )
     }
 
@@ -1276,6 +1339,8 @@ public struct FfiConverterTypeUiBoardConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.spoilerAll, into: &buf)
         FfiConverterSequenceString.write(value.spoilerGameIds, into: &buf)
         FfiConverterSequenceString.write(value.revealedGameIds, into: &buf)
+        FfiConverterSequenceString.write(value.noScrollGameIds, into: &buf)
+        FfiConverterOptionString.write(value.timezone, into: &buf)
     }
 }
 
@@ -1382,6 +1447,11 @@ public struct UiGame {
      * True when spoiler protection sanitized this game (scores zeroed).
      */
     public var spoiled: Bool
+    /**
+     * True when this game's board rendering scrolls (deep golf/F1 leaderboard)
+     * — the card menu offers its scroll toggle only for these.
+     */
+    public var scrolls: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1400,7 +1470,11 @@ public struct UiGame {
                     */ champ: String?,
                 /**
                     * True when spoiler protection sanitized this game (scores zeroed).
-                    */ spoiled: Bool)
+                    */ spoiled: Bool,
+                /**
+                    * True when this game's board rendering scrolls (deep golf/F1 leaderboard)
+                    * — the card menu offers its scroll toggle only for these.
+                    */ scrolls: Bool)
     {
         self.id = id
         self.sportId = sportId
@@ -1414,6 +1488,7 @@ public struct UiGame {
         self.bumped = bumped
         self.champ = champ
         self.spoiled = spoiled
+        self.scrolls = scrolls
     }
 }
 
@@ -1455,6 +1530,9 @@ extension UiGame: Equatable, Hashable {
         if lhs.spoiled != rhs.spoiled {
             return false
         }
+        if lhs.scrolls != rhs.scrolls {
+            return false
+        }
         return true
     }
 
@@ -1471,6 +1549,7 @@ extension UiGame: Equatable, Hashable {
         hasher.combine(bumped)
         hasher.combine(champ)
         hasher.combine(spoiled)
+        hasher.combine(scrolls)
     }
 }
 
@@ -1492,7 +1571,8 @@ public struct FfiConverterTypeUiGame: FfiConverterRustBuffer {
                 frameId: FfiConverterString.read(from: &buf),
                 bumped: FfiConverterBool.read(from: &buf),
                 champ: FfiConverterOptionString.read(from: &buf),
-                spoiled: FfiConverterBool.read(from: &buf)
+                spoiled: FfiConverterBool.read(from: &buf),
+                scrolls: FfiConverterBool.read(from: &buf)
             )
     }
 
@@ -1509,6 +1589,7 @@ public struct FfiConverterTypeUiGame: FfiConverterRustBuffer {
         FfiConverterBool.write(value.bumped, into: &buf)
         FfiConverterOptionString.write(value.champ, into: &buf)
         FfiConverterBool.write(value.spoiled, into: &buf)
+        FfiConverterBool.write(value.scrolls, into: &buf)
     }
 }
 
@@ -2525,6 +2606,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_method_scoreboardclient_set_dwell() != 21881 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_app_core_checksum_method_scoreboardclient_set_game_scroll() != 8718 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_method_scoreboardclient_set_game_spoiler() != 7018 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2559,6 +2643,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_team_spoiler() != 60408 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_scoreboardclient_set_timezone() != 2955 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_constructor_scoreboardclient_new() != 19144 {

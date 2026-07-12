@@ -93,6 +93,12 @@ pub struct Notice {
     pub lines: Vec<(String, bool, embedded_graphics::pixelcolor::Rgb888)>,
     pub created: std::time::Instant,
     pub until: std::time::Instant,
+    /// Program identity for the manifest (see `Manifest::epoch`): minted fresh
+    /// per showing, so the board restarts the sweep even when the step count
+    /// matches the outgoing rotation's length — and so a RE-SET notice (second
+    /// knob press mid-notice) yields a different manifest the dedup can't
+    /// swallow, restarting the bar with the new expiry.
+    pub epoch: u64,
 }
 
 impl AppState {
@@ -416,7 +422,7 @@ async fn get_sample(
         "strict" => Some(SpoilerMode::Strict),
         _ => None,
     };
-    let (_, px) = render::render_frame(&g, spoiler);
+    let (_, px) = render::render_frame(&g, spoiler, None);
     (
         [(axum::http::header::CONTENT_TYPE, "image/png")],
         render_png(&px),
@@ -441,7 +447,8 @@ async fn get_render(
         let games = s.games.lock().unwrap();
         games.iter().find(|g| g.id == id).map(|g| {
             let spoiler = cfg.as_ref().and_then(|c| spoiler_for(c, g));
-            render::render_frame(g, spoiler).1
+            let tz = cfg.as_ref().and_then(board_tz);
+            render::render_frame(g, spoiler, tz).1
         })
     };
     tracing::info!(
@@ -469,23 +476,23 @@ async fn get_render(
 /// Board-scoped summary: spoiler protection zeroes the scores and swaps the
 /// detail for spoiler-safe status, so protected results can't leak through
 /// the app's data model even if the UI mishandled them.
-pub(crate) fn to_summary_for(g: &Game, spoiler: Option<SpoilerMode>) -> GameSummary {
-    let mut s = to_summary(g);
+pub(crate) fn to_summary_for(g: &Game, spoiler: Option<SpoilerMode>, tz: Option<chrono_tz::Tz>) -> GameSummary {
+    let mut s = to_summary(g, tz);
     if let Some(mode) = spoiler {
         s.away_score = 0;
         s.home_score = 0;
-        s.detail = spoiler_detail(g, mode);
+        s.detail = spoiler_detail(g, mode, tz);
         s.spoiled = true;
     }
     s
 }
 
-pub(crate) fn to_summary(g: &Game) -> GameSummary {
+pub(crate) fn to_summary(g: &Game, tz: Option<chrono_tz::Tz>) -> GameSummary {
     // Scheduled games: the useful detail is WHEN they start ("7:05 PM"), for
     // both team games and leaderboard events.
     let pregame_detail = || {
         (g.status == GameStatus::Pregame)
-            .then(|| start_time_label(&g.start_time))
+            .then(|| start_time_label(&g.start_time, tz))
             .flatten()
     };
     // Leaderboard sports (golf/F1): no away/home — show the event + leader.
@@ -509,6 +516,7 @@ pub(crate) fn to_summary(g: &Game) -> GameSummary {
             bumped: false,
             champ: g.champ.as_ref().map(|c| c.label.clone()),
             spoiled: false,
+            scrolls: false,
         };
     }
     let detail = pregame_detail().unwrap_or_else(|| {
@@ -531,7 +539,29 @@ pub(crate) fn to_summary(g: &Game) -> GameSummary {
         bumped: false,
         champ: g.champ.as_ref().map(|c| c.label.clone()),
         spoiled: false,
+        scrolls: false,
     }
+}
+
+/// Would this game's BOARD rendering scroll (before any per-game opt-out)?
+/// Mirrors `render_board_frame`'s `deep` predicate exactly — including the
+/// pregame and spoiler outs that force a static frame regardless of depth —
+/// so the app never offers a scroll toggle on a game that can't scroll.
+/// Membership in `no_scroll_game_ids` travels separately (in the config the
+/// app already receives) and picks the toggle's label.
+pub(crate) fn game_scrolls(cfg: &BoardConfig, g: &Game) -> bool {
+    if g.status == GameStatus::Pregame || spoiler_for(cfg, g).is_some() {
+        return false;
+    }
+    let deep_field = g.leaderboard.as_ref().is_some_and(|lb| lb.rows.len() > 4);
+    let rows = cfg
+        .sports
+        .iter()
+        .find(|s| s.sport_id == g.sport_id)
+        .and_then(|s| s.leaderboard_rows)
+        .map(|r| r as usize)
+        .unwrap_or(render::LEADERBOARD_DEFAULT_ROWS);
+    deep_field && rows > 4
 }
 
 // ---- per-board selection + rendering ----
@@ -586,10 +616,22 @@ pub(crate) fn parse_espn_time(iso: &str) -> Option<chrono::DateTime<chrono::Utc>
     None
 }
 
-/// The game's local start time as frame/caption text ("7:05 PM"), if parseable.
-pub(crate) fn start_time_label(iso: &str) -> Option<String> {
+/// The board's configured IANA timezone, parsed. `None` (unset or unparseable)
+/// falls back to the server's local zone at each format site, so a local dev
+/// server keeps rendering sensible times without any configuration.
+pub(crate) fn board_tz(cfg: &BoardConfig) -> Option<chrono_tz::Tz> {
+    cfg.timezone.as_deref().and_then(|s| s.parse().ok())
+}
+
+/// The game's board-local start time as frame/caption text ("7:05 PM"), if
+/// parseable. `tz` is the BOARD's zone; `None` = the server's local zone.
+pub(crate) fn start_time_label(iso: &str, tz: Option<chrono_tz::Tz>) -> Option<String> {
     let t = parse_espn_time(iso)?;
-    Some(t.with_timezone(&chrono::Local).format("%-I:%M %p").to_string())
+    const FMT: &str = "%-I:%M %p";
+    Some(match tz {
+        Some(tz) => t.with_timezone(&tz).format(FMT).to_string(),
+        None => t.with_timezone(&chrono::Local).format(FMT).to_string(),
+    })
 }
 
 /// Should the BOARD show this game? Live always; scheduled only inside the
@@ -799,6 +841,7 @@ fn chosen_games(state: &AppState, cfg: &BoardConfig) -> Vec<Game> {
 
 pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
     let cfg = state.config_for(board_id);
+    let tz = board_tz(&cfg);
 
     // Priority 1: live games (only while powered on).
     if cfg.power {
@@ -820,12 +863,18 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
                 // Leaderboard depth (golf/F1): 4 = static top-4, no scrolling;
                 // up to the full field. Deep frames render TALL and the board
                 // scrolls a 32px window over them, one full pass per dwell
-                // (app cards keep the static 4-row frame).
-                let rows_cap = league
-                    .and_then(|s| s.leaderboard_rows)
-                    .map(|r| r as usize)
-                    .unwrap_or(render::LEADERBOARD_DEFAULT_ROWS);
-                let (id, px, scrolls) = render::render_board_frame(g, rows_cap, spoiler_for(&cfg, g));
+                // (app cards keep the static 4-row frame). A per-game scroll
+                // opt-out overrides the league depth for THIS game only —
+                // rows_cap = 4 IS the static layout.
+                let rows_cap = if cfg.no_scroll_game_ids.contains(&g.id) {
+                    4
+                } else {
+                    league
+                        .and_then(|s| s.leaderboard_rows)
+                        .map(|r| r as usize)
+                        .unwrap_or(render::LEADERBOARD_DEFAULT_ROWS)
+                };
+                let (id, px, scrolls) = render::render_board_frame(g, rows_cap, spoiler_for(&cfg, g), tz);
                 state.cache_frame(id.clone(), px);
                 rotation.push(RotationEntry { frame_id: id, dwell_ms, scroll: scrolls });
             }
@@ -834,29 +883,54 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
                 display_on: true,
                 off_state: cfg.off_state,
                 brightness: cfg.brightness,
+                epoch: 0,
             };
         }
     }
 
-    // Priority 2: a transient notice ("SLEEPING…" splash / "NO GAMES…"), rendered
-    // fresh so its bottom progress bar reflects the time left before it goes away.
+    // Priority 2: a transient notice ("SLEEPING…" splash / "NO GAMES…"). The whole
+    // progress-bar sweep is pre-rendered as ONE rotation the board steps through on
+    // its own clock — N frames at descending bar fractions, each dwelling secs/N —
+    // so no network push rides any step (the old per-step repush loop made the
+    // sleep splash visibly stutter). The fractions derive from created/until, not
+    // "now", so a mid-notice re-render yields an IDENTICAL manifest and the dedup
+    // in `push_board` keeps the board's rotation position.
     {
         let mut notices = state.notices.lock().unwrap();
         if let Some(n) = notices.get(board_id) {
-            let now = std::time::Instant::now();
-            if now < n.until {
-                let total = n.until.duration_since(n.created).as_secs_f32();
-                let remaining = n.until.duration_since(now).as_secs_f32();
-                let frac = if total > 0.0 { remaining / total } else { 0.0 };
+            if std::time::Instant::now() < n.until {
                 let lines: Vec<(&str, bool, embedded_graphics::pixelcolor::Rgb888)> =
                     n.lines.iter().map(|(s, b, c)| (s.as_str(), *b, *c)).collect();
-                let (id, px) = render::render_notice(&lines, Some(frac));
-                state.cache_frame(id.clone(), px);
+                let secs = n.until.duration_since(n.created).as_secs().max(1);
+                // The board caches every rotation frame in RAM (~4KB each), so
+                // cap the sweep at 12 steps; short notices step once a second.
+                // (FRAME_WIDTH bounds it too: finer steps than bar pixels can't
+                // render distinctly.)
+                let steps = secs.min(12).min(FRAME_WIDTH as u64) as usize;
+                let step_ms = (secs * 1000 / steps as u64) as u32;
+                let rotation = (0..steps)
+                    .map(|i| {
+                        // Bar fraction at the START of step i: full, then evenly
+                        // down to 1/steps — every width distinct, so each step
+                        // mints its own frame id.
+                        let frac = (steps - i) as f32 / steps as f32;
+                        let (id, px) = render::render_notice(&lines, Some(frac));
+                        state.cache_frame(id.clone(), px);
+                        // After the last entry the board would WRAP back to the
+                        // full bar — a jump backward no fraction ordering can
+                        // hide. Instead the last entry dwells 2s past expiry:
+                        // the expiry task's push swaps in the post-notice view
+                        // before the wrap can ever show.
+                        let dwell_ms = if i + 1 == steps { step_ms + 2000 } else { step_ms };
+                        RotationEntry { frame_id: id, dwell_ms, scroll: false }
+                    })
+                    .collect();
                 return Manifest {
-                    rotation: vec![RotationEntry { frame_id: id, dwell_ms: 60_000, scroll: false }],
+                    rotation,
                     display_on: true,
                     off_state: cfg.off_state,
                     brightness: cfg.brightness,
+                    epoch: n.epoch,
                 };
             }
             notices.remove(board_id);
@@ -866,9 +940,20 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
     // Priority 3: idle / asleep — the configured off-state (server-rendered clock
     // or a blank panel). Applies both to power-off and powered-on-but-no-games.
     let rotation = if cfg.off_state == OffState::Clock {
-        let now = chrono::Local::now();
         use chrono::Timelike;
-        let (id, px) = render::render_clock(now.hour(), now.minute());
+        // Board-local wall time: the configured IANA zone, else the server's
+        // local zone (which on Railway is UTC — hence per-board timezones).
+        let (hour, minute) = match tz {
+            Some(tz) => {
+                let now = chrono::Utc::now().with_timezone(&tz);
+                (now.hour(), now.minute())
+            }
+            None => {
+                let now = chrono::Local::now();
+                (now.hour(), now.minute())
+            }
+        };
+        let (id, px) = render::render_clock(hour, minute);
         state.cache_frame(id.clone(), px);
         vec![RotationEntry { frame_id: id, dwell_ms: 60_000, scroll: false }]
     } else {
@@ -879,6 +964,7 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
         rotation,
         off_state: cfg.off_state,
         brightness: cfg.brightness,
+        epoch: 0,
     }
 }
 
@@ -907,11 +993,15 @@ const NOTICE_GREY: embedded_graphics::pixelcolor::Rgb888 =
 const SPLASH_SECS: u64 = 4;
 const NO_GAMES_SECS: u64 = 5 * 60;
 
-/// Show a transient full-screen notice on one board, then spawn a repush loop that
-/// advances its bottom progress bar and clears it on expiry. The repush cadence
-/// scales with duration (one push ≈ per bar pixel), so a 4s splash updates ~4×/s
-/// while the 5-minute notice only pushes every few seconds.
+/// Show a transient full-screen notice on one board. The manifest render
+/// pre-bakes the WHOLE progress-bar sweep as one dwell-timed rotation (see
+/// `manifest_for_board`), so the board advances the bar on its own clock with
+/// zero network traffic per step. One task remains, solely to clear the notice
+/// at expiry — its push re-renders, sees the notice lapsed, and swaps in the
+/// post-notice view.
 pub fn set_notice(state: &AppState, board_id: &str, lines: &[(&str, bool, embedded_graphics::pixelcolor::Rgb888)], secs: u64) {
+    // Nonzero and unique per showing (0 = the games rotation).
+    static NOTICE_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let now = std::time::Instant::now();
     let until = now + Duration::from_secs(secs);
     state.notices.lock().unwrap().insert(
@@ -920,20 +1010,18 @@ pub fn set_notice(state: &AppState, board_id: &str, lines: &[(&str, bool, embedd
             lines: lines.iter().map(|(s, b, c)| (s.to_string(), *b, *c)).collect(),
             created: now,
             until,
+            epoch: NOTICE_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         },
     );
     // (No-op outside a tokio runtime, i.e. in sync tests — the tick loop covers it.)
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         let (state, board_id) = (state.clone(), board_id.to_string());
-        let step = Duration::from_millis(((secs * 1000) / FRAME_WIDTH as u64).clamp(250, 10_000));
         handle.spawn(async move {
-            loop {
-                tokio::time::sleep(step).await;
-                push_board(&state, &board_id);
-                if std::time::Instant::now() >= until {
-                    break; // final push above already swapped to the post-notice view
-                }
-            }
+            tokio::time::sleep(Duration::from_secs(secs)).await;
+            // If a NEWER notice replaced ours, its `until` hasn't lapsed: the
+            // re-render still shows it and push_board's dedup swallows the
+            // no-op push — so firing unconditionally is harmless.
+            push_board(&state, &board_id);
         });
     }
 }
@@ -996,12 +1084,12 @@ pub fn spoiler_for(cfg: &BoardConfig, g: &Game) -> Option<SpoilerMode> {
 }
 
 /// The spoiler-safe replacement for a summary's `detail` line.
-fn spoiler_detail(g: &Game, mode: SpoilerMode) -> String {
+fn spoiler_detail(g: &Game, mode: SpoilerMode, tz: Option<chrono_tz::Tz>) -> String {
     match g.status {
         GameStatus::Final => "FINAL".into(),
-        GameStatus::Pregame => start_time_label(&g.start_time).unwrap_or_default(),
+        GameStatus::Pregame => start_time_label(&g.start_time, tz).unwrap_or_default(),
         _ => match mode {
-            SpoilerMode::Strict => start_time_label(&g.start_time)
+            SpoilerMode::Strict => start_time_label(&g.start_time, tz)
                 .map(|t| format!("Started {t}"))
                 .unwrap_or_else(|| "LIVE".into()),
             SpoilerMode::Normal => {
@@ -1039,6 +1127,28 @@ pub fn handle_device_brightness(state: &AppState, board_id: &str, level: u8) {
     push_board_state(state, board_id);
 }
 
+/// The board reported its self-discovered IANA timezone (IP-geolocated at
+/// boot) — adopt it for this board's clock and start-time labels. The zone
+/// tracks where the BOARD lives, needs no phone, and self-corrects on the
+/// next boot after a move; DST is automatic because the NAME is stored and
+/// the tz database supplies the offset. Unparseable names are ignored.
+pub fn handle_device_timezone(state: &AppState, board_id: &str, tz: &str) {
+    if tz.parse::<chrono_tz::Tz>().is_err() {
+        tracing::warn!("board '{board_id}' reported unparseable timezone '{tz}' — ignored");
+        return;
+    }
+    let mut cfg = state.config_for(board_id);
+    if cfg.timezone.as_deref() == Some(tz) {
+        return;
+    }
+    tracing::info!("board '{board_id}' timezone -> {tz}");
+    cfg.timezone = Some(tz.to_string());
+    state.configs.lock().unwrap().insert(board_id.to_string(), cfg.clone());
+    state.persist_config(board_id, &cfg);
+    push_board(state, board_id);
+    push_board_state(state, board_id);
+}
+
 /// The app toggled power. Same behavior as the physical button: powering off is
 /// a timed sleep (`apply_command` armed `wake_at`), so the splash shows the same
 /// duration line; powering on cancels any active notice so the games/off-state
@@ -1063,8 +1173,9 @@ pub(crate) fn unix_now() -> u64 {
 /// One housekeeping pass: wake any boards whose sleep timer lapsed, and re-push
 /// manifests to connected boards so the idle clock advances. The identical-manifest
 /// dedup in `push_board` makes the blanket re-push free for boards showing games.
-/// Drop per-game spoiler one-offs whose games left the slate — ids are
-/// per-event, so without this the persisted lists grow forever.
+/// Drop per-game one-offs (spoiler hides/reveals, scroll opt-outs) whose games
+/// left the slate — ids are per-event, so without this the persisted lists
+/// grow forever.
 pub fn prune_spoiler_lists(state: &AppState) {
     let ids: HashSet<String> = state.games.lock().unwrap().iter().map(|g| g.id.clone()).collect();
     let stale: Vec<(String, BoardConfig)> = {
@@ -1074,6 +1185,7 @@ pub fn prune_spoiler_lists(state: &AppState) {
             .filter(|(_, c)| {
                 c.spoiler_game_ids.iter().any(|id| !ids.contains(id))
                     || c.revealed_game_ids.iter().any(|id| !ids.contains(id))
+                    || c.no_scroll_game_ids.iter().any(|id| !ids.contains(id))
             })
             .map(|(b, c)| (b.clone(), c.clone()))
             .collect()
@@ -1081,6 +1193,7 @@ pub fn prune_spoiler_lists(state: &AppState) {
     for (bid, mut cfg) in stale {
         cfg.spoiler_game_ids.retain(|id| ids.contains(id));
         cfg.revealed_game_ids.retain(|id| ids.contains(id));
+        cfg.no_scroll_game_ids.retain(|id| ids.contains(id));
         state.configs.lock().unwrap().insert(bid.clone(), cfg.clone());
         state.persist_config(&bid, &cfg);
     }
@@ -1183,14 +1296,16 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
     // frame id so the controller can pull the frame over the WS (no HTTP).
     // Deliberately IGNORES a pin: the app needs the whole rotation so it can gray
     // out the unpinned games (the pin itself travels in config.focused_game_id).
+    let tz = board_tz(&cfg);
     let now_showing: Vec<GameSummary> = {
         let (shown, bumped) = candidates_with_bumped(state, &cfg);
         let mut out: Vec<GameSummary> = shown
             .iter()
             .map(|g| {
                 let spoiler = spoiler_for(&cfg, g);
-                let mut s = to_summary_for(g, spoiler);
-                let (fid, px) = render::render_frame(g, spoiler);
+                let mut s = to_summary_for(g, spoiler, tz);
+                s.scrolls = game_scrolls(&cfg, g);
+                let (fid, px) = render::render_frame(g, spoiler, tz);
                 state.cache_frame(fid.clone(), px);
                 s.frame_id = fid;
                 s
@@ -1199,7 +1314,8 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
         // Bumped games ride along flagged, without pre-rendered frames (the app
         // falls back to HTTP rendering for those cards).
         out.extend(bumped.iter().map(|g| {
-            let mut s = to_summary_for(g, spoiler_for(&cfg, g));
+            let mut s = to_summary_for(g, spoiler_for(&cfg, g), tz);
+            s.scrolls = game_scrolls(&cfg, g);
             s.bumped = true;
             s
         }));
@@ -1551,14 +1667,14 @@ fn preview() {
         }),
     ];
     for (name, game) in &samples {
-        let (_, px) = render::render_game(game);
+        let (_, px) = render::render_game(game, None);
         let path = format!("{dir}/{name}.png");
         save_png(&path, &px, 12);
         println!("wrote {path}");
     }
     // The board-facing tall leaderboard (app cards keep the 4-row static frame).
     if let Some(golf) = espn::demo_games(0, 0).into_iter().find(|g| g.id == "demo-golf") {
-        let (_, px, scrolls) = render::render_board_frame(&golf, render::LEADERBOARD_DEFAULT_ROWS, None);
+        let (_, px, scrolls) = render::render_board_frame(&golf, render::LEADERBOARD_DEFAULT_ROWS, None, None);
         assert!(scrolls, "demo golf should be deep enough to scroll");
         let path = format!("{dir}/pga_scroll_tall.png");
         save_png(&path, &px, 12);
@@ -1615,7 +1731,8 @@ mod tests {
         let expect = unix_now() + 24 * 3600;
         assert!((wake as i64 - expect as i64).abs() <= 5, "default sleep is 24h");
         let m = manifest_for_board(&state, "b1");
-        assert!(m.display_on && m.rotation.len() == 1, "sleep splash notice shows");
+        // The splash is a pre-baked bar sweep: one step per second of notice.
+        assert!(m.display_on && m.rotation.len() == SPLASH_SECS as usize, "sleep splash notice shows");
 
         handle_button(&state, "b1");
         let cfg = state.config_for("b1");
@@ -1754,11 +1871,11 @@ mod tests {
         assert!(spoiler_for(&cfg, &g).is_some());
 
         // Sanitized summary: no scores, no live detail, flagged.
-        let s = to_summary_for(&g, Some(SpoilerMode::Normal));
+        let s = to_summary_for(&g, Some(SpoilerMode::Normal), None);
         assert!(s.spoiled);
         assert_eq!((s.away_score, s.home_score), (0, 0));
         assert_eq!(s.detail, g.ordinal, "normal mode keeps period only");
-        let s = to_summary_for(&g, Some(SpoilerMode::Strict));
+        let s = to_summary_for(&g, Some(SpoilerMode::Strict), None);
         assert!(!s.detail.contains(&g.clock), "strict never leaks the clock");
     }
 
@@ -1930,7 +2047,8 @@ mod tests {
         assert!(cfg.power, "no-games press must not sleep the board");
         assert!(state.notices.lock().unwrap().contains_key("b1"));
         let m = manifest_for_board(&state, "b1");
-        assert!(m.display_on && m.rotation.len() == 1, "notice frame shows");
+        // Long notices cap the pre-baked bar sweep at 12 steps (board RAM).
+        assert!(m.display_on && m.rotation.len() == 12, "notice rotation shows");
     }
 
     /// Loading configs drops team favorites for leagues the catalog says have no
@@ -2199,7 +2317,13 @@ mod tests {
         assert!(parse_espn_time("2026-06-28T13:00Z").is_some());
         assert!(parse_espn_time("2026-06-28T13:00:00Z").is_some());
         assert!(parse_espn_time("garbage").is_none());
-        assert!(start_time_label("2026-06-28T13:00Z").is_some());
+        assert!(start_time_label("2026-06-28T13:00Z", None).is_some());
+        // Board timezones move the label: 23:00Z is 7 PM in New York (EDT) and
+        // 8 AM the next morning in Tokyo.
+        let ny: chrono_tz::Tz = "America/New_York".parse().unwrap();
+        let tokyo: chrono_tz::Tz = "Asia/Tokyo".parse().unwrap();
+        assert_eq!(start_time_label("2026-06-28T23:00Z", Some(ny)).as_deref(), Some("7:00 PM"));
+        assert_eq!(start_time_label("2026-06-28T23:00Z", Some(tokyo)).as_deref(), Some("8:00 AM"));
     }
 
     /// Removing a preference-driven game EXCLUDES it (preferences untouched);
@@ -2264,7 +2388,7 @@ mod tests {
         let cfg = BoardConfig { power: false, ..Default::default() };
         state.configs.lock().unwrap().insert("b1".into(), cfg);
         let m = manifest_for_board(&state, "b1");
-        assert!(m.display_on && m.rotation.len() == 1, "splash frame shows");
+        assert!(m.display_on && m.rotation.len() == SPLASH_SECS as usize, "splash sweep shows");
         handle_app_power(&state, "b1", true);
         assert!(!state.notices.lock().unwrap().contains_key("b1"), "power on cancels the notice");
     }
@@ -2290,6 +2414,230 @@ mod tests {
         assert_eq!(lit_bottom(&full.1), 64);
         assert_eq!(lit_bottom(&half.1), 32);
         assert_eq!(lit_bottom(&none.1), 0);
+    }
+
+    /// A notice is ONE pre-baked dwell-timed rotation the board steps through on
+    /// its own clock (no per-step network pushes): N distinct frames whose bar
+    /// sweeps down, dwells covering the whole duration, the last entry padded
+    /// past expiry so the wrap back to a full bar never shows.
+    #[test]
+    fn notice_renders_as_one_dwell_timed_rotation() {
+        let state = AppState::new_ephemeral();
+        state.games.lock().unwrap().clear();
+        handle_button(&state, "b1"); // idle press -> the 5-minute "NO GAMES" notice
+        let m = manifest_for_board(&state, "b1");
+
+        let steps = m.rotation.len();
+        assert_eq!(steps, 12, "long notices cap the sweep at 12 steps (board RAM)");
+        assert!(m.rotation.iter().all(|e| !e.scroll), "notices never scroll");
+        // Distinct content-addressed frames: every step draws a different bar.
+        let ids: HashSet<&FrameId> = m.rotation.iter().map(|e| &e.frame_id).collect();
+        assert_eq!(ids.len(), steps);
+
+        // Dwells cover the whole duration; the FINAL entry carries the +2s pad.
+        let step_ms = NO_GAMES_SECS * 1000 / steps as u64;
+        for e in &m.rotation[..steps - 1] {
+            assert_eq!(e.dwell_ms as u64, step_ms);
+        }
+        assert_eq!(m.rotation[steps - 1].dwell_ms as u64, step_ms + 2000, "last entry padded past expiry");
+        let total: u64 = m.rotation.iter().map(|e| e.dwell_ms as u64).sum();
+        assert_eq!(total, NO_GAMES_SECS * 1000 + 2000);
+
+        // The bar advances (lit bottom-row pixels strictly deplete) across entries.
+        let lit = |id: &FrameId| {
+            let frames = state.frames.lock().unwrap();
+            let (_, px) = frames.get(id).cloned().expect("sweep frame cached");
+            (0..FRAME_WIDTH)
+                .filter(|x| {
+                    let i = ((FRAME_HEIGHT - 1) * FRAME_WIDTH + x) * 2;
+                    px[i] != 0 || px[i + 1] != 0
+                })
+                .count()
+        };
+        let widths: Vec<usize> = m.rotation.iter().map(|e| lit(&e.frame_id)).collect();
+        assert_eq!(widths[0], FRAME_WIDTH, "sweep starts with a full bar");
+        assert!(widths.windows(2).all(|w| w[1] < w[0]), "bar must deplete: {widths:?}");
+
+        // A mid-notice re-render is byte-identical, so push_board's dedup keeps
+        // the board's rotation position — the fix for the stuttering splash.
+        let m2 = manifest_for_board(&state, "b1");
+        assert_eq!(
+            serde_json::to_string(&ServerMsg::Manifest(m)).unwrap(),
+            serde_json::to_string(&ServerMsg::Manifest(m2)).unwrap()
+        );
+    }
+
+    /// A short splash gets one bar step per second (4s -> 4 entries of ~1s).
+    #[test]
+    fn short_splash_steps_once_per_second() {
+        let state = AppState::new_ephemeral();
+        handle_button(&state, "b1"); // games showing -> sleep + 4s splash
+        let m = manifest_for_board(&state, "b1");
+        assert_eq!(m.rotation.len(), SPLASH_SECS as usize);
+        for e in &m.rotation[..m.rotation.len() - 1] {
+            assert_eq!(e.dwell_ms, 1000);
+        }
+        assert_eq!(m.rotation.last().unwrap().dwell_ms, 3000, "1s + the 2s anti-wrap pad");
+    }
+
+    /// Notices carry a fresh nonzero manifest epoch per SHOWING: the board
+    /// restarts the sweep even when its step count matches the outgoing games
+    /// rotation's length (the same-shape heuristic can't tell them apart), and
+    /// a re-set notice mid-showing yields a DIFFERENT manifest the dedup can't
+    /// swallow — the bar restarts with the new expiry. Games manifests are
+    /// always program 0.
+    #[test]
+    fn notice_epochs_mark_a_new_program_per_showing() {
+        let state = AppState::new_ephemeral();
+        handle_button(&state, "b1"); // games showing -> sleep + splash
+        let first = manifest_for_board(&state, "b1");
+        assert_ne!(first.epoch, 0, "a notice is not the games program");
+
+        handle_button(&state, "b1"); // wake -> back to the games rotation
+        assert_eq!(manifest_for_board(&state, "b1").epoch, 0, "games = program 0");
+
+        handle_button(&state, "b1"); // sleep again -> a NEW showing of the splash
+        let second = manifest_for_board(&state, "b1");
+        assert_ne!(second.epoch, 0);
+        assert_ne!(first.epoch, second.epoch, "each showing mints its own epoch");
+    }
+
+    /// The board reports its own IP-geolocated zone: valid names are adopted
+    /// and persisted, junk is ignored, and re-reports of the same zone are
+    /// no-ops (the firmware re-sends after every reconnect).
+    #[test]
+    fn device_reported_timezone_is_adopted_with_validation() {
+        let state = AppState::new_ephemeral();
+        handle_device_timezone(&state, "b1", "America/Chicago");
+        assert_eq!(state.config_for("b1").timezone.as_deref(), Some("America/Chicago"));
+
+        handle_device_timezone(&state, "b1", "Not/AZone");
+        assert_eq!(
+            state.config_for("b1").timezone.as_deref(),
+            Some("America/Chicago"),
+            "junk from a spoofed geolocation reply must not clobber the zone"
+        );
+
+        handle_device_timezone(&state, "b1", "Asia/Tokyo");
+        assert_eq!(state.config_for("b1").timezone.as_deref(), Some("Asia/Tokyo"));
+    }
+
+    /// The idle clock renders in the BOARD's timezone: two boards in different
+    /// zones get different frames; SetTimezone round-trips through the config;
+    /// an unparseable zone is ignored (the old zone stays).
+    #[test]
+    fn per_board_timezone_drives_the_clock() {
+        let state = AppState::new_ephemeral();
+        state.games.lock().unwrap().clear(); // idle -> off-state clock
+
+        crate::ws::apply_command(&state, "b1", Command::SetTimezone { tz: "America/New_York".into() });
+        crate::ws::apply_command(&state, "b2", Command::SetTimezone { tz: "Asia/Tokyo".into() });
+        assert_eq!(state.config_for("b1").timezone.as_deref(), Some("America/New_York"));
+        assert_eq!(state.config_for("b2").timezone.as_deref(), Some("Asia/Tokyo"));
+
+        // New York and Tokyo are 13–14h apart — their wall clocks never agree,
+        // so the rendered clock frames must differ.
+        let m1 = manifest_for_board(&state, "b1");
+        let m2 = manifest_for_board(&state, "b2");
+        assert_eq!(m1.rotation.len(), 1);
+        assert_ne!(m1.rotation[0].frame_id, m2.rotation[0].frame_id, "clocks track board zones");
+
+        // Garbage is ignored: the board keeps its zone.
+        crate::ws::apply_command(&state, "b1", Command::SetTimezone { tz: "Not/AZone".into() });
+        assert_eq!(state.config_for("b1").timezone.as_deref(), Some("America/New_York"));
+    }
+
+    /// Timezone rides the portable settings blob — but ONLY when the export
+    /// carried one, so an old blob can't erase where a board lives.
+    #[test]
+    fn portable_settings_move_timezone_only_when_present() {
+        let src = BoardConfig { timezone: Some("America/Denver".into()), ..Default::default() };
+        let blob = PortableSettings::from(&src);
+        let mut dst = BoardConfig { timezone: Some("Asia/Tokyo".into()), ..Default::default() };
+        blob.apply_to(&mut dst);
+        assert_eq!(dst.timezone.as_deref(), Some("America/Denver"), "export with a zone applies it");
+
+        // A pre-timezone blob deserializes with timezone=None and leaves it alone.
+        let old: PortableSettings = serde_json::from_str(r#"{"scoreboard_settings":1}"#).unwrap();
+        assert!(old.timezone.is_none());
+        let mut dst = BoardConfig { timezone: Some("Asia/Tokyo".into()), ..Default::default() };
+        old.apply_to(&mut dst);
+        assert_eq!(dst.timezone.as_deref(), Some("Asia/Tokyo"), "old blobs keep the board's zone");
+    }
+
+    /// The per-game scroll toggle: turning a deep leaderboard off renders the
+    /// static top-4 panel frame (scroll=false) while the rest of the league
+    /// keeps its depth; toggling back restores the tall scroll; ResetRotation
+    /// clears the list; the summaries advertise which games CAN scroll.
+    #[test]
+    fn per_game_scroll_toggle() {
+        let state = AppState::new_ephemeral();
+        *state.games.lock().unwrap() = espn::demo_games(0, 0);
+        let entry_for = |m: &Manifest, id: &str| {
+            let cfg = state.config_for("b1");
+            let chosen = chosen_games(&state, &cfg);
+            m.rotation
+                .iter()
+                .zip(&chosen)
+                .find(|(_, g)| g.id == id)
+                .map(|(e, _)| e.clone())
+                .expect("game in rotation")
+        };
+        let frame_h = |e: &RotationEntry| {
+            state.frames.lock().unwrap().get(&e.frame_id).map(|(_, p)| p.len() / (FRAME_WIDTH * 2)).unwrap()
+        };
+
+        // Baseline: demo F1 scrolls at the default depth.
+        let m = manifest_for_board(&state, "b1");
+        let e = entry_for(&m, "demo-f1");
+        assert!(e.scroll, "demo F1 scrolls by default");
+        assert!(frame_h(&e) > FRAME_HEIGHT);
+
+        // Toggle off: THIS game renders the static top-4 frame…
+        crate::ws::apply_command(&state, "b1", Command::SetGameScroll { game_id: "demo-f1".into(), scroll: false });
+        assert_eq!(state.config_for("b1").no_scroll_game_ids, vec!["demo-f1".to_string()]);
+        let m = manifest_for_board(&state, "b1");
+        let e = entry_for(&m, "demo-f1");
+        assert!(!e.scroll, "opted-out game must not scroll");
+        assert_eq!(frame_h(&e), FRAME_HEIGHT, "static frame is panel-sized");
+        // …while the other deep leaderboard (demo golf) still scrolls.
+        let golf = entry_for(&m, "demo-golf");
+        assert!(golf.scroll, "the opt-out is per-game, not per-league");
+
+        // Summaries still advertise the game as scroll-capable (the app keys
+        // the toggle's LABEL off config.no_scroll_game_ids).
+        let ServerMsg::BoardState { now_showing, config, .. } = board_state_msg(&state, "b1") else {
+            panic!("expected BoardState");
+        };
+        let f1 = now_showing.iter().find(|g| g.id == "demo-f1").unwrap();
+        assert!(f1.scrolls, "deep leaderboards advertise the toggle");
+        assert!(config.no_scroll_game_ids.contains(&"demo-f1".to_string()));
+        let team_game = now_showing.iter().find(|g| !g.home.is_empty()).unwrap();
+        assert!(!team_game.scrolls, "team games never offer the toggle");
+
+        // Toggle back on: the tall scrolling frame returns.
+        crate::ws::apply_command(&state, "b1", Command::SetGameScroll { game_id: "demo-f1".into(), scroll: true });
+        assert!(state.config_for("b1").no_scroll_game_ids.is_empty());
+        let m = manifest_for_board(&state, "b1");
+        let e = entry_for(&m, "demo-f1");
+        assert!(e.scroll && frame_h(&e) > FRAME_HEIGHT, "toggling back restores the scroll");
+
+        // ResetRotation clears the list like the other per-game tweaks.
+        crate::ws::apply_command(&state, "b1", Command::SetGameScroll { game_id: "demo-f1".into(), scroll: false });
+        crate::ws::apply_command(&state, "b1", Command::ResetRotation);
+        assert!(state.config_for("b1").no_scroll_game_ids.is_empty());
+    }
+
+    /// Ended/vanished games fall out of no_scroll_game_ids with the other
+    /// per-game lists, so persisted configs stay bounded.
+    #[test]
+    fn no_scroll_list_is_pruned_with_the_slate() {
+        let state = AppState::new_ephemeral();
+        *state.games.lock().unwrap() = espn::demo_games(0, 0);
+        crate::ws::apply_command(&state, "b1", Command::SetGameScroll { game_id: "demo-f1".into(), scroll: false });
+        crate::ws::apply_command(&state, "b1", Command::SetGameScroll { game_id: "gone-game".into(), scroll: false });
+        prune_spoiler_lists(&state);
+        assert_eq!(state.config_for("b1").no_scroll_game_ids, vec!["demo-f1".to_string()]);
     }
 
     /// A lapsed sleep timer flips power back on at the next housekeeping tick.

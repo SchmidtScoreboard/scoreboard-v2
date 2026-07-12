@@ -61,7 +61,7 @@ pub async fn provision(
     // characteristic added since (there's no app-side way to flush the cache).
     // A new address = a new device = a fresh discovery. Top two bits must be
     // 11 for a valid static random address (the array is little-endian).
-    let mut rng = esp_hal::rng::Rng::new();
+    let rng = esp_hal::rng::Rng::new();
     let mut addr = [0u8; 6];
     for b in addr.iter_mut() {
         *b = rng.random() as u8;
