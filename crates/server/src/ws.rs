@@ -86,6 +86,11 @@ async fn device_loop(sender: WsSender, mut receiver: WsReceiver, state: AppState
             }
         }
     });
+    // Keepalive: quiet content (an overnight leaderboard) can mean minutes of
+    // manifest silence, but the firmware aborts a socket that's idle for 45s
+    // and prod's TCP proxy reaps idle flows — the connection would flap
+    // connect/auth/drop forever. Two pings per timeout window keep it up.
+    let keepalive = spawn_keepalive(tx.clone());
 
     // Initial per-board manifest.
     push_board(&state, &board_id);
@@ -126,6 +131,7 @@ async fn device_loop(sender: WsSender, mut receiver: WsReceiver, state: AppState
     // Drop the manifest-dedup entry too: with the board gone nothing can request
     // its frames, so the eviction pass may reclaim them (reconnect re-renders).
     state.forget_last_manifest(&board_id);
+    keepalive.abort();
     forward.abort();
     // Mirror the connect path: apps should see "offline" now, not at the next poll.
     push_board_state(&state, &board_id);
@@ -149,6 +155,8 @@ async fn controller_loop(
             }
         }
     });
+    // Same idle-flow reaping applies to apps sitting on a quiet screen.
+    let keepalive = spawn_keepalive(out.clone());
     let mut subscribed: Vec<String> = Vec::new();
     state.poll_wake.notify_one(); // fetch fresh games now (covers browse before subscribe)
 
@@ -276,8 +284,26 @@ async fn controller_loop(
             }
         }
     }
+    keepalive.abort();
     forward.abort();
     tracing::info!("controller '{pubkey}' disconnected");
+}
+
+/// Ws ping every 20s through the connection's outbox channel. Content pushes
+/// are the only other traffic, and a quiet slate can go minutes without one —
+/// while the firmware's 45s read timeout and the TCP proxy's idle reaper both
+/// need SOMETHING on the wire. Devices answer with pongs; so do phones.
+fn spawn_keepalive(tx: mpsc::UnboundedSender<Message>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(20));
+        tick.tick().await; // the first tick fires immediately; skip it
+        loop {
+            tick.tick().await;
+            if tx.send(Message::Ping(Vec::new().into())).is_err() {
+                return; // connection gone; the forwarder cleaned up
+            }
+        }
+    })
 }
 
 pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
