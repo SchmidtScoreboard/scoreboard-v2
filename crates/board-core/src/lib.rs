@@ -381,8 +381,14 @@ impl Board {
                     };
                 }
             }
-            // double press: enter the syncing/setup phase
-            Gesture::Double => self.mode = Mode::Syncing,
+            // double press: show the pairing code — but only while online.
+            // Offline (or in BLE provisioning) the server doesn't know any
+            // code, so the screen would just be a dead end.
+            Gesture::Double => {
+                if self.online {
+                    self.mode = Mode::Syncing;
+                }
+            }
             // long press: factory reset -> setup
             Gesture::Long => {
                 self.manifest = None;
@@ -478,11 +484,13 @@ impl Board {
         c.into_u32()
     }
 
+    /// BLE provisioning screen. No pairing code here — the board has no Wi-Fi
+    /// (let alone a server that knows a code); it tells the user what to do.
     fn screen_setup(&self) -> Vec<u32> {
         let mut c = Canvas::new();
-        center_text(&mut c, "SETUP", 6, &FONT_5X8, Rgb888::WHITE);
-        center_text(&mut c, &self.setup_code, 18, &FONT_6X10, Rgb888::new(0xFF, 0xCC, 0x00));
-        center_text(&mut c, "in the app", 28, &FONT_4X6, Rgb888::new(0x88, 0x88, 0x88));
+        center_text(&mut c, "SETUP", 8, &FONT_5X8, Rgb888::WHITE);
+        center_text(&mut c, "WI-FI VIA APP", 19, &FONT_4X6, Rgb888::new(0x33, 0xAA, 0xFF));
+        center_text(&mut c, "BLUETOOTH", 28, &FONT_4X6, Rgb888::new(0x88, 0x88, 0x88));
         c.into_u32()
     }
 
@@ -676,11 +684,20 @@ mod tests {
         b.tick(1500);
         assert_eq!(b.mode(), Mode::Running);
 
-        // double press -> syncing
+        // double press OFFLINE: inert — the pairing code means nothing until
+        // the server has been told about it.
         b.button_down(2000);
         b.button_up(2040);
         b.button_down(2120);
         b.button_up(2160);
+        assert_eq!(b.mode(), Mode::Running, "offline double-press is locked out");
+
+        // Online, the same gesture opens the pairing screen.
+        b.set_online(true);
+        b.button_down(3000);
+        b.button_up(3040);
+        b.button_down(3120);
+        b.button_up(3160);
         assert_eq!(b.mode(), Mode::Syncing);
     }
 
