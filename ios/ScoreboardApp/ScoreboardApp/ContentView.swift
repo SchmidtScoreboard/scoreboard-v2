@@ -2516,22 +2516,27 @@ final class BluetoothProvisioner: NSObject, ObservableObject {
     }
 
     @Published var status: Status = .searching
+    /// SSIDs the board saw in its own Wi-Fi scan (strongest first), read from
+    /// the optional networks characteristic. Empty on old firmware.
+    @Published var networks: [String] = []
 
     /// Whether the connected board exposes the server characteristic (older
     /// firmware, or a stale iOS GATT cache of it, won't).
     var canSetServer: Bool { serverChar != nil }
 
-    private let serviceUUID = CBUUID(string: "21BA0000-5363-6F72-6562-6F6172640001")
-    private let ssidUUID    = CBUUID(string: "21BA0000-5363-6F72-6562-6F6172640002")
-    private let passUUID    = CBUUID(string: "21BA0000-5363-6F72-6562-6F6172640003")
-    private let serverUUID  = CBUUID(string: "21BA0000-5363-6F72-6562-6F6172640004")
-    private let deviceName  = "Scoreboard Setup"
+    private let serviceUUID   = CBUUID(string: "21BA0000-5363-6F72-6562-6F6172640001")
+    private let ssidUUID      = CBUUID(string: "21BA0000-5363-6F72-6562-6F6172640002")
+    private let passUUID      = CBUUID(string: "21BA0000-5363-6F72-6562-6F6172640003")
+    private let serverUUID    = CBUUID(string: "21BA0000-5363-6F72-6562-6F6172640004")
+    private let networksUUID  = CBUUID(string: "21BA0000-5363-6F72-6562-6F6172640005")
+    private let deviceName    = "Scoreboard Setup"
 
     private var central: CBCentralManager?
     private var board: CBPeripheral?
     private var ssidChar: CBCharacteristic?
     private var passChar: CBCharacteristic?
     private var serverChar: CBCharacteristic?
+    private var networksChar: CBCharacteristic?
     private var ssidToSend: Data?
     private var passwordToSend: Data?
     private var sentPassword = false
@@ -2552,6 +2557,8 @@ final class BluetoothProvisioner: NSObject, ObservableObject {
         ssidChar = nil
         passChar = nil
         serverChar = nil
+        networksChar = nil
+        networks = []
     }
 
     func retry() {
@@ -2643,7 +2650,15 @@ extension BluetoothProvisioner: CBCentralManagerDelegate {
         if sentPassword || status == .sending {
             status = .success
         } else if status != .success {
+            // Drop everything tied to the lost peripheral — a rescan may land on
+            // a DIFFERENT board, and issuing reads/writes against another
+            // peripheral's characteristic objects is undefined.
             board = nil
+            ssidChar = nil
+            passChar = nil
+            serverChar = nil
+            networksChar = nil
+            networks = []
             beginScan()
         }
     }
@@ -2656,7 +2671,7 @@ extension BluetoothProvisioner: CBPeripheralDelegate {
             status = .failed("This board isn't in setup mode")
             return
         }
-        peripheral.discoverCharacteristics([ssidUUID, passUUID, serverUUID], for: service)
+        peripheral.discoverCharacteristics([ssidUUID, passUUID, serverUUID, networksUUID], for: service)
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
@@ -2665,9 +2680,23 @@ extension BluetoothProvisioner: CBPeripheralDelegate {
             if ch.uuid == ssidUUID { ssidChar = ch }
             if ch.uuid == passUUID { passChar = ch }
             if ch.uuid == serverUUID { serverChar = ch }
+            if ch.uuid == networksUUID { networksChar = ch }
         }
+        // The networks list is optional (old firmware lacks it) — kick off the
+        // read but don't gate readiness on it.
+        if let networksChar { peripheral.readValue(for: networksChar) }
         status = (ssidChar != nil && passChar != nil) ? .ready
             : .failed("Provisioning characteristics missing")
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        guard characteristic.uuid == networksUUID, error == nil, let data = characteristic.value else { return }
+        // Value is "\n"-joined SSIDs, zero-padded to a fixed length. Strip ONLY
+        // the NUL padding — SSIDs are arbitrary strings and may legitimately
+        // start or end with spaces, which a whitespace trim would corrupt.
+        let text = (String(data: data, encoding: .utf8) ?? "")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\0"))
+        networks = text.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
@@ -2693,6 +2722,12 @@ struct BluetoothSetupView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var ble = BluetoothProvisioner()
     @State private var ssid = ""
+    /// Network chosen from the board's scan list; nil = "Other…" / manual entry.
+    @State private var pickedNetwork: String?
+    /// The first list gets to preselect; later lists (retry against another
+    /// board) must respect an explicit "Other…" choice instead of clobbering it.
+    @State private var autoSelected = false
+    @FocusState private var ssidFocused: Bool
     @State private var password = ""
     /// ws URL of the server this board should connect to (written over BLE).
     var server: String = ""
@@ -2708,9 +2743,20 @@ struct BluetoothSetupView: View {
                 }
 
                 Section {
-                    TextField("Network name (SSID)", text: $ssid)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
+                    if !ble.networks.isEmpty {
+                        Picker("Network", selection: $pickedNetwork) {
+                            ForEach(ble.networks, id: \.self) { name in
+                                Text(name).tag(String?.some(name))
+                            }
+                            Text("Other…").tag(String?.none)
+                        }
+                    }
+                    if ble.networks.isEmpty || pickedNetwork == nil {
+                        TextField("Network name (SSID)", text: $ssid)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .focused($ssidFocused)
+                    }
                     SecureField("Password", text: $password)
                 } header: {
                     Text("Wi-Fi")
@@ -2720,7 +2766,7 @@ struct BluetoothSetupView: View {
 
                 Section {
                     Button {
-                        ble.send(ssid: ssid, password: password, server: server)
+                        ble.send(ssid: effectiveSsid, password: password, server: server)
                     } label: {
                         HStack {
                             Spacer()
@@ -2744,16 +2790,37 @@ struct BluetoothSetupView: View {
             }
             .onAppear { ble.start() }
             .onDisappear { ble.stop() }
+            .onChange(of: ble.networks) { _, list in
+                guard !list.isEmpty else { return }
+                if let p = pickedNetwork, !list.contains(p) {
+                    // Selection left over from a previous scan this board didn't
+                    // report — never leave the Picker pointing at nothing (Send
+                    // would silently use the invisible stale SSID).
+                    pickedNetwork = list.first
+                } else if !autoSelected, pickedNetwork == nil, ssid.isEmpty, !ssidFocused {
+                    // First list: preselect the strongest network — unless the
+                    // user is already typing into the manual field.
+                    pickedNetwork = list.first
+                }
+                autoSelected = true
+            }
             .alert("Wi-Fi sent!", isPresented: successBinding) {
                 Button("Done") { dismiss() }
             } message: {
-                Text("The board is restarting and will join \"\(ssid)\". Once it's online, double-press the knob for a 6-digit code and enter it to finish pairing.")
+                Text("The board is restarting and will join \"\(effectiveSsid)\". Once it's online, double-press the knob for a 6-digit code and enter it to finish pairing.")
             }
         }
     }
 
+    /// The SSID that will actually be sent: the picked scan-list entry, or the
+    /// typed one for "Other…" / boards that don't report a scan list.
+    private var effectiveSsid: String {
+        if !ble.networks.isEmpty, let pickedNetwork { return pickedNetwork }
+        return ssid
+    }
+
     private var canSend: Bool {
-        ble.status == .ready && !ssid.isEmpty
+        ble.status == .ready && !effectiveSsid.isEmpty
     }
 
     private var successBinding: Binding<Bool> {

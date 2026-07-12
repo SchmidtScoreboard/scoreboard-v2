@@ -19,6 +19,8 @@ if [[ -z "$PORT" ]]; then
 fi
 
 echo "==> building"
+# xtensa-esp32s3-elf-gcc must be on PATH for the link step.
+[[ -f "$HOME/export-esp.sh" ]] && source "$HOME/export-esp.sh"
 cargo build --release
 
 echo "==> freeing serial port (closing any monitors)"
