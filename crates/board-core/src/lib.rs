@@ -56,6 +56,15 @@ pub enum Gesture {
     Long,
 }
 
+/// Where BLE provisioning stands, as reported by the firmware — the setup
+/// screen names what it's waiting on instead of a one-size-fits-all "SETUP".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SetupPhase {
+    WaitingBluetooth,
+    WaitingCreds,
+    Saved,
+}
+
 pub struct Board {
     cache: BTreeMap<FrameId, Vec<u8>>,
     manifest: Option<Manifest>,
@@ -75,6 +84,8 @@ pub struct Board {
     prev_release: Option<u64>,
     local_brightness: u8, // encoder-controlled, 10..=100
     online: bool,         // is the websocket currently connected
+    wifi_up: bool,        // host-reported Wi-Fi link/DHCP state (connect screen)
+    setup_phase: SetupPhase, // which BLE-provisioning stage the setup screen shows
     brightness_changed_at: Option<u64>, // transient brightness-bar overlay window
 
     // hold-to-reset (factory reset of the stored Wi-Fi credentials)
@@ -111,6 +122,8 @@ impl Board {
             prev_release: None,
             local_brightness: 100,
             online: false,
+            wifi_up: false,
+            setup_phase: SetupPhase::WaitingBluetooth,
             brightness_changed_at: None,
             reset_active: false,
             reset_progress: 0,
@@ -158,6 +171,17 @@ impl Board {
     /// Host reports websocket connectivity; drives the reconnecting screen.
     pub fn set_online(&mut self, online: bool) {
         self.online = online;
+    }
+
+    /// Host-reported Wi-Fi link/DHCP state; drives the connect-progress screen
+    /// (which leg — Wi-Fi or server — is still coming up). Default false.
+    pub fn set_wifi(&mut self, up: bool) {
+        self.wifi_up = up;
+    }
+
+    /// Rendering hint for `Mode::Setup` (BLE provisioning). Default WaitingBluetooth.
+    pub fn set_setup_phase(&mut self, p: SetupPhase) {
+        self.setup_phase = p;
     }
 
     pub fn set_setup_code(&mut self, code: String) {
@@ -393,6 +417,8 @@ impl Board {
             Gesture::Long => {
                 self.manifest = None;
                 self.cache.clear();
+                // Fresh provisioning always starts from the top of the handshake.
+                self.setup_phase = SetupPhase::WaitingBluetooth;
                 self.mode = Mode::Setup;
             }
         }
@@ -415,7 +441,7 @@ impl Board {
                 if self.online {
                     self.screen_running()
                 } else {
-                    self.screen_reconnecting()
+                    self.screen_connecting()
                 }
             }
         };
@@ -484,13 +510,33 @@ impl Board {
         c.into_u32()
     }
 
-    /// BLE provisioning screen. No pairing code here — the board has no Wi-Fi
-    /// (let alone a server that knows a code); it tells the user what to do.
+    /// BLE provisioning screens. No pairing code here — the board has no Wi-Fi
+    /// (let alone a server that knows a code); it names which half of the
+    /// handshake it's waiting on, animated so the panel never looks hung.
     fn screen_setup(&self) -> Vec<u32> {
         let mut c = Canvas::new();
-        center_text(&mut c, "SETUP", 8, &FONT_5X8, Rgb888::WHITE);
-        center_text(&mut c, "WI-FI VIA APP", 19, &FONT_4X6, Rgb888::new(0x33, 0xAA, 0xFF));
-        center_text(&mut c, "BLUETOOTH", 28, &FONT_4X6, Rgb888::new(0x88, 0x88, 0x88));
+        let grey = Rgb888::new(0x88, 0x88, 0x88);
+        let blue = Rgb888::new(0x33, 0xAA, 0xFF);
+        match self.setup_phase {
+            SetupPhase::WaitingBluetooth => {
+                center_text(&mut c, "SETUP", 6, &FONT_5X8, Rgb888::WHITE);
+                center_text(&mut c, "WAITING FOR", 16, &FONT_4X6, grey);
+                center_text(&mut c, "BLUETOOTH", 25, &FONT_4X6, blue);
+                ellipsis(&mut c, 52, 25, self.anim, blue);
+            }
+            SetupPhase::WaitingCreds => {
+                center_text(&mut c, "SETUP", 6, &FONT_5X8, Rgb888::WHITE);
+                center_text(&mut c, "WAITING FOR", 16, &FONT_4X6, grey);
+                center_text(&mut c, "WI-FI", 25, &FONT_4X6, blue);
+                ellipsis(&mut c, 44, 25, self.anim, blue);
+            }
+            SetupPhase::Saved => {
+                // On screen <1s — the firmware reboots right after; static is fine.
+                center_text(&mut c, "WI-FI SAVED", 6, &FONT_4X6, Rgb888::new(0x33, 0xDD, 0x55));
+                draw_checkmark(&mut c, FRAME_WIDTH as i32 / 2, 16);
+                center_text(&mut c, "REBOOTING", 27, &FONT_4X6, grey);
+            }
+        }
         c.into_u32()
     }
 
@@ -502,10 +548,29 @@ impl Board {
         c.into_u32()
     }
 
-    fn screen_reconnecting(&self) -> Vec<u32> {
+    /// Switch-style connect progress: board -> router -> server nodes, with a
+    /// dot walking whichever leg is still coming up. Covers both the first boot
+    /// after provisioning and mid-session drops — a drop now says WHICH hop is
+    /// down, which the old flat RECONNECTING never did.
+    fn screen_connecting(&self) -> Vec<u32> {
         let mut c = Canvas::new();
-        center_text(&mut c, "RECONNECTING", 12, &FONT_4X6, Rgb888::new(0xFF, 0x88, 0x00));
-        spinner(&mut c, self.anim, 22);
+        let amber = Rgb888::new(0xFF, 0x88, 0x00);
+        let green = Rgb888::new(0x33, 0xDD, 0x55);
+        let dim = Rgb888::new(0x33, 0x33, 0x33);
+        let grey = Rgb888::new(0x88, 0x88, 0x88);
+        center_text(&mut c, "CONNECTING", 4, &FONT_4X6, Rgb888::WHITE);
+        draw_panel_node(&mut c);
+        draw_wifi_node(&mut c, if self.wifi_up { green } else { grey });
+        draw_server_node(&mut c);
+        if self.wifi_up {
+            draw_leg(&mut c, 15, green, None);
+            draw_leg(&mut c, 38, dim, Some(self.anim % 5));
+            center_text(&mut c, "FINDING SERVER", 27, &FONT_4X6, amber);
+        } else {
+            draw_leg(&mut c, 15, dim, Some(self.anim % 5));
+            draw_leg(&mut c, 38, dim, None);
+            center_text(&mut c, "JOINING WI-FI", 27, &FONT_4X6, amber);
+        }
         c.into_u32()
     }
 
@@ -600,6 +665,72 @@ fn spinner(c: &mut Canvas, anim: u32, y: i32) {
             .into_styled(PrimitiveStyle::with_fill(color))
             .draw(c)
             .ok();
+    }
+}
+
+/// Trailing "..." after a centered word: grows a dot every ~530ms (4 anim
+/// steps) then wraps — enough motion to show the board isn't hung without the
+/// word itself jittering around. `x0` is the column just past the word.
+fn ellipsis(c: &mut Canvas, x0: i32, y_center: i32, anim: u32, color: Rgb888) {
+    let n = (anim / 4) % 4;
+    for i in 0..n as i32 {
+        Rectangle::new(Point::new(x0 + i * 3, y_center + 1), Size::new(2, 2))
+            .into_styled(PrimitiveStyle::with_fill(color))
+            .draw(c)
+            .ok();
+    }
+}
+
+/// One leg of the connect-progress screen: 5 single-pixel dots from `x0`, 3px
+/// apart, on the node row. `base` is the resting color (dim grey while the leg
+/// is pending, green once it's up); `bright` walks a white dot along the leg.
+fn draw_leg(c: &mut Canvas, x0: i32, base: Rgb888, bright: Option<u32>) {
+    for i in 0..5u32 {
+        let color = if Some(i) == bright { Rgb888::WHITE } else { base };
+        Pixel(Point::new(x0 + i as i32 * 3, 16), color).draw(c).ok();
+    }
+}
+
+/// Left connect-screen node: the board itself — a panel outline with a grid of
+/// lit "LED" pixels so it reads as this very scoreboard.
+fn draw_panel_node(c: &mut Canvas) {
+    Rectangle::new(Point::new(3, 13), Size::new(9, 7))
+        .into_styled(PrimitiveStyle::with_stroke(Rgb888::new(0x88, 0x88, 0x88), 1))
+        .draw(c)
+        .ok();
+    for &(x, y) in &[(5, 15), (7, 15), (9, 15), (5, 17), (7, 17), (9, 17)] {
+        Pixel(Point::new(x, y), Rgb888::new(0x33, 0xAA, 0xFF)).draw(c).ok();
+    }
+}
+
+/// Middle connect-screen node: the classic dot-plus-arcs Wi-Fi mark, tinted
+/// green once the link is up.
+fn draw_wifi_node(c: &mut Canvas, color: Rgb888) {
+    #[rustfmt::skip]
+    let px = [
+        (29, 14), (30, 13), (31, 12), (32, 12), (33, 12), (34, 13), (35, 14), // outer arc
+        (30, 16), (31, 15), (32, 15), (33, 15), (34, 16),                     // inner arc
+        (32, 18),                                                             // dot
+    ];
+    for &(x, y) in &px {
+        Pixel(Point::new(x, y), color).draw(c).ok();
+    }
+}
+
+/// Right connect-screen node: a tiny server rack — outline, a shelf line, and
+/// green indicator lights per unit.
+fn draw_server_node(c: &mut Canvas) {
+    let grey = Rgb888::new(0x88, 0x88, 0x88);
+    Rectangle::new(Point::new(52, 13), Size::new(9, 7))
+        .into_styled(PrimitiveStyle::with_stroke(grey, 1))
+        .draw(c)
+        .ok();
+    Line::new(Point::new(53, 16), Point::new(59, 16))
+        .into_styled(PrimitiveStyle::with_stroke(Rgb888::new(0x44, 0x44, 0x44), 1))
+        .draw(c)
+        .ok();
+    for &(x, y) in &[(54, 14), (54, 18)] {
+        Pixel(Point::new(x, y), Rgb888::new(0x33, 0xDD, 0x55)).draw(c).ok();
     }
 }
 
@@ -919,5 +1050,113 @@ mod tests {
         assert!(!b.reset_triggered());
         // A long-ish hold no longer enters Setup (that's the app's job now).
         assert_eq!(b.mode(), Mode::Running);
+    }
+
+    /// The three BLE-provisioning phases render distinct screens — the firmware
+    /// flips the phase as the handshake progresses, and each step must be
+    /// visible on the panel.
+    #[test]
+    fn setup_phases_render_distinct_screens() {
+        let mut b = Board::new();
+        b.tick(0);
+        b.gesture(Gesture::Long);
+        assert_eq!(b.mode(), Mode::Setup);
+        let bt = b.framebuffer();
+        b.set_setup_phase(SetupPhase::WaitingCreds);
+        let creds = b.framebuffer();
+        b.set_setup_phase(SetupPhase::Saved);
+        let saved = b.framebuffer();
+        assert_ne!(bt, creds, "BLUETOOTH vs WI-FI wait screens must differ");
+        assert_ne!(creds, saved, "WI-FI wait vs saved screens must differ");
+        assert_ne!(bt, saved, "BLUETOOTH wait vs saved screens must differ");
+    }
+
+    /// A board parked in provisioning must keep visibly moving (the growing
+    /// ellipsis) so it never looks hung while the user fiddles with the app.
+    #[test]
+    fn setup_screen_animates() {
+        let mut b = Board::new();
+        b.tick(0);
+        b.gesture(Gesture::Long);
+        b.tick(1000);
+        let before = b.framebuffer();
+        b.tick(1500); // ~500ms later: the ellipsis has grown a dot
+        assert_ne!(before, b.framebuffer(), "wall time advances the setup animation");
+    }
+
+    /// Offline in Running mode shows the connect-progress screen; the Wi-Fi and
+    /// server legs render differently so the animation matches the label.
+    #[test]
+    fn connect_screen_distinguishes_wifi_from_server_leg() {
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.tick(1000); // online defaults false -> connect screen
+        b.set_wifi(false);
+        let joining = b.framebuffer();
+        b.set_wifi(true);
+        let finding = b.framebuffer();
+        assert_ne!(joining, finding, "wifi state must change the connect screen");
+    }
+
+    /// The traveling dot on the connect screen must keep moving — a frozen leg
+    /// reads as a hung board, exactly what these screens exist to prevent.
+    #[test]
+    fn connect_screen_animates() {
+        for wifi in [false, true] {
+            let mut b = Board::new();
+            b.mode = Mode::Running;
+            b.set_wifi(wifi);
+            b.tick(1000);
+            let before = b.framebuffer();
+            b.tick(1400); // ~400ms later: the leg dot has advanced a step
+            assert_ne!(
+                before,
+                b.framebuffer(),
+                "wall time advances the connect animation (wifi={wifi})"
+            );
+        }
+    }
+
+    /// Not a test — renders the new screens to raw RGB888 files for eyeballing.
+    /// Run: cargo test -p board-core -- --ignored dump_screens
+    #[test]
+    #[ignore]
+    fn dump_screens() {
+        // Output dir override for whoever's eyeballing (default: system temp).
+        let dir = std::env::var("BOARD_SCREEN_DUMP_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("board-screens"));
+        let dir = dir.as_path();
+        std::fs::create_dir_all(dir).unwrap();
+        let dump = |name: &str, t: u64, b: &mut Board| {
+            b.tick(t);
+            let fb = b.framebuffer();
+            let mut bytes = Vec::with_capacity(fb.len() * 3);
+            for px in fb {
+                bytes.extend_from_slice(&[(px >> 16) as u8, (px >> 8) as u8, px as u8]);
+            }
+            std::fs::write(dir.join(format!("{name}_{t}.rgb")), bytes).unwrap();
+        };
+        // 0ms and 800ms straddle both animation periods (ellipsis: 532ms/step,
+        // leg dot: 665ms/lap), so each pair shows the motion.
+        for t in [0u64, 800] {
+            for (phase, name) in [
+                (SetupPhase::WaitingBluetooth, "setup_bluetooth"),
+                (SetupPhase::WaitingCreds, "setup_wifi_creds"),
+                (SetupPhase::Saved, "setup_saved"),
+            ] {
+                let mut b = Board::new();
+                b.tick(0);
+                b.gesture(Gesture::Long);
+                b.set_setup_phase(phase);
+                dump(name, t, &mut b);
+            }
+            for (wifi, name) in [(false, "connect_wifi_down"), (true, "connect_wifi_up")] {
+                let mut b = Board::new();
+                b.mode = Mode::Running;
+                b.set_wifi(wifi);
+                dump(name, t, &mut b);
+            }
+        }
     }
 }

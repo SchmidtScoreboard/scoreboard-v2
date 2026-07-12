@@ -48,7 +48,11 @@ fn parse_args() -> (String, String, bool) {
 fn main() -> eframe::Result<()> {
     let (server, board_id, headless) = parse_args();
     println!("simulator: server={server} board={board_id}");
-    let board = Arc::new(Mutex::new(Board::new()));
+    let mut b = Board::new();
+    // The simulator rides the Mac's network — the Wi-Fi leg is never what's
+    // down here, so the connect screen goes straight to the server leg.
+    b.set_wifi(true);
+    let board = Arc::new(Mutex::new(b));
     let failures = Arc::new(Mutex::new(Failures::default()));
 
     // Websocket client feeds the shared board on its own runtime/thread.
