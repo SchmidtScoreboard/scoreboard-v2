@@ -10,6 +10,7 @@ extern crate alloc;
 
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 use board_core::{Board, Gesture};
 use embassy_executor::Spawner;
 use embassy_net::tcp::TcpSocket;
@@ -32,7 +33,9 @@ use esp_hub75::{
     Hub75, Hub75Pins16,
 };
 use esp_println::println;
-use esp_radio::wifi::{sta::StationConfig, Config, Interface, WifiController};
+use esp_radio::wifi::{
+    ap::AccessPointInfo, scan::ScanConfig, sta::StationConfig, Config, Interface, WifiController,
+};
 use scoreboard_protocol::{
     decode_frame, pubkey_hex, sign_hex, ClientMsg, Role, ServerMsg, FRAME_PIXELS, FRAME_WIDTH,
 };
@@ -54,7 +57,7 @@ const COLS: usize = 64;
 const NROWS: usize = compute_rows(ROWS);
 const PLANES: usize = 7;
 type FBType = DmaFrameBuffer<NROWS, COLS, PLANES>;
-type SharedBoard = Mutex<CriticalSectionRawMutex, Board>;
+pub type SharedBoard = Mutex<CriticalSectionRawMutex, Board>;
 
 /// Board-generated messages (e.g. knob press -> ButtonPress) on their way to the
 /// server. The render task drains board-core's outbox into here; the ws task
@@ -190,13 +193,70 @@ async fn main(spawner: Spawner) -> ! {
             // the setup screen; board-core guards it.)
             spawner.spawn(encoder_task(Encoder::new(i2c), board).unwrap());
             spawner.spawn(setup_reset_task(board).unwrap());
-            ble::provision(p.BT, &mut flash).await;
+
+            // Scan for nearby networks BEFORE BLE starts (no coex feature — the
+            // two radios must not run at once). wifi::new() itself starts the
+            // controller in station mode, which is all scan_async needs. A failed
+            // scan just means an empty list: provisioning must never block on it.
+            let scanned = match esp_radio::wifi::new(p.WIFI, Default::default()) {
+                Ok((mut controller, interfaces)) => {
+                    let aps = match controller.scan_async(&ScanConfig::default().with_max(12)).await
+                    {
+                        Ok(aps) => aps,
+                        Err(e) => {
+                            println!("[scan] scan failed: {e:?} — provisioning without a list");
+                            Vec::new()
+                        }
+                    };
+                    // Deinit Wi-Fi (WifiController::drop -> wifi_deinit) before
+                    // the BleConnector claims the radio.
+                    drop(interfaces);
+                    drop(controller);
+                    aps
+                }
+                Err(e) => {
+                    println!("[scan] wifi init failed: {e:?} — provisioning without a list");
+                    Vec::new()
+                }
+            };
+            let networks = networks_payload(scanned);
+            println!("[scan] offering networks: {}", networks.replace('\n', ", "));
+            ble::provision(p.BT, &mut flash, board, networks).await;
         }
     }
 
     loop {
         Timer::after(Duration::from_secs(30)).await;
     }
+}
+
+/// The BLE `networks` payload: UTF-8 SSIDs joined by '\n', strongest signal
+/// first, deduped, no empty/hidden names, truncated at a whole-SSID boundary to
+/// <=180 bytes so the value fits one ATT read at iOS's typical negotiated MTU.
+fn networks_payload(mut aps: Vec<AccessPointInfo>) -> String {
+    const MAX: usize = 180;
+    aps.sort_unstable_by(|a, b| b.signal_strength.cmp(&a.signal_strength));
+    let mut out = String::new();
+    for ap in &aps {
+        let ssid = ap.ssid.as_str();
+        // Control chars would corrupt the record format ('\n' IS the separator,
+        // and the app splits on it) — a beacon can carry arbitrary bytes.
+        if ssid.is_empty()
+            || ssid.chars().any(|c| c.is_control())
+            || out.split('\n').any(|s| s == ssid)
+        {
+            continue;
+        }
+        let sep = usize::from(!out.is_empty());
+        if out.len() + sep + ssid.len() > MAX {
+            break;
+        }
+        if sep == 1 {
+            out.push('\n');
+        }
+        out.push_str(ssid);
+    }
+    out
 }
 
 /// Double-buffered panel refresh: DMA `front` to the panel while blitting `back`,
@@ -273,7 +333,11 @@ async fn device(
 
     loop {
         Timer::after(Duration::from_secs(1)).await;
-        if stack.config_v4().is_none() {
+        // Report the Wi-Fi/DHCP leg every pass — board-core's connect screen
+        // shows JOINING WI-FI vs FINDING SERVER off this.
+        let wifi_up = stack.config_v4().is_some();
+        board.lock().await.set_wifi(wifi_up);
+        if !wifi_up {
             continue;
         }
         // DNS-resolve the host unless it's an IP literal (prod servers are

@@ -4,9 +4,12 @@
 //! WiFi mode. Test from a phone with nRF Connect (or the app) before iOS support.
 
 use crate::creds;
+use crate::SharedBoard;
 use alloc::string::String;
+use board_core::SetupPhase;
 use bt_hci::controller::ExternalController;
 use embassy_futures::join::join;
+use embassy_time::{Duration, Timer};
 use esp_hal::peripherals::BT;
 use esp_println::println;
 use esp_radio::ble::controller::BleConnector;
@@ -34,9 +37,19 @@ struct Provisioning {
     /// triggers the save). Empty = the firmware's compiled default server.
     #[characteristic(uuid = "21ba0000-5363-6f72-6562-6f6172640004", write, value = [0u8; 96])]
     server: [u8; 96],
+    /// Nearby Wi-Fi networks, scanned before advertising: UTF-8 SSIDs joined by
+    /// '\n', strongest first, deduped, zero-padded to the fixed size. 180 bytes
+    /// keeps the whole value inside one ATT read at iOS's typical MTU (185).
+    #[characteristic(uuid = "21ba0000-5363-6f72-6562-6f6172640005", read, value = [0u8; 180])]
+    networks: [u8; 180],
 }
 
-pub async fn provision(bt: BT<'static>, flash: &mut FlashStorage<'_>) -> ! {
+pub async fn provision(
+    bt: BT<'static>,
+    flash: &mut FlashStorage<'_>,
+    board: &'static SharedBoard,
+    networks: String,
+) -> ! {
     let transport = BleConnector::new(bt, Default::default()).unwrap();
     // 20 HCI command slots — matches the trouble-host/esp reference examples.
     // (1 slot stalls the multi-command advertising setup.)
@@ -54,11 +67,25 @@ pub async fn provision(bt: BT<'static>, flash: &mut FlashStorage<'_>) -> ! {
     }))
     .unwrap();
 
+    // Publish the pre-scanned network list on the read characteristic
+    // (zero-padded to its fixed 180-byte size).
+    let mut nets = [0u8; 180];
+    let n = networks.len().min(nets.len());
+    nets[..n].copy_from_slice(&networks.as_bytes()[..n]);
+    if let Err(e) = server.prov.networks.set(&server, &nets) {
+        println!("[ble] networks characteristic set failed: {:?}", e);
+    }
+
     println!("[ble] advertising 'Scoreboard Setup' — write SSID + password chars to provision");
     let _ = join(ble_task(runner), async {
         loop {
             match advertise("Scoreboard Setup", &mut peripheral, &server).await {
-                Ok(conn) => gatt_loop(&server, &conn, flash).await,
+                Ok(conn) => {
+                    // Phone attached: the setup screen switches to "waiting for
+                    // Wi-Fi details".
+                    board.lock().await.set_setup_phase(SetupPhase::WaitingCreds);
+                    gatt_loop(&server, &conn, flash, board).await;
+                }
                 Err(_) => println!("[ble] advertise error"),
             }
         }
@@ -80,6 +107,7 @@ async fn gatt_loop<P: PacketPool>(
     server: &Server<'_>,
     conn: &GattConnection<'_, '_, P>,
     flash: &mut FlashStorage<'_>,
+    board: &'static SharedBoard,
 ) {
     let ssid_h = server.prov.ssid;
     let pass_h = server.prov.password;
@@ -90,7 +118,11 @@ async fn gatt_loop<P: PacketPool>(
     let clean = |b: &[u8]| core::str::from_utf8(b).ok().map(|s| String::from(s.trim_end_matches('\0')));
     loop {
         match conn.next().await {
-            GattConnectionEvent::Disconnected { .. } => return,
+            GattConnectionEvent::Disconnected { .. } => {
+                // Phone left without finishing — back to "connect over Bluetooth".
+                board.lock().await.set_setup_phase(SetupPhase::WaitingBluetooth);
+                return;
+            }
             GattConnectionEvent::Gatt { event } => {
                 if let GattEvent::Write(e) = &event {
                     if e.handle() == ssid_h.handle {
@@ -120,6 +152,10 @@ async fn gatt_loop<P: PacketPool>(
                         .unwrap_or((String::new(), 0));
                     if !s.is_empty() && creds::save(flash, s, p, &host, port) {
                         println!("[ble] saved creds for '{}' (server '{}') — rebooting", s, host);
+                        // Show "WI-FI SAVED" for a beat before the reboot wipes
+                        // the panel — otherwise the confirmation is never seen.
+                        board.lock().await.set_setup_phase(SetupPhase::Saved);
+                        Timer::after(Duration::from_millis(900)).await;
                         esp_hal::system::software_reset();
                     }
                 }
