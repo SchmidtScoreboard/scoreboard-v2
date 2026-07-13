@@ -8,6 +8,8 @@
 //!
 //! Every parse goes through `espn::parse_feed`, the same functions the poll
 //! loop uses, so what this tool shows is what the server would serve.
+//!
+//! Full tour — keys, capture layout, debugging recipes: docs/cli.md.
 
 use crate::espn::{self, EspnSource};
 use crate::model::{Game, GameStatus};

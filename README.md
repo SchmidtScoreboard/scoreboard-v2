@@ -94,6 +94,11 @@ cargo run -p simulator
 # Render sample boards to PNGs (no hardware or server needed)
 cargo run -p server -- --preview        # writes /tmp/sb_preview/*.png
 
+# Pipeline debugger: raw feed JSON -> parsed games -> rendered frames.
+# Interactive TUI or headless captures — see docs/cli.md for the full tour.
+cargo run -p server -- tui
+cargo run -p server -- tui --feed pga --dump
+
 # iOS app
 ./ios/build-core.sh    # build the Rust core -> xcframework + Swift bindings (after app-core changes)
 ./ios/run.sh           # build the app + launch it (reuses a booted simulator, else boots one)
