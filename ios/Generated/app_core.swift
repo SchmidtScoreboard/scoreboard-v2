@@ -1429,6 +1429,17 @@ public struct UiGame {
     public var status: String
     public var detail: String
     /**
+     * Normalized RFC3339 UTC start time ("2026-06-28T13:00:00Z"); nil when
+     * the feed's timestamp was absent or unparseable. Never stripped by
+     * spoiler protection — times are not spoilers.
+     */
+    public var startTime: String?
+    /**
+     * Normalized RFC3339 UTC end time; present mainly for multi-day events
+     * (golf tournaments, F1 race weekends). nil for ordinary games.
+     */
+    public var endTime: String?
+    /**
      * Content hash of this game's rendered frame; look it up among the frames pushed
      * via `on_frame` to draw the card.
      */
@@ -1457,6 +1468,15 @@ public struct UiGame {
     // declare one manually.
     public init(id: String, sportId: String, away: String, home: String, awayScore: UInt32, homeScore: UInt32, status: String, detail: String,
                 /**
+                    * Normalized RFC3339 UTC start time ("2026-06-28T13:00:00Z"); nil when
+                    * the feed's timestamp was absent or unparseable. Never stripped by
+                    * spoiler protection — times are not spoilers.
+                    */ startTime: String?,
+                /**
+                    * Normalized RFC3339 UTC end time; present mainly for multi-day events
+                    * (golf tournaments, F1 race weekends). nil for ordinary games.
+                    */ endTime: String?,
+                /**
                     * Content hash of this game's rendered frame; look it up among the frames pushed
                     * via `on_frame` to draw the card.
                     */ frameId: String,
@@ -1484,6 +1504,8 @@ public struct UiGame {
         self.homeScore = homeScore
         self.status = status
         self.detail = detail
+        self.startTime = startTime
+        self.endTime = endTime
         self.frameId = frameId
         self.bumped = bumped
         self.champ = champ
@@ -1518,6 +1540,12 @@ extension UiGame: Equatable, Hashable {
         if lhs.detail != rhs.detail {
             return false
         }
+        if lhs.startTime != rhs.startTime {
+            return false
+        }
+        if lhs.endTime != rhs.endTime {
+            return false
+        }
         if lhs.frameId != rhs.frameId {
             return false
         }
@@ -1545,6 +1573,8 @@ extension UiGame: Equatable, Hashable {
         hasher.combine(homeScore)
         hasher.combine(status)
         hasher.combine(detail)
+        hasher.combine(startTime)
+        hasher.combine(endTime)
         hasher.combine(frameId)
         hasher.combine(bumped)
         hasher.combine(champ)
@@ -1568,6 +1598,8 @@ public struct FfiConverterTypeUiGame: FfiConverterRustBuffer {
                 homeScore: FfiConverterUInt32.read(from: &buf),
                 status: FfiConverterString.read(from: &buf),
                 detail: FfiConverterString.read(from: &buf),
+                startTime: FfiConverterOptionString.read(from: &buf),
+                endTime: FfiConverterOptionString.read(from: &buf),
                 frameId: FfiConverterString.read(from: &buf),
                 bumped: FfiConverterBool.read(from: &buf),
                 champ: FfiConverterOptionString.read(from: &buf),
@@ -1585,6 +1617,8 @@ public struct FfiConverterTypeUiGame: FfiConverterRustBuffer {
         FfiConverterUInt32.write(value.homeScore, into: &buf)
         FfiConverterString.write(value.status, into: &buf)
         FfiConverterString.write(value.detail, into: &buf)
+        FfiConverterOptionString.write(value.startTime, into: &buf)
+        FfiConverterOptionString.write(value.endTime, into: &buf)
         FfiConverterString.write(value.frameId, into: &buf)
         FfiConverterBool.write(value.bumped, into: &buf)
         FfiConverterOptionString.write(value.champ, into: &buf)

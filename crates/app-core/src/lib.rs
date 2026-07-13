@@ -102,6 +102,13 @@ pub struct UiGame {
     pub home_score: u32,
     pub status: String,
     pub detail: String,
+    /// Normalized RFC3339 UTC start time ("2026-06-28T13:00:00Z"); nil when
+    /// the feed's timestamp was absent or unparseable. Never stripped by
+    /// spoiler protection — times are not spoilers.
+    pub start_time: Option<String>,
+    /// Normalized RFC3339 UTC end time; present mainly for multi-day events
+    /// (golf tournaments, F1 race weekends). nil for ordinary games.
+    pub end_time: Option<String>,
     /// Content hash of this game's rendered frame; look it up among the frames pushed
     /// via `on_frame` to draw the card.
     pub frame_id: String,
@@ -756,6 +763,8 @@ fn to_ui_games(games: Vec<GameSummary>) -> Vec<UiGame> {
             home_score: g.home_score,
             status: g.status,
             detail: g.detail,
+            start_time: g.start_time,
+            end_time: g.end_time,
             frame_id: g.frame_id,
             bumped: g.bumped,
             champ: g.champ,

@@ -87,6 +87,16 @@ pub struct GameSummary {
     pub home_score: u32,
     pub status: String, // "live" | "upcoming" | "final"
     pub detail: String, // e.g. "P2 12:34" or "7:00 PM"
+    /// Normalized RFC3339 UTC start time ("2026-06-28T13:00:00Z"); None when
+    /// the feed's timestamp was absent or unparseable. NOT a spoiler — even
+    /// strict spoiler mode shows the matchup + time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<String>,
+    /// Normalized RFC3339 UTC end time. Present mainly for multi-day events
+    /// (golf tournaments, F1 race weekends) whose feed carries an endDate;
+    /// None for ordinary games. Not a spoiler either.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_time: Option<String>,
     /// Content hash of this game's rendered frame ("" if not rendered). The frame
     /// is pushed as a binary WS message, so cards update without HTTP polling.
     #[serde(default)]

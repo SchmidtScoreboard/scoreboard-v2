@@ -2337,9 +2337,18 @@ struct CardMenu: View {
     /// Pinning only applies to games on the board.
     var canPin: Bool = true
 
+    /// Menu actions can't present anything themselves — the sheets and alert
+    /// hang off the Menu view. CardMenu renders at both call sites (dashboard
+    /// carousel and View All), so both get the presentations for free.
+    @State private var shareImage: ShareableImage?
+    @State private var shareFailed = false
+    @State private var showInfo = false
+
     var body: some View {
         let pinned = model.focusedGameId == game.id
         let noScroll = model.current.noScrollGameIds.contains(game.id)
+        let starts = game.startTime.flatMap(Self.localTimeLabel)
+        let ends = game.endTime.flatMap(Self.localTimeLabel)
         Menu {
             if canPin {
                 Button {
@@ -2368,6 +2377,38 @@ struct CardMenu: View {
                     )
                 }
             }
+            Button {
+                fetchShareImage()
+            } label: {
+                Label("Share image", systemImage: "square.and.arrow.up")
+            }
+            Button {
+                showInfo = true
+            } label: {
+                Label("Info", systemImage: "info.circle")
+            }
+            // Schedule footnote: start/end in the PHONE's zone (the board keeps
+            // its own local clock), greyed and inert — information, not actions.
+            // Omitted entirely when the feed gave no usable timestamps.
+            if starts != nil || ends != nil {
+                Divider()
+                Section {
+                    // Tense matters: "Starts 7:00 PM Sat" for yesterday's game
+                    // reads as NEXT Saturday — "Started" pins it to the past.
+                    if let starts {
+                        Button {} label: {
+                            Label("\(starts.past ? "Started" : "Starts") \(starts.label)", systemImage: "clock")
+                        }
+                        .disabled(true)
+                    }
+                    if let ends {
+                        Button {} label: {
+                            Label("\(ends.past ? "Ended" : "Ends") \(ends.label)", systemImage: "flag.checkered")
+                        }
+                        .disabled(true)
+                    }
+                }
+            }
         } label: {
             Text(" ")
                 .font(.caption.weight(.semibold))
@@ -2378,6 +2419,180 @@ struct CardMenu: View {
                 .background(Capsule().fill(.primary.opacity(0.06)))
         }
         .buttonStyle(.plain)
+        .sheet(item: $shareImage) { item in
+            ActivityShareSheet(items: [item.image])
+        }
+        .sheet(isPresented: $showInfo) {
+            GameInfoSheet(title: model.gameTitle(game), url: infoURL)
+        }
+        .alert("Couldn't fetch the image", isPresented: $shareFailed) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Check that the server is reachable and try again.")
+        }
+    }
+
+    /// The same /render URL the card's frame displays (same board, so the same
+    /// spoiler scoping), with a fresh cache-busting `r` so the share grabs the
+    /// current frame rather than whatever URLCache pinned.
+    private var renderURL: URL? {
+        let id = game.id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? game.id
+        let v = "\(game.awayScore)-\(game.homeScore)-\(game.status)-\(game.detail)-\(game.spoiled)"
+            .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let ts = Int(Date().timeIntervalSince1970)
+        return URL(string: "\(model.httpBase)/render/\(id).png?v=\(v)&r=\(ts)&board=\(model.selectedBoardId ?? "")")
+    }
+
+    /// GET /game/{id} — the full processed game as pretty JSON, redacted by
+    /// this board's spoiler rules server-side.
+    private var infoURL: URL? {
+        let id = game.id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? game.id
+        return URL(string: "\(model.httpBase)/game/\(id)?board=\(model.selectedBoardId ?? "")")
+    }
+
+    /// Fetch the rendered frame and blow it up for sharing. A raw 64×32 PNG is
+    /// a postage stamp in a message thread; the crisp-pixel 512×256 is the
+    /// point, so the upscale is nearest-neighbor, never smoothed.
+    private func fetchShareImage() {
+        guard let url = renderURL else { shareFailed = true; return }
+        Task { @MainActor in
+            do {
+                let (data, _) = try await URLSession.shared.data(from: url)
+                guard let small = UIImage(data: data),
+                      let big = upscaledCrisp(small, factor: 8) else {
+                    shareFailed = true
+                    return
+                }
+                shareImage = ShareableImage(image: big)
+            } catch {
+                shareFailed = true
+            }
+        }
+    }
+
+    /// RFC3339 → a label in the USER'S zone: time alone when the date is today
+    /// ("6:30 PM"), weekday appended otherwise ("4:00 PM Sun"), plus whether
+    /// the moment already passed (drives Starts/Started wording). nil when the
+    /// string doesn't parse (so the caller drops the row instead of lying).
+    static func localTimeLabel(_ rfc3339: String) -> (label: String, past: Bool)? {
+        let iso = ISO8601DateFormatter() // internet date-time by default
+        var date = iso.date(from: rfc3339)
+        if date == nil {
+            iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            date = iso.date(from: rfc3339)
+        }
+        guard let date else { return nil }
+        let time = date.formatted(date: .omitted, time: .shortened)
+        let past = date < Date()
+        guard !Calendar.current.isDateInToday(date) else { return (time, past) }
+        return ("\(time) \(date.formatted(.dateTime.weekday(.abbreviated)))", past)
+    }
+}
+
+/// A fetched share payload — `sheet(item:)` wants Identifiable, and the image
+/// only exists once the render fetch lands.
+private struct ShareableImage: Identifiable {
+    let id = UUID()
+    let image: UIImage
+}
+
+/// UIActivityViewController bridge: ShareLink needs its item up front, but the
+/// share image is fetched after the menu tap, so the system sheet is presented
+/// the UIKit way.
+private struct ActivityShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+    func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
+}
+
+/// Integer nearest-neighbor upscale. CGContext with interpolation off keeps
+/// every LED pixel a hard-edged square — smoothing would melt the panel into
+/// a blurry gradient.
+private func upscaledCrisp(_ image: UIImage, factor: Int) -> UIImage? {
+    guard let cg = image.cgImage else { return nil }
+    let w = cg.width * factor
+    let h = cg.height * factor
+    guard let ctx = CGContext(
+        data: nil, width: w, height: h,
+        bitsPerComponent: 8, bytesPerRow: 0,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ) else { return nil }
+    ctx.interpolationQuality = .none
+    ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+    return ctx.makeImage().map { UIImage(cgImage: $0) }
+}
+
+/// The Info sheet: the game's full server-side JSON, exactly as GET /game/{id}
+/// serves it (pretty-printed, redacted by this board's spoiler rules). Raw on
+/// purpose — it's the debugging view of what the server actually knows.
+struct GameInfoSheet: View {
+    /// The matchup ("NY @ TOR"), same as the card title.
+    let title: String
+    let url: URL?
+    @Environment(\.dismiss) private var dismiss
+    @State private var json: String?
+    @State private var failed = false
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let json {
+                    // Both axes: pretty JSON is long AND wide, and wrapping
+                    // would mangle the indentation that makes it readable.
+                    ScrollView([.vertical, .horizontal]) {
+                        Text(json)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                            .padding(16)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                } else if failed {
+                    ContentUnavailableView(
+                        "Couldn't load",
+                        systemImage: "wifi.exclamationmark",
+                        description: Text("Server unreachable.")
+                    )
+                } else {
+                    ProgressView()
+                }
+            }
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Copy") {
+                        UIPasteboard.general.string = json
+                    }
+                    .disabled(json == nil)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .task {
+                guard let url else { failed = true; return }
+                do {
+                    // Skip URLCache — the point is the server's CURRENT view.
+                    var req = URLRequest(url: url)
+                    req.cachePolicy = .reloadIgnoringLocalCacheData
+                    let (data, response) = try await URLSession.shared.data(for: req)
+                    // A non-200 body is an error message (the 404 "no game …"
+                    // plain text, a proxy error page) — never present it as
+                    // the game's JSON with a working Copy button.
+                    let ok = (response as? HTTPURLResponse).map { $0.statusCode == 200 } ?? true
+                    if ok, let text = String(data: data, encoding: .utf8), !text.isEmpty {
+                        json = text
+                    } else {
+                        failed = true
+                    }
+                } catch {
+                    failed = true
+                }
+            }
+        }
     }
 }
 

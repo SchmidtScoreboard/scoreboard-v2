@@ -787,7 +787,7 @@ mod kern_tests {
             status: GameStatus::Active,
             ordinal: "3rd".into(),
             clock: String::new(),
-            start_time: String::new(),
+            start_time: String::new(), end_time: None,
             leaderboard: None,
             session: None,
             situation: None,
@@ -825,7 +825,7 @@ mod kern_tests {
             status: GameStatus::Active,
             ordinal: String::new(),
             clock: String::new(),
-            start_time: String::new(),
+            start_time: String::new(), end_time: None,
             leaderboard: Some(Leaderboard {
                 name: "MONACO GP".into(),
                 rows: vec![
@@ -891,7 +891,7 @@ mod kern_tests {
             status: GameStatus::Active,
             ordinal: ordinal.into(),
             clock: clock.into(),
-            start_time: String::new(),
+            start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
             session: None,

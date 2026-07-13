@@ -3,8 +3,23 @@
 
 use embedded_graphics::pixelcolor::Rgb888;
 use embedded_graphics::prelude::RgbColor;
+use serde::{Serialize, Serializer};
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// Serialize an `Rgb888` as the 6-digit hex string it was parsed from
+/// (`"FFB81C"`) — for the raw-data endpoint's JSON (the type has no serde
+/// support of its own, and hex is what every other color field speaks).
+fn ser_rgb<S: Serializer>(c: &Rgb888, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&format!("{:02X}{:02X}{:02X}", c.r(), c.g(), c.b()))
+}
+
+fn ser_rgb_opt<S: Serializer>(c: &Option<Rgb888>, s: S) -> Result<S::Ok, S::Error> {
+    match c {
+        Some(c) => ser_rgb(c, s),
+        None => s.serialize_none(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub enum GameStatus {
     Pregame,
     Active,
@@ -12,12 +27,14 @@ pub enum GameStatus {
     Final,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct TeamSide {
     pub abbrev: String,
     pub name: String, // short display name, uppercased at render time
     pub score: u32,
-    pub primary: Rgb888,   // row background
+    #[serde(serialize_with = "ser_rgb")]
+    pub primary: Rgb888, // row background
+    #[serde(serialize_with = "ser_rgb")]
     pub secondary: Rgb888, // accent bar + text
 }
 
@@ -36,7 +53,7 @@ impl TeamSide {
 }
 
 /// A ranked entry in a leaderboard sport (golfer/driver name + score/gap).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct LeaderRow {
     /// Position label drawn centered in a fixed two-digit column ("1".."20");
     /// empty = no rank column (golf keeps names at the left edge).
@@ -44,6 +61,7 @@ pub struct LeaderRow {
     pub name: String,
     pub value: String,
     /// Team color for the rank + name (F1 broadcast style); None = white.
+    #[serde(serialize_with = "ser_rgb_opt", skip_serializing_if = "Option::is_none")]
     pub color: Option<embedded_graphics::pixelcolor::Rgb888>,
     /// Tire compound indicator drawn as a colored dot after the name:
     /// 'S'oft, 'M'edium, 'H'ard, 'I'ntermediate, 'W'et. ESPN's feed carries
@@ -52,7 +70,7 @@ pub struct LeaderRow {
 }
 
 /// Golf tournament / F1 race: an event name + ranked individuals (top few).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Leaderboard {
     pub name: String,
     pub rows: Vec<LeaderRow>,
@@ -63,7 +81,7 @@ pub struct Leaderboard {
 /// ids (e.g. "final", "conf", "playoffs" — never "none") so the board's
 /// big-games preference can be matched against it; `label` is the human name
 /// shown on game cards ("Stanley Cup Final", "Playoffs").
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Champ {
     pub tier: String,
     pub label: String,
@@ -71,7 +89,7 @@ pub struct Champ {
 
 /// Live in-game situation, rendered with the ORIGINAL scoreboard's sport-specific
 /// bottom layouts (rust-scoreboard football.rs / baseball.rs / hockey.rs).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum Situation {
     /// NFL/CFB: down & distance + yardline + which side has the ball.
     Football {
@@ -106,14 +124,14 @@ pub enum Situation {
 /// Pregame context shown on the board while a game is scheduled: each team's
 /// overall record replaces its (meaningless) 0 score in the team row, and the
 /// national broadcast joins the start time in the bottom strip.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Pregame {
     pub away_record: String, // "47-42" (soccer: "4-2-8"); "" if unknown
     pub home_record: String,
     pub broadcast: String, // "ESPN" — national feed only; "" if none
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Game {
     pub id: String,
     pub sport_id: String,
@@ -123,6 +141,11 @@ pub struct Game {
     pub ordinal: String, // "2nd", "HALF", "" ...
     pub clock: String,   // "12:34" when active
     pub start_time: String,
+    /// Feed-format end timestamp, when the source carries one. ESPN only
+    /// provides `endDate` for multi-day leaderboard events (golf tournaments,
+    /// F1 race weekends) — `None` for ordinary games.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_time: Option<String>,
     /// Set for leaderboard sports (golf, F1): an event name + ranked rows. `None`
     /// for normal two-team games (then home/away are the real teams).
     pub leaderboard: Option<Leaderboard>,

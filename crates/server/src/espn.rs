@@ -369,6 +369,8 @@ fn parse_golf(sport_id: &str, ev: LeaderEvent) -> Option<Game> {
         ordinal: String::new(),
         clock: String::new(),
         start_time: comp.date,
+        // Tournaments run for days — surface when this one wraps up.
+        end_time: (!ev.end_date.is_empty()).then(|| ev.end_date.clone()),
         leaderboard: Some(Leaderboard { name, rows }),
         champ,
         session: None,
@@ -431,6 +433,11 @@ fn parse_f1(ev: LeaderEvent) -> Vec<Game> {
                 ordinal: String::new(),
                 clock: String::new(),
                 start_time: comp.date.clone(),
+                // ESPN's endDate is EVENT-level (when the whole weekend ends
+                // — i.e. after the race). It's the race's end, not quali's,
+                // so only the race session carries it.
+                end_time: (session == "race" && !ev.end_date.is_empty())
+                    .then(|| ev.end_date.clone()),
                 leaderboard: Some(Leaderboard { name, rows }),
                 champ: None,
                 session: Some(session.into()),
@@ -597,6 +604,11 @@ struct LeaderEvent {
     id: String,
     #[serde(default, rename = "shortName")]
     short_name: String,
+    /// When the event ENDS — golf tournaments and F1 weekends span days, and
+    /// ESPN carries `endDate` on these leaderboard events (team-sport
+    /// scoreboard events have no such field).
+    #[serde(default, rename = "endDate")]
+    end_date: String,
     #[serde(default)]
     competitions: Vec<LeaderComp>,
 }
@@ -674,7 +686,7 @@ pub fn mock_games() -> Vec<Game> {
         Game {
             id: "mock-nhl".into(), sport_id: "nhl".into(), away: bruins, home: leafs,
             status: GameStatus::Active, ordinal: "2nd".into(), clock: "12:34".into(),
-            start_time: String::new(),
+            start_time: String::new(), end_time: None,
             leaderboard: None,
             // Tagged so the app's big-game caption + selection are exercisable
             // offline (outside playoff season there are no live postseason
@@ -687,7 +699,7 @@ pub fn mock_games() -> Vec<Game> {
         Game {
             id: "mock-nba".into(), sport_id: "nba".into(), away: celtics, home: lakers,
             status: GameStatus::Active, ordinal: "4th".into(), clock: "5:20".into(),
-            start_time: String::new(),
+            start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
             session: None,
@@ -759,7 +771,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             id: "demo-nhl".into(), sport_id: "nhl".into(),
             away: team("BOS", "BRUINS", (n / 3 % 6) as u32, "FFB81C", "000000"),
             home: team("TOR", "LEAFS", (n / 5 % 5) as u32, "00205B", "FFFFFF"),
-            status: GameStatus::Active, ordinal: period(0), clock: clock.clone(), start_time: String::new(),
+            status: GameStatus::Active, ordinal: period(0), clock: clock.clone(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: Some(Champ { tier: "final".into(), label: "Stanley Cup Final".into() }),
             session: None,
@@ -777,7 +789,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             id: "demo-nhl-2".into(), sport_id: "nhl".into(),
             away: team("COL", "AVALANCHE", (n / 4 % 5) as u32, "6F263D", "236192"),
             home: team("VGK", "KNIGHTS", (n / 6 % 4) as u32, "B4975A", "333F42"),
-            status: GameStatus::Active, ordinal: period(2), clock: clock.clone(), start_time: String::new(),
+            status: GameStatus::Active, ordinal: period(2), clock: clock.clone(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: Some(Champ { tier: "conf".into(), label: "Conference Finals".into() }),
             session: None,
@@ -790,7 +802,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             id: "demo-nhl-ot".into(), sport_id: "nhl".into(),
             away: team("DET", "RED WINGS", 2, "CE1126", "FFFFFF"),
             home: team("CHI", "BLACKHAWKS", 2, "CF0A2C", "FFD100"),
-            status: GameStatus::Active, ordinal: "OT".into(), clock: clock.clone(), start_time: String::new(),
+            status: GameStatus::Active, ordinal: "OT".into(), clock: clock.clone(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
             session: None,
@@ -805,7 +817,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             id: "demo-nba".into(), sport_id: "nba".into(),
             away: team("BOS", "CELTICS", (80 + n % 30) as u32, "007A33", "FFFFFF"),
             home: team("LAL", "LAKERS", (78 + n % 28) as u32, "552583", "FDB927"),
-            status: GameStatus::Active, ordinal: period(1), clock: clock.clone(), start_time: String::new(),
+            status: GameStatus::Active, ordinal: period(1), clock: clock.clone(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
             session: None,
@@ -816,7 +828,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             id: "demo-nba-2".into(), sport_id: "nba".into(),
             away: team("GSW", "WARRIORS", (85 + n % 25) as u32, "1D428A", "FFC72C"),
             home: team("DEN", "NUGGETS", (88 + n % 22) as u32, "0E2240", "FEC524"),
-            status: GameStatus::Active, ordinal: period(3), clock: clock.clone(), start_time: String::new(),
+            status: GameStatus::Active, ordinal: period(3), clock: clock.clone(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
             session: None,
@@ -827,7 +839,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             id: "demo-nba-3".into(), sport_id: "nba".into(),
             away: team("MIA", "HEAT", (70 + n % 26) as u32, "98002E", "F9A01B"),
             home: team("NYK", "KNICKS", (72 + n % 24) as u32, "006BB6", "F58426"),
-            status: GameStatus::Active, ordinal: period(0), clock: clock.clone(), start_time: String::new(),
+            status: GameStatus::Active, ordinal: period(0), clock: clock.clone(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
             session: None,
@@ -838,7 +850,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             id: "demo-mlb".into(), sport_id: "mlb".into(),
             away: team("NYY", "YANKEES", (n / 7 % 9) as u32, "132448", "C4CED3"),
             home: team("BOS", "RED SOX", (n / 6 % 9) as u32, "BD3039", "FFFFFF"),
-            status: GameStatus::Active, ordinal: period(2), clock: String::new(), start_time: String::new(),
+            status: GameStatus::Active, ordinal: period(2), clock: String::new(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
             session: None,
@@ -857,7 +869,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             id: "demo-mlb-2".into(), sport_id: "mlb".into(),
             away: team("LAD", "DODGERS", (n / 5 % 8) as u32, "005A9C", "EF3E42"),
             home: team("CHC", "CUBS", (n / 8 % 7) as u32, "0E3386", "CC3433"),
-            status: GameStatus::Active, ordinal: period(1), clock: String::new(), start_time: String::new(),
+            status: GameStatus::Active, ordinal: period(1), clock: String::new(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
             session: None,
@@ -876,7 +888,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             home: team("SEA", "MARINERS", 4, "0C2C56", "005C5C"),
             status: if ending_live { GameStatus::Active } else { GameStatus::Final },
             ordinal: if ending_live { "9th".into() } else { String::new() },
-            clock: String::new(), start_time: String::new(),
+            clock: String::new(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
             session: None,
@@ -887,7 +899,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             id: "demo-nfl".into(), sport_id: "nfl".into(),
             away: team("NE", "PATRIOTS", (n / 9 % 35) as u32, "002244", "C60C30"),
             home: team("BUF", "BILLS", (n / 8 % 35) as u32, "00338D", "FFFFFF"),
-            status: GameStatus::Active, ordinal: period(3), clock: clock.clone(), start_time: String::new(),
+            status: GameStatus::Active, ordinal: period(3), clock: clock.clone(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
             session: None,
@@ -908,7 +920,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             id: "demo-cfb".into(), sport_id: "cfb".into(),
             away: team("OSU", "BUCKEYES", (n / 7 % 28) as u32, "BB0000", "666666"),
             home: team("MICH", "WOLVERINES", (n / 6 % 31) as u32, "00274C", "FFCB05"),
-            status: GameStatus::Active, ordinal: period(1), clock: clock.clone(), start_time: String::new(),
+            status: GameStatus::Active, ordinal: period(1), clock: clock.clone(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
             session: None,
@@ -929,7 +941,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             id: "demo-wnba".into(), sport_id: "wnba".into(),
             away: team("LVA", "ACES", (n / 6 % 22) as u32, "CE0E2D", "000000"),
             home: team("NYL", "LIBERTY", (n / 7 % 24) as u32, "6ECEB2", "000000"),
-            status: GameStatus::Active, ordinal: period(2), clock: clock.clone(), start_time: String::new(),
+            status: GameStatus::Active, ordinal: period(2), clock: clock.clone(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
             session: None,
@@ -940,7 +952,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             id: "demo-mls".into(), sport_id: "mls".into(),
             away: team("LAFC", "LAFC", (n / 6 % 4) as u32, "000000", "C39E6D"),
             home: team("MIA", "INTER MIAMI", (n / 4 % 4) as u32, "F7B5CD", "231F20"),
-            status: GameStatus::Active, ordinal: "2nd".into(), clock: clock.clone(), start_time: String::new(),
+            status: GameStatus::Active, ordinal: "2nd".into(), clock: clock.clone(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
             session: None,
@@ -951,7 +963,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             id: "demo-epl".into(), sport_id: "epl".into(),
             away: team("ARS", "ARSENAL", (n / 5 % 4) as u32, "EF0107", "FFFFFF"),
             home: team("MCI", "MAN CITY", (n / 7 % 4) as u32, "6CABDD", "FFFFFF"),
-            status: GameStatus::Active, ordinal: "1st".into(), clock: clock.clone(), start_time: String::new(),
+            status: GameStatus::Active, ordinal: "1st".into(), clock: clock.clone(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
             session: None,
@@ -962,7 +974,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             id: "demo-wc".into(), sport_id: "wc".into(),
             away: team("USA", "USA", (n / 8 % 3) as u32, "002868", "BF0A30"),
             home: team("FRA", "FRANCE", (n / 9 % 3) as u32, "21304D", "FFFFFF"),
-            status: GameStatus::Active, ordinal: "2nd".into(), clock, start_time: String::new(),
+            status: GameStatus::Active, ordinal: "2nd".into(), clock, start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
             session: None,
@@ -972,7 +984,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
         Game {
             id: "demo-golf".into(), sport_id: "pga".into(),
             away: TeamSide::empty("PGA"), home: TeamSide::empty(""),
-            status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(),
+            status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
             // Ten deep so the board's scrolling leaderboard shows in demo mode.
             leaderboard: Some(Leaderboard { name: "MASTERS".into(), rows: vec![
                 LeaderRow { name: "SCHEFFLER".into(), value: "-8".into(), ..Default::default() },
@@ -994,7 +1006,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
         Game {
             id: "demo-golf-2".into(), sport_id: "lpga".into(),
             away: TeamSide::empty("LPGA"), home: TeamSide::empty(""),
-            status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(),
+            status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
             leaderboard: Some(Leaderboard { name: "US OPEN".into(), rows: vec![
                 LeaderRow { name: "KORDA".into(), value: "-7".into(), ..Default::default() },
                 LeaderRow { name: "THITIKUL".into(), value: "-5".into(), ..Default::default() },
@@ -1009,7 +1021,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
         Game {
             id: "demo-f1".into(), sport_id: "f1".into(),
             away: TeamSide::empty("F1"), home: TeamSide::empty(""),
-            status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(),
+            status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
             // Full broadcast treatment: team colors + tire compounds (live
             // ESPN rows carry no tire data, so the demo is where dots show).
             leaderboard: Some(Leaderboard { name: "MONACO GP".into(), rows: vec![
@@ -1046,7 +1058,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
         Game {
             id: "demo-f1-quali".into(), sport_id: "f1".into(),
             away: TeamSide::empty("F1"), home: TeamSide::empty(""),
-            status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(),
+            status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
             leaderboard: Some(Leaderboard { name: "BRITISH GP Q".into(), rows: vec![
                 LeaderRow { rank: "1".into(), name: "NOR".into(), value: "1:24.8".into(), color: f1_team_color("NOR"), tire: None },
                 LeaderRow { rank: "2".into(), name: "VER".into(), value: "+0.093".into(), color: f1_team_color("VER"), tire: None },
@@ -1070,6 +1082,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             home: team("EDM", "OILERS", 0, "041E42", "FF4C00"),
             status: GameStatus::Pregame, ordinal: String::new(), clock: String::new(),
             start_time: (chrono::Utc::now() + chrono::Duration::minutes(20)).format("%Y-%m-%dT%H:%MZ").to_string(),
+            end_time: None,
             leaderboard: None,
             champ: None,
             session: None,
@@ -1086,6 +1099,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             home: team("PHX", "SUNS", 0, "1D1160", "E56020"),
             status: GameStatus::Pregame, ordinal: String::new(), clock: String::new(),
             start_time: (chrono::Utc::now() + chrono::Duration::hours(3)).format("%Y-%m-%dT%H:%MZ").to_string(),
+            end_time: None,
             leaderboard: None,
             champ: None,
             session: None,
@@ -1500,6 +1514,9 @@ fn parse_event(sport_id: &str, ev: Event) -> Option<Game> {
         ordinal,
         clock,
         start_time: comp.date,
+        // Team-sport scoreboard events carry no endDate (games end within
+        // hours; only multi-day leaderboard events get one).
+        end_time: None,
         leaderboard: None,
         champ,
         session: None,
@@ -1679,6 +1696,57 @@ mod leader_tests {
         assert_eq!(rows.first().map(|r| (r.rank.as_str(), r.name.as_str())), Some(("1", "VER")));
         assert_eq!(rows.get(1).map(|r| r.name.as_str()), Some("NOR"));
         assert!(rows.first().unwrap().color.is_some(), "VER maps to a team color");
+    }
+
+    /// Multi-day leaderboard events carry ESPN's event-level endDate as
+    /// end_time: golf tournaments always; F1 weekends on the RACE session only
+    /// (the weekend ends when the race does — quali doesn't run to Sunday).
+    /// Events without one (and team-sport games, which have no such field)
+    /// stay None.
+    #[test]
+    fn leaderboard_events_carry_end_dates() {
+        // Shape verified against the live feeds: golf/F1 events have
+        // "endDate"; team-sport scoreboard events do not.
+        let golf = r#"{
+            "id": "401",
+            "shortName": "Travelers Championship",
+            "endDate": "2026-07-12T04:00Z",
+            "competitions": [
+                {"date":"2026-07-09T04:00Z","status":{"type":{"name":"STATUS_IN_PROGRESS"}},
+                 "competitors":[{"order":1,"athlete":{"displayName":"Scottie Scheffler"},
+                                 "status":{"position":{"id":1}},
+                                 "statistics":[{"displayValue":"-8"}]}]}
+            ]
+        }"#;
+        let ev: LeaderEvent = serde_json::from_str(golf).unwrap();
+        let g = parse_golf("pga", ev).unwrap();
+        assert_eq!(g.end_time.as_deref(), Some("2026-07-12T04:00Z"));
+        assert_eq!(g.start_time, "2026-07-09T04:00Z");
+
+        // No endDate in the feed -> None (never an empty string).
+        let ev: LeaderEvent =
+            serde_json::from_str(&golf.replace("\"endDate\": \"2026-07-12T04:00Z\",", "")).unwrap();
+        assert_eq!(parse_golf("pga", ev).unwrap().end_time, None);
+
+        let f1 = r#"{
+            "id": "evt1",
+            "shortName": "British GP",
+            "endDate": "2026-07-19T13:00Z",
+            "competitions": [
+                {"date":"2026-07-18T15:00Z","status":{"type":{"name":"STATUS_FINAL"}},
+                 "type":{"abbreviation":"Qual"},
+                 "competitors":[{"order":1,"athlete":{"displayName":"Lando Norris"}}]},
+                {"date":"2026-07-19T14:00Z","status":{"type":{"name":"STATUS_SCHEDULED"}},
+                 "type":{"abbreviation":"Race"},
+                 "competitors":[]}
+            ]
+        }"#;
+        let ev: LeaderEvent = serde_json::from_str(f1).unwrap();
+        let games = parse_f1(ev);
+        let race = games.iter().find(|g| g.session.as_deref() == Some("race")).unwrap();
+        assert_eq!(race.end_time.as_deref(), Some("2026-07-19T13:00Z"));
+        let quali = games.iter().find(|g| g.session.as_deref() == Some("quali")).unwrap();
+        assert_eq!(quali.end_time, None, "the weekend end is not quali's end");
     }
 
     /// Golf majors get the "major" champ tier; regular tour stops don't.

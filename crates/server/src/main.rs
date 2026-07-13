@@ -362,6 +362,7 @@ async fn main() {
     let app = Router::new()
         .route("/catalog", get(get_catalog))
         .route("/render/:id", get(get_render))
+        .route("/game/:id", get(get_game))
         .route("/sample/:variant", get(get_sample))
         .route("/ws", get(ws::ws_handler))
         .with_state(state);
@@ -406,6 +407,7 @@ async fn get_sample(
         ordinal: "OT".into(),
         clock: "2:41".into(),
         start_time: "2026-07-08T23:00Z".into(),
+        end_time: None,
         leaderboard: None,
         champ: None,
         session: None,
@@ -473,6 +475,76 @@ async fn get_render(
         .into_response()
 }
 
+/// The full processed `Game` as pretty JSON — the raw-data companion to
+/// `get_render`'s PNG. `?board=` scopes the response to that board's spoiler
+/// rules exactly like `get_render` does: without it a protected game's raw
+/// data would leak the score around the sanitized summaries and frames.
+/// Protected games are served REDACTED (see `redact_game`) with a visible
+/// `"spoiled": true`; unknown ids are a plain-text 404 (unlike the render
+/// route there's no image-failure ambiguity to work around here).
+async fn get_game(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
+    State(s): State<AppState>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let cfg = q.get("board").map(|b| s.config_for(b));
+    let game = s.games.lock().unwrap().iter().find(|g| g.id == id).cloned();
+    let Some(game) = game else {
+        tracing::info!("game {id} board={} -> UNKNOWN GAME", q.get("board").map(String::as_str).unwrap_or("-"));
+        return (axum::http::StatusCode::NOT_FOUND, format!("no game '{id}'")).into_response();
+    };
+    // `spoiler_for` already honors the one-off reveal list, so a revealed
+    // game passes through unredacted like everywhere else.
+    let spoiler = cfg.as_ref().and_then(|c| spoiler_for(c, &game));
+    let (game, spoiled) = match spoiler {
+        Some(mode) => (redact_game(&game, mode), true),
+        None => (game, false),
+    };
+    let mut v = serde_json::to_value(&game).expect("game serializes");
+    if spoiled {
+        // Flag the redaction in the payload itself, like GameSummary::spoiled.
+        v.as_object_mut()
+            .expect("game serializes to an object")
+            .insert("spoiled".into(), true.into());
+    }
+    tracing::info!(
+        "game {id} board={} -> {}",
+        q.get("board").map(String::as_str).unwrap_or("-"),
+        if spoiled { "spoiled" } else { "ok" }
+    );
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        serde_json::to_string_pretty(&v).expect("game serializes"),
+    )
+        .into_response()
+}
+
+/// A spoiler-safe clone of a game for the raw-data endpoint — as strict as
+/// `to_summary_for` and `render_spoiled` (the fields those sanitize are the
+/// fields cleared here): scores zeroed, live situation dropped, clock
+/// emptied, leaderboard rows emptied (the matchup / event name is not a
+/// spoiler). Normal mode keeps the ordinal as sanctioned basic progress;
+/// Strict hides even that.
+pub(crate) fn redact_game(g: &Game, mode: SpoilerMode) -> Game {
+    let mut r = g.clone();
+    r.away.score = 0;
+    r.home.score = 0;
+    r.clock = String::new();
+    r.situation = None;
+    if let Some(lb) = &mut r.leaderboard {
+        lb.rows.clear();
+    }
+    // Normal mode may show progress (period/quarter/lap) — but only while the
+    // game is IN progress. A Final's lingering ordinal ("OT", "10th") is a
+    // result: it says the game went past regulation, which spoiler_detail and
+    // render_spoiled both deliberately collapse to a bare FINAL.
+    if mode == SpoilerMode::Strict || g.status == GameStatus::Final {
+        r.ordinal = String::new();
+    }
+    r
+}
+
 /// Board-scoped summary: spoiler protection zeroes the scores and swaps the
 /// detail for spoiler-safe status, so protected results can't leak through
 /// the app's data model even if the UI mishandled them.
@@ -495,6 +567,12 @@ pub(crate) fn to_summary(g: &Game, tz: Option<chrono_tz::Tz>) -> GameSummary {
             .then(|| start_time_label(&g.start_time, tz))
             .flatten()
     };
+    // Normalized machine-readable timestamps (RFC3339 UTC) alongside the
+    // human `detail` label. Times are NOT spoilers — even strict mode shows
+    // the matchup + time — so the spoiler pass in `to_summary_for` leaves
+    // these untouched.
+    let start_time = parse_espn_time(&g.start_time).map(rfc3339_utc);
+    let end_time = g.end_time.as_deref().and_then(parse_espn_time).map(rfc3339_utc);
     // Leaderboard sports (golf/F1): no away/home — show the event + leader.
     if let Some(lb) = &g.leaderboard {
         let detail = pregame_detail().unwrap_or_else(|| {
@@ -512,6 +590,8 @@ pub(crate) fn to_summary(g: &Game, tz: Option<chrono_tz::Tz>) -> GameSummary {
             home_score: 0,
             status: format!("{:?}", g.status).to_lowercase(),
             detail,
+            start_time,
+            end_time,
             frame_id: String::new(),
             bumped: false,
             champ: g.champ.as_ref().map(|c| c.label.clone()),
@@ -535,6 +615,8 @@ pub(crate) fn to_summary(g: &Game, tz: Option<chrono_tz::Tz>) -> GameSummary {
         home_score: g.home.score,
         status: format!("{:?}", g.status).to_lowercase(),
         detail,
+        start_time,
+        end_time,
         frame_id: String::new(),
         bumped: false,
         champ: g.champ.as_ref().map(|c| c.label.clone()),
@@ -614,6 +696,12 @@ pub(crate) fn parse_espn_time(iso: &str) -> Option<chrono::DateTime<chrono::Utc>
         }
     }
     None
+}
+
+/// Canonical RFC3339 UTC text ("2026-06-28T13:00:00Z") for app-facing
+/// timestamps — one normalized shape regardless of the feed's quirks.
+pub(crate) fn rfc3339_utc(t: chrono::DateTime<chrono::Utc>) -> String {
+    t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 /// The board's configured IANA timezone, parsed. `None` (unset or unparseable)
@@ -1608,7 +1696,7 @@ fn preview() {
         status,
         ordinal: ordinal.into(),
         clock: clock.into(),
-        start_time: String::new(),
+        start_time: String::new(), end_time: None,
         leaderboard: None,
         champ: None,
         session: None,
@@ -1668,7 +1756,7 @@ fn preview() {
         ("golf", Game {
             id: "g".into(), sport_id: "pga".into(),
             away: model::TeamSide::empty("PGA"), home: model::TeamSide::empty(""),
-            status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(),
+            status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
             leaderboard: Some(model::Leaderboard { name: "MASTERS".into(), rows: vec![
                 model::LeaderRow { name: "SCHEFFLER".into(), value: "-8".into(), ..Default::default() },
                 model::LeaderRow { name: "MCILROY".into(), value: "-6".into(), ..Default::default() },
@@ -1684,7 +1772,7 @@ fn preview() {
         ("f1", Game {
             id: "f".into(), sport_id: "f1".into(),
             away: model::TeamSide::empty("F1"), home: model::TeamSide::empty(""),
-            status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(),
+            status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
             leaderboard: Some(model::Leaderboard { name: "MONACO GP".into(), rows: vec![
                 model::LeaderRow { rank: "1".into(), name: "VER".into(), value: "LAP 42".into(), color: Some(model::hex_to_rgb("3671C6")), tire: Some('M') },
                 model::LeaderRow { rank: "2".into(), name: "NOR".into(), value: "+2.1".into(), color: Some(model::hex_to_rgb("FF8000")), tire: Some('M') },
@@ -2148,7 +2236,7 @@ mod tests {
             status: GameStatus::Active,
             ordinal: String::new(),
             clock: String::new(),
-            start_time: String::new(),
+            start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: champ_tier.map(|t| model::Champ { tier: t.into(), label: t.into() }),
             session: session.map(Into::into),
@@ -2221,7 +2309,7 @@ mod tests {
                 status: GameStatus::Active,
                 ordinal: "1st".into(),
                 clock: "5:00".into(),
-                start_time: String::new(),
+                start_time: String::new(), end_time: None,
                 leaderboard: None,
                 champ: None,
                 session: None,
@@ -2281,7 +2369,7 @@ mod tests {
             status: GameStatus::Active,
             ordinal: "3rd".into(),
             clock: "1:00".into(),
-            start_time: String::new(),
+            start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
             session: None,
@@ -2327,6 +2415,7 @@ mod tests {
             ordinal: String::new(),
             clock: String::new(),
             start_time: (now + D::minutes(mins_from_now)).format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            end_time: None,
             leaderboard: None,
             champ: None,
             session: None,
@@ -2359,6 +2448,7 @@ mod tests {
             ordinal: String::new(),
             clock: String::new(),
             start_time: (now + D::minutes(mins_from_now)).format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            end_time: None,
             leaderboard: None,
             champ: None,
             session: None,
@@ -2394,6 +2484,154 @@ mod tests {
         let tokyo: chrono_tz::Tz = "Asia/Tokyo".parse().unwrap();
         assert_eq!(start_time_label("2026-06-28T23:00Z", Some(ny)).as_deref(), Some("7:00 PM"));
         assert_eq!(start_time_label("2026-06-28T23:00Z", Some(tokyo)).as_deref(), Some("8:00 AM"));
+    }
+
+    /// Summaries carry machine-readable RFC3339 UTC timestamps alongside the
+    /// human detail label: start_time normalized from ESPN's format, end_time
+    /// only when the feed carried one (multi-day golf/F1 events), and neither
+    /// is stripped by spoiler protection (times are not spoilers).
+    #[test]
+    fn summaries_carry_normalized_timestamps() {
+        let mut g = Game {
+            id: "g".into(),
+            sport_id: "nhl".into(),
+            away: TeamSide::empty("A"),
+            home: TeamSide::empty("B"),
+            status: GameStatus::Active,
+            ordinal: "2nd".into(),
+            clock: "5:00".into(),
+            start_time: "2026-06-28T13:00Z".into(),
+            end_time: None,
+            leaderboard: None,
+            champ: None,
+            session: None,
+            situation: None,
+            pregame: None,
+        };
+        let s = to_summary(&g, None);
+        assert_eq!(s.start_time.as_deref(), Some("2026-06-28T13:00:00Z"));
+        assert_eq!(s.end_time, None, "no feed end date -> None");
+        // The normalized value is genuinely RFC3339.
+        chrono::DateTime::parse_from_rfc3339(s.start_time.as_deref().unwrap()).unwrap();
+
+        // A multi-day event's end date is normalized the same way.
+        g.end_time = Some("2026-06-30T22:00Z".into());
+        let s = to_summary(&g, None);
+        assert_eq!(s.end_time.as_deref(), Some("2026-06-30T22:00:00Z"));
+
+        // Times survive spoiler sanitization in BOTH modes — even strict mode
+        // shows matchup + time.
+        for mode in [SpoilerMode::Normal, SpoilerMode::Strict] {
+            let s = to_summary_for(&g, Some(mode), None);
+            assert!(s.spoiled);
+            assert_eq!(s.start_time.as_deref(), Some("2026-06-28T13:00:00Z"));
+            assert_eq!(s.end_time.as_deref(), Some("2026-06-30T22:00:00Z"));
+        }
+
+        // Unparseable feed text -> None, never garbage.
+        g.start_time = "not-a-time".into();
+        g.end_time = Some("also-not-a-time".into());
+        let s = to_summary(&g, None);
+        assert_eq!((s.start_time, s.end_time), (None, None));
+    }
+
+    /// GET /game/{id}: the full processed game as pretty JSON; unknown ids
+    /// are a plain-text 404.
+    #[tokio::test]
+    async fn game_endpoint_serves_pretty_json_and_404s() {
+        use axum::extract::{Path, Query};
+        let state = AppState::new_ephemeral(); // mock slate incl. "mock-nhl" (BOS @ TOR)
+        let resp = get_game(Path("mock-nhl".into()), Query(HashMap::new()), State(state.clone())).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains('\n'), "pretty-printed, not a single line");
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["away"]["abbrev"], "BOS", "carries the away team");
+        assert_eq!(v["away"]["score"], 2, "unscoped request shows the score");
+        assert!(v.get("spoiled").is_none(), "unprotected game carries no spoiled flag");
+
+        let resp = get_game(Path("no-such-game".into()), Query(HashMap::new()), State(state)).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    /// The spoiler rule is leak-proof through the raw-data path too: a
+    /// protected board's request gets zeroed scores, no situation/clock, and
+    /// an EMPTY leaderboard, flagged "spoiled": true — while the same id
+    /// without a board (or after a reveal) serves the full data.
+    #[tokio::test]
+    async fn game_endpoint_redacts_spoiler_protected_games() {
+        use axum::extract::{Path, Query};
+        let state = AppState::new_ephemeral();
+        // Tick 7: demo-nhl has nonzero scores + a hockey situation; demo-golf
+        // has a populated leaderboard.
+        *state.games.lock().unwrap() = espn::demo_games(7, 0);
+        crate::ws::apply_command(&state, "b1", Command::SetSpoilerAll { on: true });
+
+        let fetch = |id: &str, board: Option<&str>| {
+            let state = state.clone();
+            let id = id.to_string();
+            let q: HashMap<String, String> = board
+                .map(|b| HashMap::from([("board".to_string(), b.to_string())]))
+                .unwrap_or_default();
+            async move {
+                let resp = get_game(Path(id), Query(q), State(state)).await;
+                assert_eq!(resp.status(), axum::http::StatusCode::OK);
+                let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+            }
+        };
+
+        // Protected: zeroed scores, no live details, flagged.
+        let v = fetch("demo-nhl", Some("b1")).await;
+        assert_eq!(v["spoiled"], true);
+        assert_eq!((v["away"]["score"].as_u64(), v["home"]["score"].as_u64()), (Some(0), Some(0)));
+        assert!(v["situation"].is_null(), "situation carries the power play — redacted");
+        assert_eq!(v["clock"], "", "the clock is a result detail");
+        assert!(!v["ordinal"].as_str().unwrap().is_empty(), "normal mode keeps basic progress");
+
+        // Protected leaderboard: the event name stays, the rows go.
+        let v = fetch("demo-golf", Some("b1")).await;
+        assert_eq!(v["spoiled"], true);
+        assert_eq!(v["leaderboard"]["name"], "MASTERS");
+        assert_eq!(v["leaderboard"]["rows"].as_array().map(Vec::len), Some(0));
+
+        // A FINAL's ordinal is a result ("OT" says the game went past
+        // regulation) — Normal mode must hide it once the game ends, exactly
+        // like spoiler_detail and render_spoiled collapse finals to "FINAL".
+        // (ESPN leaves period at its last value on finals, so parse_event
+        // yields ordinal "OT" for an overtime final — force that shape here.)
+        {
+            let mut games = state.games.lock().unwrap();
+            let g = games.iter_mut().find(|g| g.id == "demo-nhl").unwrap();
+            g.status = GameStatus::Final;
+            g.ordinal = "OT".into();
+        }
+        let v = fetch("demo-nhl", Some("b1")).await;
+        assert_eq!(v["ordinal"], "", "a final's ordinal is a result, not progress");
+
+        // Strict mode hides even the in-progress ordinal.
+        crate::ws::apply_command(&state, "b1", Command::SetSpoilerMode { mode: SpoilerMode::Strict });
+        let v = fetch("demo-nhl", Some("b1")).await;
+        assert_eq!(v["ordinal"], "", "strict hides basic progress too");
+
+        // The SAME id with no board scope serves the full data.
+        let v = fetch("demo-nhl", None).await;
+        assert!(v["away"]["score"].as_u64().unwrap() > 0);
+        assert!(!v["situation"].is_null());
+        assert!(v.get("spoiled").is_none());
+        let v = fetch("demo-golf", None).await;
+        assert!(v["leaderboard"]["rows"].as_array().map(Vec::len).unwrap() > 0);
+
+        // A one-off reveal beats the board-wide rule here like everywhere else.
+        crate::ws::apply_command(&state, "b1", Command::SetGameSpoiler { game_id: "demo-nhl".into(), hidden: false });
+        let v = fetch("demo-nhl", Some("b1")).await;
+        assert!(v["away"]["score"].as_u64().unwrap() > 0, "revealed game escapes redaction");
+        assert!(v.get("spoiled").is_none());
     }
 
     /// Removing a preference-driven game EXCLUDES it (preferences untouched);
@@ -2807,7 +3045,7 @@ mod tests {
             status: GameStatus::Active,
             ordinal: String::new(),
             clock: String::new(),
-            start_time: String::new(),
+            start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
             session: None,
