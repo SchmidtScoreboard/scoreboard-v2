@@ -65,7 +65,7 @@ Three panes, cycled with `Tab` / `Shift-Tab`: **feeds** (left), **events**
 | `↑`/`↓` or `k`/`j` | Move selection (or scroll, in the detail pane) |
 | `Enter` (feeds pane) | Fetch the selected feed |
 | `r` | Re-fetch the selected feed |
-| `1` / `2` / `3` | Detail tab: raw event JSON / parsed `Game` / rendered frame |
+| `1` / `2` / `3` | Detail tab: raw event JSON / parsed `Game` / rendered frame (focus follows, so `j`/`k` scroll it immediately) |
 | `v` | Cycle the frame variant: normal → spoiled-normal → spoiled-strict |
 | `s` | Save the selected **event**'s artifacts to the out dir |
 | `S` | Save the whole **feed** (full raw doc + every event) |

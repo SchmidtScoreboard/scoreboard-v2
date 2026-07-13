@@ -82,6 +82,24 @@ struct App {
     variant: Variant,
     scroll: u16,
     status: String,
+    /// Terminal advertises 24-bit color (COLORTERM). Without it, RGB escape
+    /// codes render as garbage (macOS Terminal has no truecolor support), so
+    /// frames fall back to the xterm-256 cube.
+    truecolor: bool,
+}
+
+impl App {
+    /// Switch the detail tab — and pull focus to the detail pane, so j/k
+    /// scroll what you just asked to look at (leaving focus on the feeds list
+    /// made j/k flip feeds instead — a trap). Each tab starts at the top;
+    /// carrying a 40-line JSON scroll into a 16-row frame blanked it.
+    fn set_tab(&mut self, tab: Tab) {
+        if self.tab != tab {
+            self.scroll = 0;
+        }
+        self.tab = tab;
+        self.pane = 2;
+    }
 }
 
 impl App {
@@ -246,11 +264,34 @@ fn save_all(out: &Path, feed: &str, f: &Fetched) -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
+/// An RGB pixel as a terminal color: true 24-bit when the terminal supports
+/// it, else the nearest xterm-256 cube entry (RGB escapes on a non-truecolor
+/// terminal don't degrade — they render as garbage).
+fn cell_color(r: u8, g: u8, b: u8, truecolor: bool) -> Color {
+    if truecolor {
+        return Color::Rgb(r, g, b);
+    }
+    // Nearest 6x6x6 cube level (thresholds from the xterm palette's
+    // 0/95/135/175/215/255 steps).
+    let q = |v: u8| -> u16 {
+        if v < 48 {
+            0
+        } else if v < 114 {
+            1
+        } else {
+            (v as u16 - 35) / 40
+        }
+    };
+    Color::Indexed((16 + 36 * q(r) + 6 * q(g) + q(b)) as u8)
+}
+
 /// Render a frame as terminal half-blocks (▀: fg = upper pixel, bg = lower).
-fn frame_lines(px: &[u8], scroll: u16) -> Vec<Line<'static>> {
+fn frame_lines(px: &[u8], scroll: u16, truecolor: bool) -> Vec<Line<'static>> {
     let height = px.len() / (FRAME_WIDTH * 2);
     let mut lines = Vec::new();
-    let mut y = (scroll as usize) * 2;
+    // Scroll counts terminal rows (2px each), clamped so a stale offset can
+    // never scroll the whole frame out of view.
+    let mut y = ((scroll as usize) * 2).min(height.saturating_sub(2));
     while y < height {
         let mut spans = Vec::with_capacity(FRAME_WIDTH);
         for x in 0..FRAME_WIDTH {
@@ -261,7 +302,7 @@ fn frame_lines(px: &[u8], scroll: u16) -> Vec<Line<'static>> {
                 let i = (yy * FRAME_WIDTH + x) * 2;
                 let c = u16::from_le_bytes([px[i], px[i + 1]]);
                 let (r, g, b) = scoreboard_protocol::rgb565_to_888(c);
-                Color::Rgb(r, g, b)
+                cell_color(r, g, b, truecolor)
             };
             spans.push(Span::styled("▀", Style::default().fg(color(y)).bg(color(y + 1))));
         }
@@ -332,6 +373,9 @@ pub fn run(args: &[String]) {
         variant: Variant::Normal,
         scroll: 0,
         status: "Enter/r fetch · Tab panes · 1/2/3 tabs · v variant · s/S save · q quit".into(),
+        truecolor: std::env::var("COLORTERM")
+            .map(|v| v.contains("truecolor") || v.contains("24bit"))
+            .unwrap_or(false),
     };
 
     // Preload: --feed selects; --input loads a capture into it.
@@ -386,9 +430,9 @@ pub fn run(args: &[String]) {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
             KeyCode::Tab => app.pane = (app.pane + 1) % 3,
             KeyCode::BackTab => app.pane = (app.pane + 2) % 3,
-            KeyCode::Char('1') => app.tab = Tab::Raw,
-            KeyCode::Char('2') => app.tab = Tab::Game,
-            KeyCode::Char('3') => app.tab = Tab::Frame,
+            KeyCode::Char('1') => app.set_tab(Tab::Raw),
+            KeyCode::Char('2') => app.set_tab(Tab::Game),
+            KeyCode::Char('3') => app.set_tab(Tab::Frame),
             KeyCode::Char('v') => app.variant = app.variant.next(),
             KeyCode::Char('r') => app.fetch_selected(),
             KeyCode::Char('s') => app.save_current(),
@@ -525,7 +569,7 @@ fn draw_detail(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                     );
                     let h = px.len() / (FRAME_WIDTH * 2);
                     (
-                        frame_lines(&px, app.scroll),
+                        frame_lines(&px, app.scroll, app.truecolor),
                         format!(
                             "frame · {} · {}x{}{} (v = variant)",
                             app.variant.label(),
