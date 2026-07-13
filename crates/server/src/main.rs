@@ -84,6 +84,73 @@ pub struct AppState {
     /// observe it at poll granularity). Drives the post-game linger; memory-only —
     /// a restart mid-linger just ends the linger early.
     pub finished: Arc<Mutex<HashMap<String, std::time::Instant>>>,
+    /// The OTA firmware image this server hosts (loaded once from FIRMWARE_DIR
+    /// at startup, integrity-checked). None = feature off: no update offers,
+    /// the /firmware routes 404.
+    pub firmware: Option<Arc<FirmwareDist>>,
+    /// Firmware version each connected board last reported
+    /// (`ClientMsg::DeviceVersion`). Volatile on purpose — devices re-send on
+    /// every connect, and the entry is dropped on disconnect (BoardState says
+    /// None while offline).
+    pub device_versions: Arc<Mutex<HashMap<String, String>>>,
+}
+
+/// The signed metadata half of an OTA dist — exactly the firmware.json that
+/// `sign-firmware` writes and GET /firmware/latest serves.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct FirmwareManifest {
+    pub version: String,
+    pub size: u32,
+    /// Hex sha256 of the raw image bytes.
+    pub sha256: String,
+    /// Hex Ed25519 signature over the raw image bytes (verified on the board
+    /// against its baked-in FW_PUBKEY_HEX; the server just relays it).
+    pub sig: String,
+}
+
+/// A hosted firmware image: manifest + the bytes it describes. Only ever
+/// constructed by `load_firmware_dist`, which refuses a manifest/image pair
+/// that doesn't match — a served image always has the advertised size + hash.
+#[derive(Clone, Debug)]
+pub struct FirmwareDist {
+    pub manifest: FirmwareManifest,
+    /// The raw image; `Bytes` so every download is a cheap refcount clone.
+    pub bytes: axum::body::Bytes,
+}
+
+/// Load the OTA dist from `dir` (firmware.json + firmware.bin).
+/// - Nothing there at all -> Ok(None): the feature is quietly off.
+/// - A dist that doesn't hold together (unreadable/unparseable manifest,
+///   missing image, size or sha256 mismatch) -> Err: the caller must treat it
+///   as a hard startup error rather than ever serving a broken image.
+pub fn load_firmware_dist(dir: &std::path::Path) -> Result<Option<FirmwareDist>, String> {
+    let json_path = dir.join("firmware.json");
+    let bin_path = dir.join("firmware.bin");
+    if !json_path.exists() && !bin_path.exists() {
+        return Ok(None); // no dist published — feature off
+    }
+    let json = std::fs::read_to_string(&json_path)
+        .map_err(|e| format!("reading {}: {e}", json_path.display()))?;
+    let manifest: FirmwareManifest =
+        serde_json::from_str(&json).map_err(|e| format!("parsing {}: {e}", json_path.display()))?;
+    let bytes = std::fs::read(&bin_path).map_err(|e| format!("reading {}: {e}", bin_path.display()))?;
+    if bytes.len() != manifest.size as usize {
+        return Err(format!(
+            "{} is {} bytes but firmware.json says {}",
+            bin_path.display(),
+            bytes.len(),
+            manifest.size
+        ));
+    }
+    let sha = sha256_hex(&bytes);
+    if sha != manifest.sha256 {
+        return Err(format!(
+            "sha256 mismatch: {} hashes to {sha} but firmware.json says {}",
+            bin_path.display(),
+            manifest.sha256
+        ));
+    }
+    Ok(Some(FirmwareDist { manifest, bytes: bytes.into() }))
 }
 
 /// A transient full-screen message for one board. Stored as text so each manifest
@@ -154,6 +221,8 @@ impl AppState {
             frame_grace: Arc::new(Mutex::new(HashSet::new())),
             frame_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             finished: Arc::new(Mutex::new(HashMap::new())),
+            firmware: None,
+            device_versions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -359,7 +428,29 @@ async fn main() {
             mock_catalog()
         }),
     };
-    let state = AppState::new_with_catalog(catalog);
+    let mut state = AppState::new_with_catalog(catalog);
+    // OTA firmware dist: absent = feature quietly off; present-but-broken =
+    // refuse to start (a board must never download an image that won't verify).
+    let fw_dir = PathBuf::from(std::env::var("FIRMWARE_DIR").unwrap_or_else(|_| "./firmware-dist".into()));
+    state.firmware = match load_firmware_dist(&fw_dir) {
+        Ok(Some(dist)) => {
+            tracing::info!(
+                "hosting firmware {} ({} bytes) from {}",
+                dist.manifest.version,
+                dist.manifest.size,
+                fw_dir.display()
+            );
+            Some(Arc::new(dist))
+        }
+        Ok(None) => {
+            tracing::info!("no firmware dist in {} — OTA updates off", fw_dir.display());
+            None
+        }
+        Err(e) => {
+            eprintln!("error: firmware dist in {} is broken: {e}", fw_dir.display());
+            std::process::exit(1);
+        }
+    };
     tokio::spawn(poll_loop(state.clone(), source));
     tokio::spawn(tick_loop(state.clone()));
 
@@ -368,6 +459,8 @@ async fn main() {
         .route("/render/:id", get(get_render))
         .route("/game/:id", get(get_game))
         .route("/sample/:variant", get(get_sample))
+        .route("/firmware/latest", get(get_firmware_latest))
+        .route("/firmware.bin", get(get_firmware_bin))
         .route("/ws", get(ws::ws_handler))
         .with_state(state);
 
@@ -383,6 +476,31 @@ async fn main() {
 
 async fn get_catalog(State(s): State<AppState>) -> Json<Catalog> {
     Json((*s.catalog).clone())
+}
+
+/// GET /firmware/latest — the hosted dist's firmware.json (version/size/
+/// sha256/sig). Plain-text 404 when no dist is hosted.
+async fn get_firmware_latest(State(s): State<AppState>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match &s.firmware {
+        Some(fw) => Json(fw.manifest.clone()).into_response(),
+        None => (axum::http::StatusCode::NOT_FOUND, "no firmware hosted").into_response(),
+    }
+}
+
+/// GET /firmware.bin — the raw image bytes the board downloads over plain
+/// HTTP (it verifies size + sha256 + Ed25519 signature itself, so the
+/// transport needs no trust). Plain-text 404 when no dist is hosted.
+async fn get_firmware_bin(State(s): State<AppState>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match &s.firmware {
+        Some(fw) => (
+            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+            fw.bytes.clone(),
+        )
+            .into_response(),
+        None => (axum::http::StatusCode::NOT_FOUND, "no firmware hosted").into_response(),
+    }
 }
 
 /// A canned example frame for the app's spoiler-settings rows: the same game
@@ -1316,6 +1434,49 @@ pub fn handle_device_timezone(state: &AppState, board_id: &str, tz: &str) {
     push_board_state(state, board_id);
 }
 
+/// The board reported its running firmware version (once, after auth). Record
+/// it and — only when that changes what apps would see — re-push board state,
+/// which carries `firmware_version` and the update offer computed from it.
+pub fn handle_device_version(state: &AppState, board_id: &str, version: String) {
+    let changed = {
+        let mut versions = state.device_versions.lock().unwrap();
+        if versions.get(board_id) == Some(&version) {
+            false
+        } else {
+            tracing::info!("board '{board_id}' runs firmware {version}");
+            versions.insert(board_id.to_string(), version);
+            true
+        }
+    };
+    if changed {
+        push_board_state(state, board_id);
+    }
+}
+
+/// The app pressed Update. Relay the hosted dist to the board's device socket
+/// as `ServerMsg::UpdateFirmware` — the board downloads /firmware.bin from us
+/// and verifies it against these fields. No dist or an offline board is a
+/// logged no-op (nothing to send, or nobody to send it to).
+pub fn handle_update_firmware(state: &AppState, board_id: &str) {
+    let Some(fw) = &state.firmware else {
+        tracing::info!("update requested for '{board_id}' but no firmware dist is hosted — ignored");
+        return;
+    };
+    let msg = ServerMsg::UpdateFirmware {
+        version: fw.manifest.version.clone(),
+        size: fw.manifest.size,
+        sha256: fw.manifest.sha256.clone(),
+        sig: fw.manifest.sig.clone(),
+    };
+    match state.devices.lock().unwrap().get(board_id) {
+        Some(tx) => {
+            let _ = tx.send(Message::Text(serde_json::to_string(&msg).unwrap()));
+            tracing::info!("offered firmware {} to board '{board_id}'", fw.manifest.version);
+        }
+        None => tracing::info!("update requested for offline board '{board_id}' — ignored"),
+    }
+}
+
 /// The app toggled power. Same behavior as the physical button: powering off is
 /// a timed sleep (`apply_command` armed `wake_at`), so the splash shows the same
 /// duration line; powering on cancels any active notice so the games/off-state
@@ -1489,11 +1650,25 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
         out
     };
     let online = state.devices.lock().unwrap().contains_key(board_id);
+    // What the connected device reported (dropped on disconnect, so offline
+    // boards read None) and, ONLY when the hosted dist is strictly newer by
+    // CalVer, the version the app may offer as an update. `version_newer`
+    // treats anything unparseable as never-newer, so junk on either side
+    // simply means no offer.
+    let firmware_version = state.device_versions.lock().unwrap().get(board_id).cloned();
+    let firmware_update = match (&state.firmware, &firmware_version) {
+        (Some(fw), Some(cur)) if version_newer(&fw.manifest.version, cur) => {
+            Some(fw.manifest.version.clone())
+        }
+        _ => None,
+    };
     ServerMsg::BoardState {
         board_id: board_id.to_string(),
         online,
         now_showing,
         config: cfg,
+        firmware_version,
+        firmware_update,
     }
 }
 
@@ -3281,5 +3456,115 @@ mod tests {
         // Focus overrides everything -> only g3.
         cfg.focused_game_id = Some("g3".into());
         assert_eq!(ids(&cfg), vec!["g3".to_string()]);
+    }
+
+    // ---- OTA firmware hosting ----
+
+    /// Build a valid dist dir (image + matching firmware.json) under a unique
+    /// temp path. Returns (dir, image bytes). Sig is any hex string — the
+    /// server relays it opaquely; only the BOARD verifies it.
+    fn write_dist(tag: &str, version: &str) -> (PathBuf, Vec<u8>) {
+        let dir = std::env::temp_dir().join(format!("scoreboard-fw-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = b"\xE9\x00firmware image bytes".to_vec();
+        std::fs::write(dir.join("firmware.bin"), &image).unwrap();
+        let json = serde_json::json!({
+            "version": version,
+            "size": image.len(),
+            "sha256": sha256_hex(&image),
+            "sig": "ab".repeat(64),
+        });
+        std::fs::write(dir.join("firmware.json"), json.to_string()).unwrap();
+        (dir, image)
+    }
+
+    /// The update decision is the pinned CalVer tuple compare: strictly newer
+    /// offers, equal/older doesn't, junk on either side never does.
+    #[test]
+    fn calver_update_compare() {
+        assert!(version_newer("2026.7.1", "2026.7.0"));
+        assert!(!version_newer("2026.7.0", "2026.7.1"));
+        assert!(version_newer("2027.1.0", "2026.12.0"));
+        assert!(!version_newer("2026.12.0", "2027.1.0"));
+        assert!(!version_newer("2026.7.0", "2026.7.0")); // equal = no offer
+        assert!(!version_newer("junk", "2026.7.0"));
+        assert!(!version_newer("2026.8.0", "junk"));
+        assert!(!version_newer("2026.8", "2026.7.0")); // not three parts
+    }
+
+    /// An absent dist quietly disables the feature; a dist whose image doesn't
+    /// match its manifest (size or sha256) is a load ERROR — the caller treats
+    /// that as fatal at startup so a broken image is never served.
+    #[test]
+    fn firmware_dist_load_is_integrity_checked() {
+        // Nothing there at all -> feature off, not an error.
+        let missing = std::env::temp_dir().join(format!("scoreboard-fw-test-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing);
+        assert!(matches!(load_firmware_dist(&missing), Ok(None)));
+
+        // A valid dist loads with the manifest and bytes intact.
+        let (dir, image) = write_dist("valid", "2026.7.0");
+        let dist = load_firmware_dist(&dir).unwrap().expect("dist present");
+        assert_eq!(dist.manifest.version, "2026.7.0");
+        assert_eq!(dist.manifest.size as usize, image.len());
+        assert_eq!(dist.manifest.sha256, sha256_hex(&image));
+        assert_eq!(&dist.bytes[..], &image[..]);
+
+        // Corrupt the image AFTER signing: sha mismatch -> hard error.
+        std::fs::write(dir.join("firmware.bin"), b"tampered bytes!!!!!!!").unwrap();
+        let err = load_firmware_dist(&dir).unwrap_err();
+        assert!(err.contains("sha256") || err.contains("bytes"), "names the mismatch: {err}");
+
+        // Wrong length (manifest size no longer matches) -> hard error too.
+        std::fs::write(dir.join("firmware.bin"), b"short").unwrap();
+        assert!(load_firmware_dist(&dir).is_err());
+
+        // Half a dist (manifest without image) is broken, not absent.
+        std::fs::remove_file(dir.join("firmware.bin")).unwrap();
+        assert!(load_firmware_dist(&dir).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// GET /firmware/latest serves the manifest JSON and /firmware.bin the raw
+    /// image, straight from an integrity-checked temp dist; with no dist both
+    /// routes 404.
+    #[tokio::test]
+    async fn firmware_routes_round_trip() {
+        let (dir, image) = write_dist("routes", "2026.7.0");
+        let mut state = AppState::new_ephemeral();
+        state.firmware = Some(Arc::new(load_firmware_dist(&dir).unwrap().unwrap()));
+
+        let resp = get_firmware_latest(State(state.clone())).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let m: FirmwareManifest = serde_json::from_slice(&body).unwrap();
+        assert_eq!(m.version, "2026.7.0");
+        assert_eq!(m.size as usize, image.len());
+        assert_eq!(m.sha256, sha256_hex(&image));
+        assert_eq!(m.sig, "ab".repeat(64));
+
+        let resp = get_firmware_bin(State(state)).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            "application/octet-stream"
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        assert_eq!(&body[..], &image[..], "served image is byte-identical");
+
+        // No dist hosted -> plain 404s.
+        let bare = AppState::new_ephemeral();
+        let resp = get_firmware_latest(State(bare.clone())).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+        let resp = get_firmware_bin(State(bare)).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

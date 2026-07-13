@@ -25,8 +25,13 @@ pub const FRAME_BYTES: usize = FRAME_PIXELS * 2;
 pub type FrameId = String;
 
 pub fn frame_id(rgb565_le: &[u8]) -> FrameId {
+    sha256_hex(rgb565_le)
+}
+
+/// Hex sha256 of arbitrary bytes (frame ids, firmware images).
+pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
-    h.update(rgb565_le);
+    h.update(bytes);
     hex::encode(h.finalize())
 }
 
@@ -421,6 +426,9 @@ pub enum Command {
     /// and game start-time labels. Unparseable names are ignored.
     SetTimezone { tz: String },
     Rename { name: String },
+    /// Tell this board to download, verify, and install the firmware image the
+    /// server is hosting (the one advertised via `BoardState::firmware_update`).
+    UpdateFirmware,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -466,6 +474,10 @@ pub enum ClientMsg {
     // controller applies a previously exported blob to this board, answered by
     // `ServerMsg::ImportResult`
     ImportSettings { board_id: String, json: String },
+    // device reports its running firmware version (env!("CARGO_PKG_VERSION")),
+    // sent once after auth — the server echoes it into `BoardState` and uses it
+    // to decide whether to offer the hosted image as an update
+    DeviceVersion { version: String },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -483,6 +495,15 @@ pub enum ServerMsg {
         online: bool,
         now_showing: Vec<GameSummary>,
         config: BoardConfig,
+        /// Firmware version the device last reported on this connection
+        /// (`ClientMsg::DeviceVersion`); None while offline or pre-report.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        firmware_version: Option<String>,
+        /// Version of the server-hosted firmware image, present ONLY when it is
+        /// strictly newer (CalVer compare) than `firmware_version` — the app
+        /// shows its Update button exactly when this is Some.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        firmware_update: Option<String>,
     },
     CommandAck {
         req_id: u64,
@@ -499,6 +520,43 @@ pub enum ServerMsg {
     SettingsExport { board_id: String, json: String },
     // outcome of `ClientMsg::ImportSettings` (None = applied successfully)
     ImportResult { board_id: String, error: Option<String> },
+    // to a device: download + install this firmware image. The device fetches
+    // http://{server_host}:{server_port}/firmware.bin (the server it is already
+    // connected to), checks the byte count against `size`, verifies `sha256`
+    // (hex, over the raw image bytes) and `sig` (hex Ed25519 signature over the
+    // raw image bytes, against the baked-in FW_PUBKEY_HEX), writes the inactive
+    // OTA slot, and reboots into it.
+    UpdateFirmware {
+        version: String,
+        size: u32,
+        sha256: String,
+        sig: String,
+    },
+}
+
+// ---- firmware versions (CalVer "YYYY.M.P") ----
+
+/// Parse a CalVer firmware version ("2026.7.0") into its three numeric parts.
+/// None when the string isn't exactly three '.'-separated u32s.
+pub fn parse_calver(v: &str) -> Option<(u32, u32, u32)> {
+    let mut it = v.split('.');
+    let a = it.next()?.parse().ok()?;
+    let b = it.next()?.parse().ok()?;
+    let c = it.next()?.parse().ok()?;
+    if it.next().is_some() {
+        return None;
+    }
+    Some((a, b, c))
+}
+
+/// True iff `candidate` is strictly newer than `current`: both parse as CalVer
+/// and compare greater as a (year, month, patch) tuple. Unparseable versions
+/// are never newer (either side failing to parse means "don't offer/install").
+pub fn version_newer(candidate: &str, current: &str) -> bool {
+    match (parse_calver(candidate), parse_calver(current)) {
+        (Some(c), Some(cur)) => c > cur,
+        _ => false,
+    }
 }
 
 // ---- binary frame framing ----
@@ -545,6 +603,35 @@ pub fn verify_hex(pubkey_hex: &str, msg: &[u8], sig_hex: &str) -> bool {
     let Ok(sig_bytes) = hex::decode(sig_hex) else { return false };
     let Ok(sig): Result<[u8; 64], _> = sig_bytes.try_into() else { return false };
     vk.verify(msg, &Signature::from_bytes(&sig)).is_ok()
+}
+
+#[cfg(test)]
+mod calver_tests {
+    use super::*;
+    #[test]
+    fn parses_calver() {
+        assert_eq!(parse_calver("2026.7.0"), Some((2026, 7, 0)));
+        assert_eq!(parse_calver("2026.12.34"), Some((2026, 12, 34)));
+        assert_eq!(parse_calver("0.1.0"), Some((0, 1, 0)));
+        assert_eq!(parse_calver("2026.7"), None); // too few parts
+        assert_eq!(parse_calver("2026.7.0.1"), None); // too many parts
+        assert_eq!(parse_calver("2026.7.x"), None); // non-numeric
+        assert_eq!(parse_calver(""), None);
+    }
+
+    #[test]
+    fn newer_is_strict_tuple_compare() {
+        assert!(version_newer("2026.7.1", "2026.7.0"));
+        assert!(version_newer("2026.8.0", "2026.7.9"));
+        assert!(version_newer("2027.1.0", "2026.12.9"));
+        // NUMERIC compare, not string compare: 10 > 9.
+        assert!(version_newer("2026.10.0", "2026.9.0"));
+        assert!(!version_newer("2026.7.0", "2026.7.0")); // equal = not newer
+        assert!(!version_newer("2026.6.9", "2026.7.0")); // older
+        // Unparseable on either side = never newer.
+        assert!(!version_newer("garbage", "2026.7.0"));
+        assert!(!version_newer("2026.7.0", "garbage"));
+    }
 }
 
 #[cfg(test)]

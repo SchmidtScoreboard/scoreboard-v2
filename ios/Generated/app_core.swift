@@ -685,6 +685,15 @@ public protocol ScoreboardClientProtocol: AnyObject {
      * idle clock and start-time labels. Invalid names are ignored server-side.
      */
     func setTimezone(boardId: String, tz: String)
+
+    /**
+     * Tell a board to download, verify, and install the server-hosted
+     * firmware image (the one advertised via `on_board_version`'s
+     * `update_available`). The board goes offline while it flashes and
+     * reboots (~a minute); the fresh version report on reconnect is the
+     * confirmation.
+     */
+    func updateFirmware(boardId: String)
 }
 
 open class ScoreboardClient:
@@ -1066,6 +1075,19 @@ open class ScoreboardClient:
         uniffi_app_core_fn_method_scoreboardclient_set_timezone(self.uniffiClonePointer(),
                                                                 FfiConverterString.lower(boardId),
                                                                 FfiConverterString.lower(tz), $0)
+    }
+    }
+
+    /**
+     * Tell a board to download, verify, and install the server-hosted
+     * firmware image (the one advertised via `on_board_version`'s
+     * `update_available`). The board goes offline while it flashes and
+     * reboots (~a minute); the fresh version report on reconnect is the
+     * confirmation.
+     */
+    open func updateFirmware(boardId: String) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_update_firmware(self.uniffiClonePointer(),
+                                                                   FfiConverterString.lower(boardId), $0)
     }
     }
 }
@@ -2030,6 +2052,15 @@ public protocol ClientListener: AnyObject {
      * Outcome of `import_settings`: `None` = applied, `Some` = readable error.
      */
     func onImportResult(boardId: String, error: String?)
+
+    /**
+     * Firmware versions, delivered with every board state push: `version` is
+     * what the device last reported on this connection (None while offline or
+     * pre-report); `update_available` is the server-hosted image's version,
+     * present ONLY when it is strictly newer than `version` — show an Update
+     * button exactly when this is Some.
+     */
+    func onBoardVersion(boardId: String, version: String?, updateAvailable: String?)
 }
 
 // Magic number for the Rust proxy to call using the same mechanism as every other method,
@@ -2277,6 +2308,33 @@ private enum UniffiCallbackInterfaceClientListener {
                 return try uniffiObj.onImportResult(
                     boardId: FfiConverterString.lift(boardId),
                     error: FfiConverterOptionString.lift(error)
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onBoardVersion: { (
+            uniffiHandle: UInt64,
+            boardId: RustBuffer,
+            version: RustBuffer,
+            updateAvailable: RustBuffer,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceClientListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.onBoardVersion(
+                    boardId: FfiConverterString.lift(boardId),
+                    version: FfiConverterOptionString.lift(version),
+                    updateAvailable: FfiConverterOptionString.lift(updateAvailable)
                 )
             }
 
@@ -2682,6 +2740,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_method_scoreboardclient_set_timezone() != 2955 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_app_core_checksum_method_scoreboardclient_update_firmware() != 35440 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_constructor_scoreboardclient_new() != 19144 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2713,6 +2774,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_clientlistener_on_import_result() != 34671 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_clientlistener_on_board_version() != 56934 {
         return InitializationResult.apiChecksumMismatch
     }
 

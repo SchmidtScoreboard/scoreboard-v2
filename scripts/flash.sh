@@ -29,7 +29,17 @@ lsof -t /dev/cu.usbmodem* 2>/dev/null | xargs -r kill 2>/dev/null || true
 sleep 1
 
 echo "==> flashing via $PORT"
-espflash flash -p "$PORT" target/xtensa-esp32s3-none-elf/release/firmware-rs
+# --partition-table: the OTA layout (nvs kept at 0x9000 so creds/brightness/
+#   identity survive; two 3MB app slots for over-the-air updates).
+# --target-app-partition ota_0 + --erase-parts otadata: write the app into
+#   slot 0 and blank the OTA selector so the bootloader boots exactly that
+#   slot. This is both the first-time migration AND the USB recovery path
+#   after a bad OTA.
+espflash flash -p "$PORT" \
+    --partition-table partitions.csv \
+    --target-app-partition ota_0 \
+    --erase-parts otadata \
+    target/xtensa-esp32s3-none-elf/release/firmware-rs
 
 echo
 echo "=============================================================="

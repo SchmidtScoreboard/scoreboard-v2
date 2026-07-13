@@ -91,6 +91,9 @@ final class ListenerAdapter: ClientListener {
     func onImportResult(boardId: String, error: String?) {
         Task { @MainActor in self.model?.handleImportResult(boardId, error) }
     }
+    func onBoardVersion(boardId: String, version: String?, updateAvailable: String?) {
+        Task { @MainActor in self.model?.applyBoardVersion(boardId, version, updateAvailable) }
+    }
 }
 
 /// Everything the app tracks for a single paired board.
@@ -119,6 +122,21 @@ struct BoardInfo {
     var noScrollGameIds: Set<String> = []         // leaderboards pinned to the static top-4
     /// Unix seconds when a button-sleep auto-wakes (nil when not sleeping).
     var wakeAt: UInt64?
+    /// Firmware version the board last reported (nil while offline/unknown).
+    var firmwareVersion: String?
+    /// Server-hosted firmware version, present only when NEWER than reported
+    /// — non-nil is exactly when the Update button shows.
+    var firmwareUpdate: String?
+    /// True from tapping Update until the board reports a changed version or
+    /// comes back online — drives the passive "Updating…" hint. The board
+    /// itself shows real progress on its panel; the app just waits.
+    var updatingFirmware = false
+    /// What the board reported when the update started (a later, different
+    /// report means the update landed).
+    var updatingFromVersion: String?
+    /// The board dropped offline mid-update (expected: it reboots to flash);
+    /// the next online push then ends the "Updating…" hint.
+    var sawOfflineDuringUpdate = false
 }
 
 @MainActor
@@ -675,7 +693,45 @@ final class BoardViewModel: ObservableObject {
         mutate(boardId) {
             $0.nowShowing = nowShowing
             $0.online = online
+            // A firmware update takes the board offline (it reboots to flash);
+            // coming back online afterwards ends the "Updating…" hint — the
+            // version row updating on reconnect is the real feedback.
+            if $0.updatingFirmware {
+                if !online {
+                    $0.sawOfflineDuringUpdate = true
+                } else if $0.sawOfflineDuringUpdate {
+                    $0.updatingFirmware = false
+                    $0.sawOfflineDuringUpdate = false
+                }
+            }
         }
+    }
+
+    /// Firmware versions ride along with every board state push.
+    func applyBoardVersion(_ boardId: String, _ version: String?, _ updateAvailable: String?) {
+        guard boardIds.contains(boardId) else { return }
+        mutate(boardId) {
+            $0.firmwareVersion = version
+            $0.firmwareUpdate = updateAvailable
+            // A changed version report means the update landed (or reverted to
+            // a slot we can name) — either way, stop saying "Updating…".
+            if $0.updatingFirmware, let v = version, v != $0.updatingFromVersion {
+                $0.updatingFirmware = false
+                $0.sawOfflineDuringUpdate = false
+            }
+        }
+    }
+
+    /// Kick off the selected board's over-the-air update (it downloads the
+    /// image the server advertised, verifies it, flashes, and reboots).
+    func updateFirmware() {
+        guard let id = selectedBoardId else { return }
+        mutate(id) {
+            $0.updatingFirmware = true
+            $0.updatingFromVersion = $0.firmwareVersion
+            $0.sawOfflineDuringUpdate = false
+        }
+        client?.updateFirmware(boardId: id)
     }
 
     func applyConfig(_ boardId: String, _ c: UiBoardConfig) {
@@ -1229,6 +1285,8 @@ struct DashboardView: View {
     @State private var showRename = false
     @State private var renameText = ""
     @State private var showRemoveConfirm = false
+    /// Firmware update tapped — confirm before telling the board to reflash.
+    @State private var showUpdateConfirm = false
     /// Import tapped with nothing usable on the clipboard.
     @State private var showImportEmptyAlert = false
     /// Which settings-row explainer card is up (nil = none).
@@ -1301,6 +1359,7 @@ struct DashboardView: View {
             settingsSection
             spoilerSection
             transferSection
+            aboutSection
             removeSection
         }
         // One uniform gap between top-level sections. Individual sections that
@@ -1637,6 +1696,57 @@ struct DashboardView: View {
             Button("OK", role: .cancel) {}
         } message: { outcome in
             Text(outcome.error ?? "This scoreboard now uses the transferred settings.")
+        }
+    }
+
+    /// Versions of the two halves the user can see: the board's firmware (as it
+    /// last reported) and this app. When the server hosts a newer image, an
+    /// Update button appears; after confirming, a passive "Updating…" hint
+    /// holds until the board reports back — the BOARD shows real progress on
+    /// its own panel, so the app deliberately has no progress bar.
+    private var aboutSection: some View {
+        Section {
+            HStack {
+                Text("Scoreboard firmware")
+                Spacer()
+                Text(model.current.firmwareVersion ?? "—")
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            HStack {
+                Text("App")
+                Spacer()
+                Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—")
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            if model.current.updatingFirmware {
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text("Updating… the scoreboard restarts itself when it's done.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            } else if let target = model.current.firmwareUpdate {
+                Button {
+                    showUpdateConfirm = true
+                } label: {
+                    Label("Update to \(target)", systemImage: "arrow.down.circle.fill")
+                        .font(.body.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                }
+                .confirmationDialog(
+                    "Update to \(target)?",
+                    isPresented: $showUpdateConfirm,
+                    titleVisibility: .visible
+                ) {
+                    Button("Update") { model.updateFirmware() }
+                } message: {
+                    Text("The scoreboard downloads the update and restarts itself — about a minute. It keeps working if the update fails.")
+                }
+            }
+        } header: {
+            Text("About")
         }
     }
 

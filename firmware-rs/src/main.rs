@@ -46,11 +46,26 @@ mod ble;
 mod brightness;
 mod config;
 mod creds;
+mod fw_pubkey;
 mod identity;
+mod ota;
 mod seesaw;
 mod ws;
 
 esp_bootloader_esp_idf::esp_app_desc!();
+
+/// esp-backtrace prints the panic, then calls this instead of halting (the
+/// `custom-halt` feature). Halting would strand an OTA'd image forever — no
+/// halted CPU runs a revert watchdog. Rebooting instead feeds ota::boot_check's
+/// three-strike counter, so a panic-looping update reverts itself.
+#[unsafe(no_mangle)]
+extern "Rust" fn custom_halt() -> ! {
+    // Let the panic text drain the UART before the reset takes it.
+    for _ in 0..4_000_000 {
+        core::hint::spin_loop();
+    }
+    esp_hal::system::software_reset()
+}
 
 const ROWS: usize = 32;
 const COLS: usize = 64;
@@ -84,6 +99,13 @@ async fn main(spawner: Spawner) -> ! {
     let sw_int = SoftwareInterruptControl::new(p.SW_INTERRUPT);
     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
 
+    // OTA self-check FIRST — before the HUB75/radio/I2C bring-up that a broken
+    // update could panic in. Together with the rebooting panic handler, this is
+    // the brick-proofing: every boot of an unconfirmed image lands here and
+    // counts a strike before anything riskier runs (see ota::boot_check).
+    let mut flash = FlashStorage::new(p.FLASH);
+    let fw_unconfirmed = ota::boot_check(&mut flash);
+
     // board-core state, shared by the device + render tasks
     let board: &'static SharedBoard = mk_static!(SharedBoard, Mutex::new(Board::new()));
 
@@ -112,11 +134,27 @@ async fn main(spawner: Spawner) -> ! {
 
     // Load persisted state BEFORE the first render, so the board never flashes at
     // full brightness on boot — it powers on at the level you left it.
-    let mut flash = FlashStorage::new(p.FLASH);
     let stored_creds = creds::load(&mut flash);
     if let Some(level) = brightness::load(&mut flash) {
         board.lock().await.set_brightness(level);
         println!("[bright] restored {}%", level);
+    }
+    // The running firmware version, on the boot screen and reported to the
+    // server after every auth (which offers updates when we're behind).
+    board.lock().await.set_version(String::from(env!("CARGO_PKG_VERSION")));
+    println!("[fw] version {}", env!("CARGO_PKG_VERSION"));
+
+    // Flash moves behind a mutex from here on: brightness persistence,
+    // hold-to-reset, BLE credential saves, and the OTA updater all lock it per
+    // short operation, so no path can starve another (reset must ALWAYS work,
+    // including mid-download).
+    let flash: &'static ota::SharedFlash = mk_static!(ota::SharedFlash, Mutex::new(flash));
+    // An unconfirmed image must prove itself (one ws auth) within five minutes
+    // or the watchdog reverts to the previous slot — armed in EVERY mode: an
+    // update that breaks credential loading strands the board in provisioning,
+    // and that must revert too. See ota.rs for the whole strategy.
+    if fw_unconfirmed {
+        spawner.spawn(ota::revert_watchdog(flash).unwrap());
     }
 
     // The render task always runs — it shows games (WiFi mode) or the setup screen
@@ -129,7 +167,7 @@ async fn main(spawner: Spawner) -> ! {
             println!("[creds] loaded from flash; connecting to '{}'…", creds.ssid);
             // Mint-or-load this board's Ed25519 identity; its pubkey is the board_id.
             let mut id_rng = Rng::new();
-            let secret = identity::load_or_create(&mut flash, &mut id_rng);
+            let secret = identity::load_or_create(&mut *flash.lock().await, &mut id_rng);
             let board_id = pubkey_hex(&secret);
             println!("[id] board {}", board_id);
 
@@ -142,7 +180,7 @@ async fn main(spawner: Spawner) -> ! {
 
             // Server: BLE-provisioned host:port, else the compiled default.
             let (server_host, server_port) = if creds.server_host.is_empty() {
-                (format!("{}", config::SERVER_IP), config::SERVER_PORT)
+                (String::from(config::SERVER_HOST), config::SERVER_PORT)
             } else {
                 (creds.server_host.clone(), creds.server_port)
             };
@@ -169,8 +207,10 @@ async fn main(spawner: Spawner) -> ! {
 
             spawner.spawn(connection(controller).unwrap());
             spawner.spawn(net_task(runner).unwrap());
-            spawner.spawn(device(stack, board, board_id, secret, code, server_host, server_port).unwrap());
-
+            spawner.spawn(
+                device(stack, board, board_id, secret, code, server_host, server_port, flash, fw_unconfirmed)
+                    .unwrap(),
+            );
             // encoder (seesaw over I2C / STEMMA QT: SDA=16, SCL=17)
             let i2c = I2c::new(p.I2C0, I2cConfig::default())
                 .expect("i2c")
@@ -221,7 +261,7 @@ async fn main(spawner: Spawner) -> ! {
             };
             let networks = networks_payload(scanned);
             println!("[scan] offering networks: {}", networks.replace('\n', ", "));
-            ble::provision(p.BT, &mut flash, board, networks).await;
+            ble::provision(p.BT, flash, board, networks).await;
         }
     }
 
@@ -316,6 +356,7 @@ async fn render(
 
 /// WebSocket device-protocol loop feeding board-core.
 #[embassy_executor::task]
+#[allow(clippy::too_many_arguments)]
 async fn device(
     stack: Stack<'static>,
     board: &'static SharedBoard,
@@ -324,6 +365,8 @@ async fn device(
     pair_code: String,
     server_host: String,
     server_port: u16,
+    flash: &'static ota::SharedFlash,
+    fw_unconfirmed: bool,
 ) {
     let mut rx = alloc::vec![0u8; 2048];
     let mut tx = alloc::vec![0u8; 2048];
@@ -391,6 +434,9 @@ async fn device(
         // Parse state lives OUTSIDE the select so a read cancelled by an outbox
         // message resumes mid-frame instead of desyncing the stream.
         let mut reader = ws::FrameReader::new();
+        // Set when the server orders a firmware update: the ws loop ends and the
+        // download takes over this task's socket buffers (see below).
+        let mut pending_update: Option<ota::UpdateJob> = None;
 
         loop {
             // Full-duplex on one socket: wait on the next server frame OR an
@@ -423,7 +469,22 @@ async fn device(
                             let msg = ClientMsg::DeviceTimezone { tz: tz.clone() };
                             let _ = ws::write_text(&mut sock, &serde_json::to_vec(&msg).unwrap()).await;
                         }
+                        // Report the running firmware version — the server
+                        // echoes it into BoardState and offers the hosted
+                        // image when we're behind.
+                        let ver = ClientMsg::DeviceVersion {
+                            version: String::from(env!("CARGO_PKG_VERSION")),
+                        };
+                        let _ = ws::write_text(&mut sock, &serde_json::to_vec(&ver).unwrap()).await;
                         println!("[ws] authed (pair code {pair_code})");
+                    }
+                    Ok(ServerMsg::AuthOk) => {
+                        // First contact with the server: if this boot is a fresh
+                        // OTA image, this is the proof it works — persist Valid
+                        // so the revert watchdog stands down.
+                        if fw_unconfirmed {
+                            ota::confirm_running_image(flash).await;
+                        }
                     }
                     Ok(ServerMsg::SetupDone) => {
                         // Paired: leave the pairing screen if it's up.
@@ -434,6 +495,14 @@ async fn device(
                         if let Some(req) = need {
                             let _ = ws::write_text(&mut sock, &serde_json::to_vec(&req).unwrap()).await;
                         }
+                    }
+                    Ok(ServerMsg::UpdateFirmware { version, size, sha256, sig }) => {
+                        // Leave the ws loop: the download reuses this task's
+                        // socket buffers (the connection can't survive that,
+                        // and the server's keepalive stops anyway).
+                        println!("[ota] server offers {version} ({size} bytes)");
+                        pending_update = Some(ota::UpdateJob { version, size, sha256, sig });
+                        break;
                     }
                     _ => {}
                 },
@@ -452,6 +521,36 @@ async fn device(
                     println!("[ws] disconnected; reconnecting");
                     board.lock().await.set_online(false);
                     break;
+                }
+            }
+        }
+
+        // The websocket is done. If the server ordered an update, run the
+        // download HERE, exactly like fetch_timezone: this task owns the
+        // socket buffers, and the ws socket is dropped first so they're free.
+        drop(sock);
+        if let Some(job) = pending_update.take() {
+            board.lock().await.set_online(false);
+            match ota::download_and_install(
+                stack, &mut rx, &mut tx, ip, server_port, &host, &job, flash, board,
+            )
+            .await
+            {
+                Ok(()) => {
+                    // Hold the full bar for a beat so completion is visible,
+                    // then reboot into the new slot. The new image confirms
+                    // itself after its first auth (or reverts — see ota.rs).
+                    println!("[ota] {} installed; rebooting into the new image", job.version);
+                    board.lock().await.set_updating(Some(100));
+                    Timer::after(Duration::from_millis(1500)).await;
+                    esp_hal::system::software_reset();
+                }
+                Err(e) => {
+                    // A failed update is a NON-EVENT: clear the overlay and let
+                    // the outer loop reconnect as if nothing happened — the old
+                    // image never stopped running and otadata never moved.
+                    println!("[ota] update failed: {e}; resuming normal operation");
+                    board.lock().await.set_updating(None);
                 }
             }
         }
@@ -534,12 +633,14 @@ async fn encoder_task(mut enc: Encoder, board: &'static SharedBoard) {
     }
 }
 
-/// Owns the flash peripheral in WiFi mode. Two jobs: (1) persist encoder brightness
+/// Flash housekeeping in WiFi mode. Two jobs: (1) persist encoder brightness
 /// once it settles (~2s after the last turn, so we don't wear flash on every
 /// detent); (2) on hold-to-reset, wipe the Wi-Fi credentials and reboot into BLE
-/// provisioning.
+/// provisioning. The flash itself is SHARED (embassy mutex) with the OTA
+/// updater; both sides lock per short operation, so hold-to-reset keeps working
+/// throughout a firmware download.
 #[embassy_executor::task]
-async fn flash_task(mut flash: FlashStorage<'static>, board: &'static SharedBoard) {
+async fn flash_task(flash: &'static ota::SharedFlash, board: &'static SharedBoard) {
     let mut saved = board.lock().await.brightness();
     let mut target = saved;
     let mut dirty_at: Option<Instant> = None;
@@ -554,7 +655,7 @@ async fn flash_task(mut flash: FlashStorage<'static>, board: &'static SharedBoar
         if reset {
             println!("[reset] clearing Wi-Fi credentials, rebooting into setup");
             Timer::after(Duration::from_millis(1000)).await;
-            creds::clear(&mut flash);
+            creds::clear(&mut *flash.lock().await);
             esp_hal::system::software_reset();
         }
         // Brightness persistence (debounced).
@@ -564,7 +665,7 @@ async fn flash_task(mut flash: FlashStorage<'static>, board: &'static SharedBoar
         }
         if let Some(t) = dirty_at {
             if t.elapsed() >= Duration::from_secs(2) {
-                if target != saved && brightness::save(&mut flash, target) {
+                if target != saved && brightness::save(&mut *flash.lock().await, target) {
                     println!("[bright] persisted {}%", target);
                     saved = target;
                 }

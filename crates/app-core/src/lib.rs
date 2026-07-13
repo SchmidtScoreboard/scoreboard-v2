@@ -142,6 +142,12 @@ pub trait ClientListener: Send + Sync {
     fn on_settings_export(&self, board_id: String, json: String);
     /// Outcome of `import_settings`: `None` = applied, `Some` = readable error.
     fn on_import_result(&self, board_id: String, error: Option<String>);
+    /// Firmware versions, delivered with every board state push: `version` is
+    /// what the device last reported on this connection (None while offline or
+    /// pre-report); `update_available` is the server-hosted image's version,
+    /// present ONLY when it is strictly newer than `version` — show an Update
+    /// button exactly when this is Some.
+    fn on_board_version(&self, board_id: String, version: Option<String>, update_available: Option<String>);
 }
 
 enum Out {
@@ -329,10 +335,11 @@ impl ScoreboardClient {
                                         ServerMsg::Games { games } => {
                                             if let Some(l) = listener.lock().unwrap().as_ref() { l.on_games(to_ui_games(games)); }
                                         }
-                                        ServerMsg::BoardState { board_id: bid, online, now_showing, config } => {
+                                        ServerMsg::BoardState { board_id: bid, online, now_showing, config, firmware_version, firmware_update } => {
                                             if let Some(l) = listener.lock().unwrap().as_ref() {
                                                 l.on_board_state(bid.clone(), to_ui_games(now_showing), online);
-                                                l.on_config(bid, to_ui_board_config(config));
+                                                l.on_config(bid.clone(), to_ui_board_config(config));
+                                                l.on_board_version(bid, firmware_version, firmware_update);
                                             }
                                         }
                                         ServerMsg::SettingsExport { board_id: bid, json } => {
@@ -582,6 +589,15 @@ impl ScoreboardClient {
     pub fn import_settings(&self, board_id: String, json: String) {
         let _ = self.tx.send(Out::ImportSettings(board_id, json));
     }
+
+    /// Tell a board to download, verify, and install the server-hosted
+    /// firmware image (the one advertised via `on_board_version`'s
+    /// `update_available`). The board goes offline while it flashes and
+    /// reboots (~a minute); the fresh version report on reconnect is the
+    /// confirmation.
+    pub fn update_firmware(&self, board_id: String) {
+        let _ = self.tx.send(Out::Command(board_id, Command::UpdateFirmware));
+    }
 }
 
 fn to_ui_sports(cat: Catalog) -> Vec<UiSport> {
@@ -633,6 +649,7 @@ mod wss_tests {
         fn on_pair_failed(&self, _: String) {}
         fn on_settings_export(&self, _: String, _: String) {}
         fn on_import_result(&self, _: String, _: Option<String>) {}
+        fn on_board_version(&self, _: String, _: Option<String>, _: Option<String>) {}
     }
 
     /// The order-of-operations regression: the app launches while the server is

@@ -3926,7 +3926,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.1.0"
+version = "2026.7.0"
 dependencies = [
  "async-trait",
  "axum",

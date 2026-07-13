@@ -4,7 +4,10 @@
 
 [package]
 name = "firmware-rs"
-version = "0.1.0"
+# CalVer "YYYY.M.P" — this IS the firmware version: the board reports
+# env!("CARGO_PKG_VERSION") to the server, and scripts/release-firmware.sh
+# stamps it into firmware-dist/firmware.json. Bump it for every OTA release.
+version = "2026.7.0"
 edition = "2021"
 default-run = "firmware-rs"
 
@@ -25,7 +28,7 @@ static_cell = "2.1.1"
 
 # logging + panic over serial
 esp-println = { version = "0.17.0", features = ["esp32s3"] }
-esp-backtrace = { version = "0.19.0", features = ["esp32s3", "panic-handler", "println"] }
+esp-backtrace = { version = "0.19.0", features = ["esp32s3", "panic-handler", "println", "custom-halt"] }
 esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32s3"] }
 
 # scheduler + radio + network stack
@@ -43,6 +46,13 @@ critical-section = "1.2.0"
 scoreboard-protocol = { path = "../crates/protocol" }
 board-core = { path = "../crates/board-core" }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
+# OTA image verification. Same versions the protocol crate pins, but the
+# firmware needs the INCREMENTAL APIs (sha2's Digest, dalek's StreamVerifier —
+# hazmat feature): a ~1MB image streams to flash and never fits in RAM, so the
+# protocol crate's one-shot sha256_hex/verify_hex helpers can't be used here.
+sha2 = { version = "0.10", default-features = false }
+ed25519-dalek = { version = "2", default-features = false, features = ["hazmat"] }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
 smoltcp = { version = "0.13.0", default-features = false, features = [
   "medium-ethernet",
   "proto-dhcpv4",

@@ -1,6 +1,9 @@
 # Keep the build context small + host-only. crates/* (all workspace members) and
 # Cargo.lock are intentionally included — cargo needs every member's manifest to
 # resolve the workspace, even though only `server` is compiled.
+# NOTE: /firmware-dist must stay IN the context — the Dockerfile copies it into
+# the runtime image (the server hosts it as the OTA firmware release). The
+# anchored /firmware and /firmware-rs patterns match only those exact names.
 /target
 /firmware-rs
 /firmware

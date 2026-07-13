@@ -7,13 +7,13 @@ pub const WIFI_PASSWORD: &str = "your-password";
 
 // Dev server (default build).
 #[cfg(not(feature = "prod"))]
-pub const SERVER_IP: core::net::Ipv4Addr = core::net::Ipv4Addr::new(192, 168, 1, 100);
+pub const SERVER_HOST: &str = "192.168.1.100"; // hostname or IP literal
 #[cfg(not(feature = "prod"))]
 pub const SERVER_PORT: u16 = 7878;
 
-// Prod server (built with `--features prod`).
+// Prod server (built with `--features prod` — what OTA releases ship).
 #[cfg(feature = "prod")]
-pub const SERVER_IP: core::net::Ipv4Addr = core::net::Ipv4Addr::new(10, 0, 0, 100);
+pub const SERVER_HOST: &str = "your-prod-host.example.com";
 #[cfg(feature = "prod")]
 pub const SERVER_PORT: u16 = 7878;
 

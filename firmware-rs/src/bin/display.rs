@@ -22,6 +22,17 @@ use esp_hub75::{
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
+
+/// crate-wide `custom-halt` hook (see main.rs): reboot after a panic instead
+/// of halting. This test bin just needs the symbol to link.
+#[unsafe(no_mangle)]
+extern "Rust" fn custom_halt() -> ! {
+    for _ in 0..4_000_000 {
+        core::hint::spin_loop();
+    }
+    esp_hal::system::software_reset()
+}
+
 const ROWS: usize = 32;
 const COLS: usize = 64;
 const NROWS: usize = compute_rows(ROWS);

@@ -1,0 +1,20 @@
+# OTA partition table for the MatrixPortal S3 (8MB flash).
+#
+# CRITICAL: creds.rs / brightness.rs / identity.rs write RAW flash offsets
+# 0x9000 / 0xA000 / 0xB000. The nvs partition below (0x9000 + 0x6000 =
+# 0x9000..0xEFFF) covers all three sectors, so Wi-Fi creds, brightness, and
+# the board identity survive both the flag-day reflash and every OTA update.
+# Do NOT move or shrink nvs.
+#
+# esp-bootloader-esp-idf's OtaUpdater requires the otadata partition and two
+# non-factory app slots; espflash writes this table (as binary) at 0x8000, the
+# offset the bootloader reads it from. App slots hold 3MB each (image ~1MB).
+# With otadata erased/blank the bootloader falls back to booting ota_0 —
+# scripts/flash.sh erases otadata and targets ota_0 for exactly that reason.
+#
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x6000,
+otadata,  data, ota,     0xf000,   0x2000,
+phy_init, data, phy,     0x11000,  0x1000,
+ota_0,    app,  ota_0,   0x20000,  0x300000,
+ota_1,    app,  ota_1,   0x320000, 0x300000,

@@ -100,6 +100,13 @@ pub struct Board {
     reset_done: bool,           // fill complete — firmware wipes creds + reboots
     reset_done_at: Option<u64>, // for the simulator to auto-dismiss (device reboots first)
 
+    // OTA update in progress: Some(pct) = full-screen updating overlay. Progress
+    // is DEVICE-known (bytes the firmware has downloaded), so this is pure local
+    // rendering — no animation or progress ever rides the network.
+    updating: Option<u8>,
+    // Firmware version shown on the boot screen (env!("CARGO_PKG_VERSION")).
+    version: Option<String>,
+
     /// Messages for the host to send to the server (drained via `take_outgoing`).
     outbox: Vec<ClientMsg>,
 }
@@ -136,6 +143,8 @@ impl Board {
             reset_progress: 0,
             reset_done: false,
             reset_done_at: None,
+            updating: None,
+            version: None,
             outbox: Vec::new(),
         }
     }
@@ -162,6 +171,21 @@ impl Board {
     /// Restore a persisted brightness on boot (clamped to the encoder range).
     pub fn set_brightness(&mut self, level: u8) {
         self.local_brightness = level.clamp(10, 100);
+    }
+
+    /// OTA update progress. `Some(pct)` puts up (or refreshes) the full-screen
+    /// updating overlay — "UPDATING" + progress bar + "DO NOT UNPLUG" — which
+    /// overrides every mode except hold-to-reset (mid-flash-write is the one
+    /// moment the user must not think the board hung and pull the plug).
+    /// `None` clears it back to whatever the mode would normally show (the
+    /// failed-download case: the update must be a non-event).
+    pub fn set_updating(&mut self, progress: Option<u8>) {
+        self.updating = progress.map(|p| p.min(100));
+    }
+
+    /// Firmware version line for the boot screen (env!("CARGO_PKG_VERSION")).
+    pub fn set_version(&mut self, v: String) {
+        self.version = Some(v);
     }
 
     /// True while the hold-to-reset bar is on screen (held past the grace window).
@@ -455,6 +479,14 @@ impl Board {
             scale_buf(&mut buf, self.local_brightness);
             return buf;
         }
+        // An OTA update in flight overrides every mode BELOW reset: the one
+        // state where the user must not conclude the board hung and unplug it
+        // mid-flash-write. (Reset still wins — the escape hatch is sacred.)
+        if let Some(pct) = self.updating {
+            let mut buf = self.screen_updating(pct);
+            scale_buf(&mut buf, self.local_brightness);
+            return buf;
+        }
         let mut buf = match self.mode {
             Mode::Booting => self.screen_boot(),
             Mode::Setup => self.screen_setup(),
@@ -555,7 +587,43 @@ impl Board {
     fn screen_boot(&self) -> Vec<u32> {
         let mut c = Canvas::new();
         center_text(&mut c, "SCOREBOARD", 12, &FONT_5X8, Rgb888::new(0x33, 0xAA, 0xFF));
+        // Firmware version, small and grey under the title — the one place a
+        // user can read the running version off the panel itself.
+        if let Some(v) = &self.version {
+            center_text(&mut c, v, 19, &FONT_4X6, Rgb888::new(0x88, 0x88, 0x88));
+        }
         spinner(&mut c, self.anim, 24);
+        c.into_u32()
+    }
+
+    /// OTA in progress: amber title, the hold-to-reset-style outlined bar
+    /// filled to `pct`, and the warning that matters. Progress comes from the
+    /// firmware's own download counter — device-local, like every animation.
+    fn screen_updating(&self, pct: u8) -> Vec<u32> {
+        let mut c = Canvas::new();
+        let amber = Rgb888::new(0xFF, 0x88, 0x00);
+        center_text(&mut c, "UPDATING", 5, &FONT_5X8, amber);
+
+        // Same outlined-bar language as hold-to-reset (proportional fill).
+        let bar_x = 6i32;
+        let bar_y = 13i32;
+        let bar_w = FRAME_WIDTH as i32 - 12;
+        let bar_h = 8i32;
+        Rectangle::new(Point::new(bar_x, bar_y), Size::new(bar_w as u32, bar_h as u32))
+            .into_styled(PrimitiveStyle::with_stroke(Rgb888::new(0x55, 0x55, 0x55), 1))
+            .draw(&mut c)
+            .ok();
+        let fill_w = (bar_w - 2) as u32 * pct.min(100) as u32 / 100;
+        if fill_w > 0 {
+            Rectangle::new(
+                Point::new(bar_x + 1, bar_y + 1),
+                Size::new(fill_w, (bar_h - 2) as u32),
+            )
+            .into_styled(PrimitiveStyle::with_fill(amber))
+            .draw(&mut c)
+            .ok();
+        }
+        center_text(&mut c, "DO NOT UNPLUG", 27, &FONT_4X6, Rgb888::new(0x88, 0x88, 0x88));
         c.into_u32()
     }
 
@@ -1320,6 +1388,96 @@ mod tests {
             reference.framebuffer(),
             "no content: connect screen with no grace delay"
         );
+    }
+
+    /// The OTA updating screen: distinct at 0/50/100 (the bar visibly fills),
+    /// overrides Running content, and `None` clears it back exactly.
+    #[test]
+    fn updating_screen_progresses_overrides_and_clears() {
+        use scoreboard_protocol::RotationEntry;
+        let solid = |r: u8, g: u8, b: u8| -> Vec<u8> {
+            let px = scoreboard_protocol::rgb888_to_565(r, g, b).to_le_bytes();
+            (0..FRAME_PIXELS).flat_map(|_| px).collect()
+        };
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.tick(0);
+        b.on_manifest(Manifest {
+            rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 1000, scroll: false }],
+            display_on: true,
+            off_state: Default::default(),
+            epoch: 0,
+            brightness: 100,
+        });
+        b.on_frame("a".into(), solid(255, 0, 0));
+        b.tick(100);
+        let running = b.framebuffer();
+        assert_eq!(running[0], 0xFF0000, "content up before the update");
+
+        b.set_updating(Some(0));
+        let at0 = b.framebuffer();
+        assert_ne!(at0, running, "updating overlay overrides Running content");
+        b.set_updating(Some(50));
+        let at50 = b.framebuffer();
+        b.set_updating(Some(100));
+        let at100 = b.framebuffer();
+        assert_ne!(at0, at50, "0% vs 50% must differ (bar fills)");
+        assert_ne!(at50, at100, "50% vs 100% must differ (bar fills)");
+        assert_ne!(at0, at100, "0% vs 100% must differ (bar fills)");
+
+        // A failed download clears the overlay: back to the exact running frame.
+        b.set_updating(None);
+        assert_eq!(b.framebuffer(), running, "None restores the running content");
+    }
+
+    /// Updating overrides every mode below reset — but hold-to-reset still wins:
+    /// the escape hatch must never be hidden, even mid-download.
+    #[test]
+    fn reset_overlay_beats_updating_screen() {
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.tick(0);
+        b.set_updating(Some(50));
+        let mut reference = Board::new();
+        reference.mode = Mode::Running;
+        reference.tick(0);
+        // Same hold on both boards; the one mid-update must render identically.
+        b.button_down(0);
+        reference.button_down(0);
+        b.tick(900); // past the grace window: reset bar up
+        reference.tick(900);
+        assert!(b.reset_active());
+        assert_eq!(
+            b.framebuffer(),
+            reference.framebuffer(),
+            "hold-to-reset renders over the updating screen"
+        );
+
+        // Asleep is overridden too ("every mode except reset").
+        let mut asleep = Board::new();
+        asleep.mode = Mode::Asleep;
+        asleep.tick(0);
+        assert!(asleep.framebuffer().iter().all(|&p| p == 0));
+        asleep.set_updating(Some(50));
+        assert!(
+            asleep.framebuffer().iter().any(|&p| p != 0),
+            "updating overlay lights up even an asleep panel"
+        );
+    }
+
+    /// The boot screen carries the firmware version once the host reports it.
+    #[test]
+    fn boot_screen_shows_version() {
+        let mut plain = Board::new();
+        plain.tick(0);
+        let without = plain.framebuffer();
+
+        let mut b = Board::new();
+        b.set_version("2026.7.0".into());
+        b.tick(0);
+        assert_eq!(b.mode(), Mode::Booting);
+        assert_ne!(b.framebuffer(), without, "version line changes the boot screen");
     }
 
     /// Not a test — renders the new screens to raw RGB888 files for eyeballing.

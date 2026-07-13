@@ -321,6 +321,13 @@ typedef void (*UniffiCallbackInterfaceClientListenerMethod9)(uint64_t, RustBuffe
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD10
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD10
+typedef void (*UniffiCallbackInterfaceClientListenerMethod10)(uint64_t, RustBuffer, RustBuffer, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_CLIENT_LISTENER
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_CLIENT_LISTENER
 typedef struct UniffiVTableCallbackInterfaceClientListener {
@@ -334,6 +341,7 @@ typedef struct UniffiVTableCallbackInterfaceClientListener {
     UniffiCallbackInterfaceClientListenerMethod7 _Nonnull onPairFailed;
     UniffiCallbackInterfaceClientListenerMethod8 _Nonnull onSettingsExport;
     UniffiCallbackInterfaceClientListenerMethod9 _Nonnull onImportResult;
+    UniffiCallbackInterfaceClientListenerMethod10 _Nonnull onBoardVersion;
     UniffiCallbackInterfaceFree _Nonnull uniffiFree;
 } UniffiVTableCallbackInterfaceClientListener;
 
@@ -516,6 +524,11 @@ void uniffi_app_core_fn_method_scoreboardclient_set_team_spoiler(void*_Nonnull p
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_TIMEZONE
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_TIMEZONE
 void uniffi_app_core_fn_method_scoreboardclient_set_timezone(void*_Nonnull ptr, RustBuffer board_id, RustBuffer tz, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_UPDATE_FIRMWARE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_UPDATE_FIRMWARE
+void uniffi_app_core_fn_method_scoreboardclient_update_firmware(void*_Nonnull ptr, RustBuffer board_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_INIT_CALLBACK_VTABLE_CLIENTLISTENER
@@ -1001,6 +1014,12 @@ uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_timezone(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_UPDATE_FIRMWARE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_UPDATE_FIRMWARE
+uint16_t uniffi_app_core_checksum_method_scoreboardclient_update_firmware(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_CONSTRUCTOR_SCOREBOARDCLIENT_NEW
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_CONSTRUCTOR_SCOREBOARDCLIENT_NEW
 uint16_t uniffi_app_core_checksum_constructor_scoreboardclient_new(void
@@ -1064,6 +1083,12 @@ uint16_t uniffi_app_core_checksum_method_clientlistener_on_settings_export(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_IMPORT_RESULT
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_IMPORT_RESULT
 uint16_t uniffi_app_core_checksum_method_clientlistener_on_import_result(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_BOARD_VERSION
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_BOARD_VERSION
+uint16_t uniffi_app_core_checksum_method_clientlistener_on_board_version(void
     
 );
 #endif

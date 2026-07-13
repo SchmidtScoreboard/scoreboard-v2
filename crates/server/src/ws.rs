@@ -125,20 +125,44 @@ async fn device_loop(sender: WsSender, mut receiver: WsReceiver, state: AppState
                 Ok(ClientMsg::DeviceTimezone { tz }) => {
                     crate::handle_device_timezone(&state, &board_id, &tz);
                 }
+                Ok(ClientMsg::DeviceVersion { version }) => {
+                    crate::handle_device_version(&state, &board_id, version);
+                }
                 _ => {}
             }
         }
     }
 
-    state.devices.lock().unwrap().remove(&board_id);
-    // Drop the manifest-dedup entry too: with the board gone nothing can request
-    // its frames, so the eviction pass may reclaim them (reconnect re-renders).
-    state.forget_last_manifest(&board_id);
+    // Tear down only OUR registration. A board that reboots without closing the
+    // socket (OTA reset, power blip) reconnects while this stale loop is still
+    // parked on its dead receiver — when the keepalive finally errors it out,
+    // an unconditional cleanup would clobber the NEW connection's entries and
+    // leave a connected board invisible until its next reconnect.
+    let ours = {
+        let mut devices = state.devices.lock().unwrap();
+        match devices.get(&board_id) {
+            Some(current) if current.same_channel(&tx) => {
+                devices.remove(&board_id);
+                true
+            }
+            _ => false,
+        }
+    };
+    if ours {
+        // Drop the manifest-dedup entry too: with the board gone nothing can
+        // request its frames, so the eviction pass may reclaim them.
+        state.forget_last_manifest(&board_id);
+        // An offline board has no CURRENT firmware version (the contract: None
+        // while offline; devices re-report on every connect).
+        state.device_versions.lock().unwrap().remove(&board_id);
+    }
     keepalive.abort();
     forward.abort();
-    // Mirror the connect path: apps should see "offline" now, not at the next poll.
-    push_board_state(&state, &board_id);
-    tracing::info!("device '{board_id}' disconnected");
+    if ours {
+        // Mirror the connect path: apps should see "offline" now, not at the next poll.
+        push_board_state(&state, &board_id);
+    }
+    tracing::info!("device '{board_id}' disconnected (stale: {})", !ours);
 }
 
 async fn controller_loop(
@@ -409,6 +433,13 @@ pub(crate) fn apply_settings_import(state: &AppState, board_id: &str, json: &str
 }
 
 pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
+    // Firmware update touches no config at all: relay the hosted dist to the
+    // board's device socket (no dist / offline board = logged no-op) and skip
+    // the fold-persist-push cycle below entirely.
+    if matches!(cmd, Command::UpdateFirmware) {
+        crate::handle_update_firmware(state, board_id);
+        return;
+    }
     // Set when the app toggles power, so the board gets the same "SLEEPING" splash
     // (or notice cancel) the physical button produces. Handled outside the config
     // lock below.
@@ -564,6 +595,10 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
                     cfg.timezone = Some(tz);
                 }
             }
+            // Relayed to the device by the early return at the top of this
+            // function — never reaches the config fold. The arm stays so a new
+            // Command variant is still a compile error here.
+            Command::UpdateFirmware => unreachable!("handled before the config fold"),
             // Deliberately no catch-all: a new Command variant should be a compile
             // error here, not a silently ignored no-op.
         }
@@ -591,7 +626,10 @@ mod tests {
     type Client = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
     async fn spawn_server() -> (String, AppState) {
-        let state = AppState::new_ephemeral();
+        spawn_server_with(AppState::new_ephemeral()).await
+    }
+
+    async fn spawn_server_with(state: AppState) -> (String, AppState) {
         let app = Router::new()
             .route("/ws", get(ws_handler))
             .with_state(state.clone());
@@ -599,6 +637,23 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (format!("ws://{addr}/ws"), state)
+    }
+
+    /// An ephemeral state hosting a fake firmware dist at `version`. The sig is
+    /// opaque to the server (only the board verifies it), so any hex works.
+    fn state_with_firmware(version: &str) -> AppState {
+        let mut state = AppState::new_ephemeral();
+        let image = b"\xE9\x00ota image".to_vec();
+        state.firmware = Some(std::sync::Arc::new(crate::FirmwareDist {
+            manifest: crate::FirmwareManifest {
+                version: version.into(),
+                size: image.len() as u32,
+                sha256: sha256_hex(&image),
+                sig: "cd".repeat(64),
+            },
+            bytes: image.into(),
+        }));
+        state
     }
 
     async fn send(ws: &mut Client, m: &ClientMsg) {
@@ -818,6 +873,93 @@ mod tests {
                 assert!(e.contains("pairing"), "unexpected error text: {e}")
             }
             other => panic!("expected an ImportResult error (no export for unpaired), got {other:?}"),
+        }
+    }
+
+    /// Pair a fresh controller with `dev`'s board and subscribe it, consuming
+    /// the initial BoardState push. Returns the subscribed controller.
+    async fn paired_subscriber(url: &str, dev: &mut Client, board_id: &str, secret: &[u8; 32]) -> Client {
+        send(dev, &ClientMsg::EnterSetup { code: "313131".into() }).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (mut ctrl, _) = auth(url, Role::Controller, secret).await;
+        send(&mut ctrl, &ClientMsg::Pair { code: "313131".into() }).await;
+        assert!(recv_until(&mut ctrl, |m| matches!(m, ServerMsg::Paired { .. })).await.is_some());
+        send(&mut ctrl, &ClientMsg::Subscribe { board_ids: vec![board_id.to_string()] }).await;
+        let first = recv_until(&mut ctrl, |m| matches!(m, ServerMsg::BoardState { .. })).await;
+        match first {
+            Some(ServerMsg::BoardState { firmware_version, firmware_update, .. }) => {
+                assert_eq!(firmware_version, None, "no version before the device reports one");
+                assert_eq!(firmware_update, None, "no offer without a reported version");
+            }
+            other => panic!("expected the initial BoardState, got {other:?}"),
+        }
+        ctrl
+    }
+
+    /// DeviceVersion flows into BoardState: the reported version is echoed,
+    /// and `firmware_update` carries the hosted dist's version ONLY while that
+    /// dist is strictly newer (CalVer) than the report.
+    #[tokio::test]
+    async fn device_version_drives_board_state_update_offer() {
+        let (url, _state) = spawn_server_with(state_with_firmware("2026.7.0")).await;
+        let (mut dev, board_id) = auth(&url, Role::Device, &[1u8; 32]).await;
+        let mut ctrl = paired_subscriber(&url, &mut dev, &board_id, &[2u8; 32]).await;
+
+        // An older report -> version echoed + the dist offered as an update.
+        send(&mut dev, &ClientMsg::DeviceVersion { version: "2026.6.0".into() }).await;
+        let pushed = recv_until(&mut ctrl, |m| {
+            matches!(m, ServerMsg::BoardState { firmware_version: Some(_), .. })
+        })
+        .await;
+        match pushed {
+            Some(ServerMsg::BoardState { firmware_version, firmware_update, .. }) => {
+                assert_eq!(firmware_version.as_deref(), Some("2026.6.0"));
+                assert_eq!(firmware_update.as_deref(), Some("2026.7.0"), "dist is newer -> offered");
+            }
+            other => panic!("expected a BoardState push after DeviceVersion, got {other:?}"),
+        }
+
+        // Reporting the dist's own version -> echoed, but nothing to offer.
+        send(&mut dev, &ClientMsg::DeviceVersion { version: "2026.7.0".into() }).await;
+        let pushed = recv_until(&mut ctrl, |m| {
+            matches!(m, ServerMsg::BoardState { firmware_version: Some(v), .. } if v == "2026.7.0")
+        })
+        .await;
+        match pushed {
+            Some(ServerMsg::BoardState { firmware_update, .. }) => {
+                assert_eq!(firmware_update, None, "equal version is NOT an update");
+            }
+            other => panic!("expected a BoardState push after DeviceVersion, got {other:?}"),
+        }
+    }
+
+    /// Command::UpdateFirmware relays the hosted dist to the board's device
+    /// socket as the pinned ServerMsg::UpdateFirmware (version/size/sha256/sig).
+    #[tokio::test]
+    async fn update_firmware_command_reaches_the_device() {
+        let (url, state) = spawn_server_with(state_with_firmware("2026.7.0")).await;
+        let fw = state.firmware.clone().expect("test state hosts a dist");
+        let (mut dev, board_id) = auth(&url, Role::Device, &[1u8; 32]).await;
+        let mut ctrl = paired_subscriber(&url, &mut dev, &board_id, &[2u8; 32]).await;
+
+        send(&mut ctrl, &ClientMsg::Command {
+            req_id: 7,
+            board_id: board_id.clone(),
+            cmd: Command::UpdateFirmware,
+        })
+        .await;
+        let ack = recv_until(&mut ctrl, |m| matches!(m, ServerMsg::CommandAck { .. })).await;
+        assert!(matches!(ack, Some(ServerMsg::CommandAck { req_id: 7, ok: true, .. })));
+
+        let offer = recv_until(&mut dev, |m| matches!(m, ServerMsg::UpdateFirmware { .. })).await;
+        match offer {
+            Some(ServerMsg::UpdateFirmware { version, size, sha256, sig }) => {
+                assert_eq!(version, fw.manifest.version);
+                assert_eq!(size, fw.manifest.size);
+                assert_eq!(sha256, fw.manifest.sha256);
+                assert_eq!(sig, fw.manifest.sig);
+            }
+            other => panic!("expected UpdateFirmware at the device, got {other:?}"),
         }
     }
 }

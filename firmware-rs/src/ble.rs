@@ -13,7 +13,6 @@ use embassy_time::{Duration, Timer};
 use esp_hal::peripherals::BT;
 use esp_println::println;
 use esp_radio::ble::controller::BleConnector;
-use esp_storage::FlashStorage;
 use trouble_host::prelude::*;
 
 const CONNECTIONS_MAX: usize = 1;
@@ -46,7 +45,7 @@ struct Provisioning {
 
 pub async fn provision(
     bt: BT<'static>,
-    flash: &mut FlashStorage<'_>,
+    flash: &'static crate::ota::SharedFlash,
     board: &'static SharedBoard,
     networks: String,
 ) -> ! {
@@ -117,7 +116,7 @@ async fn ble_task<C: Controller, P: PacketPool>(mut runner: Runner<'_, C, P>) {
 async fn gatt_loop<P: PacketPool>(
     server: &Server<'_>,
     conn: &GattConnection<'_, '_, P>,
-    flash: &mut FlashStorage<'_>,
+    flash: &'static crate::ota::SharedFlash,
     board: &'static SharedBoard,
 ) {
     let ssid_h = server.prov.ssid;
@@ -161,7 +160,7 @@ async fn gatt_loop<P: PacketPool>(
                             Some((String::from(h), pt.parse::<u16>().ok()?))
                         })
                         .unwrap_or((String::new(), 0));
-                    if !s.is_empty() && creds::save(flash, s, p, &host, port) {
+                    if !s.is_empty() && creds::save(&mut *flash.lock().await, s, p, &host, port) {
                         println!("[ble] saved creds for '{}' (server '{}') — rebooting", s, host);
                         // Show "WI-FI SAVED" for a beat before the reboot wipes
                         // the panel — otherwise the confirmation is never seen.
