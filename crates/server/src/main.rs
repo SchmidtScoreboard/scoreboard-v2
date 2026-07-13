@@ -99,6 +99,10 @@ pub struct Notice {
     /// knob press mid-notice) yields a different manifest the dedup can't
     /// swallow, restarting the bar with the new expiry.
     pub epoch: u64,
+    /// When the countdown ends, put the board to sleep (the NO GAMES notice
+    /// SAYS "sleeping in 10 seconds" — this makes it true). Guarded by epoch:
+    /// a notice that was replaced or cleared never sleeps the board late.
+    pub then_sleep: bool,
 }
 
 impl AppState {
@@ -1100,7 +1104,7 @@ const NOTICE_GREY: embedded_graphics::pixelcolor::Rgb888 =
     embedded_graphics::pixelcolor::Rgb888::new(160, 160, 160);
 /// How long the "SLEEPING…" splash stays up before the off-state takes over.
 const SPLASH_SECS: u64 = 4;
-const NO_GAMES_SECS: u64 = 5 * 60;
+const NO_GAMES_SECS: u64 = 10;
 
 /// Show a transient full-screen notice on one board. The manifest render
 /// pre-bakes the WHOLE progress-bar sweep as one dwell-timed rotation (see
@@ -1108,18 +1112,20 @@ const NO_GAMES_SECS: u64 = 5 * 60;
 /// zero network traffic per step. One task remains, solely to clear the notice
 /// at expiry — its push re-renders, sees the notice lapsed, and swaps in the
 /// post-notice view.
-pub fn set_notice(state: &AppState, board_id: &str, lines: &[(&str, bool, embedded_graphics::pixelcolor::Rgb888)], secs: u64) {
+pub fn set_notice(state: &AppState, board_id: &str, lines: &[(&str, bool, embedded_graphics::pixelcolor::Rgb888)], secs: u64, then_sleep: bool) {
     // Nonzero and unique per showing (0 = the games rotation).
     static NOTICE_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let now = std::time::Instant::now();
     let until = now + Duration::from_secs(secs);
+    let epoch = NOTICE_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     state.notices.lock().unwrap().insert(
         board_id.to_string(),
         Notice {
             lines: lines.iter().map(|(s, b, c)| (s.to_string(), *b, *c)).collect(),
             created: now,
             until,
-            epoch: NOTICE_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            epoch,
+            then_sleep,
         },
     );
     // (No-op outside a tokio runtime, i.e. in sync tests — the tick loop covers it.)
@@ -1127,11 +1133,43 @@ pub fn set_notice(state: &AppState, board_id: &str, lines: &[(&str, bool, embedd
         let (state, board_id) = (state.clone(), board_id.to_string());
         handle.spawn(async move {
             tokio::time::sleep(Duration::from_secs(secs)).await;
-            // If a NEWER notice replaced ours, its `until` hasn't lapsed: the
-            // re-render still shows it and push_board's dedup swallows the
-            // no-op push — so firing unconditionally is harmless.
-            push_board(&state, &board_id);
+            finish_notice(&state, &board_id, epoch);
         });
+    }
+}
+
+/// Notice countdown expiry: if OUR notice (by epoch) is still the active one,
+/// retire it — and if it promised sleep ("NO GAMES / SLEEPING IN…"), actually
+/// put the board to sleep with the standard timed wake. A replaced or already
+/// -cleared notice does nothing: a newer showing owns the screen, and a game
+/// that appeared mid-countdown (priority 1 clears the notice) must not have
+/// the panel yanked dark 10 seconds later.
+pub(crate) fn finish_notice(state: &AppState, board_id: &str, epoch: u64) {
+    let mine = {
+        let mut notices = state.notices.lock().unwrap();
+        match notices.get(board_id) {
+            Some(n) if n.epoch == epoch => {
+                let sleep = n.then_sleep;
+                notices.remove(board_id);
+                Some(sleep)
+            }
+            _ => None,
+        }
+    };
+    match mine {
+        Some(true) => {
+            let mut cfg = state.config_for(board_id);
+            cfg.power = false;
+            cfg.wake_at = Some(unix_now() + cfg.sleep_hours.max(1) as u64 * 3600);
+            state.configs.lock().unwrap().insert(board_id.to_string(), cfg.clone());
+            state.persist_config(board_id, &cfg);
+            tracing::info!("board '{board_id}': no-games countdown lapsed -> sleep");
+            push_board(state, board_id);
+            push_board_state(state, board_id);
+        }
+        Some(false) => push_board(state, board_id),
+        // Replaced/cleared: the newer showing's own expiry task pushes.
+        None => {}
     }
 }
 
@@ -1143,12 +1181,32 @@ pub fn handle_button(state: &AppState, board_id: &str) {
     let mut cfg = state.config_for(board_id);
     let has_games = !candidate_games(state, &cfg).is_empty();
 
+    // A press DURING the no-games countdown means "yes, sleep now" — don't
+    // make the user wait out the bar they were just shown.
+    let counting_down = state
+        .notices
+        .lock()
+        .unwrap()
+        .get(board_id)
+        .is_some_and(|n| n.then_sleep && std::time::Instant::now() < n.until);
+    if counting_down {
+        state.notices.lock().unwrap().remove(board_id);
+        cfg.power = false;
+        cfg.wake_at = Some(unix_now() + cfg.sleep_hours.max(1) as u64 * 3600);
+        state.configs.lock().unwrap().insert(board_id.to_string(), cfg.clone());
+        state.persist_config(board_id, &cfg);
+        tracing::info!("board '{board_id}': button skipped the no-games countdown -> sleep");
+        push_board(state, board_id);
+        push_board_state(state, board_id);
+        return;
+    }
+
     if !cfg.power {
         // Wake up.
         cfg.power = true;
         cfg.wake_at = None;
         if !has_games {
-            set_notice(state, board_id, &[("NO GAMES", true, NOTICE_WHITE), ("SLEEPING IN", false, NOTICE_GREY), ("5 MINUTES", false, NOTICE_GREY)], NO_GAMES_SECS);
+            set_notice(state, board_id, &[("NO GAMES", true, NOTICE_WHITE), ("SLEEPING IN", false, NOTICE_GREY), ("10 SECONDS", false, NOTICE_GREY)], NO_GAMES_SECS, true);
         }
         tracing::info!("board '{board_id}': button -> wake");
     } else if has_games {
@@ -1157,11 +1215,11 @@ pub fn handle_button(state: &AppState, board_id: &str) {
         cfg.power = false;
         cfg.wake_at = Some(unix_now() + hours as u64 * 3600);
         let caption = if hours == 1 { "FOR 1 HOUR".to_string() } else { format!("FOR {hours} HOURS") };
-        set_notice(state, board_id, &[("SLEEPING", true, NOTICE_WHITE), (&caption, false, NOTICE_GREY)], SPLASH_SECS);
+        set_notice(state, board_id, &[("SLEEPING", true, NOTICE_WHITE), (&caption, false, NOTICE_GREY)], SPLASH_SECS, false);
         tracing::info!("board '{board_id}': button -> sleep {hours}h");
     } else {
         // Powered on but idle: show why the panel is dark, then re-sleep.
-        set_notice(state, board_id, &[("NO GAMES", true, NOTICE_WHITE), ("SLEEPING IN", false, NOTICE_GREY), ("5 MINUTES", false, NOTICE_GREY)], NO_GAMES_SECS);
+        set_notice(state, board_id, &[("NO GAMES", true, NOTICE_WHITE), ("SLEEPING IN", false, NOTICE_GREY), ("10 SECONDS", false, NOTICE_GREY)], NO_GAMES_SECS, true);
         tracing::info!("board '{board_id}': button -> no-games notice");
     }
 
@@ -1268,7 +1326,7 @@ pub fn handle_app_power(state: &AppState, board_id: &str, on: bool) {
     } else {
         let hours = state.config_for(board_id).sleep_hours.max(1);
         let caption = if hours == 1 { "FOR 1 HOUR".to_string() } else { format!("FOR {hours} HOURS") };
-        set_notice(state, board_id, &[("SLEEPING", true, NOTICE_WHITE), (&caption, false, NOTICE_GREY)], SPLASH_SECS);
+        set_notice(state, board_id, &[("SLEEPING", true, NOTICE_WHITE), (&caption, false, NOTICE_GREY)], SPLASH_SECS, false);
     }
 }
 
@@ -2167,8 +2225,52 @@ mod tests {
         assert!(cfg.power, "no-games press must not sleep the board");
         assert!(state.notices.lock().unwrap().contains_key("b1"));
         let m = manifest_for_board(&state, "b1");
-        // Long notices cap the pre-baked bar sweep at 12 steps (board RAM).
-        assert!(m.display_on && m.rotation.len() == 12, "notice rotation shows");
+        // One dwell-timed step per second of countdown.
+        assert!(m.display_on && m.rotation.len() == NO_GAMES_SECS as usize, "notice rotation shows");
+        assert!(
+            state.notices.lock().unwrap().get("b1").unwrap().then_sleep,
+            "the countdown notice re-sleeps the board on expiry"
+        );
+    }
+
+    /// A second press DURING the no-games countdown sleeps immediately — the
+    /// user shouldn't have to wait out the bar they were just shown.
+    #[test]
+    fn second_press_skips_the_no_games_countdown() {
+        let state = AppState::new_ephemeral();
+        state.games.lock().unwrap().clear();
+        handle_button(&state, "b1"); // countdown up, power on
+        assert!(state.config_for("b1").power);
+        handle_button(&state, "b1"); // "yes, sleep now"
+        let cfg = state.config_for("b1");
+        assert!(!cfg.power, "second press sleeps without waiting");
+        assert!(cfg.wake_at.is_some(), "the standard timed wake is armed");
+        assert!(
+            !state.notices.lock().unwrap().contains_key("b1"),
+            "countdown cancelled, straight to the off-state"
+        );
+    }
+
+    /// The countdown's expiry actually sleeps the board — but only if OUR
+    /// notice (by epoch) is still the active one. A cleared/replaced notice
+    /// (a game appeared mid-countdown) must never yank the panel dark late.
+    #[test]
+    fn countdown_expiry_sleeps_unless_superseded() {
+        let state = AppState::new_ephemeral();
+        state.games.lock().unwrap().clear();
+        handle_button(&state, "b1");
+        let epoch = state.notices.lock().unwrap().get("b1").unwrap().epoch;
+        finish_notice(&state, "b1", epoch);
+        let cfg = state.config_for("b1");
+        assert!(!cfg.power, "expiry honors the promise: board is asleep");
+        assert!(cfg.wake_at.is_some());
+
+        // Round 2: the notice is cleared before expiry (as when games appear).
+        handle_button(&state, "b1"); // wake -> new countdown
+        let epoch = state.notices.lock().unwrap().get("b1").unwrap().epoch;
+        state.notices.lock().unwrap().remove("b1");
+        finish_notice(&state, "b1", epoch);
+        assert!(state.config_for("b1").power, "a superseded countdown never sleeps the board");
     }
 
     /// Loading configs drops team favorites for leagues the catalog says have no
@@ -2704,24 +2806,27 @@ mod tests {
     /// The notice frame carries a depleting progress bar: as time passes the render
     /// changes (bar shrinks), so successive manifests differ.
     #[test]
-    fn notice_progress_bar_depletes() {
+    fn notice_progress_bar_fills_toward_the_event() {
         let full = render::render_notice(&[("SLEEPING", true, NOTICE_WHITE)], Some(1.0));
         let half = render::render_notice(&[("SLEEPING", true, NOTICE_WHITE)], Some(0.5));
         let none = render::render_notice(&[("SLEEPING", true, NOTICE_WHITE)], Some(0.0));
         assert_ne!(full.0, half.0, "bar width must change the frame");
         assert_ne!(half.0, none.0);
-        // The bottom row's lit pixel count tracks the remaining fraction.
-        let lit_bottom = |px: &[u8]| {
+        // Reset-button styling: fill GROWS as `remaining` shrinks. Measure a
+        // row inside the outlined box (box top at FRAME_HEIGHT-6).
+        let lit_in_bar = |px: &[u8]| {
+            let y = scoreboard_protocol::FRAME_HEIGHT - 4; // interior fill row
             (0..scoreboard_protocol::FRAME_WIDTH)
                 .filter(|x| {
-                    let i = ((scoreboard_protocol::FRAME_HEIGHT - 1) * scoreboard_protocol::FRAME_WIDTH + x) * 2;
+                    let i = (y * scoreboard_protocol::FRAME_WIDTH + x) * 2;
                     px[i] != 0 || px[i + 1] != 0
                 })
                 .count()
         };
-        assert_eq!(lit_bottom(&full.1), 64);
-        assert_eq!(lit_bottom(&half.1), 32);
-        assert_eq!(lit_bottom(&none.1), 0);
+        let (f, h, n) = (lit_in_bar(&full.1), lit_in_bar(&half.1), lit_in_bar(&none.1));
+        assert!(f < h && h < n, "fill grows toward the event: {f} < {h} < {n}");
+        assert_eq!(f, 2, "all-remaining shows just the outline edges");
+        assert_eq!(n, scoreboard_protocol::FRAME_WIDTH - 8, "none-remaining fills the box");
     }
 
     /// A notice is ONE pre-baked dwell-timed rotation the board steps through on
@@ -2732,11 +2837,11 @@ mod tests {
     fn notice_renders_as_one_dwell_timed_rotation() {
         let state = AppState::new_ephemeral();
         state.games.lock().unwrap().clear();
-        handle_button(&state, "b1"); // idle press -> the 5-minute "NO GAMES" notice
+        handle_button(&state, "b1"); // idle press -> the 10-second "NO GAMES" countdown
         let m = manifest_for_board(&state, "b1");
 
         let steps = m.rotation.len();
-        assert_eq!(steps, 12, "long notices cap the sweep at 12 steps (board RAM)");
+        assert_eq!(steps, NO_GAMES_SECS as usize, "one 1s step per countdown second");
         assert!(m.rotation.iter().all(|e| !e.scroll), "notices never scroll");
         // Distinct content-addressed frames: every step draws a different bar.
         let ids: HashSet<&FrameId> = m.rotation.iter().map(|e| &e.frame_id).collect();
@@ -2751,20 +2856,20 @@ mod tests {
         let total: u64 = m.rotation.iter().map(|e| e.dwell_ms as u64).sum();
         assert_eq!(total, NO_GAMES_SECS * 1000 + 2000);
 
-        // The bar advances (lit bottom-row pixels strictly deplete) across entries.
+        // The bar advances (fill strictly GROWS) across entries — reset style.
         let lit = |id: &FrameId| {
             let frames = state.frames.lock().unwrap();
             let (_, px) = frames.get(id).cloned().expect("sweep frame cached");
+            let y = FRAME_HEIGHT - 4; // interior fill row of the outlined box
             (0..FRAME_WIDTH)
                 .filter(|x| {
-                    let i = ((FRAME_HEIGHT - 1) * FRAME_WIDTH + x) * 2;
+                    let i = (y * FRAME_WIDTH + x) * 2;
                     px[i] != 0 || px[i + 1] != 0
                 })
                 .count()
         };
         let widths: Vec<usize> = m.rotation.iter().map(|e| lit(&e.frame_id)).collect();
-        assert_eq!(widths[0], FRAME_WIDTH, "sweep starts with a full bar");
-        assert!(widths.windows(2).all(|w| w[1] < w[0]), "bar must deplete: {widths:?}");
+        assert!(widths.windows(2).all(|w| w[1] > w[0]), "bar must fill: {widths:?}");
 
         // A mid-notice re-render is byte-identical, so push_board's dedup keeps
         // the board's rotation position — the fix for the stuttering splash.

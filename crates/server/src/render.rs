@@ -722,14 +722,15 @@ fn checkered_flag(c: &mut Canvas, x0: i32) {
 /// whole block is centered vertically. Lines wider than the panel are clipped by
 /// the canvas — keep big lines ≤ ~10 chars and small ones ≤ ~12.
 ///
-/// `remaining` (0.0..=1.0) draws a depleting progress bar along the bottom row
-/// showing how long until the notice goes away; `None` omits it (e.g. the clock).
+/// `remaining` (0.0..=1.0) draws a countdown bar along the bottom — the
+/// hold-to-reset styling (outlined box, fill GROWING toward the event: full
+/// bar = it happens now); `None` omits it (e.g. the clock).
 pub fn render_notice(lines: &[(&str, bool, Rgb888)], remaining: Option<f32>) -> (FrameId, Vec<u8>) {
     let mut c = Canvas::new();
     let line_h = |big: bool| if big { 6 } else { 5 };
     let gap = 2;
     // Reserve the bottom rows for the bar so the text block centers above it.
-    let content_h = if remaining.is_some() { FRAME_HEIGHT as i32 - 3 } else { FRAME_HEIGHT as i32 };
+    let content_h = if remaining.is_some() { FRAME_HEIGHT as i32 - 7 } else { FRAME_HEIGHT as i32 };
     let total: i32 = lines.iter().map(|(_, b, _)| line_h(*b)).sum::<i32>()
         + gap * (lines.len().saturating_sub(1)) as i32;
     let mut y = (content_h - total) / 2;
@@ -741,9 +742,19 @@ pub fn render_notice(lines: &[(&str, bool, Rgb888)], remaining: Option<f32>) -> 
         y += h + gap;
     }
     if let Some(rem) = remaining {
-        let w = (rem.clamp(0.0, 1.0) * FRAME_WIDTH as f32).round() as u32;
+        let bar_x = 4i32;
+        let bar_h = 5u32;
+        let bar_y = FRAME_HEIGHT as i32 - bar_h as i32 - 1;
+        let bar_w = FRAME_WIDTH as u32 - 8;
+        let outline = Rgb888::new(0x55, 0x55, 0x55);
+        fill(&mut c, bar_x, bar_y, bar_w, 1, outline);
+        fill(&mut c, bar_x, bar_y + bar_h as i32 - 1, bar_w, 1, outline);
+        fill(&mut c, bar_x, bar_y, 1, bar_h, outline);
+        fill(&mut c, bar_x + bar_w as i32 - 1, bar_y, 1, bar_h, outline);
+        let done = 1.0 - rem.clamp(0.0, 1.0);
+        let w = (done * (bar_w - 2) as f32).round() as u32;
         if w > 0 {
-            fill(&mut c, 0, FRAME_HEIGHT as i32 - 1, w, 1, GREY);
+            fill(&mut c, bar_x + 1, bar_y + 1, w, bar_h - 2, Rgb888::new(0xFF, 0xAA, 0x00));
         }
     }
     let px = c.to_rgb565();
