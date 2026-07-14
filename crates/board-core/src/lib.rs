@@ -722,6 +722,12 @@ impl Board {
         if self.reset_done {
             draw_checkmark(&mut c, FRAME_WIDTH as i32 / 2, bar_y + bar_h / 2);
         }
+        // Version at the bottom — with OTA updates, the reset screen is the
+        // handiest place to read what's running: hold the knob a moment,
+        // release before the bar fills.
+        if let Some(v) = &self.version {
+            center_text(&mut c, v, 28, &FONT_4X6, Rgb888::new(0x88, 0x88, 0x88));
+        }
         c.into_u32()
     }
 }
