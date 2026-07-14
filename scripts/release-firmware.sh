@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
-# Build + sign an OTA firmware release into firmware-dist/.
+# Build + sign an OTA firmware release into firmware-dist/<channel>/.
 #
-#   1. version <- firmware-rs/Cargo.toml [package].version (CalVer "YYYY.M.P")
+#   usage: release-firmware.sh [stable|beta|dev]     (default: stable)
+#
+#   1. version <- firmware-rs/Cargo.toml [package].version (CalVer "YYYY.M.P").
+#                 Versions live in ONE monotonic space across ALL channels: a
+#                 version that already exists in any channel's firmware.json is
+#                 refused (a dev 2026.7.1 and a different stable 2026.7.1 could
+#                 never disambiguate on-device — bump the patch instead).
 #   2. pubkey  <- sign-firmware --print-pubkey (generates the signing key at
 #                 ~/.config/scoreboard/firmware-signing.key on first use), then
 #                 firmware-rs/src/fw_pubkey.rs is (re)written to match — the
@@ -13,14 +19,26 @@
 #                 FEATURES="" (dev) or FEATURES="foo,bar".
 #   4. image   <- espflash save-image --chip esp32s3 (ELF -> raw app image),
 #                 size-checked against the 3MB ota_0 slot in partitions.csv
-#   5. sign    <- sign-firmware writes firmware-dist/firmware.json
+#   5. sign    <- sign-firmware writes firmware-dist/<channel>/firmware.json
 #                 { version, size, sha256, sig }
 #
 # Commit firmware-dist/ afterwards: the Dockerfile ships it inside the server
-# image (FIRMWARE_DIR=/firmware-dist), which serves GET /firmware/latest and
-# GET /firmware.bin to boards.
+# image (FIRMWARE_DIR=/firmware-dist), which serves GET /firmware/<channel>/latest
+# and GET /firmware/<channel>.bin to boards on that channel (and to beta/dev
+# boards, whose allowed set includes the channels below them).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+CHANNEL="${1-stable}"
+case "$CHANNEL" in
+    stable|beta|dev) ;;
+    *)
+        echo "error: unknown channel '$CHANNEL' (expected stable, beta, or dev)" >&2
+        echo "usage: $0 [stable|beta|dev]" >&2
+        exit 2
+        ;;
+esac
+DIST="firmware-dist/$CHANNEL"
 
 FEATURES="${FEATURES-prod}"
 
@@ -31,7 +49,30 @@ if [[ -z "$VERSION" ]]; then
     exit 1
 fi
 
-echo "==> release version $VERSION (from firmware-rs/Cargo.toml)"
+echo "==> release version $VERSION -> $CHANNEL channel (from firmware-rs/Cargo.toml)"
+
+# CalVer is one monotonic space ACROSS channels AND across time: a release
+# OVERWRITES its channel's firmware.json, so checking only the current jsons
+# would free superseded versions for re-publication as different bytes — the
+# exact on-device ambiguity this guard exists to prevent. The append-only
+# ledger remembers every version ever published.
+LEDGER=firmware-dist/RELEASES.log
+if [[ -f "$LEDGER" ]] && grep -q "^$VERSION " "$LEDGER"; then
+    echo "error: version $VERSION was already published:" >&2
+    grep "^$VERSION " "$LEDGER" | sed 's/^/       /' >&2
+    echo "       versions are shared across ALL channels and never reused — bump firmware-rs/Cargo.toml" >&2
+    exit 1
+fi
+# Belt and braces for ledgers older than this check / hand-edited dists:
+for existing in firmware-dist/*/firmware.json; do
+    [[ -f "$existing" ]] || continue
+    PUBLISHED="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$existing" | head -1)"
+    if [[ "$PUBLISHED" == "$VERSION" ]]; then
+        echo "error: version $VERSION is already published in $existing" >&2
+        echo "       versions are shared across ALL channels — bump firmware-rs/Cargo.toml" >&2
+        exit 1
+    fi
+done
 
 echo "==> signing key / public key"
 PUBKEY="$(cargo run -q -p server --bin sign-firmware -- --print-pubkey)"
@@ -70,7 +111,7 @@ echo "==> building firmware (features: ${FEATURES:-<none>})"
 )
 
 echo "==> converting ELF to app image"
-mkdir -p firmware-dist
+mkdir -p "$DIST"
 # --partition-table/--target-app-partition make espflash verify the image fits
 # the 3MB ota_0 slot (and never pad: non-merge save-image emits the app only).
 # --flash-size 8mb: the MatrixPortal S3's flash — with no chip attached to
@@ -80,16 +121,21 @@ espflash save-image --chip esp32s3 \
     --partition-table firmware-rs/partitions.csv \
     --target-app-partition ota_0 \
     firmware-rs/target/xtensa-esp32s3-none-elf/release/firmware-rs \
-    firmware-dist/firmware.bin
+    "$DIST/firmware.bin"
 
 echo "==> signing"
-cargo run -q -p server --bin sign-firmware -- firmware-dist/firmware.bin "$VERSION"
+cargo run -q -p server --bin sign-firmware -- "$DIST/firmware.bin" "$VERSION" "$CHANNEL"
+
+# Ledger entry: version, channel, sha, date — the permanent no-reuse record.
+SHA="$(sed -n 's/.*"sha256": *"\([^"]*\)".*/\1/p' "$DIST/firmware.json" | head -1)"
+echo "$VERSION $CHANNEL $SHA $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$LEDGER"
 
 echo
 echo "=============================================================="
-echo "  Release $VERSION ready in firmware-dist/"
-echo "  - firmware.bin  ($(wc -c < firmware-dist/firmware.bin | tr -d ' ') bytes)"
+echo "  Release $VERSION ($CHANNEL channel) ready in $DIST/"
+echo "  - firmware.bin  ($(wc -c < "$DIST/firmware.bin" | tr -d ' ') bytes)"
 echo "  - firmware.json (version/size/sha256/sig)"
 echo "  Commit firmware-dist/ (and $PUBKEY_RS if it changed), then deploy"
-echo "  the server — boards see the update on their next BoardState."
+echo "  the server — it serves /firmware/$CHANNEL.bin, and boards whose"
+echo "  channel allows '$CHANNEL' see the update on their next BoardState."
 echo "=============================================================="

@@ -12,7 +12,7 @@
 //! scripts/release-firmware.sh from this tool's output), and the board accepts
 //! only images whose signature verifies against it.
 //!
-//! firmware.json (served by the server as GET /firmware/latest):
+//! firmware.json (served by the server as GET /firmware/{channel}/latest):
 //!   { "version": "2026.7.0", "size": <bytes>, "sha256": "<hex of raw image
 //!     bytes>", "sig": "<hex Ed25519 signature over the raw image bytes>" }
 
@@ -22,7 +22,7 @@ use std::process::exit;
 
 use scoreboard_protocol::{pubkey_hex, sha256_hex, sign_hex, verify_hex};
 
-const USAGE: &str = "usage: sign-firmware <image.bin> <version>\n       sign-firmware --print-pubkey\n\nSigns an OTA firmware image: writes firmware.json (version/size/sha256/sig)\nnext to the image. The Ed25519 seed is read from\n~/.config/scoreboard/firmware-signing.key (generated on first use).";
+const USAGE: &str = "usage: sign-firmware <image.bin> <version> <channel>\n       sign-firmware --print-pubkey\n\nSigns an OTA firmware image: writes firmware.json (version/size/sha256/sig)\nnext to the image. The Ed25519 seed is read from\n~/.config/scoreboard/firmware-signing.key (generated on first use).";
 
 fn key_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| {
@@ -112,9 +112,9 @@ fn main() {
             let seed = load_or_generate_seed(&key_path());
             println!("{}", pubkey_hex(&seed));
         }
-        [image_path, version] => {
+        [image_path, version, channel] => {
             let seed = load_or_generate_seed(&key_path());
-            sign(Path::new(image_path), version, &seed);
+            sign(Path::new(image_path), version, channel, &seed);
         }
         _ => {
             eprintln!("{USAGE}");
@@ -123,7 +123,11 @@ fn main() {
     }
 }
 
-fn sign(image: &Path, version: &str, seed: &[u8; 32]) {
+fn sign(image: &Path, version: &str, channel: &str, seed: &[u8; 32]) {
+    if !matches!(channel, "stable" | "beta" | "dev") {
+        eprintln!("error: channel {channel:?} is not one of stable/beta/dev");
+        exit(1);
+    }
     // The wire contract sends versions around as CalVer "YYYY.M.P"; refuse to
     // publish a dist the server/app/board would never treat as an update.
     if scoreboard_protocol::parse_calver(version).is_none() {
@@ -149,7 +153,10 @@ fn sign(image: &Path, version: &str, seed: &[u8; 32]) {
     // firmware feeds its verifier the same prefix): without this, anyone on
     // the plain-HTTP path could replay an old signed release under a new
     // version string. The board also refuses non-newer versions outright.
-    let mut message = format!("scoreboard-fw:{version}:{size}:").into_bytes();
+    // Channel rides inside the signed message too: an on-path attacker can
+    // replay offers but can never RELABEL one — a dev image only verifies as
+    // channel=dev on the device.
+    let mut message = format!("scoreboard-fw:{version}:{size}:{channel}:").into_bytes();
     message.extend_from_slice(&bytes);
     let sig = sign_hex(seed, &message);
     let pubkey = pubkey_hex(seed);
@@ -161,6 +168,7 @@ fn sign(image: &Path, version: &str, seed: &[u8; 32]) {
 
     let json = serde_json::json!({
         "version": version,
+        "channel": channel,
         "size": size,
         "sha256": sha256,
         "sig": sig,

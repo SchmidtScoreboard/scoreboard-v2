@@ -496,12 +496,12 @@ async fn device(
                             let _ = ws::write_text(&mut sock, &serde_json::to_vec(&req).unwrap()).await;
                         }
                     }
-                    Ok(ServerMsg::UpdateFirmware { version, size, sha256, sig }) => {
+                    Ok(ServerMsg::UpdateFirmware { version, size, sha256, sig, path, channel }) => {
                         // Leave the ws loop: the download reuses this task's
                         // socket buffers (the connection can't survive that,
                         // and the server's keepalive stops anyway).
-                        println!("[ota] server offers {version} ({size} bytes)");
-                        pending_update = Some(ota::UpdateJob { version, size, sha256, sig });
+                        println!("[ota] server offers {version} ({channel}) at {path} ({size} bytes)");
+                        pending_update = Some(ota::UpdateJob { version, size, sha256, sig, path, channel });
                         break;
                     }
                     _ => {}

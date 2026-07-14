@@ -205,6 +205,55 @@ pub struct SportConfig {
     pub spoiler_team_ids: Vec<String>,
 }
 
+/// Which firmware release channel a board follows. Channels are cumulative
+/// toward Dev: a board may always be offered anything from the channels BELOW
+/// its own (stable ⊆ beta ⊆ dev), newest CalVer wins — so a beta board whose
+/// beta build is older than the current stable release gets the stable one.
+/// All channels share ONE CalVer space (`scripts/release-firmware.sh` refuses
+/// a version that exists in any channel), so a version string identifies a
+/// unique image regardless of where it was published.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum FwChannel {
+    #[default]
+    Stable,
+    Beta,
+    Dev,
+}
+
+impl FwChannel {
+    /// Every channel, in stable-first order.
+    pub const ALL: [FwChannel; 3] = [FwChannel::Stable, FwChannel::Beta, FwChannel::Dev];
+
+    /// The dist-directory / route-segment name ("stable" | "beta" | "dev").
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FwChannel::Stable => "stable",
+            FwChannel::Beta => "beta",
+            FwChannel::Dev => "dev",
+        }
+    }
+
+    /// Inverse of [`as_str`](Self::as_str) — used to parse route segments.
+    pub fn from_name(s: &str) -> Option<FwChannel> {
+        match s {
+            "stable" => Some(FwChannel::Stable),
+            "beta" => Some(FwChannel::Beta),
+            "dev" => Some(FwChannel::Dev),
+            _ => None,
+        }
+    }
+
+    /// The offer matrix: which channels' dists a board on this channel may be
+    /// offered. Stable -> {stable}; Beta -> {stable, beta}; Dev -> all three.
+    pub fn allowed(self) -> &'static [FwChannel] {
+        match self {
+            FwChannel::Stable => &[FwChannel::Stable],
+            FwChannel::Beta => &[FwChannel::Stable, FwChannel::Beta],
+            FwChannel::Dev => &[FwChannel::Stable, FwChannel::Beta, FwChannel::Dev],
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct BoardConfig {
     pub brightness: u8,
@@ -258,6 +307,11 @@ pub struct BoardConfig {
     /// and game start-time labels track where the BOARD lives.
     #[serde(default)]
     pub timezone: Option<String>,
+    /// Firmware release channel this board follows (`Command::SetFwChannel`).
+    /// Durable per-board config, but deliberately NOT part of
+    /// `PortableSettings` — see the note there.
+    #[serde(default)]
+    pub fw_channel: FwChannel,
 }
 
 fn default_sleep_hours() -> u32 {
@@ -280,6 +334,11 @@ pub const PORTABLE_SETTINGS_VERSION: u32 = 1;
 /// server). Deliberately excludes board identity (`name`), live state
 /// (`power`/`wake_at`), and per-game one-offs (extra/excluded/focused/spoiler
 /// game ids — those ids expire with the games they point at).
+///
+/// `fw_channel` is durable per-board config but is ALSO deliberately excluded:
+/// importing a friend's settings must never enroll a board in beta/dev
+/// firmware — release-channel membership is a per-board decision, not a
+/// portable preference.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct PortableSettings {
     /// Format marker + version. Named `scoreboard_settings` so an exported blob
@@ -371,6 +430,7 @@ impl Default for BoardConfig {
             revealed_game_ids: Vec::new(),
             no_scroll_game_ids: Vec::new(),
             timezone: None,
+            fw_channel: FwChannel::default(),
         }
     }
 }
@@ -426,6 +486,11 @@ pub enum Command {
     /// and game start-time labels. Unparseable names are ignored.
     SetTimezone { tz: String },
     Rename { name: String },
+    /// Which firmware release channel this board follows. Takes effect
+    /// immediately: the server persists it and re-pushes `BoardState`, whose
+    /// `firmware_update` offer is recomputed against the new channel's
+    /// allowed dists.
+    SetFwChannel { channel: FwChannel },
     /// Tell this board to download, verify, and install the firmware image the
     /// server is hosting (the one advertised via `BoardState::firmware_update`).
     UpdateFirmware,
@@ -520,17 +585,24 @@ pub enum ServerMsg {
     SettingsExport { board_id: String, json: String },
     // outcome of `ClientMsg::ImportSettings` (None = applied successfully)
     ImportResult { board_id: String, error: Option<String> },
-    // to a device: download + install this firmware image. The device fetches
-    // http://{server_host}:{server_port}/firmware.bin (the server it is already
-    // connected to), checks the byte count against `size`, verifies `sha256`
-    // (hex, over the raw image bytes) and `sig` (hex Ed25519 signature over the
-    // raw image bytes, against the baked-in FW_PUBKEY_HEX), writes the inactive
-    // OTA slot, and reboots into it.
+    // to a device: download + install this firmware image. The device GETs
+    // `path` (e.g. "/firmware/beta.bin") from http://{server_host}:{server_port}
+    // (the server it is already connected to), checks the byte count against
+    // `size`, verifies `sha256` (hex, over the raw image bytes) and `sig` (hex
+    // Ed25519 signature over the raw image bytes, against the baked-in
+    // FW_PUBKEY_HEX), writes the inactive OTA slot, and reboots into it. The
+    // path points at the CHANNEL the picked dist lives in (a beta board whose
+    // best offer is the stable image is sent the stable path).
     UpdateFirmware {
         version: String,
         size: u32,
         sha256: String,
         sig: String,
+        path: String,
+        /// The channel the picked dist lives in ("stable"/"beta"/"dev"). Bound
+        /// into the Ed25519 signature alongside version and size, so a dev
+        /// image can never verify under a relabeled offer.
+        channel: String,
     },
 }
 
@@ -631,6 +703,63 @@ mod calver_tests {
         // Unparseable on either side = never newer.
         assert!(!version_newer("garbage", "2026.7.0"));
         assert!(!version_newer("2026.7.0", "garbage"));
+    }
+}
+
+#[cfg(test)]
+mod fw_channel_tests {
+    use super::*;
+
+    #[test]
+    fn names_round_trip() {
+        for chan in FwChannel::ALL {
+            assert_eq!(FwChannel::from_name(chan.as_str()), Some(chan));
+        }
+        assert_eq!(FwChannel::from_name("nightly"), None);
+        assert_eq!(FwChannel::from_name("Stable"), None); // route names are lowercase
+        assert_eq!(FwChannel::default(), FwChannel::Stable);
+    }
+
+    #[test]
+    fn offer_matrix_allowed_sets() {
+        assert_eq!(FwChannel::Stable.allowed(), &[FwChannel::Stable]);
+        assert_eq!(FwChannel::Beta.allowed(), &[FwChannel::Stable, FwChannel::Beta]);
+        assert_eq!(
+            FwChannel::Dev.allowed(),
+            &[FwChannel::Stable, FwChannel::Beta, FwChannel::Dev]
+        );
+    }
+
+    /// An old (pre-channel) persisted config deserializes onto Stable.
+    #[test]
+    fn config_missing_channel_defaults_to_stable() {
+        let cfg: BoardConfig = serde_json::from_str("{\"brightness\":80,\"power\":true,\"sports\":[]}").unwrap();
+        assert_eq!(cfg.fw_channel, FwChannel::Stable);
+    }
+
+    /// fw_channel is durable config but deliberately NOT portable: exporting a
+    /// beta board's settings and importing them elsewhere must not enroll the
+    /// target board in beta — and the export must not leak the channel at all.
+    #[test]
+    fn portable_settings_do_not_move_fw_channel() {
+        let mut source = BoardConfig { fw_channel: FwChannel::Beta, ..Default::default() };
+        source.brightness = 40;
+        let blob = PortableSettings::from(&source);
+        let json = serde_json::to_string(&blob).unwrap();
+        assert!(!json.contains("channel"), "channel leaked into the export: {json}");
+
+        let mut target = BoardConfig::default();
+        assert_eq!(target.fw_channel, FwChannel::Stable);
+        let parsed: PortableSettings = serde_json::from_str(&json).unwrap();
+        parsed.apply_to(&mut target);
+        assert_eq!(target.brightness, 40, "durable prefs DO transfer");
+        assert_eq!(target.fw_channel, FwChannel::Stable, "channel must not transfer");
+
+        // And the other direction: importing a stable board's settings onto a
+        // dev board must not knock the dev board off its channel either.
+        let mut dev_board = BoardConfig { fw_channel: FwChannel::Dev, ..Default::default() };
+        parsed.apply_to(&mut dev_board);
+        assert_eq!(dev_board.fw_channel, FwChannel::Dev);
     }
 }
 

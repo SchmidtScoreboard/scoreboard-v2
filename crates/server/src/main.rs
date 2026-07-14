@@ -84,10 +84,11 @@ pub struct AppState {
     /// observe it at poll granularity). Drives the post-game linger; memory-only —
     /// a restart mid-linger just ends the linger early.
     pub finished: Arc<Mutex<HashMap<String, std::time::Instant>>>,
-    /// The OTA firmware image this server hosts (loaded once from FIRMWARE_DIR
-    /// at startup, integrity-checked). None = feature off: no update offers,
-    /// the /firmware routes 404.
-    pub firmware: Option<Arc<FirmwareDist>>,
+    /// The OTA firmware images this server hosts, one per release channel
+    /// (loaded once from FIRMWARE_DIR/{stable,beta,dev} at startup, each
+    /// integrity-checked). An absent channel is simply off: its routes 404 and
+    /// it never enters an offer. Empty map = OTA updates off entirely.
+    pub firmware: HashMap<FwChannel, Arc<FirmwareDist>>,
     /// Firmware version each connected board last reported
     /// (`ClientMsg::DeviceVersion`). Volatile on purpose — devices re-send on
     /// every connect, and the entry is dropped on disconnect (BoardState says
@@ -96,15 +97,20 @@ pub struct AppState {
 }
 
 /// The signed metadata half of an OTA dist — exactly the firmware.json that
-/// `sign-firmware` writes and GET /firmware/latest serves.
+/// `sign-firmware` writes and GET /firmware/{channel}/latest serves.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct FirmwareManifest {
     pub version: String,
+    /// Release channel this dist was signed FOR ("stable"/"beta"/"dev") — part
+    /// of the signed message, and checked against the directory it was loaded
+    /// from so a dist can't be smuggled between channels by a file move.
+    pub channel: String,
     pub size: u32,
     /// Hex sha256 of the raw image bytes.
     pub sha256: String,
-    /// Hex Ed25519 signature over the raw image bytes (verified on the board
-    /// against its baked-in FW_PUBKEY_HEX; the server just relays it).
+    /// Hex Ed25519 signature over "scoreboard-fw:{version}:{size}:{channel}:"
+    /// + the raw image bytes (verified on the board against its baked-in
+    /// FW_PUBKEY_HEX; the server just relays it).
     pub sig: String,
 }
 
@@ -123,7 +129,10 @@ pub struct FirmwareDist {
 /// - A dist that doesn't hold together (unreadable/unparseable manifest,
 ///   missing image, size or sha256 mismatch) -> Err: the caller must treat it
 ///   as a hard startup error rather than ever serving a broken image.
-pub fn load_firmware_dist(dir: &std::path::Path) -> Result<Option<FirmwareDist>, String> {
+pub fn load_firmware_dist(
+    dir: &std::path::Path,
+    expected_channel: Option<&str>,
+) -> Result<Option<FirmwareDist>, String> {
     let json_path = dir.join("firmware.json");
     let bin_path = dir.join("firmware.bin");
     if !json_path.exists() && !bin_path.exists() {
@@ -150,7 +159,74 @@ pub fn load_firmware_dist(dir: &std::path::Path) -> Result<Option<FirmwareDist>,
             manifest.sha256
         ));
     }
+    // The channel is inside the signed message, so a dist moved (or copied)
+    // into another channel's directory would fail on-device anyway — but fail
+    // it HERE, loudly, at startup rather than on a customer's wall.
+    if let Some(expected) = expected_channel {
+        if manifest.channel != expected {
+            return Err(format!(
+                "{} was signed for channel {:?} but is hosted as {expected:?} — dists cannot move between channels",
+                json_path.display(),
+                manifest.channel,
+            ));
+        }
+    }
     Ok(Some(FirmwareDist { manifest, bytes: bytes.into() }))
+}
+
+/// Load every release channel's dist from `base` (FIRMWARE_DIR):
+/// `{base}/stable`, `{base}/beta`, `{base}/dev`. Channels are independent —
+/// an absent dir just leaves that channel off — but any channel that IS
+/// present must hold together (`load_firmware_dist`'s checks), and flat
+/// pre-channel files at `base` itself are refused rather than silently
+/// unserved: both are hard startup errors.
+pub fn load_firmware_dists(
+    base: &std::path::Path,
+) -> Result<HashMap<FwChannel, Arc<FirmwareDist>>, String> {
+    if base.join("firmware.json").exists() || base.join("firmware.bin").exists() {
+        return Err(format!(
+            "{} holds a flat (pre-channel) dist — move firmware.bin/firmware.json into {}",
+            base.display(),
+            base.join("stable").display()
+        ));
+    }
+    let mut dists = HashMap::new();
+    for chan in FwChannel::ALL {
+        let dir = base.join(chan.as_str());
+        if let Some(dist) =
+            load_firmware_dist(&dir, Some(chan.as_str())).map_err(|e| format!("{} channel: {e}", chan.as_str()))?
+        {
+            dists.insert(chan, Arc::new(dist));
+        }
+    }
+    Ok(dists)
+}
+
+/// THE update-offer computation, shared verbatim by `board_state_msg` (which
+/// lights the app's Update button) and `handle_update_firmware` (which acts on
+/// the press) — one implementation so the two can never drift.
+///
+/// Among the hosted dists in the board's channel's allowed set (stable ⊆ beta
+/// ⊆ dev — see `FwChannel::allowed`), pick the newest by CalVer, and offer it
+/// only when strictly newer than the version the board reports running.
+/// Returns the winning dist's OWN channel too: the download path is where the
+/// dist lives, not what the board is enrolled in (a beta board whose best
+/// offer is the stable image downloads /firmware/stable.bin).
+pub fn offer_for<'a>(
+    dists: &'a HashMap<FwChannel, Arc<FirmwareDist>>,
+    channel: FwChannel,
+    running: &str,
+) -> Option<(FwChannel, &'a Arc<FirmwareDist>)> {
+    channel
+        .allowed()
+        .iter()
+        .filter_map(|c| dists.get(c).map(|fw| (*c, fw)))
+        // Unparseable versions sort as None (< every Some) and are then thrown
+        // out by `version_newer` anyway — junk can never win an offer. Ties
+        // are impossible: release-firmware.sh refuses a version that already
+        // exists in ANY channel.
+        .max_by_key(|(_, fw)| parse_calver(&fw.manifest.version))
+        .filter(|(_, fw)| version_newer(&fw.manifest.version, running))
 }
 
 /// A transient full-screen message for one board. Stored as text so each manifest
@@ -221,7 +297,7 @@ impl AppState {
             frame_grace: Arc::new(Mutex::new(HashSet::new())),
             frame_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             finished: Arc::new(Mutex::new(HashMap::new())),
-            firmware: None,
+            firmware: HashMap::new(),
             device_versions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -429,22 +505,27 @@ async fn main() {
         }),
     };
     let mut state = AppState::new_with_catalog(catalog);
-    // OTA firmware dist: absent = feature quietly off; present-but-broken =
-    // refuse to start (a board must never download an image that won't verify).
+    // OTA firmware dists, one per channel: an absent channel is quietly off;
+    // any present-but-broken channel refuses startup (a board must never
+    // download an image that won't verify).
     let fw_dir = PathBuf::from(std::env::var("FIRMWARE_DIR").unwrap_or_else(|_| "./firmware-dist".into()));
-    state.firmware = match load_firmware_dist(&fw_dir) {
-        Ok(Some(dist)) => {
-            tracing::info!(
-                "hosting firmware {} ({} bytes) from {}",
-                dist.manifest.version,
-                dist.manifest.size,
-                fw_dir.display()
-            );
-            Some(Arc::new(dist))
-        }
-        Ok(None) => {
-            tracing::info!("no firmware dist in {} — OTA updates off", fw_dir.display());
-            None
+    state.firmware = match load_firmware_dists(&fw_dir) {
+        Ok(dists) => {
+            if dists.is_empty() {
+                tracing::info!("no firmware dists in {} — OTA updates off", fw_dir.display());
+            }
+            for chan in FwChannel::ALL {
+                if let Some(dist) = dists.get(&chan) {
+                    tracing::info!(
+                        "hosting {} firmware {} ({} bytes) from {}",
+                        chan.as_str(),
+                        dist.manifest.version,
+                        dist.manifest.size,
+                        fw_dir.join(chan.as_str()).display()
+                    );
+                }
+            }
+            dists
         }
         Err(e) => {
             eprintln!("error: firmware dist in {} is broken: {e}", fw_dir.display());
@@ -459,8 +540,11 @@ async fn main() {
         .route("/render/:id", get(get_render))
         .route("/game/:id", get(get_game))
         .route("/sample/:variant", get(get_sample))
-        .route("/firmware/latest", get(get_firmware_latest))
-        .route("/firmware.bin", get(get_firmware_bin))
+        // Per-channel OTA routes: "/firmware/stable.bin" + "/firmware/stable/latest"
+        // (and beta/dev). No un-channeled aliases — no OTA-capable board ever
+        // shipped speaking the old flat paths.
+        .route("/firmware/:chan/latest", get(get_firmware_latest))
+        .route("/firmware/:file", get(get_firmware_bin))
         .route("/ws", get(ws::ws_handler))
         .with_state(state);
 
@@ -478,28 +562,38 @@ async fn get_catalog(State(s): State<AppState>) -> Json<Catalog> {
     Json((*s.catalog).clone())
 }
 
-/// GET /firmware/latest — the hosted dist's firmware.json (version/size/
-/// sha256/sig). Plain-text 404 when no dist is hosted.
-async fn get_firmware_latest(State(s): State<AppState>) -> axum::response::Response {
+/// GET /firmware/{stable|beta|dev}/latest — that channel's firmware.json
+/// (version/size/sha256/sig). Plain-text 404 for an unknown channel name or a
+/// channel with no dist hosted.
+async fn get_firmware_latest(
+    State(s): State<AppState>,
+    axum::extract::Path(chan): axum::extract::Path<String>,
+) -> axum::response::Response {
     use axum::response::IntoResponse;
-    match &s.firmware {
+    match FwChannel::from_name(&chan).and_then(|c| s.firmware.get(&c)) {
         Some(fw) => Json(fw.manifest.clone()).into_response(),
-        None => (axum::http::StatusCode::NOT_FOUND, "no firmware hosted").into_response(),
+        None => (axum::http::StatusCode::NOT_FOUND, "no firmware hosted for that channel").into_response(),
     }
 }
 
-/// GET /firmware.bin — the raw image bytes the board downloads over plain
-/// HTTP (it verifies size + sha256 + Ed25519 signature itself, so the
-/// transport needs no trust). Plain-text 404 when no dist is hosted.
-async fn get_firmware_bin(State(s): State<AppState>) -> axum::response::Response {
+/// GET /firmware/{stable|beta|dev}.bin — that channel's raw image bytes, the
+/// path `ServerMsg::UpdateFirmware` points boards at. Plain HTTP is fine: the
+/// board verifies size + sha256 + Ed25519 signature itself, so the transport
+/// needs no trust. Plain-text 404 for anything that isn't a hosted channel's
+/// "<channel>.bin".
+async fn get_firmware_bin(
+    State(s): State<AppState>,
+    axum::extract::Path(file): axum::extract::Path<String>,
+) -> axum::response::Response {
     use axum::response::IntoResponse;
-    match &s.firmware {
+    let chan = file.strip_suffix(".bin").and_then(FwChannel::from_name);
+    match chan.and_then(|c| s.firmware.get(&c)) {
         Some(fw) => (
             [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
             fw.bytes.clone(),
         )
             .into_response(),
-        None => (axum::http::StatusCode::NOT_FOUND, "no firmware hosted").into_response(),
+        None => (axum::http::StatusCode::NOT_FOUND, "no firmware hosted for that channel").into_response(),
     }
 }
 
@@ -1453,13 +1547,24 @@ pub fn handle_device_version(state: &AppState, board_id: &str, version: String) 
     }
 }
 
-/// The app pressed Update. Relay the hosted dist to the board's device socket
-/// as `ServerMsg::UpdateFirmware` — the board downloads /firmware.bin from us
-/// and verifies it against these fields. No dist or an offline board is a
-/// logged no-op (nothing to send, or nobody to send it to).
+/// The app pressed Update. Re-run the SAME pick `board_state_msg` advertised
+/// (`offer_for`: the board's channel, its reported version, the hosted dists)
+/// and relay that dist to the board's device socket as
+/// `ServerMsg::UpdateFirmware` — the board downloads `path` from us and
+/// verifies the image against the other fields. No offerable dist, no reported
+/// version, or an offline board is a logged no-op (nothing to send, or nobody
+/// to send it to).
 pub fn handle_update_firmware(state: &AppState, board_id: &str) {
-    let Some(fw) = &state.firmware else {
-        tracing::info!("update requested for '{board_id}' but no firmware dist is hosted — ignored");
+    let channel = state.config_for(board_id).fw_channel;
+    let Some(running) = state.device_versions.lock().unwrap().get(board_id).cloned() else {
+        tracing::info!("update requested for '{board_id}' but it has not reported a version — ignored");
+        return;
+    };
+    let Some((chan, fw)) = offer_for(&state.firmware, channel, &running) else {
+        tracing::info!(
+            "update requested for '{board_id}' ({} channel, running {running}) but nothing newer is hosted — ignored",
+            channel.as_str()
+        );
         return;
     };
     let msg = ServerMsg::UpdateFirmware {
@@ -1467,11 +1572,17 @@ pub fn handle_update_firmware(state: &AppState, board_id: &str) {
         size: fw.manifest.size,
         sha256: fw.manifest.sha256.clone(),
         sig: fw.manifest.sig.clone(),
+        path: format!("/firmware/{}.bin", chan.as_str()),
+        channel: chan.as_str().to_string(),
     };
     match state.devices.lock().unwrap().get(board_id) {
         Some(tx) => {
             let _ = tx.send(Message::Text(serde_json::to_string(&msg).unwrap()));
-            tracing::info!("offered firmware {} to board '{board_id}'", fw.manifest.version);
+            tracing::info!(
+                "offered {} firmware {} to board '{board_id}'",
+                chan.as_str(),
+                fw.manifest.version
+            );
         }
         None => tracing::info!("update requested for offline board '{board_id}' — ignored"),
     }
@@ -1651,17 +1762,15 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
     };
     let online = state.devices.lock().unwrap().contains_key(board_id);
     // What the connected device reported (dropped on disconnect, so offline
-    // boards read None) and, ONLY when the hosted dist is strictly newer by
-    // CalVer, the version the app may offer as an update. `version_newer`
-    // treats anything unparseable as never-newer, so junk on either side
-    // simply means no offer.
+    // boards read None) and the version the app may offer as an update —
+    // `offer_for` picks the newest dist among the board's channel's allowed
+    // set, only when strictly newer by CalVer than the report. Junk versions
+    // on either side simply mean no offer.
     let firmware_version = state.device_versions.lock().unwrap().get(board_id).cloned();
-    let firmware_update = match (&state.firmware, &firmware_version) {
-        (Some(fw), Some(cur)) if version_newer(&fw.manifest.version, cur) => {
-            Some(fw.manifest.version.clone())
-        }
-        _ => None,
-    };
+    let firmware_update = firmware_version
+        .as_deref()
+        .and_then(|cur| offer_for(&state.firmware, cfg.fw_channel, cur))
+        .map(|(_, fw)| fw.manifest.version.clone());
     ServerMsg::BoardState {
         board_id: board_id.to_string(),
         online,
@@ -3463,7 +3572,7 @@ mod tests {
     /// Build a valid dist dir (image + matching firmware.json) under a unique
     /// temp path. Returns (dir, image bytes). Sig is any hex string — the
     /// server relays it opaquely; only the BOARD verifies it.
-    fn write_dist(tag: &str, version: &str) -> (PathBuf, Vec<u8>) {
+    fn write_dist(tag: &str, version: &str, channel: &str) -> (PathBuf, Vec<u8>) {
         let dir = std::env::temp_dir().join(format!("scoreboard-fw-test-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -3471,6 +3580,7 @@ mod tests {
         std::fs::write(dir.join("firmware.bin"), &image).unwrap();
         let json = serde_json::json!({
             "version": version,
+            "channel": channel,
             "size": image.len(),
             "sha256": sha256_hex(&image),
             "sig": "ab".repeat(64),
@@ -3501,11 +3611,11 @@ mod tests {
         // Nothing there at all -> feature off, not an error.
         let missing = std::env::temp_dir().join(format!("scoreboard-fw-test-none-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&missing);
-        assert!(matches!(load_firmware_dist(&missing), Ok(None)));
+        assert!(matches!(load_firmware_dist(&missing, None), Ok(None)));
 
         // A valid dist loads with the manifest and bytes intact.
-        let (dir, image) = write_dist("valid", "2026.7.0");
-        let dist = load_firmware_dist(&dir).unwrap().expect("dist present");
+        let (dir, image) = write_dist("valid", "2026.7.0", "stable");
+        let dist = load_firmware_dist(&dir, None).unwrap().expect("dist present");
         assert_eq!(dist.manifest.version, "2026.7.0");
         assert_eq!(dist.manifest.size as usize, image.len());
         assert_eq!(dist.manifest.sha256, sha256_hex(&image));
@@ -3513,30 +3623,39 @@ mod tests {
 
         // Corrupt the image AFTER signing: sha mismatch -> hard error.
         std::fs::write(dir.join("firmware.bin"), b"tampered bytes!!!!!!!").unwrap();
-        let err = load_firmware_dist(&dir).unwrap_err();
+        let err = load_firmware_dist(&dir, None).unwrap_err();
         assert!(err.contains("sha256") || err.contains("bytes"), "names the mismatch: {err}");
 
         // Wrong length (manifest size no longer matches) -> hard error too.
         std::fs::write(dir.join("firmware.bin"), b"short").unwrap();
-        assert!(load_firmware_dist(&dir).is_err());
+        assert!(load_firmware_dist(&dir, None).is_err());
 
         // Half a dist (manifest without image) is broken, not absent.
         std::fs::remove_file(dir.join("firmware.bin")).unwrap();
-        assert!(load_firmware_dist(&dir).is_err());
+        assert!(load_firmware_dist(&dir, None).is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// GET /firmware/latest serves the manifest JSON and /firmware.bin the raw
-    /// image, straight from an integrity-checked temp dist; with no dist both
-    /// routes 404.
+    /// GET /firmware/{channel}/latest serves that channel's manifest JSON and
+    /// /firmware/{channel}.bin its raw image, straight from an
+    /// integrity-checked temp dist; absent channels and unknown names 404.
     #[tokio::test]
     async fn firmware_routes_round_trip() {
-        let (dir, image) = write_dist("routes", "2026.7.0");
+        let (dir, image) = write_dist("routes", "2026.7.0", "stable");
         let mut state = AppState::new_ephemeral();
-        state.firmware = Some(Arc::new(load_firmware_dist(&dir).unwrap().unwrap()));
+        state
+            .firmware
+            .insert(FwChannel::Stable, Arc::new(load_firmware_dist(&dir, None).unwrap().unwrap()));
 
-        let resp = get_firmware_latest(State(state.clone())).await;
+        let latest = |s: &AppState, chan: &str| {
+            get_firmware_latest(State(s.clone()), axum::extract::Path(chan.to_string()))
+        };
+        let bin = |s: &AppState, file: &str| {
+            get_firmware_bin(State(s.clone()), axum::extract::Path(file.to_string()))
+        };
+
+        let resp = latest(&state, "stable").await;
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
         assert_eq!(
             resp.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
@@ -3549,7 +3668,7 @@ mod tests {
         assert_eq!(m.sha256, sha256_hex(&image));
         assert_eq!(m.sig, "ab".repeat(64));
 
-        let resp = get_firmware_bin(State(state)).await;
+        let resp = bin(&state, "stable.bin").await;
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
         assert_eq!(
             resp.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
@@ -3558,13 +3677,173 @@ mod tests {
         let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
         assert_eq!(&body[..], &image[..], "served image is byte-identical");
 
-        // No dist hosted -> plain 404s.
+        // A channel with nothing hosted 404s — even though stable is live.
+        assert_eq!(latest(&state, "beta").await.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(bin(&state, "beta.bin").await.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(bin(&state, "dev.bin").await.status(), axum::http::StatusCode::NOT_FOUND);
+        // Unknown channel names / malformed files 404 too.
+        assert_eq!(latest(&state, "nightly").await.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(bin(&state, "nightly.bin").await.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(bin(&state, "stable").await.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(bin(&state, "stable.json").await.status(), axum::http::StatusCode::NOT_FOUND);
+
+        // No dists hosted at all -> plain 404s.
         let bare = AppState::new_ephemeral();
-        let resp = get_firmware_latest(State(bare.clone())).await;
-        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
-        let resp = get_firmware_bin(State(bare)).await;
-        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(latest(&bare, "stable").await.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(bin(&bare, "stable.bin").await.status(), axum::http::StatusCode::NOT_FOUND);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The two per-channel firmware routes coexist in one Router (a matchit
+    /// conflict would panic right here at registration) and dispatch correctly
+    /// over real HTTP: "/firmware/stable.bin" reaches the bin handler,
+    /// "/firmware/stable/latest" the manifest handler.
+    #[tokio::test]
+    async fn firmware_routes_register_and_dispatch() {
+        let (dir, image) = write_dist("dispatch", "2026.7.0", "stable");
+        let mut state = AppState::new_ephemeral();
+        state
+            .firmware
+            .insert(FwChannel::Stable, Arc::new(load_firmware_dist(&dir, None).unwrap().unwrap()));
+        let app = Router::new()
+            .route("/firmware/:chan/latest", get(get_firmware_latest))
+            .route("/firmware/:file", get(get_firmware_bin))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let bin = reqwest::get(format!("http://{addr}/firmware/stable.bin")).await.unwrap();
+        assert_eq!(bin.status(), 200);
+        assert_eq!(bin.bytes().await.unwrap().as_ref(), &image[..]);
+
+        let latest = reqwest::get(format!("http://{addr}/firmware/stable/latest")).await.unwrap();
+        assert_eq!(latest.status(), 200);
+        let m: FirmwareManifest = latest.json().await.unwrap();
+        assert_eq!(m.version, "2026.7.0");
+
+        let absent = reqwest::get(format!("http://{addr}/firmware/beta.bin")).await.unwrap();
+        assert_eq!(absent.status(), 404);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Multi-channel loading: absent channels are off, present channels load,
+    /// and ONE corrupt channel is a hard error even with a valid channel
+    /// alongside (never start half-broken). The old flat layout is refused
+    /// loudly rather than silently unserved.
+    #[test]
+    fn firmware_dists_load_per_channel() {
+        let base = std::env::temp_dir()
+            .join(format!("scoreboard-fw-test-channels-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        // Empty base dir: every channel off, not an error.
+        assert!(load_firmware_dists(&base).unwrap().is_empty());
+
+        // stable + dev hosted, beta absent -> exactly those two load.
+        for (chan, version) in [("stable", "2026.7.0"), ("dev", "2026.8.0")] {
+            let (dir, _) = write_dist(&format!("channels-{chan}"), version, chan);
+            std::fs::rename(&dir, base.join(chan)).unwrap();
+        }
+        let dists = load_firmware_dists(&base).unwrap();
+        assert_eq!(dists.len(), 2);
+        assert_eq!(dists.get(&FwChannel::Stable).unwrap().manifest.version, "2026.7.0");
+        assert_eq!(dists.get(&FwChannel::Dev).unwrap().manifest.version, "2026.8.0");
+        assert!(!dists.contains_key(&FwChannel::Beta));
+
+        // Corrupt ONE channel (dev's image no longer matches its manifest):
+        // the whole load fails, valid stable notwithstanding.
+        std::fs::write(base.join("dev").join("firmware.bin"), b"tampered!!!").unwrap();
+        let err = load_firmware_dists(&base).unwrap_err();
+        assert!(err.contains("dev"), "error names the broken channel: {err}");
+
+        // A dist signed for one channel hosted in another's directory is
+        // refused at startup (its signature binds the channel; it could never
+        // verify on-device as the channel it's masquerading in).
+        let _ = std::fs::remove_dir_all(base.join("dev"));
+        let (moved, _) = write_dist("channels-moved", "2026.9.0", "dev");
+        std::fs::rename(&moved, base.join("beta")).unwrap();
+        let err = load_firmware_dists(&base).unwrap_err();
+        assert!(
+            err.contains("cannot move between channels"),
+            "cross-channel move refused: {err}"
+        );
+        let _ = std::fs::remove_dir_all(base.join("beta"));
+
+        // Flat pre-channel files at the base are a refusal, not a silent skip.
+        let _ = std::fs::remove_dir_all(&base);
+        let (flat, _) = write_dist("channels-flat", "2026.7.0", "stable");
+        let err = load_firmware_dists(&flat).unwrap_err();
+        assert!(err.contains("flat"), "error explains the layout problem: {err}");
+        let _ = std::fs::remove_dir_all(&flat);
+    }
+
+    /// The pinned offer matrix, exhaustively: each channel sees only its
+    /// allowed set (stable ⊆ beta ⊆ dev), the NEWEST allowed dist wins, and
+    /// nothing is offered unless that pick is strictly newer than what the
+    /// board runs.
+    #[test]
+    fn firmware_offer_matrix() {
+        use FwChannel::*;
+        let dist = |version: &str| {
+            let image = format!("\u{e9}img {version}").into_bytes();
+            Arc::new(FirmwareDist {
+                manifest: FirmwareManifest {
+                    version: version.into(),
+                    // The offer path/channel come from the MAP KEY, not this
+                    // field (which only load-time validation reads) — the
+                    // matrix test doesn't care what it says.
+                    channel: String::new(),
+                    size: image.len() as u32,
+                    sha256: sha256_hex(&image),
+                    sig: "ab".repeat(64),
+                },
+                bytes: image.into(),
+            })
+        };
+        let host = |entries: &[(FwChannel, &str)]| -> HashMap<FwChannel, Arc<FirmwareDist>> {
+            entries.iter().map(|(c, v)| (*c, dist(v))).collect()
+        };
+        // offer() -> Some((dist channel, dist version)) for compact asserts.
+        let offer = |dists: &HashMap<FwChannel, Arc<FirmwareDist>>, chan, running: &str| {
+            offer_for(dists, chan, running).map(|(c, fw)| (c, fw.manifest.version.clone()))
+        };
+
+        // Newer dists on every channel: each board channel picks the newest
+        // dist it is ALLOWED to see — stable never sees beta/dev.
+        let all = host(&[(Stable, "2026.7.0"), (Beta, "2026.8.0"), (Dev, "2026.9.0")]);
+        assert_eq!(offer(&all, Stable, "2026.6.0"), Some((Stable, "2026.7.0".into())));
+        assert_eq!(offer(&all, Beta, "2026.6.0"), Some((Beta, "2026.8.0".into())));
+        assert_eq!(offer(&all, Dev, "2026.6.0"), Some((Dev, "2026.9.0".into())));
+
+        // Running >= the best allowed pick: no offer — even when a channel the
+        // board can NOT see hosts something newer.
+        assert_eq!(offer(&all, Stable, "2026.7.0"), None, "beta/dev newer, but invisible");
+        assert_eq!(offer(&all, Beta, "2026.8.0"), None, "dev newer, but invisible");
+        assert_eq!(offer(&all, Dev, "2026.9.0"), None);
+        assert_eq!(offer(&all, Dev, "2026.10.0"), None, "running ahead of everything");
+
+        // Newest-wins WITHIN the allowed set: when stable outruns beta, the
+        // beta/dev boards are offered the stable dist (and its stable path).
+        let stable_ahead = host(&[(Stable, "2026.9.0"), (Beta, "2026.8.0"), (Dev, "2026.7.0")]);
+        assert_eq!(offer(&stable_ahead, Beta, "2026.8.0"), Some((Stable, "2026.9.0".into())));
+        assert_eq!(offer(&stable_ahead, Dev, "2026.7.0"), Some((Stable, "2026.9.0".into())));
+        assert_eq!(offer(&stable_ahead, Stable, "2026.8.0"), Some((Stable, "2026.9.0".into())));
+
+        // Absent channels drop out of the pick: only a dev dist hosted means
+        // stable/beta boards get nothing, however stale they are.
+        let dev_only = host(&[(Dev, "2026.9.0")]);
+        assert_eq!(offer(&dev_only, Stable, "2026.1.0"), None);
+        assert_eq!(offer(&dev_only, Beta, "2026.1.0"), None);
+        assert_eq!(offer(&dev_only, Dev, "2026.1.0"), Some((Dev, "2026.9.0".into())));
+
+        // No dists at all / junk versions: never an offer.
+        assert_eq!(offer(&HashMap::new(), Dev, "2026.1.0"), None);
+        assert_eq!(offer(&all, Dev, "junk"), None, "unparseable running version");
+        let junk_dist = host(&[(Stable, "not-calver")]);
+        assert_eq!(offer(&junk_dist, Stable, "2026.1.0"), None, "unparseable dist version");
     }
 }

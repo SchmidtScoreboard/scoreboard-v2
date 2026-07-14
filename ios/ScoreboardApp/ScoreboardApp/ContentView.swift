@@ -122,6 +122,8 @@ struct BoardInfo {
     var noScrollGameIds: Set<String> = []         // leaderboards pinned to the static top-4
     /// Unix seconds when a button-sleep auto-wakes (nil when not sleeping).
     var wakeAt: UInt64?
+    /// Firmware release channel this board follows (stable/beta/dev).
+    var fwChannel: UiFwChannel = .stable
     /// Firmware version the board last reported (nil while offline/unknown).
     var firmwareVersion: String?
     /// Server-hosted firmware version, present only when NEWER than reported
@@ -722,6 +724,14 @@ final class BoardViewModel: ObservableObject {
         }
     }
 
+    /// Which firmware release channel the selected board follows (optimistic;
+    /// the server's next push confirms, and re-computes the update offer).
+    func setFwChannel(_ channel: UiFwChannel) {
+        guard let id = selectedBoardId else { return }
+        mutate(id) { $0.fwChannel = channel }
+        client?.setFwChannel(boardId: id, channel: channel)
+    }
+
     /// Kick off the selected board's over-the-air update (it downloads the
     /// image the server advertised, verifies it, flashes, and reboots).
     func updateFirmware() {
@@ -773,6 +783,7 @@ final class BoardViewModel: ObservableObject {
             $0.revealedGameIds = Set(c.revealedGameIds)
             $0.noScrollGameIds = Set(c.noScrollGameIds)
             $0.wakeAt = c.wakeAt
+            $0.fwChannel = c.fwChannel
         }
         // The board's timezone is NOT set from the phone: the board discovers
         // its own zone (IP geolocation at boot) and reports it — a phone that
@@ -1720,6 +1731,25 @@ struct DashboardView: View {
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
+            // Which release channel this board's updates come from. Dev is a
+            // development-build affordance (#if DEBUG); a release app facing a
+            // board that IS on Dev still shows the truth — the Dev option
+            // appears, selected but inert, rather than lying about the channel.
+            Picker("Update channel", selection: Binding(
+                get: { model.current.fwChannel },
+                set: { model.setFwChannel($0) }
+            )) {
+                Text("Stable").tag(UiFwChannel.stable)
+                Text("Beta").tag(UiFwChannel.beta)
+                #if DEBUG
+                Text("Dev").tag(UiFwChannel.dev)
+                #else
+                if model.current.fwChannel == .dev {
+                    Text("Dev").tag(UiFwChannel.dev)
+                        .selectionDisabled()
+                }
+                #endif
+            }
             if model.current.updatingFirmware {
                 HStack(spacing: 10) {
                     ProgressView()
@@ -1747,6 +1777,12 @@ struct DashboardView: View {
             }
         } header: {
             Text("About")
+        } footer: {
+            #if DEBUG
+            Text("Beta gets updates before everyone else. Dev is for development builds — expect breakage.")
+            #else
+            Text("Beta gets updates before everyone else.")
+            #endif
         }
     }
 

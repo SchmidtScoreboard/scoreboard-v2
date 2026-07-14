@@ -595,6 +595,11 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
                     cfg.timezone = Some(tz);
                 }
             }
+            // Firmware release channel. The push_board_state below re-runs the
+            // offer computation against the new channel, so switching to Beta
+            // with a newer beta dist hosted lights the app's Update button on
+            // THIS push — no reconnect involved.
+            Command::SetFwChannel { channel } => cfg.fw_channel = channel,
             // Relayed to the device by the early return at the top of this
             // function — never reaches the config fold. The arm stays so a new
             // Command variant is still a compile error here.
@@ -639,21 +644,35 @@ mod tests {
         (format!("ws://{addr}/ws"), state)
     }
 
-    /// An ephemeral state hosting a fake firmware dist at `version`. The sig is
-    /// opaque to the server (only the board verifies it), so any hex works.
-    fn state_with_firmware(version: &str) -> AppState {
+    /// An ephemeral state hosting fake firmware dists, one per (channel,
+    /// version) pair. The sigs are opaque to the server (only the board
+    /// verifies them), so any hex works.
+    fn state_with_firmware(dists: &[(FwChannel, &str)]) -> AppState {
         let mut state = AppState::new_ephemeral();
-        let image = b"\xE9\x00ota image".to_vec();
-        state.firmware = Some(std::sync::Arc::new(crate::FirmwareDist {
-            manifest: crate::FirmwareManifest {
-                version: version.into(),
-                size: image.len() as u32,
-                sha256: sha256_hex(&image),
-                sig: "cd".repeat(64),
-            },
-            bytes: image.into(),
-        }));
+        for (chan, version) in dists {
+            let image = alloc_image(version);
+            state.firmware.insert(
+                *chan,
+                std::sync::Arc::new(crate::FirmwareDist {
+                    manifest: crate::FirmwareManifest {
+                        version: (*version).into(),
+                        channel: chan.as_str().into(),
+                        size: image.len() as u32,
+                        sha256: sha256_hex(&image),
+                        sig: "cd".repeat(64),
+                    },
+                    bytes: image.into(),
+                }),
+            );
+        }
         state
+    }
+
+    /// Distinct bytes per version so no two fake dists are identical.
+    fn alloc_image(version: &str) -> Vec<u8> {
+        let mut image = b"\xE9\x00ota image ".to_vec();
+        image.extend_from_slice(version.as_bytes());
+        image
     }
 
     async fn send(ws: &mut Client, m: &ClientMsg) {
@@ -778,6 +797,9 @@ mod tests {
             a.off_state = OffState::Blank;
             a.spoiler_mode = SpoilerMode::Strict;
             a.spoiler_all = true;
+            // Durable, but deliberately NOT portable: importing someone's
+            // settings must never enroll the target board in beta firmware.
+            a.fw_channel = FwChannel::Beta;
             a.sports = vec![SportConfig {
                 sport_id: "nhl".into(),
                 favorite_team_ids: vec!["nhl-bos".into()],
@@ -827,6 +849,8 @@ mod tests {
         assert_eq!(b.excluded_game_ids, vec!["excluded-1".to_string()]);
         assert_eq!(b.focused_game_id.as_deref(), Some("focus-1"));
         assert!(b.power);
+        // A's beta enrollment did NOT travel with the export.
+        assert_eq!(b.fw_channel, FwChannel::Stable);
         // And the source board's name never travels.
         assert_eq!(a.name, None);
 
@@ -901,7 +925,8 @@ mod tests {
     /// dist is strictly newer (CalVer) than the report.
     #[tokio::test]
     async fn device_version_drives_board_state_update_offer() {
-        let (url, _state) = spawn_server_with(state_with_firmware("2026.7.0")).await;
+        let (url, _state) =
+            spawn_server_with(state_with_firmware(&[(FwChannel::Stable, "2026.7.0")])).await;
         let (mut dev, board_id) = auth(&url, Role::Device, &[1u8; 32]).await;
         let mut ctrl = paired_subscriber(&url, &mut dev, &board_id, &[2u8; 32]).await;
 
@@ -933,14 +958,28 @@ mod tests {
         }
     }
 
-    /// Command::UpdateFirmware relays the hosted dist to the board's device
-    /// socket as the pinned ServerMsg::UpdateFirmware (version/size/sha256/sig).
+    /// Command::UpdateFirmware re-runs the offer pick at command time and
+    /// relays the winning dist to the board's device socket as
+    /// ServerMsg::UpdateFirmware (version/size/sha256/sig + the CHANNEL path
+    /// the board must GET).
     #[tokio::test]
     async fn update_firmware_command_reaches_the_device() {
-        let (url, state) = spawn_server_with(state_with_firmware("2026.7.0")).await;
-        let fw = state.firmware.clone().expect("test state hosts a dist");
+        // Beta board; the newest allowed dist is the beta one — the offer must
+        // carry beta's metadata and /firmware/beta.bin.
+        let (url, state) = spawn_server_with(state_with_firmware(&[
+            (FwChannel::Stable, "2026.7.0"),
+            (FwChannel::Beta, "2026.8.0"),
+        ]))
+        .await;
+        let fw = state.firmware.get(&FwChannel::Beta).expect("test state hosts a beta dist").clone();
         let (mut dev, board_id) = auth(&url, Role::Device, &[1u8; 32]).await;
+        state.configs.lock().unwrap().entry(board_id.clone()).or_default().fw_channel =
+            FwChannel::Beta;
         let mut ctrl = paired_subscriber(&url, &mut dev, &board_id, &[2u8; 32]).await;
+
+        // The pick needs the board's reported version (no report, no offer).
+        send(&mut dev, &ClientMsg::DeviceVersion { version: "2026.6.0".into() }).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
         send(&mut ctrl, &ClientMsg::Command {
             req_id: 7,
@@ -953,13 +992,88 @@ mod tests {
 
         let offer = recv_until(&mut dev, |m| matches!(m, ServerMsg::UpdateFirmware { .. })).await;
         match offer {
-            Some(ServerMsg::UpdateFirmware { version, size, sha256, sig }) => {
+            Some(ServerMsg::UpdateFirmware { version, size, sha256, sig, path, channel }) => {
                 assert_eq!(version, fw.manifest.version);
                 assert_eq!(size, fw.manifest.size);
                 assert_eq!(sha256, fw.manifest.sha256);
                 assert_eq!(sig, fw.manifest.sig);
+                assert_eq!(path, "/firmware/beta.bin", "path names the dist's channel");
+                assert_eq!(channel, "beta", "offer names the dist's channel (signed on-device)");
             }
             other => panic!("expected UpdateFirmware at the device, got {other:?}"),
+        }
+    }
+
+    /// SetFwChannel flows through apply_command like any config command: the
+    /// channel persists into the board's config AND the very next BoardState
+    /// push recomputes the offer — switching to Beta with a newer beta dist
+    /// hosted lights the Update button immediately, no reconnect; switching
+    /// back to Stable clears it just as immediately.
+    #[tokio::test]
+    async fn set_fw_channel_round_trips_and_reoffers_immediately() {
+        let (url, state) = spawn_server_with(state_with_firmware(&[
+            (FwChannel::Stable, "2026.7.0"),
+            (FwChannel::Beta, "2026.8.0"),
+        ]))
+        .await;
+        let (mut dev, board_id) = auth(&url, Role::Device, &[1u8; 32]).await;
+        let mut ctrl = paired_subscriber(&url, &mut dev, &board_id, &[2u8; 32]).await;
+
+        // Running the current stable: a Stable-channel board has no update.
+        send(&mut dev, &ClientMsg::DeviceVersion { version: "2026.7.0".into() }).await;
+        match recv_until(&mut ctrl, |m| {
+            matches!(m, ServerMsg::BoardState { firmware_version: Some(_), .. })
+        })
+        .await
+        {
+            Some(ServerMsg::BoardState { firmware_update, config, .. }) => {
+                assert_eq!(config.fw_channel, FwChannel::Stable);
+                assert_eq!(firmware_update, None, "stable board never sees the beta dist");
+            }
+            other => panic!("expected BoardState after DeviceVersion, got {other:?}"),
+        }
+
+        // Switch to Beta: the SAME command's state reflection must already
+        // carry the recomputed offer.
+        send(&mut ctrl, &ClientMsg::Command {
+            req_id: 8,
+            board_id: board_id.clone(),
+            cmd: Command::SetFwChannel { channel: FwChannel::Beta },
+        })
+        .await;
+        let ack = recv_until(&mut ctrl, |m| matches!(m, ServerMsg::CommandAck { .. })).await;
+        assert!(matches!(ack, Some(ServerMsg::CommandAck { req_id: 8, ok: true, .. })));
+        match recv_until(&mut ctrl, |m| matches!(m, ServerMsg::BoardState { .. })).await {
+            Some(ServerMsg::BoardState { firmware_update, config, .. }) => {
+                assert_eq!(config.fw_channel, FwChannel::Beta, "channel round-trips into config");
+                assert_eq!(
+                    firmware_update.as_deref(),
+                    Some("2026.8.0"),
+                    "beta offer appears on the very push that acked the switch"
+                );
+            }
+            other => panic!("expected BoardState after SetFwChannel, got {other:?}"),
+        }
+        // And it persisted (what a reconnect would read back).
+        assert_eq!(state.config_for(&board_id).fw_channel, FwChannel::Beta);
+
+        // Switch back: the offer disappears just as immediately.
+        send(&mut ctrl, &ClientMsg::Command {
+            req_id: 9,
+            board_id: board_id.clone(),
+            cmd: Command::SetFwChannel { channel: FwChannel::Stable },
+        })
+        .await;
+        assert!(matches!(
+            recv_until(&mut ctrl, |m| matches!(m, ServerMsg::CommandAck { .. })).await,
+            Some(ServerMsg::CommandAck { req_id: 9, ok: true, .. })
+        ));
+        match recv_until(&mut ctrl, |m| matches!(m, ServerMsg::BoardState { .. })).await {
+            Some(ServerMsg::BoardState { firmware_update, config, .. }) => {
+                assert_eq!(config.fw_channel, FwChannel::Stable);
+                assert_eq!(firmware_update, None, "back on stable: nothing to offer");
+            }
+            other => panic!("expected BoardState after SetFwChannel, got {other:?}"),
         }
     }
 }

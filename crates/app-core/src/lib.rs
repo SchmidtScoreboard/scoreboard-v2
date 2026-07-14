@@ -9,7 +9,7 @@ use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use scoreboard_protocol::{
     decode_frame, pubkey_hex, rgb565_to_888, sign_hex, BoardConfig, Catalog, ClientMsg, Command,
-    GameSummary, OffState, Role, ServerMsg, SpoilerMode, SportConfig as PSportConfig,
+    FwChannel, GameSummary, OffState, Role, ServerMsg, SpoilerMode, SportConfig as PSportConfig,
 };
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -61,6 +61,15 @@ pub enum UiOffState {
     Blank,
     Clock,
 }
+/// Firmware release channel a board follows (protocol `FwChannel`). Channels
+/// are cumulative toward Dev: a beta board may also be offered stable builds
+/// when stable is newer — newest version wins.
+#[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq)]
+pub enum UiFwChannel {
+    Stable,
+    Beta,
+    Dev,
+}
 /// One board's full server-side config, pushed with every BoardState.
 #[derive(uniffi::Record, Clone)]
 pub struct UiBoardConfig {
@@ -91,6 +100,8 @@ pub struct UiBoardConfig {
     pub no_scroll_game_ids: Vec<String>,
     /// Board-local IANA timezone name ("America/New_York"); nil = server-local.
     pub timezone: Option<String>,
+    /// Firmware release channel this board follows (`set_fw_channel`).
+    pub fw_channel: UiFwChannel,
 }
 #[derive(uniffi::Record, Clone)]
 pub struct UiGame {
@@ -598,6 +609,17 @@ impl ScoreboardClient {
     pub fn update_firmware(&self, board_id: String) {
         let _ = self.tx.send(Out::Command(board_id, Command::UpdateFirmware));
     }
+
+    /// Which firmware release channel this board follows. Beta/dev boards may
+    /// still be offered a stable build when it's the newest one available.
+    pub fn set_fw_channel(&self, board_id: String, channel: UiFwChannel) {
+        let channel = match channel {
+            UiFwChannel::Stable => FwChannel::Stable,
+            UiFwChannel::Beta => FwChannel::Beta,
+            UiFwChannel::Dev => FwChannel::Dev,
+        };
+        let _ = self.tx.send(Out::Command(board_id, Command::SetFwChannel { channel }));
+    }
 }
 
 fn to_ui_sports(cat: Catalog) -> Vec<UiSport> {
@@ -765,6 +787,11 @@ fn to_ui_board_config(c: BoardConfig) -> UiBoardConfig {
         revealed_game_ids: c.revealed_game_ids,
         no_scroll_game_ids: c.no_scroll_game_ids,
         timezone: c.timezone,
+        fw_channel: match c.fw_channel {
+            FwChannel::Stable => UiFwChannel::Stable,
+            FwChannel::Beta => UiFwChannel::Beta,
+            FwChannel::Dev => UiFwChannel::Dev,
+        },
     }
 }
 

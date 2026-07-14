@@ -622,6 +622,12 @@ public protocol ScoreboardClientProtocol: AnyObject {
     func setDwell(boardId: String, secs: UInt32)
 
     /**
+     * Which firmware release channel this board follows. Beta/dev boards may
+     * still be offered a stable build when it's the newest one available.
+     */
+    func setFwChannel(boardId: String, channel: UiFwChannel)
+
+    /**
      * Per-game scroll toggle for leaderboard games (golf/F1): scroll=false
      * pins the static top-4 frame; scroll=true restores the league depth.
      */
@@ -936,6 +942,17 @@ open class ScoreboardClient:
     }
 
     /**
+     * Which firmware release channel this board follows. Beta/dev boards may
+     * still be offered a stable build when it's the newest one available.
+     */
+    open func setFwChannel(boardId: String, channel: UiFwChannel) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_set_fw_channel(self.uniffiClonePointer(),
+                                                                  FfiConverterString.lower(boardId),
+                                                                  FfiConverterTypeUiFwChannel.lower(channel), $0)
+    }
+    }
+
+    /**
      * Per-game scroll toggle for leaderboard games (golf/F1): scroll=false
      * pins the static top-4 frame; scroll=true restores the league depth.
      */
@@ -1188,6 +1205,10 @@ public struct UiBoardConfig {
      * Board-local IANA timezone name ("America/New_York"); nil = server-local.
      */
     public var timezone: String?
+    /**
+     * Firmware release channel this board follows (`set_fw_channel`).
+     */
+    public var fwChannel: UiFwChannel
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1219,7 +1240,10 @@ public struct UiBoardConfig {
                     */ noScrollGameIds: [String],
                 /**
                     * Board-local IANA timezone name ("America/New_York"); nil = server-local.
-                    */ timezone: String?)
+                    */ timezone: String?,
+                /**
+                    * Firmware release channel this board follows (`set_fw_channel`).
+                    */ fwChannel: UiFwChannel)
     {
         self.sports = sports
         self.brightness = brightness
@@ -1238,6 +1262,7 @@ public struct UiBoardConfig {
         self.revealedGameIds = revealedGameIds
         self.noScrollGameIds = noScrollGameIds
         self.timezone = timezone
+        self.fwChannel = fwChannel
     }
 }
 
@@ -1294,6 +1319,9 @@ extension UiBoardConfig: Equatable, Hashable {
         if lhs.timezone != rhs.timezone {
             return false
         }
+        if lhs.fwChannel != rhs.fwChannel {
+            return false
+        }
         return true
     }
 
@@ -1315,6 +1343,7 @@ extension UiBoardConfig: Equatable, Hashable {
         hasher.combine(revealedGameIds)
         hasher.combine(noScrollGameIds)
         hasher.combine(timezone)
+        hasher.combine(fwChannel)
     }
 }
 
@@ -1341,7 +1370,8 @@ public struct FfiConverterTypeUiBoardConfig: FfiConverterRustBuffer {
                 spoilerGameIds: FfiConverterSequenceString.read(from: &buf),
                 revealedGameIds: FfiConverterSequenceString.read(from: &buf),
                 noScrollGameIds: FfiConverterSequenceString.read(from: &buf),
-                timezone: FfiConverterOptionString.read(from: &buf)
+                timezone: FfiConverterOptionString.read(from: &buf),
+                fwChannel: FfiConverterTypeUiFwChannel.read(from: &buf)
             )
     }
 
@@ -1363,6 +1393,7 @@ public struct FfiConverterTypeUiBoardConfig: FfiConverterRustBuffer {
         FfiConverterSequenceString.write(value.revealedGameIds, into: &buf)
         FfiConverterSequenceString.write(value.noScrollGameIds, into: &buf)
         FfiConverterOptionString.write(value.timezone, into: &buf)
+        FfiConverterTypeUiFwChannel.write(value.fwChannel, into: &buf)
     }
 }
 
@@ -1963,6 +1994,69 @@ public func FfiConverterTypeUiTeam_lift(_ buf: RustBuffer) throws -> UiTeam {
 public func FfiConverterTypeUiTeam_lower(_ value: UiTeam) -> RustBuffer {
     return FfiConverterTypeUiTeam.lower(value)
 }
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Firmware release channel a board follows (protocol `FwChannel`). Channels
+ * are cumulative toward Dev: a beta board may also be offered stable builds
+ * when stable is newer — newest version wins.
+ */
+
+public enum UiFwChannel {
+    case stable
+    case beta
+    case dev
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiFwChannel: FfiConverterRustBuffer {
+    typealias SwiftType = UiFwChannel
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiFwChannel {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return .stable
+
+        case 2: return .beta
+
+        case 3: return .dev
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: UiFwChannel, into buf: inout [UInt8]) {
+        switch value {
+        case .stable:
+            writeInt(&buf, Int32(1))
+
+        case .beta:
+            writeInt(&buf, Int32(2))
+
+        case .dev:
+            writeInt(&buf, Int32(3))
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiFwChannel_lift(_ buf: RustBuffer) throws -> UiFwChannel {
+    return try FfiConverterTypeUiFwChannel.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiFwChannel_lower(_ value: UiFwChannel) -> RustBuffer {
+    return FfiConverterTypeUiFwChannel.lower(value)
+}
+
+extension UiFwChannel: Equatable, Hashable {}
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -2696,6 +2790,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_dwell() != 21881 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_scoreboardclient_set_fw_channel() != 58256 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_game_scroll() != 8718 {

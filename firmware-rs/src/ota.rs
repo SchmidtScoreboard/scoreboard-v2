@@ -1,8 +1,9 @@
 //! Over-the-air firmware updates.
 //!
 //! Flow: the server pushes `ServerMsg::UpdateFirmware { version, size, sha256,
-//! sig }`; the device task drops its websocket and calls
-//! [`download_and_install`], which streams `/firmware.bin` from the SAME
+//! sig, path }`; the device task drops its websocket and calls
+//! [`download_and_install`], which streams `path` (the offered release
+//! channel's image, e.g. "/firmware/stable.bin") from the SAME
 //! server into the inactive OTA slot, verifying byte count, sha256, and an
 //! Ed25519 signature (against the baked-in [`FW_PUBKEY_HEX`]) as it goes. Only
 //! after ALL THREE checks pass is otadata flipped to the new slot. Any failure
@@ -58,6 +59,24 @@ pub struct UpdateJob {
     pub size: u32,
     pub sha256: String,
     pub sig: String,
+    /// Claimed release channel — bound into the signature, so it is authentic
+    /// once verification passes. NOTE the residual gap (accepted for now): the
+    /// device does not persist its own enrollment, so an on-path attacker on
+    /// the plaintext ws can offer a stable board an AUTHENTIC dev image. Every
+    /// installable image is still one we signed, strictly newer, and covered
+    /// by the revert machinery.
+    pub channel: String,
+    /// Server-relative path of the image to GET (e.g. "/firmware/beta.bin") —
+    /// the server names the release channel the offered dist lives in.
+    /// Validated by [`valid_path`] before any I/O.
+    pub path: String,
+}
+
+/// A plausible request path: absolute, bounded, printable ASCII with no
+/// whitespace/control bytes — anything else would splice garbage into the
+/// HTTP request line, so it's rejected before the socket ever opens.
+fn valid_path(p: &str) -> bool {
+    p.starts_with('/') && p.len() <= 128 && p.bytes().all(|b| b.is_ascii_graphic())
 }
 
 /// Set once this boot's image has proven itself (first successful ws auth).
@@ -370,11 +389,11 @@ impl SlotWriter<'_> {
     }
 }
 
-/// Download `/firmware.bin` from the server we were just connected to, verify
-/// it (length, sha256, Ed25519 against the baked-in pubkey), write it into the
-/// inactive OTA slot, and flip otadata. `Ok(())` means "reboot me"; any `Err`
-/// leaves otadata untouched and the caller resumes normal operation — a failed
-/// update must be a non-event.
+/// Download the offer's `path` from the server we were just connected to,
+/// verify it (length, sha256, Ed25519 against the baked-in pubkey), write it
+/// into the inactive OTA slot, and flip otadata. `Ok(())` means "reboot me";
+/// any `Err` leaves otadata untouched and the caller resumes normal operation
+/// — a failed update must be a non-event.
 ///
 /// Runs in the device task with the websocket already dropped: it borrows the
 /// same rx/tx socket buffers (like `fetch_timezone`), and progress renders
@@ -398,6 +417,11 @@ pub async fn download_and_install(
     if !scoreboard_protocol::version_newer(&job.version, env!("CARGO_PKG_VERSION")) {
         return Err("offered version is not newer than the running one");
     }
+    // The download path is server-supplied: sanity-check it before it goes
+    // anywhere near the request line.
+    if !valid_path(&job.path) {
+        return Err("bad download path in the offer");
+    }
     board.lock().await.set_updating(Some(0));
 
     // Decode key + signature before any I/O — reject garbage offers instantly.
@@ -407,21 +431,27 @@ pub async fn download_and_install(
     // The signature binds version and size alongside the bytes (same prefix
     // sign-firmware feeds the signer) — a signed IMAGE with a doctored offer
     // must not verify.
-    let prefix = alloc::format!("scoreboard-fw:{}:{}:", job.version, job.size);
+    if !matches!(job.channel.as_str(), "stable" | "beta" | "dev") {
+        return Err("offer names an unknown channel");
+    }
+    let prefix =
+        alloc::format!("scoreboard-fw:{}:{}:{}:", job.version, job.size, job.channel);
     verifier.update(prefix.as_bytes());
     let size = job.size as usize;
 
     let target = resolve_target(flash, job.size).await?;
     println!(
-        "[ota] downloading v{} ({size} bytes) into {:?} @ {:#x}",
-        job.version, target.slot, target.offset
+        "[ota] downloading v{} from {} ({size} bytes) into {:?} @ {:#x}",
+        job.version, job.path, target.slot, target.offset
     );
 
     let mut sock = TcpSocket::new(stack, rx, tx);
     sock.set_timeout(Some(Duration::from_secs(30)));
     sock.connect((ip, port)).await.map_err(|_| "tcp connect failed")?;
-    let mut req = Vec::with_capacity(128);
-    req.extend_from_slice(b"GET /firmware.bin HTTP/1.1\r\nHost: ");
+    let mut req = Vec::with_capacity(192);
+    req.extend_from_slice(b"GET ");
+    req.extend_from_slice(job.path.as_bytes());
+    req.extend_from_slice(b" HTTP/1.1\r\nHost: ");
     req.extend_from_slice(host.as_bytes());
     req.extend_from_slice(b"\r\nConnection: close\r\n\r\n");
     sock.write_all(&req).await.map_err(|_| "http send failed")?;

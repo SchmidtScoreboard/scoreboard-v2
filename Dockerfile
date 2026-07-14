@@ -13,10 +13,11 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libssl3 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/target/release/server /usr/local/bin/server
-# OTA firmware dist (committed firmware.bin + firmware.json, built by
-# scripts/release-firmware.sh). The server serves it at GET /firmware/latest +
-# GET /firmware.bin; an empty/placeholder dir just means the feature is off
-# (no update offers, 404s).
+# OTA firmware dists (committed firmware.bin + firmware.json per release
+# channel under {stable,beta,dev}/, built by scripts/release-firmware.sh
+# <channel>). The server serves them at GET /firmware/<channel>/latest +
+# GET /firmware/<channel>.bin; an absent channel dir just means that channel
+# is off (no offers from it, 404s on its routes).
 COPY --from=build /app/firmware-dist /firmware-dist
 ENV FIRMWARE_DIR=/firmware-dist
 # Railway injects $PORT and mounts a volume here; set STATE_DIR=/data in the service
