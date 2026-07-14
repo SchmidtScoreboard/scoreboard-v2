@@ -1,0 +1,500 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scoreboard App Icon Maker</title>
+<style>
+  :root{
+    --bg:#0e0e12; --panel:#16161c; --panel2:#1d1d26; --ink:#d9d9e0; --mut:#8b8b98;
+    --line:#2a2a35; --acc:#ffcc00; --sel:#4da3ff;
+  }
+  *{box-sizing:border-box; margin:0}
+  html,body{background:var(--bg); color:var(--ink);
+    font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
+  header{padding:14px 20px 0}
+  header h1{font-size:16px; font-weight:600; letter-spacing:.02em}
+  header p{color:var(--mut); font-size:12px; margin-top:2px}
+  main{display:flex; gap:20px; padding:16px 20px 28px; align-items:flex-start;
+    max-width:1060px; margin:0 auto}
+  @media (max-width:920px){ main{flex-direction:column} #controls{max-width:none; width:100%} }
+
+  #stage{flex:1 1 520px; min-width:0}
+  #board{display:block; width:100%; max-width:520px; aspect-ratio:1; touch-action:none;
+    cursor:crosshair; border-radius:6px; background:#08080C}
+  .stagebar{display:flex; align-items:center; gap:14px; margin-top:10px; flex-wrap:wrap}
+  .stagebar label{display:flex; align-items:center; gap:6px; cursor:pointer}
+  .hint{color:var(--mut); font-size:11px}
+  #minis{display:flex; gap:16px; align-items:flex-end; margin-top:14px}
+  #minis figure{display:flex; flex-direction:column; align-items:center; gap:4px}
+  #minis figcaption{color:var(--mut); font-size:11px}
+  #minis canvas{display:block; background:transparent}
+
+  #controls{flex:0 0 340px; max-width:340px; display:flex; flex-direction:column; gap:12px}
+  fieldset{border:1px solid var(--line); border-radius:8px; background:var(--panel);
+    padding:10px 12px 12px; min-width:0}
+  legend{padding:0 6px; color:var(--mut); font-size:11px; text-transform:uppercase;
+    letter-spacing:.08em}
+  .row{display:flex; align-items:center; gap:8px; margin-top:8px}
+  .row:first-of-type{margin-top:2px}
+  .row label{flex:0 0 76px; color:var(--mut)}
+  .row input[type=range]{flex:1; min-width:0; accent-color:var(--acc)}
+  .row output{flex:0 0 78px; text-align:right; font-variant-numeric:tabular-nums; font-size:12px}
+
+  button{background:var(--panel2); color:var(--ink); border:1px solid var(--line);
+    border-radius:6px; padding:6px 10px; font:inherit; cursor:pointer}
+  button:hover{border-color:#3d3d4c}
+  button.on{border-color:var(--acc); color:var(--acc)}
+  .tools{display:flex; gap:6px; margin-top:2px}
+  .tools button{flex:1}
+  kbd{background:var(--panel2); border:1px solid var(--line); border-radius:4px;
+    padding:0 4px; font-size:11px}
+
+  #swList{display:flex; flex-direction:column; gap:4px; margin-top:8px}
+  .swatch{display:flex; align-items:center; gap:8px; padding:4px 6px; border-radius:6px;
+    border:1px solid transparent; cursor:pointer; background:var(--panel2)}
+  .swatch.sel{border-color:var(--sel)}
+  .swatch input[type=color], .row input[type=color]{width:34px; height:24px; padding:0;
+    border:1px solid var(--line); border-radius:4px; background:none; cursor:pointer}
+  .swatch .swname{flex:1; min-width:0; background:transparent; border:none; color:var(--ink);
+    font:inherit; outline:none; border-bottom:1px solid transparent}
+  .swatch .swname:focus{border-bottom-color:var(--line)}
+  .swatch .tag{color:var(--mut); font-size:11px; white-space:nowrap}
+
+  .btnrow{display:flex; gap:6px; flex-wrap:wrap; margin-top:8px}
+  .btnrow:first-of-type{margin-top:2px}
+  details{margin-top:8px}
+  summary{color:var(--mut); cursor:pointer; font-size:12px}
+  textarea{width:100%; margin-top:6px; background:var(--panel2); color:var(--ink);
+    border:1px solid var(--line); border-radius:6px; padding:6px; font:11px/1.4 ui-monospace,
+    SFMono-Regular,Menlo,monospace; resize:vertical}
+  #toast{color:var(--acc); font-size:12px; min-height:16px; margin-top:6px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Scoreboard App Icon Maker</h1>
+  <p>1024&times;1024 LED-matrix miniature of the 64&times;32 board &mdash; click or drag to paint.</p>
+</header>
+<main>
+  <section id="stage">
+    <canvas id="board" width="1024" height="1024"></canvas>
+    <div class="stagebar">
+      <label title="Approximation: iOS uses a continuous-curvature squircle; this preview uses a plain rounded rect with radius 22.37% (~229 px) — close enough to judge corner clipping.">
+        <input type="checkbox" id="maskToggle"> iOS mask preview
+        <span class="hint">(rounded rect &asymp; squircle)</span>
+      </label>
+      <span class="hint"><kbd>&#8984;Z</kbd>/<kbd>Ctrl+Z</kbd> undo &middot; <kbd>B</kbd> paint &middot; <kbd>E</kbd> erase &middot; <kbd>I</kbd> eyedrop</span>
+    </div>
+    <div id="minis">
+      <figure><canvas id="mini180"></canvas><figcaption>180 px</figcaption></figure>
+      <figure><canvas id="mini120"></canvas><figcaption>120 px</figcaption></figure>
+      <figure><canvas id="mini60"></canvas><figcaption>60 px</figcaption></figure>
+    </div>
+  </section>
+
+  <section id="controls">
+    <fieldset>
+      <legend>Geometry</legend>
+      <div class="row"><label for="nRange">Grid N</label>
+        <input type="range" id="nRange" min="8" max="24" step="1" value="14">
+        <output id="nVal"></output></div>
+      <div class="row"><label for="gapRange">Gap</label>
+        <input type="range" id="gapRange" min="0" max="40" step="1" value="14">
+        <output id="gapVal"></output></div>
+      <div class="row"><label for="roundRange">Roundness</label>
+        <input type="range" id="roundRange" min="0" max="100" step="0.1" value="43.3">
+        <output id="roundVal"></output></div>
+      <div class="row"><label>Derived</label><span class="hint" id="derived"></span></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Tools</legend>
+      <div class="tools">
+        <button id="toolPaint">Paint</button>
+        <button id="toolErase">Erase</button>
+        <button id="toolPick">Eyedropper</button>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Palette</legend>
+      <div class="row"><label for="bgColor">Background</label>
+        <input type="color" id="bgColor" value="#08080C">
+        <span class="hint">around the dots (not paintable)</span></div>
+      <div id="swList"></div>
+      <div class="btnrow"><button id="addSwatch">+ Add swatch</button></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Export</legend>
+      <div class="btnrow">
+        <button id="dl">Download AppIcon.png</button>
+        <button id="copyJson">Copy design JSON</button>
+      </div>
+      <div class="btnrow">
+        <button id="resetBtn">Reset to current icon</button>
+      </div>
+      <details id="jsonBox">
+        <summary>Import design JSON</summary>
+        <textarea id="jsonTa" rows="6" spellcheck="false" placeholder='{"n":14,"gap":14,...}'></textarea>
+        <div class="btnrow"><button id="applyJson">Apply JSON</button></div>
+      </details>
+      <div id="toast"></div>
+    </fieldset>
+  </section>
+</main>
+
+<script>
+'use strict';
+const SIZE = 1024, MASK_PCT = 0.2237, HEX = /^#[0-9a-fA-F]{6}$/;
+const $ = id => document.getElementById(id);
+
+function defaultPalette(){
+  return [
+    {name:'Unlit',     color:'#1E1E25'},
+    {name:'White',     color:'#F0F0F4'},
+    {name:'PP Yellow', color:'#FFCC00'},
+    {name:'CHI Red',   color:'#CF0A2C'},
+    {name:'STL Blue',  color:'#002F87'},
+    {name:'STL Gold',  color:'#FCB514'},
+  ];
+}
+function seedCells(){
+  const cells = {};
+  for (let r = 1; r <= 3; r++) for (let c = 1; c <= 12; c++) cells[c+','+r] = c <= 2 ? 1 : 3;
+  for (let r = 4; r <= 6; r++) for (let c = 1; c <= 12; c++) cells[c+','+r] = c <= 2 ? 5 : 4;
+  for (let r = 11; r <= 12; r++){
+    for (let c = 1; c <= 6;  c++) cells[c+','+r] = 1;
+    for (let c = 11; c <= 12; c++) cells[c+','+r] = 2;
+  }
+  return cells;
+}
+function defaultState(){
+  return {n:14, gap:14, roundness:43.3, bg:'#08080C', palette:defaultPalette(), cells:seedCells()};
+}
+
+let state = defaultState();
+let tool = 'paint', selectedIdx = 1;
+let hover = null, painting = false, strokeDirty = false;
+const undoStack = [];
+
+// --- geometry (integer math matches scripts/gen_app_icon.py) ---
+function geom(){
+  const cell = Math.max(1, Math.floor((SIZE - (state.n - 1) * state.gap) / state.n));
+  const footprint = state.n * cell + (state.n - 1) * state.gap;
+  const margin = Math.floor((SIZE - footprint) / 2);
+  const radius = Math.min(cell / 2, Math.round(state.roundness / 100 * cell / 2));
+  return {cell, margin, radius, pitch: cell + state.gap};
+}
+
+// --- drawing ---
+function rrPath(ctx, x, y, w, h, r){    // appends a rounded-rect subpath (no beginPath)
+  r = Math.min(r, w / 2, h / 2);
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+const icon = document.createElement('canvas');   // pure, unmasked 1024px render
+icon.width = icon.height = SIZE;
+const iconCtx = icon.getContext('2d');
+const board = $('board'), boardCtx = board.getContext('2d');
+
+function drawIcon(ctx){
+  const g = geom();
+  ctx.fillStyle = state.bg;
+  ctx.fillRect(0, 0, SIZE, SIZE);
+  for (let r = 0; r < state.n; r++)
+    for (let c = 0; c < state.n; c++){
+      const idx = state.cells[c+','+r] || 0;
+      ctx.fillStyle = (state.palette[idx] || state.palette[0]).color;
+      ctx.beginPath();
+      rrPath(ctx, g.margin + c * g.pitch, g.margin + r * g.pitch, g.cell, g.cell, g.radius);
+      ctx.fill();
+    }
+}
+function repaintDisplay(){
+  boardCtx.clearRect(0, 0, SIZE, SIZE);
+  boardCtx.drawImage(icon, 0, 0);
+  if ($('maskToggle').checked){
+    boardCtx.beginPath();
+    boardCtx.rect(0, 0, SIZE, SIZE);
+    rrPath(boardCtx, 0, 0, SIZE, SIZE, SIZE * MASK_PCT);
+    boardCtx.fillStyle = 'rgba(0,0,0,0.62)';
+    boardCtx.fill('evenodd');
+    boardCtx.beginPath();
+    rrPath(boardCtx, 0, 0, SIZE, SIZE, SIZE * MASK_PCT);
+    boardCtx.strokeStyle = 'rgba(255,255,255,0.25)';
+    boardCtx.lineWidth = 2;
+    boardCtx.stroke();
+  }
+  if (hover){
+    const g = geom();
+    boardCtx.strokeStyle = '#4da3ff';
+    boardCtx.lineWidth = 4;
+    boardCtx.strokeRect(g.margin + hover.c * g.pitch - 3, g.margin + hover.r * g.pitch - 3,
+                        g.cell + 6, g.cell + 6);
+  }
+}
+const minis = [['mini180', 180], ['mini120', 120], ['mini60', 60]];
+for (const [id, s] of minis){
+  const c = $(id);
+  c.width = c.height = s * 2;                    // 2x backing for retina
+  c.style.width = c.style.height = s + 'px';
+}
+function repaintMinis(){
+  for (const [id, s] of minis){
+    const c = $(id), ctx = c.getContext('2d'), px = s * 2;
+    ctx.clearRect(0, 0, px, px);
+    ctx.save();
+    ctx.beginPath();
+    rrPath(ctx, 0, 0, px, px, px * MASK_PCT);
+    ctx.clip();
+    ctx.drawImage(icon, 0, 0, px, px);
+    ctx.restore();
+  }
+}
+function repaintIcon(){
+  drawIcon(iconCtx);
+  repaintDisplay();
+  repaintMinis();
+  const g = geom();
+  $('derived').textContent = 'cell ' + g.cell + ' px · radius ' + g.radius + ' px · margin ' + g.margin + ' px';
+}
+
+// --- controls ---
+function syncControls(){
+  $('nRange').value = state.n;         $('nVal').textContent = state.n + ' × ' + state.n;
+  $('gapRange').value = state.gap;     $('gapVal').textContent = state.gap + ' px';
+  $('roundRange').value = state.roundness;
+  $('roundVal').textContent = state.roundness.toFixed(1) + ' %';
+  $('bgColor').value = state.bg;
+}
+$('nRange').addEventListener('input', e => { state.n = +e.target.value; syncControls(); repaintIcon(); });
+$('gapRange').addEventListener('input', e => { state.gap = +e.target.value; syncControls(); repaintIcon(); });
+$('roundRange').addEventListener('input', e => { state.roundness = +e.target.value; syncControls(); repaintIcon(); });
+$('bgColor').addEventListener('input', e => { state.bg = e.target.value; repaintIcon(); });
+$('maskToggle').addEventListener('change', repaintDisplay);
+
+// --- palette panel ---
+function buildPalette(){
+  const list = $('swList');
+  list.innerHTML = '';
+  state.palette.forEach((p, i) => {
+    const row = document.createElement('div');
+    row.className = 'swatch';
+    const col = document.createElement('input');
+    col.type = 'color';
+    col.value = HEX.test(p.color) ? p.color : '#888888';
+    col.addEventListener('input', () => { p.color = col.value; repaintIcon(); });
+    col.addEventListener('click', e => e.stopPropagation());
+    const name = document.createElement('input');
+    name.type = 'text';
+    name.className = 'swname';
+    name.value = p.name;
+    name.addEventListener('input', () => { p.name = name.value; });
+    name.addEventListener('click', e => e.stopPropagation());
+    const tag = document.createElement('span');
+    tag.className = 'tag';
+    tag.textContent = i === 0 ? 'unlit · erase' : '#' + i;
+    row.append(col, name, tag);
+    row.addEventListener('click', () => {
+      if (i === 0) tool = 'erase';
+      else { selectedIdx = i; tool = 'paint'; }
+      syncToolUI();
+    });
+    list.append(row);
+  });
+  syncToolUI();
+}
+function syncToolUI(){
+  $('toolPaint').classList.toggle('on', tool === 'paint');
+  $('toolErase').classList.toggle('on', tool === 'erase');
+  $('toolPick').classList.toggle('on', tool === 'pick');
+  [...$('swList').children].forEach((row, i) => {
+    row.classList.toggle('sel', tool === 'erase' ? i === 0 : selectedIdx === i);
+  });
+}
+$('toolPaint').addEventListener('click', () => { tool = 'paint'; syncToolUI(); });
+$('toolErase').addEventListener('click', () => { tool = 'erase'; syncToolUI(); });
+$('toolPick').addEventListener('click', () => { tool = 'pick'; syncToolUI(); });
+$('addSwatch').addEventListener('click', () => {
+  state.palette.push({name:'Swatch ' + state.palette.length, color:'#FF00FF'});
+  selectedIdx = state.palette.length - 1;
+  tool = 'paint';
+  buildPalette();
+});
+
+// --- painting ---
+function pickCell(e){
+  const r = board.getBoundingClientRect();
+  const x = (e.clientX - r.left) * SIZE / r.width;
+  const y = (e.clientY - r.top) * SIZE / r.height;
+  const g = geom();
+  const c = Math.floor((x - g.margin) / g.pitch), row = Math.floor((y - g.margin) / g.pitch);
+  if (c < 0 || row < 0 || c >= state.n || row >= state.n) return null;
+  return {c, r: row};
+}
+function pushUndo(){
+  // The FULL design: Import/Reset also swap palette/geometry/bg, and a
+  // cells-only snapshot would half-restore (old indices, new palette).
+  undoStack.push(JSON.stringify(state));
+  if (undoStack.length > 100) undoStack.shift();
+}
+function undo(){
+  if (!undoStack.length) return;
+  state = JSON.parse(undoStack.pop());
+  selectedIdx = Math.min(Math.max(1, selectedIdx), Math.max(0, state.palette.length - 1));
+  syncControls();
+  buildPalette();
+  repaintIcon();
+}
+function applyPaint(p){
+  const key = p.c + ',' + p.r;
+  const idx = tool === 'erase' ? 0 : selectedIdx;
+  if (idx === 0){
+    if (key in state.cells){ delete state.cells[key]; strokeDirty = true; repaintIcon(); }
+  } else if (state.cells[key] !== idx){
+    state.cells[key] = idx; strokeDirty = true; repaintIcon();
+  }
+}
+function eyedrop(p){
+  const idx = state.cells[p.c + ',' + p.r] || 0;
+  if (idx === 0) tool = 'erase';
+  else { selectedIdx = idx; tool = 'paint'; }
+  syncToolUI();
+}
+board.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  const p = pickCell(e);
+  if (!p) return;
+  if (tool === 'pick'){ eyedrop(p); return; }
+  pushUndo();
+  strokeDirty = false;
+  painting = true;
+  board.setPointerCapture(e.pointerId);
+  applyPaint(p);
+});
+board.addEventListener('pointermove', e => {
+  const p = pickCell(e);
+  if ((p && hover && (p.c !== hover.c || p.r !== hover.r)) || (!p !== !hover)){
+    hover = p; repaintDisplay();
+  } else hover = p;
+  if (painting && p) applyPaint(p);
+});
+board.addEventListener('pointerleave', () => { hover = null; repaintDisplay(); });
+function endStroke(){
+  if (painting && !strokeDirty) undoStack.pop();   // no-op stroke: drop its snapshot
+  painting = false;
+}
+window.addEventListener('pointerup', endStroke);
+// Touch interruptions (system gestures, notifications) cancel rather than
+// release — without this, hovering afterwards keeps painting.
+window.addEventListener('pointercancel', endStroke);
+window.addEventListener('keydown', e => {
+  const t = e.target.tagName;
+  if (t === 'INPUT' || t === 'TEXTAREA') return;
+  if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'z'){
+    e.preventDefault(); undo(); return;
+  }
+  const k = e.key.toLowerCase();
+  if (k === 'b') tool = 'paint';
+  else if (k === 'e') tool = 'erase';
+  else if (k === 'i') tool = 'pick';
+  else return;
+  syncToolUI();
+});
+
+// --- export / import ---
+function toast(msg){
+  $('toast').textContent = msg;
+  clearTimeout(toast.t);
+  toast.t = setTimeout(() => { $('toast').textContent = ''; }, 2500);
+}
+$('dl').addEventListener('click', () => {
+  drawIcon(iconCtx);                               // ensure fresh, unmasked
+  icon.toBlob(blob => {
+    if (!blob){ toast('PNG export failed'); return; }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'AppIcon.png';
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    toast('Saved AppIcon.png (1024×1024, unmasked)');
+  }, 'image/png');
+});
+function designJSON(){
+  return JSON.stringify({
+    n: state.n, gap: state.gap, roundnessPct: state.roundness, bg: state.bg,
+    palette: state.palette.map(p => ({name: p.name, color: p.color})),
+    cells: {...state.cells},
+  }, null, 1);
+}
+$('copyJson').addEventListener('click', async () => {
+  const txt = designJSON();
+  try {
+    await navigator.clipboard.writeText(txt);
+    toast('Design JSON copied');
+  } catch (err){                                   // file:// clipboard fallback
+    $('jsonBox').open = true;
+    $('jsonTa').value = txt;
+    $('jsonTa').select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (e2){}
+    toast(ok ? 'Design JSON copied' : 'Clipboard blocked — JSON is in the box below');
+  }
+});
+function applyJSON(txt){
+  let d;
+  try { d = JSON.parse(txt); } catch (err){ toast('Invalid JSON: ' + err.message); return; }
+  if (typeof d !== 'object' || d === null){ toast('Invalid design: not an object'); return; }
+  pushUndo();
+  const clamp = (v, lo, hi, dflt) => Number.isFinite(+v) ? Math.min(hi, Math.max(lo, +v)) : dflt;
+  state.n = Math.round(clamp(d.n, 8, 24, 14));
+  state.gap = Math.round(clamp(d.gap, 0, 40, 14));
+  state.roundness = clamp(d.roundnessPct, 0, 100, 43.3);
+  state.bg = HEX.test(d.bg) ? d.bg : '#08080C';
+  if (Array.isArray(d.palette) && d.palette.length){
+    state.palette = d.palette.map((p, i) => ({
+      name: typeof (p && p.name) === 'string' ? p.name : 'Swatch ' + i,
+      color: HEX.test(p && p.color) ? p.color : '#888888',
+    }));
+  } else state.palette = defaultPalette();
+  state.cells = {};
+  if (d.cells && typeof d.cells === 'object'){
+    for (const k in d.cells){
+      const v = d.cells[k];
+      if (/^\d+,\d+$/.test(k) && Number.isInteger(v) && v > 0 && v < state.palette.length)
+        state.cells[k] = v;
+    }
+  }
+  selectedIdx = Math.min(Math.max(1, selectedIdx), Math.max(0, state.palette.length - 1));
+  syncControls();
+  buildPalette();
+  repaintIcon();
+  toast('Design imported');
+}
+$('applyJson').addEventListener('click', () => applyJSON($('jsonTa').value));
+$('resetBtn').addEventListener('click', () => {
+  pushUndo();
+  state = defaultState();
+  selectedIdx = 1;
+  tool = 'paint';
+  syncControls();
+  buildPalette();
+  repaintIcon();
+  toast('Reset to the shipped icon');
+});
+
+// --- boot ---
+syncControls();
+buildPalette();
+repaintIcon();
+</script>
+</body>
+</html>
