@@ -83,10 +83,19 @@ fn valid_path(p: &str) -> bool {
 /// The revert watchdog checks it at the five-minute mark.
 static FW_CONFIRMED: AtomicBool = AtomicBool::new(false);
 
-/// Flash sector size. Chunk writes are sector-sized and sector-aligned (the
-/// OTA slots start 64KB-aligned) so each lock/erase/program cycle covers
-/// exactly one sector and the flash mutex is released between chunks.
+/// Flash sector size (the OTA slots start 64KB-aligned).
 const CHUNK: usize = 4096;
+/// Writes are batched into bursts of this many bytes. Every flash program
+/// disables the SPI cache, stalling all code that executes from flash —
+/// including the render task that re-arms the panel's DMA — so the panel goes
+/// DARK for the duration of each write. Writing per 4KB sector as bytes
+/// arrived strobed the panel at ~16Hz for the whole download (measured off a
+/// video). One 32KB burst darkens the panel once (~200ms), and the lit window
+/// after it makes the whole update read as a slow deliberate pulse instead.
+const BURST: usize = CHUNK * 8;
+/// Panel-visible pause after each burst: long enough to read as "on, working",
+/// showing the freshly advanced progress bar.
+const LIT_WINDOW_MS: u64 = 600;
 
 /// Boot-attempt counter for unconfirmed images: its own nvs sector (after
 /// creds 0x9000 / brightness 0xA000 / identity 0xB000). Incremented by
@@ -350,9 +359,11 @@ async fn commit(flash: &SharedFlash, expected: AppPartitionSubType) -> Result<()
     Ok(())
 }
 
-/// Sector-buffered writer into the inactive slot. Locks the shared flash once
-/// per 4KB sector and releases it between chunks, so hold-to-reset (which also
-/// locks per operation) is never blocked for more than one sector program.
+/// Burst-buffered writer into the inactive slot. Accumulates BURST bytes in
+/// RAM, programs them in one flash lock (~200ms — hold-to-reset only touches
+/// flash AFTER its 10s gesture, so this never blocks the escape hatch), then
+/// rests for LIT_WINDOW_MS with the panel visible. See BURST for why: each
+/// program stalls the panel dark, and per-sector writes strobed it.
 struct SlotWriter<'a> {
     flash: &'a SharedFlash,
     base: u32,
@@ -364,12 +375,15 @@ struct SlotWriter<'a> {
 impl SlotWriter<'_> {
     async fn feed(&mut self, mut data: &[u8]) -> Result<(), &'static str> {
         while !data.is_empty() {
-            let take = (CHUNK - self.buffered).min(data.len());
+            let take = (BURST - self.buffered).min(data.len());
             self.chunk[self.buffered..self.buffered + take].copy_from_slice(&data[..take]);
             self.buffered += take;
             data = &data[take..];
-            if self.buffered == CHUNK {
+            if self.buffered == BURST {
                 self.flush().await?;
+                // The lit window: the panel shows the just-advanced bar while
+                // the socket backpressures. Skipped by the final short flush.
+                Timer::after(Duration::from_millis(LIT_WINDOW_MS)).await;
             }
         }
         Ok(())
@@ -480,7 +494,7 @@ pub async fn download_and_install(
     let mut out = SlotWriter {
         flash,
         base: target.offset,
-        chunk: alloc::vec![0u8; CHUNK],
+        chunk: alloc::vec![0u8; BURST],
         buffered: 0,
         written: 0,
     };
