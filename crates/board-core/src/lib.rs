@@ -40,10 +40,12 @@ const BOOT_TIME_MS: u64 = 1500;
 const RESET_GRACE_MS: u64 = 500;
 const RESET_FILL_MS: u64 = 9500;
 // Offline grace: a dropped websocket usually re-establishes within a second or
-// two, and flashing "CONNECTING" for every blip is jarring. While there's
-// content on screen, keep showing it until the connection has been down this
-// long; only then admit the outage with the connect-progress screen.
-const OFFLINE_GRACE_MS: u64 = 5000;
+// two — and a server DEPLOY takes 30-60s of reconnect failures. While there's
+// content on screen, keep showing it (scores just pause updating); only admit
+// the outage with the connect-progress screen once it has lasted this long.
+// Field-tuned up from 5s: every deploy and proxy blip was flashing CONNECTING
+// at people, which reads as "broken", not "briefly offline".
+const OFFLINE_GRACE_MS: u64 = 45_000;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {

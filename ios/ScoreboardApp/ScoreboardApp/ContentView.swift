@@ -223,8 +223,28 @@ final class BoardViewModel: ObservableObject {
     /// board per session, so two phones in different zones can't ping-pong the
     /// board's clock forever (whoever's app saw it last wins).
 
+    /// Pending "mark this server disconnected" work items, so a transient drop
+    /// can be cancelled if the socket returns within the grace window.
+    private var disconnectGrace: [String: DispatchWorkItem] = [:]
+
     func setConnected(_ server: String, _ up: Bool) {
-        if up { connectedServers.insert(server) } else { connectedServers.remove(server) }
+        // Reconnect: apply immediately and cancel any pending grace timer.
+        if up {
+            disconnectGrace.removeValue(forKey: server)?.cancel()
+            connectedServers.insert(server)
+            return
+        }
+        // Drop: the app-core client reconnects on its own, and a server DEPLOY
+        // means ~30-60s of failed attempts. Don't slam up the "can't reach the
+        // server" splash for a blip — only if it's STILL down after the grace
+        // window. A drop while already ungraced just leaves its timer running.
+        guard connectedServers.contains(server), disconnectGrace[server] == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            self?.disconnectGrace.removeValue(forKey: server)
+            self?.connectedServers.remove(server)
+        }
+        disconnectGrace[server] = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 45, execute: work)
     }
 
     /// Get-or-create the client for a server URL and connect it.
@@ -1753,7 +1773,7 @@ struct DashboardView: View {
             if model.current.updatingFirmware {
                 HStack(spacing: 10) {
                     ProgressView()
-                    Text("Updating… the scoreboard restarts itself when it's done.")
+                    Text("Updating… the panel flickers while it writes — that's normal. It restarts itself when it's done.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -1772,7 +1792,7 @@ struct DashboardView: View {
                 ) {
                     Button("Update") { model.updateFirmware() }
                 } message: {
-                    Text("The scoreboard downloads the update and restarts itself — about a minute. It keeps working if the update fails.")
+                    Text("The scoreboard downloads the update and restarts itself — about a minute. The panel flickers while it writes, which is normal — don't unplug it. It keeps working if the update fails.")
                 }
             }
         } header: {
@@ -2397,7 +2417,7 @@ struct AllGamesView: View {
     /// The bottom-pinned search field: live, case- and diacritic-insensitive,
     /// with a clear button once there's anything to clear.
     private var searchBar: some View {
-        HStack(spacing: 6) {
+        let pill = HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
             TextField("Search games…", text: $searchText)
@@ -2411,15 +2431,24 @@ struct AllGamesView: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
+                .transition(.opacity)
             }
         }
         .font(.subheadline)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .background(Capsule().fill(Color(.secondarySystemGroupedBackground)))
         .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(.bar)
+        .padding(.vertical, 12)
+        // Floating Liquid Glass pill, inset from the edges so the list scrolls
+        // visibly BEHIND it (iOS 26). Falls back to a material capsule pre-26.
+        return Group {
+            if #available(iOS 26.0, *) {
+                pill.glassEffect(.regular.interactive(), in: .capsule)
+            } else {
+                pill.background(.thinMaterial, in: .capsule)
+                    .overlay(Capsule().strokeBorder(.white.opacity(0.12)))
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.bottom, 8)
     }
 
     /// One game card with its provenance caption and Add / Remove+Pin footer.
