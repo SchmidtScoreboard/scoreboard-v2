@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "demo-server",
+      "runtimeExecutable": "cargo",
+      "runtimeArgs": ["watch", "-w", "crates", "-x", "run -p server -- --demo"],
+      "port": 7878
+    },
+    {
+      "name": "live-server",
+      "runtimeExecutable": "cargo",
+      "runtimeArgs": ["run", "-p", "server"],
+      "port": 7878
+    }
+  ]
+}

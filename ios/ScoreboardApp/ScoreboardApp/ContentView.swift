@@ -94,6 +94,12 @@ final class ListenerAdapter: ClientListener {
     func onBoardVersion(boardId: String, version: String?, updateAvailable: String?) {
         Task { @MainActor in self.model?.applyBoardVersion(boardId, version, updateAvailable) }
     }
+    func onFirmwareList(images: [UiFwImage]) {
+        Task { @MainActor in self.model?.firmwareImages = images }
+    }
+    func onFirmwareProgress(boardId: String, pct: UInt8) {
+        Task { @MainActor in self.model?.applyFirmwareProgress(boardId, pct) }
+    }
 }
 
 /// Everything the app tracks for a single paired board.
@@ -133,6 +139,12 @@ struct BoardInfo {
     /// comes back online — drives the passive "Updating…" hint. The board
     /// itself shows real progress on its panel; the app just waits.
     var updatingFirmware = false
+    /// Server-observed download progress (0…100) of an in-flight firmware
+    /// update, pushed via `on_firmware_progress`; nil when none is running.
+    /// Drives the determinate progress bar. Cleared on the SAME events that
+    /// end `updatingFirmware` — the board reports a changed version, or it
+    /// dropped offline (to reboot) and came back online.
+    var firmwareProgress: UInt8?
     /// What the board reported when the update started (a later, different
     /// report means the update landed).
     var updatingFromVersion: String?
@@ -161,6 +173,9 @@ final class BoardViewModel: ObservableObject {
     @Published var liveGames: [UiGame] = []
     /// Team catalog — global.
     @Published var sports: [UiSport] = []
+    /// The firmware menu the server hosts (reply to `listFirmware`) — global to
+    /// the server, refreshed on demand by the DEBUG firmware picker.
+    @Published var firmwareImages: [UiFwImage] = []
 
     @Published var isPairing = false
     @Published var pairError: String?
@@ -217,6 +232,11 @@ final class BoardViewModel: ObservableObject {
     /// One client per distinct server; the active one follows the selection.
     private var clients: [String: (client: ScoreboardClient, adapter: ListenerAdapter)] = [:]
     private var client: ScoreboardClient? { clients[serverURL(of: selectedBoardId)]?.client }
+    /// The client owning a specific board (its server may differ from the
+    /// selected board's in a multi-server model).
+    private func clientFor(_ boardId: String) -> ScoreboardClient? {
+        clients[serverURL(of: boardId)]?.client
+    }
     /// Where an in-flight pairing will file the new board.
     private var pendingPairServer: String?
     /// Boards whose timezone this app session already synced — one shot per
@@ -724,6 +744,7 @@ final class BoardViewModel: ObservableObject {
                 } else if $0.sawOfflineDuringUpdate {
                     $0.updatingFirmware = false
                     $0.sawOfflineDuringUpdate = false
+                    $0.firmwareProgress = nil // reboot done — drop the bar
                 }
             }
         }
@@ -740,8 +761,44 @@ final class BoardViewModel: ObservableObject {
             if $0.updatingFirmware, let v = version, v != $0.updatingFromVersion {
                 $0.updatingFirmware = false
                 $0.sawOfflineDuringUpdate = false
+                $0.firmwareProgress = nil // new version reported — drop the bar
             }
         }
+    }
+
+    /// Server-observed firmware download progress (0…100) for a board. Any
+    /// progress means an update is under way, so the passive "Updating…" gating
+    /// is armed too (the determinate bar supersedes the indeterminate hint).
+    /// Cleared alongside `updatingFirmware` when the board reboots (offline →
+    /// online) or reports a changed version.
+    func applyFirmwareProgress(_ boardId: String, _ pct: UInt8) {
+        guard boardIds.contains(boardId) else { return }
+        mutate(boardId) {
+            $0.firmwareProgress = pct
+            if !$0.updatingFirmware {
+                $0.updatingFirmware = true
+                $0.updatingFromVersion = $0.firmwareVersion
+                $0.sawOfflineDuringUpdate = false
+            }
+        }
+    }
+
+    /// Ask the server for the firmware menu (DEBUG picker); the reply lands in
+    /// `firmwareImages` via `on_firmware_list`.
+    func listFirmware() {
+        client?.listFirmware()
+    }
+
+    /// Install a specific channel's current dist on a board (DEBUG picker /
+    /// "reinstall current"). Optimistically arms the "Updating…" gating; the
+    /// board's same-or-newer guard decides whether it actually takes.
+    func installFirmware(_ boardId: String, _ channel: UiFwChannel) {
+        mutate(boardId) {
+            $0.updatingFirmware = true
+            $0.updatingFromVersion = $0.firmwareVersion
+            $0.sawOfflineDuringUpdate = false
+        }
+        clientFor(boardId)?.installFirmware(boardId: boardId, channel: channel)
     }
 
     /// Which firmware release channel the selected board follows (optimistic;
@@ -1391,6 +1448,9 @@ struct DashboardView: View {
             spoilerSection
             transferSection
             aboutSection
+            #if DEBUG
+            firmwareDeveloperSection
+            #endif
             removeSection
         }
         // One uniform gap between top-level sections. Individual sections that
@@ -1770,7 +1830,17 @@ struct DashboardView: View {
                 }
                 #endif
             }
-            if model.current.updatingFirmware {
+            if let pct = model.current.firmwareProgress {
+                // Determinate bar while the server streams the image to the
+                // board. The panel is dark (writing flash), which alarms
+                // people — reassure them and warn against unplugging.
+                VStack(alignment: .leading, spacing: 6) {
+                    ProgressView(value: Double(pct) / 100)
+                    Text("Updating \(pct)%. The panel stays dark while it writes — that's normal; don't unplug it.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            } else if model.current.updatingFirmware {
                 HStack(spacing: 10) {
                     ProgressView()
                     Text("Updating… the panel flickers while it writes — that's normal. It restarts itself when it's done.")
@@ -1805,6 +1875,91 @@ struct DashboardView: View {
             #endif
         }
     }
+
+    #if DEBUG
+    /// DEBUG-only firmware picker: reinstall the running build (the firmware
+    /// now accepts a same-version install, so this exercises the OTA path), or
+    /// install any hosted image. The board refuses downgrades, so an image
+    /// older than the board's reported version is shown as "USB only" with its
+    /// Install button disabled. Populated by `model.listFirmware()`.
+    private var firmwareDeveloperSection: some View {
+        Section {
+            Button {
+                if let id = model.selectedBoardId {
+                    model.installFirmware(id, model.current.fwChannel)
+                }
+            } label: {
+                Label("Reinstall current firmware", systemImage: "arrow.clockwise")
+            }
+            .disabled(model.selectedBoardId == nil)
+
+            ForEach(model.firmwareImages, id: \.self) { img in
+                let installable = firmwareInstallable(img)
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(img.channel.capitalized)
+                        Text(img.version)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    Spacer()
+                    if installable {
+                        Button("Install") {
+                            if let id = model.selectedBoardId {
+                                model.installFirmware(id, channelFromName(img.channel))
+                            }
+                        }
+                        .buttonStyle(.borderless)
+                    } else {
+                        Text("older — USB only")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        } header: {
+            Text("Firmware (developer)")
+        } footer: {
+            Text("Reinstalls and installs go through the same OTA path as a real update. The board refuses downgrades — those need a USB flash.")
+        }
+        // Refresh the menu whenever this section appears.
+        .task { model.listFirmware() }
+    }
+
+    /// Map a hosted image's channel name to the enum the install command wants.
+    private func channelFromName(_ name: String) -> UiFwChannel {
+        switch name {
+        case "beta": return .beta
+        case "dev": return .dev
+        default: return .stable
+        }
+    }
+
+    /// An image is installable unless it's strictly OLDER than the board's
+    /// reported firmware (the board refuses downgrades). Same version is fine
+    /// (reinstall). Unknown board version or an unparseable string can't prove
+    /// a downgrade, so we don't block — matching the protocol's "unparseable
+    /// sorts as not-newer" (and therefore not-older either).
+    private func firmwareInstallable(_ image: UiFwImage) -> Bool {
+        guard let board = model.current.firmwareVersion,
+              let i = parseCalVer(image.version),
+              let b = parseCalVer(board) else {
+            return true
+        }
+        return !(i < b) // installable when same-or-newer; older is USB-only
+    }
+
+    /// Parse a CalVer firmware version ("2026.7.3") into a comparable tuple;
+    /// nil unless it's exactly three '.'-separated integers.
+    private func parseCalVer(_ v: String) -> (Int, Int, Int)? {
+        let parts = v.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 3,
+              let a = Int(parts[0]), let b = Int(parts[1]), let c = Int(parts[2])
+        else { return nil }
+        return (a, b, c)
+    }
+    #endif
 
     private var removeSection: some View {
         Section {

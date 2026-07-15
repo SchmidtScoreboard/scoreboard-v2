@@ -281,6 +281,24 @@ async fn controller_loop(
                         serde_json::to_string(&ServerMsg::Games { games }).unwrap(),
                     ));
                 }
+                Ok(ClientMsg::ListFirmware) => {
+                    // The DEBUG picker's full menu: one entry per channel the
+                    // server hosts a dist for, in stable-first order. Not
+                    // board-scoped — the on-device same-or-newer guard decides
+                    // what any given board actually takes.
+                    let images: Vec<FwImage> = FwChannel::ALL
+                        .iter()
+                        .filter_map(|c| {
+                            state.firmware.get(c).map(|fw| FwImage {
+                                channel: c.as_str().to_string(),
+                                version: fw.manifest.version.clone(),
+                            })
+                        })
+                        .collect();
+                    let _ = out.send(Message::Text(
+                        serde_json::to_string(&ServerMsg::FirmwareList { images }).unwrap(),
+                    ));
+                }
                 Ok(ClientMsg::ExportSettings { board_id }) => {
                     // Same per-board guard as commands: only a paired controller
                     // may read a board's preferences. Answer with an error (via
@@ -438,6 +456,13 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
     // the fold-persist-push cycle below entirely.
     if matches!(cmd, Command::UpdateFirmware) {
         crate::handle_update_firmware(state, board_id);
+        return;
+    }
+    // Same short-circuit as UpdateFirmware: InstallFirmware relays a named
+    // channel's dist to the device and touches no config. Borrow `cmd` (don't
+    // move it) so the exhaustive fold below still compiles.
+    if let Command::InstallFirmware { channel } = &cmd {
+        crate::handle_install_firmware(state, board_id, *channel);
         return;
     }
     // Set when the app toggles power, so the board gets the same "SLEEPING" splash
@@ -604,6 +629,10 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
             // function — never reaches the config fold. The arm stays so a new
             // Command variant is still a compile error here.
             Command::UpdateFirmware => unreachable!("handled before the config fold"),
+            // Relayed to the device by the early return at the top of this
+            // function (`handle_install_firmware`) — never reaches the config
+            // fold. The arm stays so a new Command variant is a compile error.
+            Command::InstallFirmware { .. } => unreachable!("handled before the config fold"),
             // Deliberately no catch-all: a new Command variant should be a compile
             // error here, not a silently ignored no-op.
         }
@@ -997,7 +1026,10 @@ mod tests {
                 assert_eq!(size, fw.manifest.size);
                 assert_eq!(sha256, fw.manifest.sha256);
                 assert_eq!(sig, fw.manifest.sig);
-                assert_eq!(path, "/firmware/beta.bin", "path names the dist's channel");
+                assert!(
+                    path.starts_with("/firmware/beta.bin?u="),
+                    "path names the dist's channel + carries a download token, got {path:?}"
+                );
                 assert_eq!(channel, "beta", "offer names the dist's channel (signed on-device)");
             }
             other => panic!("expected UpdateFirmware at the device, got {other:?}"),
@@ -1074,6 +1106,275 @@ mod tests {
                 assert_eq!(firmware_update, None, "back on stable: nothing to offer");
             }
             other => panic!("expected BoardState after SetFwChannel, got {other:?}"),
+        }
+    }
+
+    // ---- streaming OTA download + progress ----
+
+    /// A server hosting a stable dist big enough to stream in several chunks,
+    /// plus the WS routes AND the firmware HTTP routes on one listener — so a
+    /// subscribed controller (WS) can observe progress from a real HTTP fetch.
+    fn state_with_big_stable_dist() -> (AppState, Vec<u8>) {
+        // ~40 KB -> three ~16 KB chunks; distinct byte pattern so a truncation
+        // or off-by-one in the stream would fail the byte-identity check.
+        let image: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
+        let mut state = AppState::new_ephemeral();
+        state.firmware.insert(
+            FwChannel::Stable,
+            std::sync::Arc::new(crate::FirmwareDist {
+                manifest: crate::FirmwareManifest {
+                    version: "2026.7.0".into(),
+                    channel: "stable".into(),
+                    size: image.len() as u32,
+                    sha256: sha256_hex(&image),
+                    sig: "ab".repeat(64),
+                },
+                bytes: image.clone().into(),
+            }),
+        );
+        (state, image)
+    }
+
+    /// One listener serving both `/ws` and the firmware routes. Returns
+    /// (ws url, http base, state).
+    async fn spawn_full_server(state: AppState) -> (String, String, AppState) {
+        let app = Router::new()
+            .route("/ws", get(ws_handler))
+            .route("/firmware/:chan/latest", get(crate::get_firmware_latest))
+            .route("/firmware/:file", get(crate::get_firmware_bin))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("ws://{addr}/ws"), format!("http://{addr}"), state)
+    }
+
+    /// Read one ServerMsg within `ms`, or None if the socket stays quiet.
+    async fn try_recv(ws: &mut Client, ms: u64) -> Option<ServerMsg> {
+        match tokio::time::timeout(Duration::from_millis(ms), ws.next()).await {
+            Ok(Some(Ok(TMessage::Text(t)))) => serde_json::from_str(&t).ok(),
+            _ => None,
+        }
+    }
+
+    /// A tokenized `GET /firmware/stable.bin?u=<nonce>` streams the image and
+    /// drives monotonic `FirmwareProgress` to the board's subscribed
+    /// controller, reaching exactly 100; the token is dropped once the stream
+    /// drains; and the delivered body is byte-identical to the dist.
+    #[tokio::test]
+    async fn tokenized_download_streams_progress_and_clears() {
+        let (state, image) = state_with_big_stable_dist();
+        let (ws_url, http, state) = spawn_full_server(state).await;
+        let (mut dev, board_id) = auth(&ws_url, Role::Device, &[1u8; 32]).await;
+        let mut ctrl = paired_subscriber(&ws_url, &mut dev, &board_id, &[2u8; 32]).await;
+
+        // A real token arrives inside an UpdateFirmware offer; here we mint one
+        // directly to isolate the streaming route from the offer plumbing.
+        let nonce = "abad1deacafef00d".to_string();
+        state
+            .fw_download_tokens
+            .lock()
+            .unwrap()
+            .insert(nonce.clone(), (board_id.clone(), std::time::Instant::now()));
+
+        let body = reqwest::get(format!("{http}/firmware/stable.bin?u={nonce}"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(&body[..], &image[..], "streamed body is byte-identical to the dist");
+
+        let mut last = 0u8;
+        let mut reached_100 = false;
+        for _ in 0..128 {
+            match try_recv(&mut ctrl, 1000).await {
+                Some(ServerMsg::FirmwareProgress { board_id: b, pct }) => {
+                    assert_eq!(b, board_id, "progress names the downloading board");
+                    assert!(pct >= last, "progress is monotonic ({last} -> {pct})");
+                    last = pct;
+                    if pct == 100 {
+                        reached_100 = true;
+                        break;
+                    }
+                }
+                Some(_) => continue,
+                None => break,
+            }
+        }
+        assert!(reached_100, "progress reached 100% (last seen {last})");
+
+        // The one-time token is cleared once the stream completes.
+        let mut cleared = false;
+        for _ in 0..40 {
+            if !state.fw_download_tokens.lock().unwrap().contains_key(&nonce) {
+                cleared = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(cleared, "download token cleared after the stream drained");
+    }
+
+    /// The RAW HTTP framing of the tokenized stream, read exactly the way the
+    /// board's bare-metal client does (find \r\n\r\n, then treat every byte as
+    /// image). `reqwest` transparently decodes chunked transfer-encoding, so it
+    /// would happily pass even if the response were chunked — but the firmware
+    /// does NOT decode chunking and would hash the chunk-size lines into the
+    /// image, failing every OTA. This asserts identity framing (Content-Length,
+    /// NO Transfer-Encoding) and a byte-identical body.
+    #[tokio::test]
+    async fn tokenized_stream_is_content_length_framed_not_chunked() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (state, image) = state_with_big_stable_dist();
+        let (_ws_url, http, state) = spawn_full_server(state).await;
+        let nonce = "0badf00dcafe1234".to_string();
+        state.fw_download_tokens.lock().unwrap().insert(
+            nonce.clone(),
+            ("board-x".to_string(), std::time::Instant::now()),
+        );
+
+        let addr = http.trim_start_matches("http://").to_string();
+        let mut sock = tokio::net::TcpStream::connect(&addr).await.unwrap();
+        sock.write_all(
+            format!("GET /firmware/stable.bin?u={nonce} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+        let mut raw = Vec::new();
+        sock.read_to_end(&mut raw).await.unwrap();
+
+        let sep = raw.windows(4).position(|w| w == b"\r\n\r\n").expect("has headers");
+        let headers = String::from_utf8_lossy(&raw[..sep]).to_lowercase();
+        assert!(
+            !headers.contains("transfer-encoding: chunked"),
+            "the board can't decode chunked framing — response must be identity:\n{headers}"
+        );
+        assert!(
+            headers.contains(&format!("content-length: {}", image.len())),
+            "streamed response must carry the exact Content-Length:\n{headers}"
+        );
+        // Exactly what the firmware feeds to sha256/verify: raw post-header bytes.
+        assert_eq!(&raw[sep + 4..], &image[..], "raw body byte-identical to the image");
+    }
+
+    /// An un-tokenized `GET /firmware/stable.bin` serves the same bytes and
+    /// pushes NO progress to a subscribed controller (the plain path never
+    /// enters the streaming branch).
+    #[tokio::test]
+    async fn untokenized_download_is_byte_identical_and_silent() {
+        let (state, image) = state_with_big_stable_dist();
+        let (ws_url, http, _state) = spawn_full_server(state).await;
+        let (mut dev, board_id) = auth(&ws_url, Role::Device, &[1u8; 32]).await;
+        let mut ctrl = paired_subscriber(&ws_url, &mut dev, &board_id, &[2u8; 32]).await;
+
+        let body = reqwest::get(format!("{http}/firmware/stable.bin"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(&body[..], &image[..], "un-tokenized body is byte-identical");
+
+        // The test server runs no poll/tick loop, so the controller is
+        // otherwise silent: any FirmwareProgress here would be a bug.
+        for _ in 0..4 {
+            if let Some(ServerMsg::FirmwareProgress { .. }) = try_recv(&mut ctrl, 300).await {
+                panic!("un-tokenized download must emit no progress");
+            }
+        }
+    }
+
+    /// ListFirmware returns one entry per hosted channel (stable-first), with
+    /// each dist's version; unhosted channels are absent. Not board-scoped, so
+    /// no pairing/subscription is required.
+    #[tokio::test]
+    async fn list_firmware_returns_all_hosted_channels() {
+        let (url, _state) = spawn_server_with(state_with_firmware(&[
+            (FwChannel::Stable, "2026.7.0"),
+            (FwChannel::Dev, "2026.9.0"),
+        ]))
+        .await;
+        let (mut ctrl, _) = auth(&url, Role::Controller, &[3u8; 32]).await;
+        send(&mut ctrl, &ClientMsg::ListFirmware).await;
+        match recv_until(&mut ctrl, |m| matches!(m, ServerMsg::FirmwareList { .. })).await {
+            Some(ServerMsg::FirmwareList { images }) => {
+                assert_eq!(images.len(), 2, "only hosted channels are listed (beta absent)");
+                assert_eq!(images[0], FwImage { channel: "stable".into(), version: "2026.7.0".into() });
+                assert_eq!(images[1], FwImage { channel: "dev".into(), version: "2026.9.0".into() });
+            }
+            other => panic!("expected FirmwareList, got {other:?}"),
+        }
+    }
+
+    /// InstallFirmware{beta} relays the beta dist to the device as an
+    /// UpdateFirmware offer, regardless of the board's reported version: the
+    /// path names the beta channel + carries a token, and the version is the
+    /// beta dist's.
+    #[tokio::test]
+    async fn install_firmware_sends_channel_offer() {
+        let (url, state) = spawn_server_with(state_with_firmware(&[
+            (FwChannel::Stable, "2026.7.0"),
+            (FwChannel::Beta, "2026.8.0"),
+        ]))
+        .await;
+        let beta = state.firmware.get(&FwChannel::Beta).expect("beta dist hosted").clone();
+        let (mut dev, board_id) = auth(&url, Role::Device, &[1u8; 32]).await;
+        let mut ctrl = paired_subscriber(&url, &mut dev, &board_id, &[2u8; 32]).await;
+
+        // No DeviceVersion reported: InstallFirmware doesn't gate on it.
+        send(&mut ctrl, &ClientMsg::Command {
+            req_id: 11,
+            board_id: board_id.clone(),
+            cmd: Command::InstallFirmware { channel: FwChannel::Beta },
+        })
+        .await;
+        assert!(matches!(
+            recv_until(&mut ctrl, |m| matches!(m, ServerMsg::CommandAck { .. })).await,
+            Some(ServerMsg::CommandAck { req_id: 11, ok: true, .. })
+        ));
+        match recv_until(&mut dev, |m| matches!(m, ServerMsg::UpdateFirmware { .. })).await {
+            Some(ServerMsg::UpdateFirmware { version, path, channel, sha256, .. }) => {
+                assert_eq!(version, beta.manifest.version, "offer carries the beta dist's version");
+                assert_eq!(sha256, beta.manifest.sha256);
+                assert!(path.starts_with("/firmware/beta.bin?u="), "tokenized beta path, got {path:?}");
+                assert_eq!(channel, "beta");
+            }
+            other => panic!("expected UpdateFirmware at the device, got {other:?}"),
+        }
+    }
+
+    /// A same-version InstallFirmware still sends an offer — the server never
+    /// gates on version (the on-device same-or-newer guard governs whether it
+    /// takes), so a deliberate reinstall reaches the device.
+    #[tokio::test]
+    async fn install_firmware_reinstalls_same_version() {
+        let (url, _state) =
+            spawn_server_with(state_with_firmware(&[(FwChannel::Stable, "2026.7.0")])).await;
+        let (mut dev, board_id) = auth(&url, Role::Device, &[1u8; 32]).await;
+        let mut ctrl = paired_subscriber(&url, &mut dev, &board_id, &[2u8; 32]).await;
+
+        // The board already runs the hosted version.
+        send(&mut dev, &ClientMsg::DeviceVersion { version: "2026.7.0".into() }).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        send(&mut ctrl, &ClientMsg::Command {
+            req_id: 12,
+            board_id: board_id.clone(),
+            cmd: Command::InstallFirmware { channel: FwChannel::Stable },
+        })
+        .await;
+        assert!(matches!(
+            recv_until(&mut ctrl, |m| matches!(m, ServerMsg::CommandAck { .. })).await,
+            Some(ServerMsg::CommandAck { req_id: 12, ok: true, .. })
+        ));
+        match recv_until(&mut dev, |m| matches!(m, ServerMsg::UpdateFirmware { .. })).await {
+            Some(ServerMsg::UpdateFirmware { version, path, .. }) => {
+                assert_eq!(version, "2026.7.0", "reinstall sends the same version outright");
+                assert!(path.starts_with("/firmware/stable.bin?u="), "got {path:?}");
+            }
+            other => panic!("expected a reinstall offer at the device, got {other:?}"),
         }
     }
 }

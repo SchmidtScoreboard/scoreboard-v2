@@ -87,15 +87,13 @@ static FW_CONFIRMED: AtomicBool = AtomicBool::new(false);
 const CHUNK: usize = 4096;
 /// Writes are batched into bursts of this many bytes. Every flash program
 /// disables the SPI cache, stalling all code that executes from flash —
-/// including the render task that re-arms the panel's DMA — so the panel goes
-/// DARK for the duration of each write. Writing per 4KB sector as bytes
-/// arrived strobed the panel at ~16Hz for the whole download (measured off a
-/// video). One 32KB burst darkens the panel once (~200ms), and the lit window
-/// after it makes the whole update read as a slow deliberate pulse instead.
+/// including the render task — so per-sector writes locked the flash mutex at
+/// ~16Hz for the whole download. The panel is now BLANK throughout the update
+/// (board-core `set_updating` — a black panel can't strobe), so this is purely
+/// a flash-efficiency choice: one 32KB program per lock acquisition instead of
+/// eight 4KB ones. The mutex is still taken PER burst, so a hold-to-reset
+/// gesture only ever waits out a single burst write.
 const BURST: usize = CHUNK * 8;
-/// Panel-visible pause after each burst: long enough to read as "on, working",
-/// showing the freshly advanced progress bar.
-const LIT_WINDOW_MS: u64 = 600;
 
 /// Boot-attempt counter for unconfirmed images: its own nvs sector (after
 /// creds 0x9000 / brightness 0xA000 / identity 0xB000). Incremented by
@@ -360,10 +358,10 @@ async fn commit(flash: &SharedFlash, expected: AppPartitionSubType) -> Result<()
 }
 
 /// Burst-buffered writer into the inactive slot. Accumulates BURST bytes in
-/// RAM, programs them in one flash lock (~200ms — hold-to-reset only touches
-/// flash AFTER its 10s gesture, so this never blocks the escape hatch), then
-/// rests for LIT_WINDOW_MS with the panel visible. See BURST for why: each
-/// program stalls the panel dark, and per-sector writes strobed it.
+/// RAM, then programs them under one flash lock (~200ms — hold-to-reset only
+/// touches flash AFTER its 10s gesture, so this never blocks the escape hatch).
+/// The panel is black for the whole update, so there's no visual pacing to do:
+/// bursts just cut the number of cache-stalling flash programs (see BURST).
 struct SlotWriter<'a> {
     flash: &'a SharedFlash,
     base: u32,
@@ -381,9 +379,6 @@ impl SlotWriter<'_> {
             data = &data[take..];
             if self.buffered == BURST {
                 self.flush().await?;
-                // The lit window: the panel shows the just-advanced bar while
-                // the socket backpressures. Skipped by the final short flush.
-                Timer::after(Duration::from_millis(LIT_WINDOW_MS)).await;
             }
         }
         Ok(())
@@ -410,9 +405,11 @@ impl SlotWriter<'_> {
 /// — a failed update must be a non-event.
 ///
 /// Runs in the device task with the websocket already dropped: it borrows the
-/// same rx/tx socket buffers (like `fetch_timezone`), and progress renders
-/// from the DEVICE's own byte counter via `set_updating` — nothing animates
-/// over the network.
+/// same rx/tx socket buffers (like `fetch_timezone`). The panel is BLANKED for
+/// the whole download (`set_updating(Some(0))` — a black panel can't strobe as
+/// each flash write stalls the render task), and download progress is shown in
+/// the app instead, observed server-side from the bytes it streams to the
+/// board (the device's ws is down, so it can't report progress itself).
 #[allow(clippy::too_many_arguments)]
 pub async fn download_and_install(
     stack: Stack<'static>,
@@ -426,10 +423,15 @@ pub async fn download_and_install(
     board: &'static SharedBoard,
 ) -> Result<(), &'static str> {
     // Downgrade/replay guard: the plain-HTTP channel means anyone on-path can
-    // replay an OLD signed release as an "update" — refuse anything that isn't
-    // strictly newer than what we're running.
-    if !scoreboard_protocol::version_newer(&job.version, env!("CARGO_PKG_VERSION")) {
-        return Err("offered version is not newer than the running one");
+    // replay an OLD signed release as an "update". Accept only a strictly-newer
+    // version OR the SAME version we're running — a same-version reinstall is
+    // harmless (it's literally the running image, still signed and covered by
+    // the revert machinery) and is how the DEBUG picker tests the update flow.
+    // Strictly-older offers stay refused: NO downgrade, no force flag, no
+    // network-triggerable exception.
+    let running = env!("CARGO_PKG_VERSION");
+    if !(scoreboard_protocol::version_newer(&job.version, running) || job.version == running) {
+        return Err("offered version is older than the running one");
     }
     // The download path is server-supplied: sanity-check it before it goes
     // anywhere near the request line.
@@ -499,7 +501,6 @@ pub async fn download_and_install(
         written: 0,
     };
     let mut hasher = Sha256::new();
-    let mut last_pct = 0u8;
 
     // Body bytes that rode in with the headers, then the socket until exactly
     // `size` bytes. More than `size` is as fatal as fewer: the image on the
@@ -526,13 +527,9 @@ pub async fn download_and_install(
         verifier.update(data);
         out.feed(data).await?;
         received += n;
-
-        // Progress off our own byte counter, redrawn by the render task.
-        let pct = (received as u64 * 100 / size as u64) as u8;
-        if pct != last_pct {
-            board.lock().await.set_updating(Some(pct));
-            last_pct = pct;
-        }
+        // No progress rendered here: the panel stays black (set_updating(Some(0))
+        // above), and the app shows the server-observed download progress. The
+        // device ws is dropped, so the device couldn't report progress anyway.
     }
     out.flush().await?;
 

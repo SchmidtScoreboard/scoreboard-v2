@@ -568,6 +568,21 @@ public protocol ScoreboardClientProtocol: AnyObject {
     func importSettings(boardId: String, json: String)
 
     /**
+     * Tell a board to install a SPECIFIC channel's current dist (the DEBUG
+     * picker / "reinstall current" flow). The on-device same-or-newer guard
+     * still governs whether it takes, so installing an older channel's dist is
+     * a no-op on the board.
+     */
+    func installFirmware(boardId: String, channel: UiFwChannel)
+
+    /**
+     * Ask the server for the full firmware menu (every channel with a hosted
+     * dist, regardless of board enrollment). The reply arrives via
+     * `on_firmware_list`. Backs the DEBUG firmware picker.
+     */
+    func listFirmware()
+
+    /**
      * Pair with whichever board is currently showing this code.
      */
     func pair(code: String)
@@ -837,6 +852,29 @@ open class ScoreboardClient:
         uniffi_app_core_fn_method_scoreboardclient_import_settings(self.uniffiClonePointer(),
                                                                    FfiConverterString.lower(boardId),
                                                                    FfiConverterString.lower(json), $0)
+    }
+    }
+
+    /**
+     * Tell a board to install a SPECIFIC channel's current dist (the DEBUG
+     * picker / "reinstall current" flow). The on-device same-or-newer guard
+     * still governs whether it takes, so installing an older channel's dist is
+     * a no-op on the board.
+     */
+    open func installFirmware(boardId: String, channel: UiFwChannel) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_install_firmware(self.uniffiClonePointer(),
+                                                                    FfiConverterString.lower(boardId),
+                                                                    FfiConverterTypeUiFwChannel.lower(channel), $0)
+    }
+    }
+
+    /**
+     * Ask the server for the full firmware menu (every channel with a hosted
+     * dist, regardless of board enrollment). The reply arrives via
+     * `on_firmware_list`. Backs the DEBUG firmware picker.
+     */
+    open func listFirmware() { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_list_firmware(self.uniffiClonePointer(), $0)
     }
     }
 
@@ -1470,6 +1508,72 @@ public func FfiConverterTypeUiChampOption_lift(_ buf: RustBuffer) throws -> UiCh
 #endif
 public func FfiConverterTypeUiChampOption_lower(_ value: UiChampOption) -> RustBuffer {
     return FfiConverterTypeUiChampOption.lower(value)
+}
+
+/**
+ * One firmware image the server currently hosts (protocol `FwImage`), as
+ * listed for the DEBUG firmware picker. `channel` is a lowercase route name
+ * ("stable"/"beta"/"dev"); `version` is CalVer ("2026.7.3").
+ */
+public struct UiFwImage {
+    public var channel: String
+    public var version: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(channel: String, version: String) {
+        self.channel = channel
+        self.version = version
+    }
+}
+
+extension UiFwImage: Equatable, Hashable {
+    public static func == (lhs: UiFwImage, rhs: UiFwImage) -> Bool {
+        if lhs.channel != rhs.channel {
+            return false
+        }
+        if lhs.version != rhs.version {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(channel)
+        hasher.combine(version)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiFwImage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiFwImage {
+        return
+            try UiFwImage(
+                channel: FfiConverterString.read(from: &buf),
+                version: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UiFwImage, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.channel, into: &buf)
+        FfiConverterString.write(value.version, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiFwImage_lift(_ buf: RustBuffer) throws -> UiFwImage {
+    return try FfiConverterTypeUiFwImage.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiFwImage_lower(_ value: UiFwImage) -> RustBuffer {
+    return FfiConverterTypeUiFwImage.lower(value)
 }
 
 public struct UiGame {
@@ -2155,6 +2259,22 @@ public protocol ClientListener: AnyObject {
      * button exactly when this is Some.
      */
     func onBoardVersion(boardId: String, version: String?, updateAvailable: String?)
+
+    /**
+     * The full firmware menu the server hosts (reply to `list_firmware`) —
+     * one image per channel with a current dist, across ALL channels
+     * regardless of any board's enrollment. Global to the server, not per
+     * board. Drives the DEBUG firmware picker.
+     */
+    func onFirmwareList(images: [UiFwImage])
+
+    /**
+     * Server-observed progress (0..=100) of `board_id`'s in-flight firmware
+     * download. The device's ws is dropped while it fetches, so the server
+     * counts the bytes it streams. Stops when the download ends (the board
+     * reboots into the new image and re-pushes BoardState).
+     */
+    func onFirmwareProgress(boardId: String, pct: UInt8)
 }
 
 // Magic number for the Rust proxy to call using the same mechanism as every other method,
@@ -2439,6 +2559,54 @@ private enum UniffiCallbackInterfaceClientListener {
                 writeReturn: writeReturn
             )
         },
+        onFirmwareList: { (
+            uniffiHandle: UInt64,
+            images: RustBuffer,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceClientListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.onFirmwareList(
+                    images: FfiConverterSequenceTypeUiFwImage.lift(images)
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onFirmwareProgress: { (
+            uniffiHandle: UInt64,
+            boardId: RustBuffer,
+            pct: UInt8,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceClientListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.onFirmwareProgress(
+                    boardId: FfiConverterString.lift(boardId),
+                    pct: FfiConverterUInt8.lift(pct)
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
         uniffiFree: { (uniffiHandle: UInt64) in
             let result = try? FfiConverterCallbackInterfaceClientListener.handleMap.remove(handle: uniffiHandle)
             if result == nil {
@@ -2622,6 +2790,31 @@ private struct FfiConverterSequenceTypeUiChampOption: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterSequenceTypeUiFwImage: FfiConverterRustBuffer {
+    typealias SwiftType = [UiFwImage]
+
+    static func write(_ value: [UiFwImage], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeUiFwImage.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UiFwImage] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UiFwImage]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeUiFwImage.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterSequenceTypeUiGame: FfiConverterRustBuffer {
     typealias SwiftType = [UiGame]
 
@@ -2759,6 +2952,12 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_method_scoreboardclient_import_settings() != 6260 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_app_core_checksum_method_scoreboardclient_install_firmware() != 53431 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_scoreboardclient_list_firmware() != 54479 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_method_scoreboardclient_pair() != 62791 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -2874,6 +3073,12 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_clientlistener_on_board_version() != 56934 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_clientlistener_on_firmware_list() != 1495 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_clientlistener_on_firmware_progress() != 48610 {
         return InitializationResult.apiChecksumMismatch
     }
 

@@ -94,6 +94,16 @@ pub struct AppState {
     /// every connect, and the entry is dropped on disconnect (BoardState says
     /// None while offline).
     pub device_versions: Arc<Mutex<HashMap<String, String>>>,
+    /// One-time OTA download tokens: a fresh hex nonce (minted per firmware
+    /// offer) → the board_id it was minted for + when. The offer's download
+    /// path carries `?u={nonce}`; the streaming `/firmware/{chan}.bin` GET
+    /// resolves it to know whose controllers should see `FirmwareProgress`.
+    /// The nonce is deliberately UNSIGNED (only version/size/channel/bytes are
+    /// signed — the board verifies the image regardless). Entries older than
+    /// `FW_TOKEN_TTL` are swept lazily on every touch (offers the board never
+    /// acted on, downloads that never finished). Un-tokenized GETs never enter
+    /// this map and emit no progress.
+    pub fw_download_tokens: Arc<Mutex<HashMap<String, (String, std::time::Instant)>>>,
 }
 
 /// The signed metadata half of an OTA dist — exactly the firmware.json that
@@ -299,6 +309,7 @@ impl AppState {
             finished: Arc::new(Mutex::new(HashMap::new())),
             firmware: HashMap::new(),
             device_versions: Arc::new(Mutex::new(HashMap::new())),
+            fw_download_tokens: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -576,24 +587,130 @@ async fn get_firmware_latest(
     }
 }
 
+/// How long a minted OTA download token stays valid: long enough for a board
+/// to receive the offer, reconnect its HTTP fetch, and stream the whole image;
+/// swept lazily so a token an offer never used (or a download that never
+/// finished) can't accumulate.
+const FW_TOKEN_TTL: Duration = Duration::from_secs(600);
+
+/// Image bytes handed to the board's fetch per stream step. TCP backpressure
+/// paces `unfold` to the board's real consumption, so this is the granularity
+/// at which server-observed download progress advances.
+const FW_CHUNK: usize = 16 * 1024;
+
+/// Query string of `GET /firmware/{chan}.bin`. `u` is the one-time download
+/// token an offer's path carries (`?u=…`): present -> this is a board's real
+/// OTA fetch, so stream it and push `FirmwareProgress`; absent -> a plain
+/// download (curl, tests), served whole with no progress.
+#[derive(serde::Deserialize)]
+struct FwDownloadQuery {
+    #[serde(default)]
+    u: Option<String>,
+}
+
+/// Resolve a download token to the board_id it was minted for, sweeping any
+/// expired tokens first. Does NOT remove the token — the stream drops it on
+/// completion (an early-dropped download leaves it for the lazy sweep).
+fn resolve_fw_token(state: &AppState, nonce: &str) -> Option<String> {
+    let mut tokens = state.fw_download_tokens.lock().unwrap();
+    let now = Instant::now();
+    tokens.retain(|_, (_, created)| now.duration_since(*created) < FW_TOKEN_TTL);
+    tokens.get(nonce).map(|(board_id, _)| board_id.clone())
+}
+
+/// A streamed image body that reports server-observed download progress. Emits
+/// the SAME `bytes` in ~`FW_CHUNK` slices (byte-identical to the plain path —
+/// the board verifies sha256 + Ed25519), and after each slice pushes
+/// `FirmwareProgress{board_id, pct}` to that board's subscribed controllers
+/// when pct advanced by ≥2 (or reached 100). When the stream drains it drops
+/// the one-time token.
+fn progress_stream_body(
+    app: AppState,
+    board_id: String,
+    nonce: String,
+    bytes: axum::body::Bytes,
+) -> axum::body::Body {
+    struct St {
+        app: AppState,
+        board_id: String,
+        nonce: String,
+        bytes: axum::body::Bytes,
+        offset: usize,
+        last_pct: u8,
+    }
+    // Single-use token cleanup rides on Drop, NOT on the stream being polled to
+    // its terminal None: with an explicit Content-Length, hyper stops polling
+    // once it has sent `len` bytes and never asks for the end-of-stream item.
+    // Drop fires whether the body completes OR the board aborts mid-download
+    // (connection closed) — either way the nonce is reclaimed promptly.
+    impl Drop for St {
+        fn drop(&mut self) {
+            self.app.fw_download_tokens.lock().unwrap().remove(&self.nonce);
+        }
+    }
+    let init = St { app, board_id, nonce, bytes, offset: 0, last_pct: 0 };
+    let stream = futures_util::stream::unfold(init, |mut st| async move {
+        let total = st.bytes.len();
+        if st.offset >= total {
+            return None; // St drops with the stream; its Drop reclaims the token
+        }
+        let end = (st.offset + FW_CHUNK).min(total);
+        let chunk = st.bytes.slice(st.offset..end);
+        st.offset = end;
+        let pct = ((st.offset as u64 * 100) / total as u64) as u8;
+        if pct != st.last_pct && (pct >= st.last_pct + 2 || pct == 100) {
+            push_firmware_progress(&st.app, &st.board_id, pct);
+            st.last_pct = pct;
+        }
+        Some((Ok::<_, std::convert::Infallible>(chunk), st))
+    });
+    axum::body::Body::from_stream(stream)
+}
+
 /// GET /firmware/{stable|beta|dev}.bin — that channel's raw image bytes, the
 /// path `ServerMsg::UpdateFirmware` points boards at. Plain HTTP is fine: the
 /// board verifies size + sha256 + Ed25519 signature itself, so the transport
 /// needs no trust. Plain-text 404 for anything that isn't a hosted channel's
-/// "<channel>.bin".
+/// "<channel>.bin". A valid `?u=` token turns this into a progress-reporting
+/// stream (see `progress_stream_body`); an absent/unknown/expired token serves
+/// the full body exactly as before.
 async fn get_firmware_bin(
     State(s): State<AppState>,
     axum::extract::Path(file): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<FwDownloadQuery>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     let chan = file.strip_suffix(".bin").and_then(FwChannel::from_name);
-    match chan.and_then(|c| s.firmware.get(&c)) {
-        Some(fw) => (
-            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
-            fw.bytes.clone(),
-        )
-            .into_response(),
-        None => (axum::http::StatusCode::NOT_FOUND, "no firmware hosted for that channel").into_response(),
+    let Some(fw) = chan.and_then(|c| s.firmware.get(&c)) else {
+        return (axum::http::StatusCode::NOT_FOUND, "no firmware hosted for that channel").into_response();
+    };
+    // A token that resolves to a board makes this a monitored OTA fetch.
+    match q.u.as_deref().and_then(|nonce| resolve_fw_token(&s, nonce).map(|b| (nonce.to_string(), b))) {
+        Some((nonce, board_id)) => {
+            let len = fw.bytes.len();
+            let body = progress_stream_body(s.clone(), board_id, nonce, fw.bytes.clone());
+            // CRITICAL: an unknown-length streamed body makes hyper frame the
+            // response as `transfer-encoding: chunked` — but the board's bare
+            // HTTP client (firmware-rs/src/ota.rs) does NOT decode chunking; it
+            // treats every post-header byte as raw image, so the chunk-size
+            // lines would be hashed into the image and every OTA would fail
+            // sha256. An explicit Content-Length makes hyper use identity
+            // framing (raw bytes, no chunking), byte-identical to the plain
+            // branch below. (Tests that go through reqwest hide this — it
+            // decodes chunked transparently — so there is a raw-bytes test.)
+            (
+                [
+                    (axum::http::header::CONTENT_TYPE, "application/octet-stream".to_string()),
+                    (axum::http::header::CONTENT_LENGTH, len.to_string()),
+                ],
+                body,
+            )
+                .into_response()
+        }
+        None => {
+            let headers = [(axum::http::header::CONTENT_TYPE, "application/octet-stream")];
+            (headers, fw.bytes.clone()).into_response()
+        }
     }
 }
 
@@ -1547,6 +1664,39 @@ pub fn handle_device_version(state: &AppState, board_id: &str, version: String) 
     }
 }
 
+/// Mint a fresh one-time download token for `board_id` and return the
+/// tokenized image path for a dist that lives in `chan`
+/// (`/firmware/{chan}.bin?u={nonce}`). Sweeps expired tokens as it inserts.
+/// The token lets the streaming GET route push `FirmwareProgress` to the
+/// board's subscribed controllers; it is NOT part of the signed message.
+fn mint_fw_offer_path(state: &AppState, board_id: &str, chan: FwChannel) -> String {
+    let mut tokens = state.fw_download_tokens.lock().unwrap();
+    let now = Instant::now();
+    tokens.retain(|_, (_, created)| now.duration_since(*created) < FW_TOKEN_TTL);
+    // 16 hex chars of RNG — collision-free in practice for the handful of
+    // concurrent OTAs a server ever runs, and unguessable enough that a token
+    // can't be forged (it only gates progress reporting, never the bytes).
+    let nonce = format!("{:016x}", rand::random::<u64>());
+    tokens.insert(nonce.clone(), (board_id.to_string(), now));
+    format!("/firmware/{}.bin?u={}", chan.as_str(), nonce)
+}
+
+/// Build the `ServerMsg::UpdateFirmware` offer for `fw` (which lives in
+/// `chan`), targeting `board_id`: version/size/sha256/sig come straight from
+/// the dist's manifest; the download path is freshly tokenized. Shared by the
+/// newest-allowed `UpdateFirmware` flow and the channel-targeted
+/// `InstallFirmware` flow so the two never drift.
+fn build_fw_offer(state: &AppState, board_id: &str, chan: FwChannel, fw: &FirmwareDist) -> ServerMsg {
+    ServerMsg::UpdateFirmware {
+        version: fw.manifest.version.clone(),
+        size: fw.manifest.size,
+        sha256: fw.manifest.sha256.clone(),
+        sig: fw.manifest.sig.clone(),
+        path: mint_fw_offer_path(state, board_id, chan),
+        channel: chan.as_str().to_string(),
+    }
+}
+
 /// The app pressed Update. Re-run the SAME pick `board_state_msg` advertised
 /// (`offer_for`: the board's channel, its reported version, the hosted dists)
 /// and relay that dist to the board's device socket as
@@ -1567,24 +1717,39 @@ pub fn handle_update_firmware(state: &AppState, board_id: &str) {
         );
         return;
     };
-    let msg = ServerMsg::UpdateFirmware {
-        version: fw.manifest.version.clone(),
-        size: fw.manifest.size,
-        sha256: fw.manifest.sha256.clone(),
-        sig: fw.manifest.sig.clone(),
-        path: format!("/firmware/{}.bin", chan.as_str()),
-        channel: chan.as_str().to_string(),
-    };
+    let version = fw.manifest.version.clone();
+    let msg = build_fw_offer(state, board_id, chan, fw);
     match state.devices.lock().unwrap().get(board_id) {
         Some(tx) => {
             let _ = tx.send(Message::Text(serde_json::to_string(&msg).unwrap()));
-            tracing::info!(
-                "offered {} firmware {} to board '{board_id}'",
-                chan.as_str(),
-                fw.manifest.version
-            );
+            tracing::info!("offered {} firmware {version} to board '{board_id}'", chan.as_str());
         }
         None => tracing::info!("update requested for offline board '{board_id}' — ignored"),
+    }
+}
+
+/// The DEBUG picker asked to install a SPECIFIC channel's current dist
+/// (`Command::InstallFirmware`). Relay that channel's dist to the board's
+/// device socket as a `ServerMsg::UpdateFirmware` offer regardless of version —
+/// the on-device same-or-newer guard decides whether it takes, so a same/older
+/// dist still SENDS (a deliberate reinstall). No dist hosted for that channel,
+/// or an offline board, is a logged no-op.
+pub fn handle_install_firmware(state: &AppState, board_id: &str, channel: FwChannel) {
+    let Some(fw) = state.firmware.get(&channel) else {
+        tracing::info!(
+            "install requested for '{board_id}' on {} but no dist is hosted there — ignored",
+            channel.as_str()
+        );
+        return;
+    };
+    let version = fw.manifest.version.clone();
+    let msg = build_fw_offer(state, board_id, channel, fw);
+    match state.devices.lock().unwrap().get(board_id) {
+        Some(tx) => {
+            let _ = tx.send(Message::Text(serde_json::to_string(&msg).unwrap()));
+            tracing::info!("install: offered {} firmware {version} to board '{board_id}'", channel.as_str());
+        }
+        None => tracing::info!("install requested for offline board '{board_id}' — ignored"),
     }
 }
 
@@ -1723,6 +1888,23 @@ pub fn push_board_state(state: &AppState, board_id: &str) {
             }
             frame_msgs.iter().all(|f| tx.send(f.clone()).is_ok())
         });
+        if subs.is_empty() {
+            controllers.remove(board_id);
+        }
+    }
+}
+
+/// Push a firmware-download progress tick to every app subscribed to this
+/// board, pruning any whose socket has closed — the same controller routing
+/// `push_board_state` uses. Called from the streaming `/firmware/{chan}.bin`
+/// handler as it hands bytes to the board's HTTP fetch (the device's WS is
+/// dropped during the download, so progress is SERVER-observed).
+pub fn push_firmware_progress(state: &AppState, board_id: &str, pct: u8) {
+    let msg = ServerMsg::FirmwareProgress { board_id: board_id.to_string(), pct };
+    let json = Message::Text(serde_json::to_string(&msg).unwrap());
+    let mut controllers = state.controllers.lock().unwrap();
+    if let Some(subs) = controllers.get_mut(board_id) {
+        subs.retain(|tx| tx.send(json.clone()).is_ok());
         if subs.is_empty() {
             controllers.remove(board_id);
         }
@@ -3652,7 +3834,11 @@ mod tests {
             get_firmware_latest(State(s.clone()), axum::extract::Path(chan.to_string()))
         };
         let bin = |s: &AppState, file: &str| {
-            get_firmware_bin(State(s.clone()), axum::extract::Path(file.to_string()))
+            get_firmware_bin(
+                State(s.clone()),
+                axum::extract::Path(file.to_string()),
+                axum::extract::Query(FwDownloadQuery { u: None }),
+            )
         };
 
         let resp = latest(&state, "stable").await;

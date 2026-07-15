@@ -328,6 +328,20 @@ typedef void (*UniffiCallbackInterfaceClientListenerMethod10)(uint64_t, RustBuff
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD11
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD11
+typedef void (*UniffiCallbackInterfaceClientListenerMethod11)(uint64_t, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD12
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD12
+typedef void (*UniffiCallbackInterfaceClientListenerMethod12)(uint64_t, RustBuffer, uint8_t, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_CLIENT_LISTENER
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_CLIENT_LISTENER
 typedef struct UniffiVTableCallbackInterfaceClientListener {
@@ -342,6 +356,8 @@ typedef struct UniffiVTableCallbackInterfaceClientListener {
     UniffiCallbackInterfaceClientListenerMethod8 _Nonnull onSettingsExport;
     UniffiCallbackInterfaceClientListenerMethod9 _Nonnull onImportResult;
     UniffiCallbackInterfaceClientListenerMethod10 _Nonnull onBoardVersion;
+    UniffiCallbackInterfaceClientListenerMethod11 _Nonnull onFirmwareList;
+    UniffiCallbackInterfaceClientListenerMethod12 _Nonnull onFirmwareProgress;
     UniffiCallbackInterfaceFree _Nonnull uniffiFree;
 } UniffiVTableCallbackInterfaceClientListener;
 
@@ -399,6 +415,16 @@ void uniffi_app_core_fn_method_scoreboardclient_focus_game(void*_Nonnull ptr, Ru
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_IMPORT_SETTINGS
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_IMPORT_SETTINGS
 void uniffi_app_core_fn_method_scoreboardclient_import_settings(void*_Nonnull ptr, RustBuffer board_id, RustBuffer json, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_INSTALL_FIRMWARE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_INSTALL_FIRMWARE
+void uniffi_app_core_fn_method_scoreboardclient_install_firmware(void*_Nonnull ptr, RustBuffer board_id, RustBuffer channel, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_LIST_FIRMWARE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_LIST_FIRMWARE
+void uniffi_app_core_fn_method_scoreboardclient_list_firmware(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_PAIR
@@ -869,6 +895,18 @@ uint16_t uniffi_app_core_checksum_method_scoreboardclient_import_settings(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_INSTALL_FIRMWARE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_INSTALL_FIRMWARE
+uint16_t uniffi_app_core_checksum_method_scoreboardclient_install_firmware(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_LIST_FIRMWARE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_LIST_FIRMWARE
+uint16_t uniffi_app_core_checksum_method_scoreboardclient_list_firmware(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_PAIR
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_PAIR
 uint16_t uniffi_app_core_checksum_method_scoreboardclient_pair(void
@@ -1100,6 +1138,18 @@ uint16_t uniffi_app_core_checksum_method_clientlistener_on_import_result(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_BOARD_VERSION
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_BOARD_VERSION
 uint16_t uniffi_app_core_checksum_method_clientlistener_on_board_version(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_FIRMWARE_LIST
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_FIRMWARE_LIST
+uint16_t uniffi_app_core_checksum_method_clientlistener_on_firmware_list(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_FIRMWARE_PROGRESS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_FIRMWARE_PROGRESS
+uint16_t uniffi_app_core_checksum_method_clientlistener_on_firmware_progress(void
     
 );
 #endif

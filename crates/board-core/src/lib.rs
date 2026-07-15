@@ -102,9 +102,11 @@ pub struct Board {
     reset_done: bool,           // fill complete — firmware wipes creds + reboots
     reset_done_at: Option<u64>, // for the simulator to auto-dismiss (device reboots first)
 
-    // OTA update in progress: Some(pct) = full-screen updating overlay. Progress
-    // is DEVICE-known (bytes the firmware has downloaded), so this is pure local
-    // rendering — no animation or progress ever rides the network.
+    // OTA update in progress: Some(_) BLANKS the panel to black. Each flash
+    // sector write stalls the flash-resident render task, darkening whatever's
+    // lit — so any lit content strobes for the whole download. A black panel
+    // has nothing to strobe. Progress is shown in the app now (server-observed),
+    // so the stored value is vestigial: any Some renders identically black.
     updating: Option<u8>,
     // Firmware version shown on the boot screen (env!("CARGO_PKG_VERSION")).
     version: Option<String>,
@@ -175,12 +177,14 @@ impl Board {
         self.local_brightness = level.clamp(10, 100);
     }
 
-    /// OTA update progress. `Some(pct)` puts up (or refreshes) the full-screen
-    /// updating overlay — "UPDATING" + progress bar + "DO NOT UNPLUG" — which
-    /// overrides every mode except hold-to-reset (mid-flash-write is the one
-    /// moment the user must not think the board hung and pull the plug).
-    /// `None` clears it back to whatever the mode would normally show (the
-    /// failed-download case: the update must be a non-event).
+    /// OTA update in flight. `Some(_)` BLANKS the panel to all-black, overriding
+    /// every mode except hold-to-reset. The flash writes that stream the new
+    /// image stall the render task sector-by-sector, so any LIT content would
+    /// strobe for the whole download; black has nothing to strobe. Download
+    /// progress is shown in the app now (server-observed), so the value passed
+    /// is ignored for rendering — call `set_updating(Some(0))` once at the
+    /// start. `None` restores the normal mode display (the failed-download
+    /// case: the update must be a non-event).
     pub fn set_updating(&mut self, progress: Option<u8>) {
         self.updating = progress.map(|p| p.min(100));
     }
@@ -481,13 +485,14 @@ impl Board {
             scale_buf(&mut buf, self.local_brightness);
             return buf;
         }
-        // An OTA update in flight overrides every mode BELOW reset: the one
-        // state where the user must not conclude the board hung and unplug it
-        // mid-flash-write. (Reset still wins — the escape hatch is sacred.)
-        if let Some(pct) = self.updating {
-            let mut buf = self.screen_updating(pct);
-            scale_buf(&mut buf, self.local_brightness);
-            return buf;
+        // An OTA update in flight BLANKS the panel, overriding every mode below
+        // reset. The download's flash writes stall the render task per sector,
+        // so any lit content strobes; black has nothing to strobe (and progress
+        // now shows in the app, not here). Return pure black — no brightness
+        // scaling needed, it's already dark. (Reset still wins — the escape
+        // hatch is sacred, and stays fully lit even mid-download.)
+        if self.updating.is_some() {
+            return vec![0u32; FRAME_PIXELS];
         }
         let mut buf = match self.mode {
             Mode::Booting => self.screen_boot(),
@@ -595,37 +600,6 @@ impl Board {
             center_text(&mut c, v, 19, &FONT_4X6, Rgb888::new(0x88, 0x88, 0x88));
         }
         spinner(&mut c, self.anim, 24);
-        c.into_u32()
-    }
-
-    /// OTA in progress: amber title, the hold-to-reset-style outlined bar
-    /// filled to `pct`, and the warning that matters. Progress comes from the
-    /// firmware's own download counter — device-local, like every animation.
-    fn screen_updating(&self, pct: u8) -> Vec<u32> {
-        let mut c = Canvas::new();
-        let amber = Rgb888::new(0xFF, 0x88, 0x00);
-        center_text(&mut c, "UPDATING", 5, &FONT_5X8, amber);
-
-        // Same outlined-bar language as hold-to-reset (proportional fill).
-        let bar_x = 6i32;
-        let bar_y = 13i32;
-        let bar_w = FRAME_WIDTH as i32 - 12;
-        let bar_h = 8i32;
-        Rectangle::new(Point::new(bar_x, bar_y), Size::new(bar_w as u32, bar_h as u32))
-            .into_styled(PrimitiveStyle::with_stroke(Rgb888::new(0x55, 0x55, 0x55), 1))
-            .draw(&mut c)
-            .ok();
-        let fill_w = (bar_w - 2) as u32 * pct.min(100) as u32 / 100;
-        if fill_w > 0 {
-            Rectangle::new(
-                Point::new(bar_x + 1, bar_y + 1),
-                Size::new(fill_w, (bar_h - 2) as u32),
-            )
-            .into_styled(PrimitiveStyle::with_fill(amber))
-            .draw(&mut c)
-            .ok();
-        }
-        center_text(&mut c, "DO NOT UNPLUG", 27, &FONT_4X6, Rgb888::new(0x88, 0x88, 0x88));
         c.into_u32()
     }
 
@@ -1398,10 +1372,11 @@ mod tests {
         );
     }
 
-    /// The OTA updating screen: distinct at 0/50/100 (the bar visibly fills),
-    /// overrides Running content, and `None` clears it back exactly.
+    /// An OTA update BLANKS the panel to all-black (a black panel can't strobe
+    /// as each flash write stalls the render task): it overrides Running content
+    /// at any progress value, and `None` clears it back to the exact frame.
     #[test]
-    fn updating_screen_progresses_overrides_and_clears() {
+    fn updating_blanks_panel_overrides_and_clears() {
         use scoreboard_protocol::RotationEntry;
         let solid = |r: u8, g: u8, b: u8| -> Vec<u8> {
             let px = scoreboard_protocol::rgb888_to_565(r, g, b).to_le_bytes();
@@ -1423,54 +1398,56 @@ mod tests {
         let running = b.framebuffer();
         assert_eq!(running[0], 0xFF0000, "content up before the update");
 
+        // Updating overrides the running content with an all-black frame.
         b.set_updating(Some(0));
-        let at0 = b.framebuffer();
-        assert_ne!(at0, running, "updating overlay overrides Running content");
+        assert!(
+            b.framebuffer().iter().all(|&p| p == 0),
+            "updating blanks the panel to black, overriding Running content"
+        );
+        // The stored value is vestigial — the panel is black at any progress.
         b.set_updating(Some(50));
-        let at50 = b.framebuffer();
+        assert!(b.framebuffer().iter().all(|&p| p == 0), "still black at 50%");
         b.set_updating(Some(100));
-        let at100 = b.framebuffer();
-        assert_ne!(at0, at50, "0% vs 50% must differ (bar fills)");
-        assert_ne!(at50, at100, "50% vs 100% must differ (bar fills)");
-        assert_ne!(at0, at100, "0% vs 100% must differ (bar fills)");
+        assert!(b.framebuffer().iter().all(|&p| p == 0), "still black at 100%");
 
         // A failed download clears the overlay: back to the exact running frame.
         b.set_updating(None);
         assert_eq!(b.framebuffer(), running, "None restores the running content");
     }
 
-    /// Updating overrides every mode below reset — but hold-to-reset still wins:
-    /// the escape hatch must never be hidden, even mid-download.
+    /// Updating blanks the panel and overrides every mode below reset — but
+    /// hold-to-reset still WINS: the lit escape hatch must never be hidden, even
+    /// mid-download.
     #[test]
-    fn reset_overlay_beats_updating_screen() {
+    fn reset_overlay_beats_updating_blank() {
         let mut b = Board::new();
         b.mode = Mode::Running;
         b.tick(0);
         b.set_updating(Some(50));
+        // Updating alone blanks the panel to black.
+        assert!(
+            b.framebuffer().iter().all(|&p| p == 0),
+            "updating blanks the panel when no reset is held"
+        );
+
         let mut reference = Board::new();
         reference.mode = Mode::Running;
         reference.tick(0);
-        // Same hold on both boards; the one mid-update must render identically.
+        // Same hold on both boards; the one mid-update must render the (lit)
+        // reset screen, identical to the board that isn't updating.
         b.button_down(0);
         reference.button_down(0);
         b.tick(900); // past the grace window: reset bar up
         reference.tick(900);
         assert!(b.reset_active());
+        assert!(
+            b.framebuffer().iter().any(|&p| p != 0),
+            "hold-to-reset lights up over the updating blank"
+        );
         assert_eq!(
             b.framebuffer(),
             reference.framebuffer(),
-            "hold-to-reset renders over the updating screen"
-        );
-
-        // Asleep is overridden too ("every mode except reset").
-        let mut asleep = Board::new();
-        asleep.mode = Mode::Asleep;
-        asleep.tick(0);
-        assert!(asleep.framebuffer().iter().all(|&p| p == 0));
-        asleep.set_updating(Some(50));
-        assert!(
-            asleep.framebuffer().iter().any(|&p| p != 0),
-            "updating overlay lights up even an asleep panel"
+            "hold-to-reset renders over the updating blank, identical to no update"
         );
     }
 

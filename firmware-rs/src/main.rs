@@ -537,9 +537,10 @@ async fn device(
             .await
             {
                 Ok(()) => {
-                    // Hold the full bar for a beat so completion is visible,
-                    // then reboot into the new slot. The new image confirms
-                    // itself after its first auth (or reverts — see ota.rs).
+                    // Keep the panel black for a beat (it already is — the
+                    // update blanks it), then reboot into the new slot. The new
+                    // image confirms itself after its first auth (or reverts —
+                    // see ota.rs).
                     println!("[ota] {} installed; rebooting into the new image", job.version);
                     board.lock().await.set_updating(Some(100));
                     Timer::after(Duration::from_millis(1500)).await;

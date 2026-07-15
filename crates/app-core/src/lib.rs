@@ -9,7 +9,8 @@ use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use scoreboard_protocol::{
     decode_frame, pubkey_hex, rgb565_to_888, sign_hex, BoardConfig, Catalog, ClientMsg, Command,
-    FwChannel, GameSummary, OffState, Role, ServerMsg, SpoilerMode, SportConfig as PSportConfig,
+    FwChannel, FwImage, GameSummary, OffState, Role, ServerMsg, SpoilerMode,
+    SportConfig as PSportConfig,
 };
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -69,6 +70,14 @@ pub enum UiFwChannel {
     Stable,
     Beta,
     Dev,
+}
+/// One firmware image the server currently hosts (protocol `FwImage`), as
+/// listed for the DEBUG firmware picker. `channel` is a lowercase route name
+/// ("stable"/"beta"/"dev"); `version` is CalVer ("2026.7.3").
+#[derive(uniffi::Record, Clone)]
+pub struct UiFwImage {
+    pub channel: String,
+    pub version: String,
 }
 /// One board's full server-side config, pushed with every BoardState.
 #[derive(uniffi::Record, Clone)]
@@ -159,6 +168,16 @@ pub trait ClientListener: Send + Sync {
     /// present ONLY when it is strictly newer than `version` — show an Update
     /// button exactly when this is Some.
     fn on_board_version(&self, board_id: String, version: Option<String>, update_available: Option<String>);
+    /// The full firmware menu the server hosts (reply to `list_firmware`) —
+    /// one image per channel with a current dist, across ALL channels
+    /// regardless of any board's enrollment. Global to the server, not per
+    /// board. Drives the DEBUG firmware picker.
+    fn on_firmware_list(&self, images: Vec<UiFwImage>);
+    /// Server-observed progress (0..=100) of `board_id`'s in-flight firmware
+    /// download. The device's ws is dropped while it fetches, so the server
+    /// counts the bytes it streams. Stops when the download ends (the board
+    /// reboots into the new image and re-pushes BoardState).
+    fn on_firmware_progress(&self, board_id: String, pct: u8);
 }
 
 enum Out {
@@ -172,6 +191,8 @@ enum Out {
     ExportSettings(String),
     /// Apply a previously exported blob to a board: (board_id, json).
     ImportSettings(String, String),
+    /// Ask the server for the full firmware menu (DEBUG picker).
+    ListFirmware,
 }
 
 #[derive(uniffi::Object)]
@@ -359,6 +380,12 @@ impl ScoreboardClient {
                                         ServerMsg::ImportResult { board_id: bid, error } => {
                                             if let Some(l) = listener.lock().unwrap().as_ref() { l.on_import_result(bid, error); }
                                         }
+                                        ServerMsg::FirmwareList { images } => {
+                                            if let Some(l) = listener.lock().unwrap().as_ref() { l.on_firmware_list(to_ui_fw_images(images)); }
+                                        }
+                                        ServerMsg::FirmwareProgress { board_id: bid, pct } => {
+                                            if let Some(l) = listener.lock().unwrap().as_ref() { l.on_firmware_progress(bid, pct); }
+                                        }
                                         _ => {}
                                     }
                                 }
@@ -409,6 +436,9 @@ impl ScoreboardClient {
                             Some(Out::ImportSettings(bid, json)) => {
                                 let m = ClientMsg::ImportSettings { board_id: bid, json };
                                 let _ = write.send(Message::Text(serde_json::to_string(&m).unwrap())).await;
+                            }
+                            Some(Out::ListFirmware) => {
+                                let _ = write.send(Message::Text(serde_json::to_string(&ClientMsg::ListFirmware).unwrap())).await;
                             }
                             // The client object was dropped — end the task for good.
                             None => break 'reconnect,
@@ -620,6 +650,26 @@ impl ScoreboardClient {
         };
         let _ = self.tx.send(Out::Command(board_id, Command::SetFwChannel { channel }));
     }
+
+    /// Ask the server for the full firmware menu (every channel with a hosted
+    /// dist, regardless of board enrollment). The reply arrives via
+    /// `on_firmware_list`. Backs the DEBUG firmware picker.
+    pub fn list_firmware(&self) {
+        let _ = self.tx.send(Out::ListFirmware);
+    }
+
+    /// Tell a board to install a SPECIFIC channel's current dist (the DEBUG
+    /// picker / "reinstall current" flow). The on-device same-or-newer guard
+    /// still governs whether it takes, so installing an older channel's dist is
+    /// a no-op on the board.
+    pub fn install_firmware(&self, board_id: String, channel: UiFwChannel) {
+        let channel = match channel {
+            UiFwChannel::Stable => FwChannel::Stable,
+            UiFwChannel::Beta => FwChannel::Beta,
+            UiFwChannel::Dev => FwChannel::Dev,
+        };
+        let _ = self.tx.send(Out::Command(board_id, Command::InstallFirmware { channel }));
+    }
 }
 
 fn to_ui_sports(cat: Catalog) -> Vec<UiSport> {
@@ -672,6 +722,8 @@ mod wss_tests {
         fn on_settings_export(&self, _: String, _: String) {}
         fn on_import_result(&self, _: String, _: Option<String>) {}
         fn on_board_version(&self, _: String, _: Option<String>, _: Option<String>) {}
+        fn on_firmware_list(&self, _: Vec<UiFwImage>) {}
+        fn on_firmware_progress(&self, _: String, _: u8) {}
     }
 
     /// The order-of-operations regression: the app launches while the server is
@@ -815,6 +867,13 @@ fn to_ui_games(games: Vec<GameSummary>) -> Vec<UiGame> {
             spoiled: g.spoiled,
             scrolls: g.scrolls,
         })
+        .collect()
+}
+
+fn to_ui_fw_images(images: Vec<FwImage>) -> Vec<UiFwImage> {
+    images
+        .into_iter()
+        .map(|i| UiFwImage { channel: i.channel, version: i.version })
         .collect()
 }
 

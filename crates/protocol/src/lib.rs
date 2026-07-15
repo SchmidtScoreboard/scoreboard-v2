@@ -254,6 +254,18 @@ impl FwChannel {
     }
 }
 
+/// One firmware image the server currently hosts, as listed for the DEBUG
+/// firmware picker (`ServerMsg::FirmwareList`). Every channel the server has a
+/// dist for is listed regardless of any board's enrollment — the picker shows
+/// the full menu and lets the on-device same-or-newer guard decide what takes.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct FwImage {
+    /// The channel this dist lives in ("stable" | "beta" | "dev").
+    pub channel: String,
+    /// The dist's CalVer version ("2026.7.3").
+    pub version: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct BoardConfig {
     pub brightness: u8,
@@ -494,6 +506,14 @@ pub enum Command {
     /// Tell this board to download, verify, and install the firmware image the
     /// server is hosting (the one advertised via `BoardState::firmware_update`).
     UpdateFirmware,
+    /// Install a SPECIFIC channel's current dist (the DEBUG firmware picker /
+    /// "reinstall current" flow). The server sends that channel's dist as a
+    /// `ServerMsg::UpdateFirmware` offer, exactly like `UpdateFirmware` but
+    /// targeting the named channel instead of the newest allowed pick — the
+    /// on-device same-or-newer guard still governs whether it takes (so an
+    /// older channel's dist is a no-op on the board). No-op if that channel
+    /// has no hosted dist.
+    InstallFirmware { channel: FwChannel },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -543,6 +563,10 @@ pub enum ClientMsg {
     // sent once after auth — the server echoes it into `BoardState` and uses it
     // to decide whether to offer the hosted image as an update
     DeviceVersion { version: String },
+    // controller (DEBUG firmware picker) asks for every firmware image the
+    // server hosts, across ALL channels regardless of board enrollment —
+    // answered by `ServerMsg::FirmwareList`
+    ListFirmware,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -604,6 +628,17 @@ pub enum ServerMsg {
         /// image can never verify under a relabeled offer.
         channel: String,
     },
+    // to controllers subscribed to `board_id`: how far the board's in-flight
+    // firmware download has gotten (0..=100). The device's ws is DROPPED during
+    // the download, so this is SERVER-OBSERVED — the server counts the bytes it
+    // hands the board's HTTP fetch (TCP backpressure paces that to the board's
+    // real consumption) and pushes progress as it streams. Cleared (implicitly)
+    // when the stream ends: the board reboots into the new image and re-pushes
+    // BoardState, or a failure just stops the updates.
+    FirmwareProgress { board_id: String, pct: u8 },
+    // reply to `ClientMsg::ListFirmware`: every firmware image the server hosts,
+    // one per channel that has a current dist (the DEBUG picker's full menu).
+    FirmwareList { images: Vec<FwImage> },
 }
 
 // ---- firmware versions (CalVer "YYYY.M.P") ----
@@ -760,6 +795,55 @@ mod fw_channel_tests {
         let mut dev_board = BoardConfig { fw_channel: FwChannel::Dev, ..Default::default() };
         parsed.apply_to(&mut dev_board);
         assert_eq!(dev_board.fw_channel, FwChannel::Dev);
+    }
+}
+
+#[cfg(test)]
+mod firmware_msg_tests {
+    use super::*;
+
+    /// The DEBUG firmware picker / progress messages round-trip through serde.
+    /// (`FirmwareList` is a struct variant wrapping a Vec — the internally
+    /// tagged enum can't serialize a NEWTYPE around a sequence, which is why
+    /// `Games`/`FirmwareList` are struct variants; this pins that.)
+    #[test]
+    fn firmware_messages_round_trip() {
+        let list = ServerMsg::FirmwareList {
+            images: vec![
+                FwImage { channel: "stable".into(), version: "2026.7.0".into() },
+                FwImage { channel: "dev".into(), version: "2026.7.3".into() },
+            ],
+        };
+        let json = serde_json::to_string(&list).unwrap();
+        match serde_json::from_str::<ServerMsg>(&json).unwrap() {
+            ServerMsg::FirmwareList { images } => {
+                assert_eq!(images.len(), 2);
+                assert_eq!(images[1].channel, "dev");
+                assert_eq!(images[1].version, "2026.7.3");
+            }
+            other => panic!("expected FirmwareList, got {other:?}"),
+        }
+
+        let prog = ServerMsg::FirmwareProgress { board_id: "b1".into(), pct: 42 };
+        let json = serde_json::to_string(&prog).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<ServerMsg>(&json).unwrap(),
+            ServerMsg::FirmwareProgress { board_id, pct } if board_id == "b1" && pct == 42
+        ));
+
+        // The controller request + the channel-targeted install command.
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(
+                &serde_json::to_string(&ClientMsg::ListFirmware).unwrap()
+            )
+            .unwrap(),
+            ClientMsg::ListFirmware
+        ));
+        let install = Command::InstallFirmware { channel: FwChannel::Beta };
+        assert!(matches!(
+            serde_json::from_str::<Command>(&serde_json::to_string(&install).unwrap()).unwrap(),
+            Command::InstallFirmware { channel: FwChannel::Beta }
+        ));
     }
 }
 
