@@ -246,7 +246,7 @@ fn save_event(out: &Path, feed: &str, f: &Fetched, g: &Game) -> std::io::Result<
     std::fs::write(dir.join("game.txt"), format!("{g:#?}\n"))?;
     for variant in [Variant::Normal, Variant::SpoiledNormal, Variant::SpoiledStrict] {
         let (_, px, _) =
-            render::render_board_frame(g, render::LEADERBOARD_DEFAULT_ROWS, variant.spoiler(), None);
+            render::render_board_frame(g, render::LEADERBOARD_DEFAULT_ROWS, variant.spoiler(), None, scoreboard_protocol::default_name_style(&g.sport_id));
         crate::save_png(dir.join(format!("frame-{}.png", variant.label())).to_str().unwrap(), &px, 8);
     }
     Ok(dir)
@@ -566,6 +566,7 @@ fn draw_detail(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                         render::LEADERBOARD_DEFAULT_ROWS,
                         app.variant.spoiler(),
                         None,
+                        scoreboard_protocol::default_name_style(&g.sport_id),
                     );
                     let h = px.len() / (FRAME_WIDTH * 2);
                     (

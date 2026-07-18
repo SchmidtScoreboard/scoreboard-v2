@@ -230,6 +230,64 @@ impl SportsDataSource for EspnSource {
     }
 }
 
+/// One team's raw name fields for the `server team-names` overflow report:
+/// `short_display_name` (fed to `teams::short_name` for the Name style),
+/// `abbrev`, and `location` (the Location style's source). Kept separate from
+/// the protocol `Team` (which carries no location) so the report can measure
+/// every style without a protocol change.
+pub(crate) struct CatalogTeamRaw {
+    pub short_display_name: String,
+    pub abbrev: String,
+    pub location: String,
+}
+
+impl EspnSource {
+    /// Fetch every TEAM-sport league's roster with the raw fields the overflow
+    /// report needs. Returns `(sport_id, display name, teams)` per league in the
+    /// configured order; a league whose fetch/parse fails yields an empty list
+    /// (the report notes it) rather than aborting the whole run.
+    pub(crate) async fn fetch_team_catalog_raw(&self) -> Vec<(&'static str, &'static str, Vec<CatalogTeamRaw>)> {
+        let mut out = Vec::new();
+        for lg in &self.leagues {
+            let url = format!(
+                "https://site.api.espn.com/apis/site/v2/sports/{}/{}/teams?limit=500",
+                lg.sport, lg.league
+            );
+            let teams: Vec<CatalogTeamRaw> = match self.client.get(&url).send().await {
+                Ok(resp) => match resp.json::<TeamsResponse>().await {
+                    Ok(tr) => tr
+                        .sports
+                        .into_iter()
+                        .flat_map(|s| s.leagues)
+                        .flat_map(|l| l.teams)
+                        .filter_map(|w| {
+                            let t = w.team;
+                            if t.abbreviation.is_empty() {
+                                return None;
+                            }
+                            Some(CatalogTeamRaw {
+                                short_display_name: t.short_display_name,
+                                abbrev: t.abbreviation,
+                                location: t.location,
+                            })
+                        })
+                        .collect(),
+                    Err(e) => {
+                        tracing::warn!("espn teams parse {}: {e}", lg.league);
+                        Vec::new()
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("espn teams fetch {}: {e}", lg.league);
+                    Vec::new()
+                }
+            };
+            out.push((lg.sport_id, lg.name, teams));
+        }
+        out
+    }
+}
+
 // ---- golf + F1 (leaderboard sports) ----
 impl EspnSource {
     async fn fetch_golf(&self) -> Vec<Game> {
@@ -667,19 +725,19 @@ struct LeaderStat {
 #[cfg(test)]
 pub fn mock_games() -> Vec<Game> {
     let bruins = TeamSide {
-        abbrev: "BOS".into(), name: "BRUINS".into(), score: 2,
+        abbrev: "BOS".into(), name: "BRUINS".into(), location: "BOSTON".into(), score: 2,
         primary: hex_to_rgb("FFB81C"), secondary: hex_to_rgb("000000"),
     };
     let leafs = TeamSide {
-        abbrev: "TOR".into(), name: "LEAFS".into(), score: 1,
+        abbrev: "TOR".into(), name: "LEAFS".into(), location: "TORONTO".into(), score: 1,
         primary: hex_to_rgb("00205B"), secondary: hex_to_rgb("FFFFFF"),
     };
     let celtics = TeamSide {
-        abbrev: "BOS".into(), name: "CELTICS".into(), score: 88,
+        abbrev: "BOS".into(), name: "CELTICS".into(), location: "BOSTON".into(), score: 88,
         primary: hex_to_rgb("007A33"), secondary: hex_to_rgb("FFFFFF"),
     };
     let lakers = TeamSide {
-        abbrev: "LAL".into(), name: "LAKERS".into(), score: 84,
+        abbrev: "LAL".into(), name: "LAKERS".into(), location: "LOS ANGELES".into(), score: 84,
         primary: hex_to_rgb("552583"), secondary: hex_to_rgb("FDB927"),
     };
     vec![
@@ -741,14 +799,54 @@ fn f1_row(rank: u32, code: &str, value: &str, tire: char) -> LeaderRow {
     }
 }
 
+/// City / college / country for a demo team's abbrev — so the Location name
+/// style renders a real place in `--demo` mode. Unknown abbrevs get "" (the
+/// Location style then falls back to whatever the renderer does with an empty
+/// string, same as a leaderboard side).
+fn demo_location(abbrev: &str) -> &'static str {
+    match abbrev {
+        "BOS" => "BOSTON",
+        "TOR" => "TORONTO",
+        "COL" => "COLORADO",
+        "VGK" => "VEGAS",
+        "DET" => "DETROIT",
+        "CHI" => "CHICAGO",
+        "LAL" | "LAD" | "LAFC" => "LOS ANGELES",
+        "GSW" => "GOLDEN STATE",
+        "DEN" => "DENVER",
+        "MIA" => "MIAMI",
+        "NYK" | "NYY" | "NYL" | "NYR" => "NEW YORK",
+        "CHC" => "CHICAGO",
+        "HOU" => "HOUSTON",
+        "SEA" => "SEATTLE",
+        "NE" => "NEW ENGLAND",
+        "BUF" => "BUFFALO",
+        "OSU" => "OHIO STATE",
+        "MICH" => "MICHIGAN",
+        "LVA" => "LAS VEGAS",
+        "ARS" => "LONDON",
+        "MCI" => "MANCHESTER",
+        "USA" => "USA",
+        "FRA" => "FRANCE",
+        "EDM" => "EDMONTON",
+        "MIL" => "MILWAUKEE",
+        "PHX" => "PHOENIX",
+        _ => "",
+    }
+}
+
 pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
     // The scripted ending: live for the first five minutes of the server's life,
     // then FINAL — exercises the observed live->Final transition and the
     // half-hour linger without waiting for a real game to end.
     let ending_live = elapsed_secs < 5 * 60;
+    // Locations come from a per-abbrev lookup so the Location ("City"/"College"/
+    // "Country") name style has something real to show in demo mode — without
+    // threading a city through every call site below.
     let team = |abbrev: &str, name: &str, score: u32, p: &str, s: &str| TeamSide {
         abbrev: abbrev.into(),
         name: name.into(),
+        location: demo_location(abbrev).into(),
         score,
         primary: hex_to_rgb(p),
         secondary: ensure_contrast(hex_to_rgb(p), hex_to_rgb(s)),
@@ -1239,6 +1337,11 @@ struct EspnTeam {
     abbreviation: String,
     #[serde(default, rename = "shortDisplayName")]
     short_display_name: String,
+    /// City / college / country ("Boston", "Michigan", "France") — the string
+    /// the `Location` name style renders. ESPN provides this on every
+    /// competitor's team.
+    #[serde(default)]
+    location: String,
     #[serde(default)]
     color: String,
     #[serde(default, rename = "alternateColor")]
@@ -1391,6 +1494,10 @@ struct CatalogTeam {
     display_name: String,
     #[serde(default, rename = "shortDisplayName")]
     short_display_name: String,
+    /// City / college / country — the `Location` name style's source (and the
+    /// `server team-names` overflow report's).
+    #[serde(default)]
+    location: String,
     #[serde(default)]
     color: String,
     #[serde(default, rename = "alternateColor")]
@@ -1429,6 +1536,7 @@ fn parse_event(sport_id: &str, ev: Event) -> Option<Game> {
         let side = TeamSide {
             abbrev: c.team.abbreviation.clone(),
             name,
+            location: c.team.location.clone(),
             score: c.score.parse().unwrap_or(0),
             primary,
             secondary,

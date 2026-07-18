@@ -6,6 +6,7 @@ mod bdf;
 mod espn;
 mod model;
 mod render;
+mod team_names;
 mod teams;
 mod tui;
 mod ws;
@@ -472,6 +473,15 @@ async fn main() {
         return;
     }
 
+    // Headless overflow report: for every league, each team's resolved name in
+    // each available style, measured against the row width, plus an OVERFLOW
+    // section for anything that still doesn't fit. The primary "notify me for
+    // correction" tool (live renders also warn, deduped, on real truncation).
+    if std::env::args().nth(1).as_deref() == Some("team-names") {
+        team_names::run().await;
+        return;
+    }
+
     // One-shot: fetch the full ESPN catalog, write the disk cache, exit. Seeds
     // demo mode (which never contacts ESPN) with the real team lists.
     if std::env::args().any(|a| a == "--fetch-catalog") {
@@ -725,6 +735,9 @@ async fn get_sample(
     let team = |abbrev: &str, name: &str, score: u32, p: &str, sec: &str| model::TeamSide {
         abbrev: abbrev.into(),
         name: name.into(),
+        // Sample spoiler frame renders NHL (default Name style), so location is
+        // unused; left empty. (Render agent: populate to preview Location here.)
+        location: String::new(),
         score,
         primary: model::hex_to_rgb(p),
         secondary: model::ensure_contrast(model::hex_to_rgb(p), model::hex_to_rgb(sec)),
@@ -757,7 +770,7 @@ async fn get_sample(
         "strict" => Some(SpoilerMode::Strict),
         _ => None,
     };
-    let (_, px) = render::render_frame(&g, spoiler, None);
+    let (_, px) = render::render_frame(&g, spoiler, None, default_name_style(&g.sport_id));
     (
         [(axum::http::header::CONTENT_TYPE, "image/png")],
         render_png(&px),
@@ -783,7 +796,11 @@ async fn get_render(
         games.iter().find(|g| g.id == id).map(|g| {
             let spoiler = cfg.as_ref().and_then(|c| spoiler_for(c, g));
             let tz = cfg.as_ref().and_then(board_tz);
-            render::render_frame(g, spoiler, tz).1
+            let style = cfg
+                .as_ref()
+                .map(|c| name_style_for(c, &g.sport_id))
+                .unwrap_or_else(|| default_name_style(&g.sport_id));
+            render::render_frame(g, spoiler, tz, style).1
         })
     };
     tracing::info!(
@@ -1042,6 +1059,17 @@ pub(crate) fn rfc3339_utc(t: chrono::DateTime<chrono::Utc>) -> String {
 /// server keeps rendering sensible times without any configuration.
 pub(crate) fn board_tz(cfg: &BoardConfig) -> Option<chrono_tz::Tz> {
     cfg.timezone.as_deref().and_then(|s| s.parse().ok())
+}
+
+/// The resolved team-name display style for `sport_id` on this board: the
+/// league's `SportConfig.name_style` override, else the league default
+/// ([`default_name_style`]). Threaded into the renderer's `draw_team_box`.
+pub(crate) fn name_style_for(cfg: &BoardConfig, sport_id: &str) -> NameStyle {
+    cfg.sports
+        .iter()
+        .find(|s| s.sport_id == sport_id)
+        .and_then(|s| s.name_style)
+        .unwrap_or_else(|| default_name_style(sport_id))
 }
 
 /// The game's board-local start time as frame/caption text ("7:05 PM"), if
@@ -1316,7 +1344,8 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
                         .map(|r| r as usize)
                         .unwrap_or(render::LEADERBOARD_DEFAULT_ROWS)
                 };
-                let (id, px, scrolls) = render::render_board_frame(g, rows_cap, spoiler_for(&cfg, g), tz);
+                let style = name_style_for(&cfg, &g.sport_id);
+                let (id, px, scrolls) = render::render_board_frame(g, rows_cap, spoiler_for(&cfg, g), tz, style);
                 state.cache_frame(id.clone(), px);
                 rotation.push(RotationEntry { frame_id: id, dwell_ms, scroll: scrolls });
             }
@@ -1926,7 +1955,7 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
                 let spoiler = spoiler_for(&cfg, g);
                 let mut s = to_summary_for(g, spoiler, tz);
                 s.scrolls = game_scrolls(&cfg, g);
-                let (fid, px) = render::render_frame(g, spoiler, tz);
+                let (fid, px) = render::render_frame(g, spoiler, tz, name_style_for(&cfg, &g.sport_id));
                 state.cache_frame(fid.clone(), px);
                 s.frame_id = fid;
                 s
@@ -2208,6 +2237,9 @@ fn preview() {
     let mk = |abbrev: &str, name: &str, score: u32, p: &str, s: &str| TeamSide {
         abbrev: abbrev.into(),
         name: name.into(),
+        // --preview sample frames; location unused by default styles. (Render
+        // agent: populate to eyeball the Location style.)
+        location: String::new(),
         score,
         primary: model::hex_to_rgb(p),
         secondary: model::ensure_contrast(model::hex_to_rgb(p), model::hex_to_rgb(s)),
@@ -2311,14 +2343,14 @@ fn preview() {
         }),
     ];
     for (name, game) in &samples {
-        let (_, px) = render::render_game(game, None);
+        let (_, px) = render::render_game(game, None, default_name_style(&game.sport_id));
         let path = format!("{dir}/{name}.png");
         save_png(&path, &px, 12);
         println!("wrote {path}");
     }
     // The board-facing tall leaderboard (app cards keep the 4-row static frame).
     if let Some(golf) = espn::demo_games(0, 0).into_iter().find(|g| g.id == "demo-golf") {
-        let (_, px, scrolls) = render::render_board_frame(&golf, render::LEADERBOARD_DEFAULT_ROWS, None, None);
+        let (_, px, scrolls) = render::render_board_frame(&golf, render::LEADERBOARD_DEFAULT_ROWS, None, None, default_name_style(&golf.sport_id));
         assert!(scrolls, "demo golf should be deep enough to scroll");
         let path = format!("{dir}/pga_scroll_tall.png");
         save_png(&path, &px, 12);
@@ -2757,6 +2789,7 @@ mod tests {
                         leaderboard_rows: None,
                         spoiler: false,
                         spoiler_team_ids: vec![],
+                        name_style: None,
                     },
                     SportConfig {
                         sport_id: "nhl".into(),
@@ -2766,6 +2799,7 @@ mod tests {
                         leaderboard_rows: None,
                         spoiler: false,
                         spoiler_team_ids: vec![],
+                        name_style: None,
                     },
                     SportConfig {
                         sport_id: "golf".into(), // sport no longer in the catalog at all
@@ -2775,6 +2809,7 @@ mod tests {
                         leaderboard_rows: None,
                         spoiler: false,
                         spoiler_team_ids: vec![],
+                        name_style: None,
                     },
                 ],
                 ..Default::default()
@@ -2820,6 +2855,7 @@ mod tests {
                 leaderboard_rows: None,
                 spoiler: false,
                 spoiler_team_ids: vec![],
+                name_style: None,
             }],
             ..Default::default()
         };
@@ -2862,6 +2898,7 @@ mod tests {
         let side = |abbrev: &str| TeamSide {
             abbrev: abbrev.into(),
             name: abbrev.into(),
+            location: String::new(),
             score: 0,
             primary: model::hex_to_rgb("111111"),
             secondary: model::hex_to_rgb("ffffff"),
@@ -2898,6 +2935,7 @@ mod tests {
                 leaderboard_rows: None,
                 spoiler: false,
                 spoiler_team_ids: vec![],
+                name_style: None,
             }],
             extra_game_ids: vec!["added-game".into()],
             ..Default::default()
@@ -3602,6 +3640,7 @@ mod tests {
         TeamSide {
             abbrev: abbrev.into(),
             name: abbrev.into(),
+            location: String::new(),
             score: 0,
             primary: model::hex_to_rgb("000000"),
             secondary: model::hex_to_rgb("FFFFFF"),
@@ -3653,6 +3692,7 @@ mod tests {
             leaderboard_rows: None,
             spoiler: false,
             spoiler_team_ids: vec![],
+            name_style: None,
         });
         // "Conference Finals+" covers the cup final but not an early round,
         // and the regular-season game isn't a championship game at all.
@@ -3735,6 +3775,7 @@ mod tests {
             leaderboard_rows: None,
             spoiler: false,
             spoiler_team_ids: vec![],
+            name_style: None,
         });
         assert_eq!(ids(&cfg), vec!["g1".to_string()]);
 

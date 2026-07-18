@@ -119,6 +119,7 @@ struct BoardInfo {
     var dwellSecs: UInt32 = 10
     var leagueDwell: [String: UInt32] = [:]     // sportId -> per-league override
     var leagueRows: [String: UInt32] = [:]      // sportId -> leaderboard depth (golf/F1)
+    var leagueNameStyle: [String: UiNameStyle] = [:] // sportId -> name-style override (absent = league default)
     var strictSpoilers = false                   // spoiled games: strict vs normal display
     var spoilerAll = false                       // protect every game on this board
     var leagueSpoiler: [String: Bool] = [:]      // sportId -> league-wide protection
@@ -828,6 +829,7 @@ final class BoardViewModel: ObservableObject {
         var champ: [String: String] = [:]
         var dwell: [String: UInt32] = [:]
         var rows: [String: UInt32] = [:]
+        var nameStyle: [String: UiNameStyle] = [:]
         var lspoil: [String: Bool] = [:]
         var tspoil: [String: Set<String>] = [:]
         for s in c.sports {
@@ -835,6 +837,7 @@ final class BoardViewModel: ObservableObject {
             if let o = s.championshipOptionId { champ[s.sportId] = o }
             if let d = s.dwellSecs { dwell[s.sportId] = d }
             if let r = s.leaderboardRows { rows[s.sportId] = r }
+            if let n = s.nameStyle { nameStyle[s.sportId] = n }
             if s.spoiler { lspoil[s.sportId] = true }
             if !s.spoilerTeamIds.isEmpty { tspoil[s.sportId] = Set(s.spoilerTeamIds) }
         }
@@ -852,6 +855,7 @@ final class BoardViewModel: ObservableObject {
             $0.dwellSecs = c.dwellSecs
             $0.leagueDwell = dwell
             $0.leagueRows = rows
+            $0.leagueNameStyle = nameStyle
             $0.strictSpoilers = c.strictSpoilers
             $0.spoilerAll = c.spoilerAll
             $0.leagueSpoiler = lspoil
@@ -898,6 +902,16 @@ final class BoardViewModel: ObservableObject {
             if let rows { $0.leagueRows[sportId] = rows } else { $0.leagueRows.removeValue(forKey: sportId) }
         }
         client?.setLeagueRows(boardId: id, sportId: sportId, rows: rows)
+    }
+
+    /// Per-league team-name display style override; nil = the league default.
+    func leagueNameStyle(_ sportId: String) -> UiNameStyle? { current.leagueNameStyle[sportId] }
+    func setLeagueNameStyle(_ sportId: String, _ style: UiNameStyle?) {
+        guard let id = selectedBoardId else { return }
+        mutate(id) {
+            if let style { $0.leagueNameStyle[sportId] = style } else { $0.leagueNameStyle.removeValue(forKey: sportId) }
+        }
+        client?.setLeagueNameStyle(boardId: id, sportId: sportId, style: style)
     }
 
     // ---- spoiler protection ----
@@ -3212,6 +3226,11 @@ struct LeagueEditorView: View {
         ["pga", "lpga", "f1"].contains(sport.id)
     }
 
+    /// The name-style choices this league offers (empty for leaderboard sports,
+    /// which hides the "Names" picker) and the style it defaults to.
+    private var nameStyleChoices: [UiNameStyleOption] { nameStyleOptions(sportId: sport.id) }
+    private var defaultStyle: UiNameStyle { defaultNameStyle(sportId: sport.id) }
+
     /// What the option picker configures varies by league kind.
     private var optionsTitle: String {
         switch sport.id {
@@ -3294,6 +3313,22 @@ struct LeagueEditorView: View {
                 }
             } footer: {
                 Text("How long this league's events hold the panel — leaderboards fit a full scroll pass into it.")
+            }
+            // Team-name display style — hidden for leaderboard leagues (golf/F1),
+            // whose fields are individuals with no per-team style.
+            if !nameStyleChoices.isEmpty {
+                Section {
+                    Picker("Names", selection: Binding(
+                        get: { model.leagueNameStyle(sport.id) ?? defaultStyle },
+                        set: { model.setLeagueNameStyle(sport.id, $0 == defaultStyle ? nil : $0) }
+                    )) {
+                        ForEach(nameStyleChoices, id: \.style) { opt in
+                            Text(opt.label).tag(opt.style)
+                        }
+                    }
+                } footer: {
+                    Text("How team names appear on the board for this league.")
+                }
             }
             // Subscription leagues (PGA/LPGA/F1) have no teams — just the picker.
             if !sport.teams.isEmpty {

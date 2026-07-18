@@ -30,7 +30,11 @@ pub enum GameStatus {
 #[derive(Clone, Debug, Serialize)]
 pub struct TeamSide {
     pub abbrev: String,
-    pub name: String, // short display name, uppercased at render time
+    pub name: String, // short mascot/display name, uppercased at render time
+    /// City / college / country (ESPN `competitor.team.location`) — the string
+    /// the `Location` name style renders (uppercased + shortened at draw time).
+    /// Empty for leaderboard "teams" (golf tours / F1) that have no location.
+    pub location: String,
     pub score: u32,
     #[serde(serialize_with = "ser_rgb")]
     pub primary: Rgb888, // row background
@@ -45,6 +49,7 @@ impl TeamSide {
         Self {
             abbrev: abbrev.into(),
             name: String::new(),
+            location: String::new(),
             score: 0,
             primary: Rgb888::BLACK,
             secondary: Rgb888::WHITE,
@@ -189,8 +194,11 @@ fn contrast(a: Rgb888, b: Rgb888) -> f32 {
 
 /// Like the original backend: if the team's secondary color doesn't contrast
 /// enough with its primary, fall back to white or black (whichever reads).
+/// The threshold matches the original Python backend's `color.py` (3.5) — the
+/// v2 port had lowered it to 3.0, which let genuinely hard-to-read secondaries
+/// (a mid-tone accent on a mid-tone primary) survive on the panel.
 pub fn ensure_contrast(primary: Rgb888, secondary: Rgb888) -> Rgb888 {
-    if contrast(primary, secondary) >= 3.0 {
+    if contrast(primary, secondary) >= 3.5 {
         secondary
     } else if contrast(primary, Rgb888::WHITE) >= contrast(primary, Rgb888::BLACK) {
         Rgb888::WHITE

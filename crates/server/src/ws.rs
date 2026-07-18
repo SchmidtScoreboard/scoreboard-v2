@@ -571,6 +571,17 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
                     cfg.sports.push(SportConfig { sport_id, leaderboard_rows: rows, ..Default::default() });
                 }
             }
+            // Per-league team-name display style: Some overrides the league
+            // default (City/Team name/Abbreviation), None reverts to it. Upsert
+            // by sport_id like SetLeagueDwell so a name-style edit on a league
+            // the user hasn't otherwise configured still sticks.
+            Command::SetLeagueNameStyle { sport_id, style } => {
+                if let Some(s) = cfg.sports.iter_mut().find(|s| s.sport_id == sport_id) {
+                    s.name_style = style;
+                } else if style.is_some() {
+                    cfg.sports.push(SportConfig { sport_id, name_style: style, ..Default::default() });
+                }
+            }
             Command::SetSpoilerMode { mode } => cfg.spoiler_mode = mode,
             Command::SetSpoilerAll { on } => cfg.spoiler_all = on,
             Command::SetLeagueSpoiler { sport_id, on } => {
@@ -748,6 +759,54 @@ mod tests {
         (ws, pubkey)
     }
 
+    /// SetLeagueNameStyle upserts the league's SportConfig.name_style like the
+    /// other per-league settings: Some sets it (creating the entry if needed),
+    /// None reverts to the league default, and None on an unconfigured league is
+    /// a no-op (no empty entry).
+    #[tokio::test]
+    async fn set_league_name_style_round_trips() {
+        let state = AppState::new_ephemeral();
+        let board = "board-namestyle";
+
+        // Some on a league with no prior config creates the entry.
+        apply_command(
+            &state,
+            board,
+            Command::SetLeagueNameStyle { sport_id: "cfb".into(), style: Some(NameStyle::Abbrev) },
+        );
+        let cfg = state.config_for(board);
+        assert_eq!(
+            cfg.sports.iter().find(|s| s.sport_id == "cfb").and_then(|s| s.name_style),
+            Some(NameStyle::Abbrev),
+            "name_style set and persisted",
+        );
+
+        // None reverts to the league default without dropping the entry.
+        apply_command(
+            &state,
+            board,
+            Command::SetLeagueNameStyle { sport_id: "cfb".into(), style: None },
+        );
+        let cfg = state.config_for(board);
+        assert_eq!(
+            cfg.sports.iter().find(|s| s.sport_id == "cfb").and_then(|s| s.name_style),
+            None,
+            "name_style cleared back to the default",
+        );
+
+        // None on a league that was never configured stays a no-op.
+        apply_command(
+            &state,
+            board,
+            Command::SetLeagueNameStyle { sport_id: "nhl".into(), style: None },
+        );
+        let cfg = state.config_for(board);
+        assert!(
+            !cfg.sports.iter().any(|s| s.sport_id == "nhl"),
+            "None on an unconfigured league creates no entry",
+        );
+    }
+
     #[tokio::test]
     async fn pair_flow_end_to_end() {
         let (url, _state) = spawn_server().await;
@@ -837,6 +896,7 @@ mod tests {
                 leaderboard_rows: None,
                 spoiler: true,
                 spoiler_team_ids: vec!["nhl-tor".into()],
+                name_style: None,
             }];
             let b = configs.entry(board_b.clone()).or_default();
             b.name = Some("Living room".into());

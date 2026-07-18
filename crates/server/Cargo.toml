@@ -6,6 +6,8 @@ version = "2026.7.0"
 
 # The OTA release signer (scripts/release-firmware.sh runs it). Explicit for
 # discoverability — cargo would auto-discover src/bin/sign-firmware.rs anyway.
+default-run = "server"
+
 [[bin]]
 name = "sign-firmware"
 path = "src/bin/sign-firmware.rs"

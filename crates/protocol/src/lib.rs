@@ -183,6 +183,57 @@ pub struct Manifest {
     pub epoch: u64,
 }
 
+// ---- per-league team-name display style ----
+/// How a team's name is rendered on the board for a given league. Resolved
+/// per-board: a league's `SportConfig.name_style`, falling back to
+/// [`default_name_style`] when that is `None`. A `TeamSide` carries all three
+/// strings (location / name / abbrev) so any style can be drawn from one game.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum NameStyle {
+    /// City / college / country — `TeamSide.location`.
+    Location,
+    /// Mascot / team name — `TeamSide.name` (the default for pro clubs).
+    #[default]
+    Name,
+    /// Team abbreviation — `TeamSide.abbrev`.
+    Abbrev,
+}
+
+/// The name-style choices a league offers, as `(style, LABEL)` pairs in menu
+/// order. Empty for leaderboard sports (golf/F1 — individual fields, no
+/// per-team style). Shared by the server (render + overflow report) and the
+/// app (the per-league "Names" picker), so both speak the same menu.
+pub fn name_style_options(sport_id: &str) -> &'static [(NameStyle, &'static str)] {
+    use NameStyle::*;
+    match sport_id {
+        // College: the LOCATION is the identity ("Michigan"); the mascot
+        // ("Wolverines") is optional. Default is Location.
+        "cfb" | "cbb" | "wcbb" => {
+            &[(Location, "College"), (Name, "Team name"), (Abbrev, "Abbreviation")]
+        }
+        // World Cup national teams have no mascot — country or abbreviation only.
+        "wc" => &[(Location, "Country"), (Abbrev, "Abbreviation")],
+        // Other team sports: pro clubs, which default to the mascot.
+        "nhl" | "nba" | "mlb" | "nfl" | "wnba" | "mls" | "epl" => {
+            &[(Location, "City"), (Name, "Team name"), (Abbrev, "Abbreviation")]
+        }
+        // Leaderboard sports (f1/pga/lpga) and anything unknown: no per-team
+        // style — individual leaderboards, not two-team rows.
+        _ => &[],
+    }
+}
+
+/// The default name style for a league, used when `SportConfig.name_style` is
+/// `None`. College + World Cup identify by location; every other league
+/// (including the leaderboard sports, where it is unused) defaults to Name.
+pub fn default_name_style(sport_id: &str) -> NameStyle {
+    match sport_id {
+        "cfb" | "cbb" | "wcbb" | "wc" => NameStyle::Location,
+        _ => NameStyle::Name,
+    }
+}
+
 // ---- per-board config ----
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct SportConfig {
@@ -197,6 +248,11 @@ pub struct SportConfig {
     /// top-4 (no scrolling), up to 20 = the full field. None = default (10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leaderboard_rows: Option<u32>,
+    /// Per-league team-name display style; None = the league default
+    /// ([`default_name_style`]). Location = city/college/country, Name =
+    /// mascot, Abbrev = abbreviation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_style: Option<NameStyle>,
     /// Spoiler-protect every game in this league.
     #[serde(default, skip_serializing_if = "is_false")]
     pub spoiler: bool,
@@ -479,6 +535,10 @@ pub enum Command {
     /// Leaderboard depth for golf/F1 (4 = static top-4 .. 20 = full field);
     /// None reverts to the default (10).
     SetLeagueRows { sport_id: String, rows: Option<u32> },
+    /// Per-league team-name display style (city/college/country vs mascot vs
+    /// abbreviation); None reverts the league to its default
+    /// ([`default_name_style`]).
+    SetLeagueNameStyle { sport_id: String, style: Option<NameStyle> },
     /// How spoiler-protected games render (strict vs normal).
     SetSpoilerMode { mode: SpoilerMode },
     /// Spoiler-protect every game on the board.
@@ -843,6 +903,108 @@ mod firmware_msg_tests {
         assert!(matches!(
             serde_json::from_str::<Command>(&serde_json::to_string(&install).unwrap()).unwrap(),
             Command::InstallFirmware { channel: FwChannel::Beta }
+        ));
+    }
+}
+
+#[cfg(test)]
+mod name_style_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_per_league() {
+        // College identifies by location.
+        assert_eq!(default_name_style("cfb"), NameStyle::Location);
+        assert_eq!(default_name_style("cbb"), NameStyle::Location);
+        assert_eq!(default_name_style("wcbb"), NameStyle::Location);
+        // World Cup national teams: default to the country (Location).
+        assert_eq!(default_name_style("wc"), NameStyle::Location);
+        // Pro clubs default to the mascot.
+        assert_eq!(default_name_style("nhl"), NameStyle::Name);
+        assert_eq!(default_name_style("mlb"), NameStyle::Name);
+        assert_eq!(default_name_style("epl"), NameStyle::Name);
+        // Leaderboard sports: unused, but Name by contract.
+        assert_eq!(default_name_style("f1"), NameStyle::Name);
+        assert_eq!(default_name_style("pga"), NameStyle::Name);
+        assert_eq!(default_name_style("lpga"), NameStyle::Name);
+        // The enum's own Default is Name.
+        assert_eq!(NameStyle::default(), NameStyle::Name);
+    }
+
+    #[test]
+    fn options_per_league() {
+        // College offers all three, Location first, with the "College" label.
+        let college = name_style_options("cfb");
+        assert_eq!(college.len(), 3);
+        assert_eq!(college[0], (NameStyle::Location, "College"));
+        assert_eq!(
+            college.iter().map(|(_, l)| *l).collect::<Vec<_>>(),
+            vec!["College", "Team name", "Abbreviation"]
+        );
+        // cbb/wcbb share the college table.
+        assert_eq!(name_style_options("cbb"), college);
+        assert_eq!(name_style_options("wcbb"), college);
+
+        // World Cup has NO Name option (countries have no mascot).
+        let wc = name_style_options("wc");
+        assert_eq!(wc.len(), 2);
+        assert_eq!(wc[0], (NameStyle::Location, "Country"));
+        assert_eq!(wc[1], (NameStyle::Abbrev, "Abbreviation"));
+        assert!(!wc.iter().any(|(s, _)| *s == NameStyle::Name), "no mascot for nations");
+
+        // Pro club: City / Team name / Abbreviation.
+        let nhl = name_style_options("nhl");
+        assert_eq!(nhl.len(), 3);
+        assert_eq!(nhl[0], (NameStyle::Location, "City"));
+
+        // Leaderboard sports have no per-team style at all.
+        assert!(name_style_options("f1").is_empty());
+        assert!(name_style_options("pga").is_empty());
+        assert!(name_style_options("lpga").is_empty());
+        // Unknown leagues degrade to empty too.
+        assert!(name_style_options("zzz").is_empty());
+    }
+
+    #[test]
+    fn serde_snake_case_and_skip_none() {
+        // The wire form is snake_case.
+        assert_eq!(serde_json::to_string(&NameStyle::Location).unwrap(), "\"location\"");
+        assert_eq!(serde_json::to_string(&NameStyle::Name).unwrap(), "\"name\"");
+        assert_eq!(serde_json::to_string(&NameStyle::Abbrev).unwrap(), "\"abbrev\"");
+
+        // None name_style is omitted from a serialized SportConfig...
+        let cfg = SportConfig { sport_id: "nhl".into(), ..Default::default() };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(!json.contains("name_style"), "None must be skipped: {json}");
+
+        // ...and Some round-trips.
+        let cfg2 =
+            SportConfig { sport_id: "cfb".into(), name_style: Some(NameStyle::Abbrev), ..Default::default() };
+        let round: SportConfig = serde_json::from_str(&serde_json::to_string(&cfg2).unwrap()).unwrap();
+        assert_eq!(round.name_style, Some(NameStyle::Abbrev));
+
+        // A pre-name-style persisted config deserializes with name_style None.
+        let old: SportConfig =
+            serde_json::from_str("{\"sport_id\":\"nhl\",\"favorite_team_ids\":[],\"championship_option_id\":null}")
+                .unwrap();
+        assert_eq!(old.name_style, None);
+    }
+
+    #[test]
+    fn command_round_trips() {
+        let cmd = Command::SetLeagueNameStyle {
+            sport_id: "wc".into(),
+            style: Some(NameStyle::Location),
+        };
+        assert!(matches!(
+            serde_json::from_str::<Command>(&serde_json::to_string(&cmd).unwrap()).unwrap(),
+            Command::SetLeagueNameStyle { style: Some(NameStyle::Location), .. }
+        ));
+        // None (revert to default) round-trips too.
+        let revert = Command::SetLeagueNameStyle { sport_id: "cfb".into(), style: None };
+        assert!(matches!(
+            serde_json::from_str::<Command>(&serde_json::to_string(&revert).unwrap()).unwrap(),
+            Command::SetLeagueNameStyle { style: None, .. }
         ));
     }
 }

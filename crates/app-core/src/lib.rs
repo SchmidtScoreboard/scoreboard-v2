@@ -8,9 +8,10 @@ uniffi::setup_scaffolding!();
 use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use scoreboard_protocol::{
-    decode_frame, pubkey_hex, rgb565_to_888, sign_hex, BoardConfig, Catalog, ClientMsg, Command,
-    FwChannel, FwImage, GameSummary, OffState, Role, ServerMsg, SpoilerMode,
-    SportConfig as PSportConfig,
+    decode_frame, default_name_style as p_default_name_style,
+    name_style_options as p_name_style_options, pubkey_hex, rgb565_to_888, sign_hex, BoardConfig,
+    Catalog, ClientMsg, Command, FwChannel, FwImage, GameSummary, NameStyle, OffState, Role,
+    ServerMsg, SpoilerMode, SportConfig as PSportConfig,
 };
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -42,6 +43,24 @@ pub struct UiSport {
     pub teams: Vec<UiTeam>,
     pub championship_options: Vec<UiChampOption>,
 }
+/// How a league renders team names on the board (protocol `NameStyle`).
+/// Location = city/college/country, Name = mascot/team name, Abbrev = the
+/// abbreviation. Resolved per-board against the league default when unset.
+#[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq)]
+pub enum UiNameStyle {
+    Location,
+    Name,
+    Abbrev,
+}
+/// One entry in a league's "Names" picker: a `style` plus its league-specific
+/// `label` ("College"/"City"/"Country", "Team name", "Abbreviation"). Comes
+/// from `name_style_options(sport_id)` in menu order; empty for leaderboard
+/// sports (golf/F1), which the app hides the picker for.
+#[derive(uniffi::Record, Clone)]
+pub struct UiNameStyleOption {
+    pub style: UiNameStyle,
+    pub label: String,
+}
 #[derive(uniffi::Record, Clone)]
 pub struct UiSportConfig {
     pub sport_id: String,
@@ -51,6 +70,10 @@ pub struct UiSportConfig {
     pub dwell_secs: Option<u32>,
     /// Leaderboard depth for golf/F1 (4 = static top-4 .. 20 = full field).
     pub leaderboard_rows: Option<u32>,
+    /// Per-league team-name display style; None = the league default
+    /// (`default_name_style`). Location = city/college/country, Name = mascot,
+    /// Abbrev = abbreviation.
+    pub name_style: Option<UiNameStyle>,
     /// Spoiler-protect every game in this league.
     pub spoiler: bool,
     /// Spoiler-protect games involving these teams.
@@ -542,6 +565,21 @@ impl ScoreboardClient {
         let _ = self.tx.send(Out::Command(board_id, Command::SetLeagueRows { sport_id, rows }));
     }
 
+    /// Per-league team-name display style (Location/Name/Abbrev); None reverts
+    /// to the league default (`default_name_style`). Only meaningful for the
+    /// styles a league offers via `name_style_options`.
+    pub fn set_league_name_style(
+        &self,
+        board_id: String,
+        sport_id: String,
+        style: Option<UiNameStyle>,
+    ) {
+        let style = style.map(NameStyle::from);
+        let _ = self
+            .tx
+            .send(Out::Command(board_id, Command::SetLeagueNameStyle { sport_id, style }));
+    }
+
     pub fn set_dwell(&self, board_id: String, secs: u32) {
         let _ = self.tx.send(Out::Command(board_id, Command::SetDwell { secs }));
     }
@@ -811,10 +849,53 @@ fn to_ui_configs(sports: Vec<PSportConfig>) -> Vec<UiSportConfig> {
             championship_option_id: s.championship_option_id,
             dwell_secs: s.dwell_secs,
             leaderboard_rows: s.leaderboard_rows,
+            name_style: s.name_style.map(UiNameStyle::from),
             spoiler: s.spoiler,
             spoiler_team_ids: s.spoiler_team_ids,
         })
         .collect()
+}
+
+impl From<NameStyle> for UiNameStyle {
+    fn from(s: NameStyle) -> Self {
+        match s {
+            NameStyle::Location => UiNameStyle::Location,
+            NameStyle::Name => UiNameStyle::Name,
+            NameStyle::Abbrev => UiNameStyle::Abbrev,
+        }
+    }
+}
+impl From<UiNameStyle> for NameStyle {
+    fn from(s: UiNameStyle) -> Self {
+        match s {
+            UiNameStyle::Location => NameStyle::Location,
+            UiNameStyle::Name => NameStyle::Name,
+            UiNameStyle::Abbrev => NameStyle::Abbrev,
+        }
+    }
+}
+
+/// The name-style choices a league offers, in menu order, each with its
+/// league-specific label. Wraps protocol `name_style_options`. Empty for
+/// leaderboard sports (golf/F1) and unknown leagues — the app hides the
+/// "Names" picker when this is empty.
+#[uniffi::export]
+pub fn name_style_options(sport_id: String) -> Vec<UiNameStyleOption> {
+    p_name_style_options(&sport_id)
+        .iter()
+        .map(|(style, label)| UiNameStyleOption {
+            style: UiNameStyle::from(*style),
+            label: (*label).to_string(),
+        })
+        .collect()
+}
+
+/// The style a league falls back to when its `name_style` override is unset.
+/// Wraps protocol `default_name_style` so the app can preselect it in the
+/// "Names" picker. Location for college/World Cup, Name otherwise.
+#[uniffi::export]
+pub fn default_name_style(sport_id: String) -> UiNameStyle {
+    UiNameStyle::from(p_default_name_style(&sport_id))
 }
 
 fn to_ui_board_config(c: BoardConfig) -> UiBoardConfig {

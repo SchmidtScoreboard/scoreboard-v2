@@ -502,6 +502,11 @@ void uniffi_app_core_fn_method_scoreboardclient_set_game_spoiler(void*_Nonnull p
 void uniffi_app_core_fn_method_scoreboardclient_set_league_dwell(void*_Nonnull ptr, RustBuffer board_id, RustBuffer sport_id, RustBuffer secs, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_NAME_STYLE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_NAME_STYLE
+void uniffi_app_core_fn_method_scoreboardclient_set_league_name_style(void*_Nonnull ptr, RustBuffer board_id, RustBuffer sport_id, RustBuffer style, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_ROWS
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_ROWS
 void uniffi_app_core_fn_method_scoreboardclient_set_league_rows(void*_Nonnull ptr, RustBuffer board_id, RustBuffer sport_id, RustBuffer rows, RustCallStatus *_Nonnull out_status
@@ -565,6 +570,16 @@ void uniffi_app_core_fn_method_scoreboardclient_update_firmware(void*_Nonnull pt
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_INIT_CALLBACK_VTABLE_CLIENTLISTENER
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_INIT_CALLBACK_VTABLE_CLIENTLISTENER
 void uniffi_app_core_fn_init_callback_vtable_clientlistener(UniffiVTableCallbackInterfaceClientListener* _Nonnull vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_DEFAULT_NAME_STYLE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_DEFAULT_NAME_STYLE
+RustBuffer uniffi_app_core_fn_func_default_name_style(RustBuffer sport_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_NAME_STYLE_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_NAME_STYLE_OPTIONS
+RustBuffer uniffi_app_core_fn_func_name_style_options(RustBuffer sport_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_APP_CORE_RUSTBUFFER_ALLOC
@@ -847,6 +862,18 @@ void ffi_app_core_rust_future_free_void(uint64_t handle
 void ffi_app_core_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_DEFAULT_NAME_STYLE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_DEFAULT_NAME_STYLE
+uint16_t uniffi_app_core_checksum_func_default_name_style(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_NAME_STYLE_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_NAME_STYLE_OPTIONS
+uint16_t uniffi_app_core_checksum_func_name_style_options(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_ADD_GAME
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_ADD_GAME
 uint16_t uniffi_app_core_checksum_method_scoreboardclient_add_game(void
@@ -994,6 +1021,12 @@ uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_game_spoiler(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_DWELL
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_DWELL
 uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_league_dwell(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_NAME_STYLE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_NAME_STYLE
+uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_league_name_style(void
     
 );
 #endif

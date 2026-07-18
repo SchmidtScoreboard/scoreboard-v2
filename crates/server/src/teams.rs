@@ -26,6 +26,104 @@ fn curated(sport_id: &str, abbrev: &str) -> Option<&'static str> {
     table.iter().find(|(a, _)| *a == abbrev).map(|(_, n)| *n)
 }
 
+/// Shorten a city / college / country for the `Location` name style. Unlike the
+/// mascot rule this applies unconditionally (the substitutions are canonical
+/// abbreviations that always read): a leading "University of" / "Univ" is
+/// dropped, a trailing "State" becomes "St", and a leading direction word
+/// collapses to its initial ("North Carolina" -> "N Carolina") — the same
+/// transforms `team_generator.py` used, plus the college "University of" trim.
+/// Case-insensitive on the tokens it matches; other words keep their case (the
+/// board uppercases the whole string at draw time).
+/// ASCII-fold accented letters — the 4x6 / 5x8 board fonts are ASCII-only, so
+/// "Türkiye"/"CF Montréal"/"Curaçao" would otherwise render blank glyphs.
+pub fn ascii_fold(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' | 'Á' | 'À' | 'Â' | 'Ä' | 'Ã' | 'Å' => 'A',
+            'é' | 'è' | 'ê' | 'ë' | 'É' | 'È' | 'Ê' | 'Ë' => 'E',
+            'í' | 'ì' | 'î' | 'ï' | 'Í' | 'Ì' | 'Î' | 'Ï' => 'I',
+            'ó' | 'ò' | 'ô' | 'ö' | 'õ' | 'Ó' | 'Ò' | 'Ô' | 'Ö' | 'Õ' => 'O',
+            'ú' | 'ù' | 'û' | 'ü' | 'Ú' | 'Ù' | 'Û' | 'Ü' => 'U',
+            'ç' | 'Ç' => 'C',
+            'ñ' | 'Ñ' => 'N',
+            'ı' => 'I',
+            'ş' | 'Ş' => 'S',
+            'ğ' | 'Ğ' => 'G',
+            other => other,
+        })
+        .collect()
+}
+
+/// Curated location short forms for names that don't fit even after the
+/// mechanical rules — hand-add here when `server team-names` flags one you
+/// want spelled out instead of falling back to the abbreviation. Keyed by the
+/// UPPERCASE ASCII-folded raw location.
+fn curated_location(name_upper: &str) -> Option<&'static str> {
+    const TABLE: &[(&str, &str)] = &[
+        ("NORTH CAROLINA", "N CAROLINA"),
+        ("SOUTH CAROLINA", "S CAROLINA"),
+        ("BOSTON COLLEGE", "BOSTON C"),
+        ("MANCHESTER UNITED", "MAN UNITED"),
+        ("MANCHESTER CITY", "MAN CITY"),
+        ("BOSNIA-HERZEGOVINA", "BOSNIA"),
+        ("UNITED STATES", "USA"),
+        ("SAUDI ARABIA", "SAUDI"),
+    ];
+    TABLE.iter().find(|(k, _)| *k == name_upper).map(|(_, v)| *v)
+}
+
+pub fn shorten_location(name: &str) -> String {
+    let folded = ascii_fold(name);
+    if let Some(curated) = curated_location(&folded.to_ascii_uppercase()) {
+        return curated.to_string();
+    }
+    let mut parts: Vec<String> = folded.split_whitespace().map(|s| s.to_string()).collect();
+    if parts.is_empty() {
+        return String::new();
+    }
+    let up = |s: &str| s.to_ascii_uppercase();
+    // Drop a trailing club suffix (soccer: "... FC" / "... SC" / "... United").
+    if parts.len() > 1 {
+        if let Some(last) = parts.last() {
+            if matches!(up(last).as_str(), "FC" | "SC" | "CF" | "AFC") {
+                parts.pop();
+            }
+        }
+    }
+    // Drop a leading "University of" / "Univ." (rare in ESPN's location field,
+    // but defensive for college feeds that spell it out).
+    if matches!(up(&parts[0]).trim_end_matches('.'), "UNIVERSITY" | "UNIV") {
+        parts.remove(0);
+        if parts.first().map(|s| up(s)).as_deref() == Some("OF") {
+            parts.remove(0);
+        }
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    // Trailing "State" -> "St".
+    if let Some(last) = parts.last_mut() {
+        if up(last) == "STATE" {
+            *last = "St".to_string();
+        }
+    }
+    // Leading direction word -> its initial. ESPN's college locations use both
+    // the bare ("East Carolina") and the -ERN form ("Eastern Michigan").
+    if let Some(first) = parts.first_mut() {
+        for (dir, init) in [
+            ("NORTH", "N"), ("NORTHERN", "N"), ("EAST", "E"), ("EASTERN", "E"),
+            ("SOUTH", "S"), ("SOUTHERN", "S"), ("WEST", "W"), ("WESTERN", "W"),
+            ("CENTRAL", "C"),
+        ] {
+            if up(first) == dir {
+                *first = init.to_string();
+                break;
+            }
+        }
+    }
+    parts.join(" ")
+}
+
 /// Original shortening rule (team_generator.py): only applied when >11 chars —
 /// trailing "State" -> "St", leading direction word -> its initial.
 fn shorten(name: &str) -> String {

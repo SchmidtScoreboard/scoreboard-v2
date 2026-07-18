@@ -661,6 +661,13 @@ public protocol ScoreboardClientProtocol: AnyObject {
     func setLeagueDwell(boardId: String, sportId: String, secs: UInt32?)
 
     /**
+     * Per-league team-name display style (Location/Name/Abbrev); None reverts
+     * to the league default (`default_name_style`). Only meaningful for the
+     * styles a league offers via `name_style_options`.
+     */
+    func setLeagueNameStyle(boardId: String, sportId: String, style: UiNameStyle?)
+
+    /**
      * Leaderboard depth for golf/F1; None reverts to the default (top 10).
      */
     func setLeagueRows(boardId: String, sportId: String, rows: UInt32?)
@@ -1023,6 +1030,19 @@ open class ScoreboardClient:
                                                                     FfiConverterString.lower(boardId),
                                                                     FfiConverterString.lower(sportId),
                                                                     FfiConverterOptionUInt32.lower(secs), $0)
+    }
+    }
+
+    /**
+     * Per-league team-name display style (Location/Name/Abbrev); None reverts
+     * to the league default (`default_name_style`). Only meaningful for the
+     * styles a league offers via `name_style_options`.
+     */
+    open func setLeagueNameStyle(boardId: String, sportId: String, style: UiNameStyle?) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_set_league_name_style(self.uniffiClonePointer(),
+                                                                         FfiConverterString.lower(boardId),
+                                                                         FfiConverterString.lower(sportId),
+                                                                         FfiConverterOptionTypeUiNameStyle.lower(style), $0)
     }
     }
 
@@ -1798,6 +1818,73 @@ public func FfiConverterTypeUiGame_lower(_ value: UiGame) -> RustBuffer {
     return FfiConverterTypeUiGame.lower(value)
 }
 
+/**
+ * One entry in a league's "Names" picker: a `style` plus its league-specific
+ * `label` ("College"/"City"/"Country", "Team name", "Abbreviation"). Comes
+ * from `name_style_options(sport_id)` in menu order; empty for leaderboard
+ * sports (golf/F1), which the app hides the picker for.
+ */
+public struct UiNameStyleOption {
+    public var style: UiNameStyle
+    public var label: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(style: UiNameStyle, label: String) {
+        self.style = style
+        self.label = label
+    }
+}
+
+extension UiNameStyleOption: Equatable, Hashable {
+    public static func == (lhs: UiNameStyleOption, rhs: UiNameStyleOption) -> Bool {
+        if lhs.style != rhs.style {
+            return false
+        }
+        if lhs.label != rhs.label {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(style)
+        hasher.combine(label)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiNameStyleOption: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiNameStyleOption {
+        return
+            try UiNameStyleOption(
+                style: FfiConverterTypeUiNameStyle.read(from: &buf),
+                label: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UiNameStyleOption, into buf: inout [UInt8]) {
+        FfiConverterTypeUiNameStyle.write(value.style, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiNameStyleOption_lift(_ buf: RustBuffer) throws -> UiNameStyleOption {
+    return try FfiConverterTypeUiNameStyleOption.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiNameStyleOption_lower(_ value: UiNameStyleOption) -> RustBuffer {
+    return FfiConverterTypeUiNameStyleOption.lower(value)
+}
+
 public struct UiSport {
     public var id: String
     public var name: String
@@ -1888,6 +1975,12 @@ public struct UiSportConfig {
      */
     public var leaderboardRows: UInt32?
     /**
+     * Per-league team-name display style; None = the league default
+     * (`default_name_style`). Location = city/college/country, Name = mascot,
+     * Abbrev = abbreviation.
+     */
+    public var nameStyle: UiNameStyle?
+    /**
      * Spoiler-protect every game in this league.
      */
     public var spoiler: Bool
@@ -1906,6 +1999,11 @@ public struct UiSportConfig {
                     * Leaderboard depth for golf/F1 (4 = static top-4 .. 20 = full field).
                     */ leaderboardRows: UInt32?,
                 /**
+                    * Per-league team-name display style; None = the league default
+                    * (`default_name_style`). Location = city/college/country, Name = mascot,
+                    * Abbrev = abbreviation.
+                    */ nameStyle: UiNameStyle?,
+                /**
                     * Spoiler-protect every game in this league.
                     */ spoiler: Bool,
                 /**
@@ -1917,6 +2015,7 @@ public struct UiSportConfig {
         self.championshipOptionId = championshipOptionId
         self.dwellSecs = dwellSecs
         self.leaderboardRows = leaderboardRows
+        self.nameStyle = nameStyle
         self.spoiler = spoiler
         self.spoilerTeamIds = spoilerTeamIds
     }
@@ -1939,6 +2038,9 @@ extension UiSportConfig: Equatable, Hashable {
         if lhs.leaderboardRows != rhs.leaderboardRows {
             return false
         }
+        if lhs.nameStyle != rhs.nameStyle {
+            return false
+        }
         if lhs.spoiler != rhs.spoiler {
             return false
         }
@@ -1954,6 +2056,7 @@ extension UiSportConfig: Equatable, Hashable {
         hasher.combine(championshipOptionId)
         hasher.combine(dwellSecs)
         hasher.combine(leaderboardRows)
+        hasher.combine(nameStyle)
         hasher.combine(spoiler)
         hasher.combine(spoilerTeamIds)
     }
@@ -1971,6 +2074,7 @@ public struct FfiConverterTypeUiSportConfig: FfiConverterRustBuffer {
                 championshipOptionId: FfiConverterOptionString.read(from: &buf),
                 dwellSecs: FfiConverterOptionUInt32.read(from: &buf),
                 leaderboardRows: FfiConverterOptionUInt32.read(from: &buf),
+                nameStyle: FfiConverterOptionTypeUiNameStyle.read(from: &buf),
                 spoiler: FfiConverterBool.read(from: &buf),
                 spoilerTeamIds: FfiConverterSequenceString.read(from: &buf)
             )
@@ -1982,6 +2086,7 @@ public struct FfiConverterTypeUiSportConfig: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.championshipOptionId, into: &buf)
         FfiConverterOptionUInt32.write(value.dwellSecs, into: &buf)
         FfiConverterOptionUInt32.write(value.leaderboardRows, into: &buf)
+        FfiConverterOptionTypeUiNameStyle.write(value.nameStyle, into: &buf)
         FfiConverterBool.write(value.spoiler, into: &buf)
         FfiConverterSequenceString.write(value.spoilerTeamIds, into: &buf)
     }
@@ -2161,6 +2266,69 @@ public func FfiConverterTypeUiFwChannel_lower(_ value: UiFwChannel) -> RustBuffe
 }
 
 extension UiFwChannel: Equatable, Hashable {}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * How a league renders team names on the board (protocol `NameStyle`).
+ * Location = city/college/country, Name = mascot/team name, Abbrev = the
+ * abbreviation. Resolved per-board against the league default when unset.
+ */
+
+public enum UiNameStyle {
+    case location
+    case name
+    case abbrev
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiNameStyle: FfiConverterRustBuffer {
+    typealias SwiftType = UiNameStyle
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiNameStyle {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return .location
+
+        case 2: return .name
+
+        case 3: return .abbrev
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: UiNameStyle, into buf: inout [UInt8]) {
+        switch value {
+        case .location:
+            writeInt(&buf, Int32(1))
+
+        case .name:
+            writeInt(&buf, Int32(2))
+
+        case .abbrev:
+            writeInt(&buf, Int32(3))
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiNameStyle_lift(_ buf: RustBuffer) throws -> UiNameStyle {
+    return try FfiConverterTypeUiNameStyle.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiNameStyle_lower(_ value: UiNameStyle) -> RustBuffer {
+    return FfiConverterTypeUiNameStyle.lower(value)
+}
+
+extension UiNameStyle: Equatable, Hashable {}
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -2740,6 +2908,30 @@ private struct FfiConverterOptionString: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterOptionTypeUiNameStyle: FfiConverterRustBuffer {
+    typealias SwiftType = UiNameStyle?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeUiNameStyle.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeUiNameStyle.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -2840,6 +3032,31 @@ private struct FfiConverterSequenceTypeUiGame: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterSequenceTypeUiNameStyleOption: FfiConverterRustBuffer {
+    typealias SwiftType = [UiNameStyleOption]
+
+    static func write(_ value: [UiNameStyleOption], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeUiNameStyleOption.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UiNameStyleOption] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UiNameStyleOption]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeUiNameStyleOption.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterSequenceTypeUiSport: FfiConverterRustBuffer {
     typealias SwiftType = [UiSport]
 
@@ -2912,6 +3129,33 @@ private struct FfiConverterSequenceTypeUiTeam: FfiConverterRustBuffer {
     }
 }
 
+/**
+ * The style a league falls back to when its `name_style` override is unset.
+ * Wraps protocol `default_name_style` so the app can preselect it in the
+ * "Names" picker. Location for college/World Cup, Name otherwise.
+ */
+public func defaultNameStyle(sportId: String) -> UiNameStyle {
+    return try! FfiConverterTypeUiNameStyle.lift(try! rustCall {
+        uniffi_app_core_fn_func_default_name_style(
+            FfiConverterString.lower(sportId), $0
+        )
+    })
+}
+
+/**
+ * The name-style choices a league offers, in menu order, each with its
+ * league-specific label. Wraps protocol `name_style_options`. Empty for
+ * leaderboard sports (golf/F1) and unknown leagues — the app hides the
+ * "Names" picker when this is empty.
+ */
+public func nameStyleOptions(sportId: String) -> [UiNameStyleOption] {
+    return try! FfiConverterSequenceTypeUiNameStyleOption.lift(try! rustCall {
+        uniffi_app_core_fn_func_name_style_options(
+            FfiConverterString.lower(sportId), $0
+        )
+    })
+}
+
 private enum InitializationResult {
     case ok
     case contractVersionMismatch
@@ -2927,6 +3171,12 @@ private var initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_app_core_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if uniffi_app_core_checksum_func_default_name_style() != 9560 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_name_style_options() != 22961 {
+        return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_add_game() != 7881 {
         return InitializationResult.apiChecksumMismatch
@@ -3001,6 +3251,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_league_dwell() != 25672 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_scoreboardclient_set_league_name_style() != 22803 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_league_rows() != 35011 {

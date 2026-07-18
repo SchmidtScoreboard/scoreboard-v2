@@ -8,8 +8,10 @@
 //!    (so the glyph has equal `spacing` margin top and bottom = vertically centered),
 //!  - per-character kerning overrides Mark used (5x8: I,T->4 Y->6 ; 4x6: N->5).
 
-use crate::model::{Game, GameStatus, Situation, TeamSide};
-use scoreboard_protocol::SpoilerMode;
+use crate::model::{ensure_contrast, Game, GameStatus, Situation, TeamSide};
+use scoreboard_protocol::{NameStyle, SpoilerMode};
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
 use embedded_graphics::{
     draw_target::DrawTarget,
     geometry::{OriginDimensions, Size},
@@ -317,11 +319,25 @@ fn box_h(lay: &Layout) -> i32 {
     lay.glyph_h + 2 * lay.spacing
 }
 
+/// The on-board display string for a team under `style`: the raw
+/// location/name/abbrev, shortened (location only — the mascot `name` is already
+/// shortened at parse time) and uppercased.
+fn team_display(team: &TeamSide, style: NameStyle) -> String {
+    // shorten_location already ASCII-folds; fold the others too — the board
+    // font is ASCII-only, so an accented mascot ("Peñarol") would blank out.
+    match style {
+        NameStyle::Location => crate::teams::shorten_location(&team.location).to_ascii_uppercase(),
+        NameStyle::Name => crate::teams::ascii_fold(&team.name).to_ascii_uppercase(),
+        NameStyle::Abbrev => crate::teams::ascii_fold(&team.abbrev).to_ascii_uppercase(),
+    }
+}
+
 /// `accent_w` is normally ACCENT_W; football widens the possessing team's
 /// stripe to 8 (the original's possession cue), which also shifts the name.
 /// `right_text` is the score — or the team's record while the game is
-/// scheduled, when a 0-0 line would say nothing.
-fn draw_team_box(c: &mut Canvas, team: &TeamSide, y_offset: i32, lay: &Layout, accent_w: u32, right_text: &str) {
+/// scheduled, when a 0-0 line would say nothing. `style` picks which of the
+/// team's three name strings is drawn (per-board / per-league resolved).
+fn draw_team_box(c: &mut Canvas, sport_id: &str, team: &TeamSide, style: NameStyle, y_offset: i32, lay: &Layout, accent_w: u32, right_text: &str) {
     let bh = box_h(lay);
     fill(c, 0, y_offset, FRAME_WIDTH as u32, bh as u32, team.primary);
     // The original's rectangle x-endpoints were inclusive, so its width-8
@@ -331,9 +347,67 @@ fn draw_team_box(c: &mut Canvas, team: &TeamSide, y_offset: i32, lay: &Layout, a
     fill(c, 0, y_offset, stripe, bh as u32, team.secondary);
     let by = centered_baseline(y_offset, bh, lay.big);
     let right_x = SCORE_RIGHT - text_width(right_text, lay.big);
+    let name_x = accent_w as i32 + 3;
+    let max_right = right_x - 2;
+    let avail = max_right - name_x;
+    // Resolve the styled name, then GUARANTEE it's readable: if the chosen
+    // style (after shortening) still overflows the row, fall back to the
+    // abbreviation, which always fits — a clipped half-name is worse than a
+    // recognizable abbrev. The overflow is still reported (deduped here, and
+    // exhaustively by `server team-names`) so a long name can be given a
+    // curated short form rather than silently dropping to its abbrev.
+    let styled = team_display(team, style);
+    let display = if text_width(&styled, lay.big) > avail && style != NameStyle::Abbrev {
+        warn_overflow(sport_id, style, &styled, text_width(&styled, lay.big), avail);
+        let abbrev = team.abbrev.to_ascii_uppercase();
+        // Even the abbrev can (rarely) be wide; clip guards that edge.
+        if text_width(&abbrev, lay.big) <= avail { abbrev } else { styled }
+    } else {
+        styled
+    };
     // Clip the name against the right text — records are wider than scores.
-    draw_text_clip(c, &team.name.to_ascii_uppercase(), accent_w as i32 + 3, by, right_x - 2, lay.big, team.secondary);
+    draw_text_clip(c, &display, name_x, by, max_right, lay.big, team.secondary);
     draw_text(c, right_text, right_x, by, lay.big, team.secondary);
+}
+
+/// Deduped overflow warning (per league / style / display string), so a team
+/// that always overflows logs once, not every render tick.
+fn warn_overflow(sport_id: &str, style: NameStyle, shown: &str, width: i32, avail: i32) {
+    static WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let key = format!("{sport_id}|{style:?}|{shown}");
+    let mut set = WARNED.get_or_init(|| Mutex::new(HashSet::new())).lock().unwrap();
+    if set.insert(key) {
+        tracing::warn!(
+            "team-name overflow: league={} style={:?} name={:?} width={}px avail={}px (truncated) — run `server team-names` for the full report",
+            sport_id, style, shown, width, avail
+        );
+    }
+}
+
+/// Team-row name metrics for `sport`'s layout: `(rendered width, available
+/// width)`. The name overflows (and `draw_team_box` clips it) when
+/// `width > avail`. `avail` reserves a minimum two-digit score column, matching
+/// `draw_team_box`. Used by the `server team-names` overflow report so it and
+/// the renderer measure identically.
+pub fn team_name_metrics(sport: &str, display: &str) -> (i32, i32) {
+    let lay = layout_for(sport);
+    let width = text_width(display, lay.big);
+    let name_x = ACCENT_W as i32 + 3;
+    let right_x = SCORE_RIGHT - text_width("00", lay.big);
+    let avail = (right_x - 2) - name_x;
+    (width, avail)
+}
+
+/// Leaderboard-row name metrics (golf / F1), mirroring `render_leaderboard_rows`'
+/// name clip: an optional two-digit rank column on the left, the value
+/// right-aligned at x=63. `(rendered width, available width)`; overflow when
+/// `width > avail`.
+pub fn leaderboard_name_metrics(name: &str, value: &str, has_rank: bool) -> (i32, i32) {
+    let width = text_width(name, false);
+    let value_right = 63;
+    let name_max_right = value_right - text_width(value, false) - 2;
+    let name_x = if has_rank { text_width("20", false) + 3 } else { 1 };
+    (width, name_max_right - name_x)
 }
 
 /// `tz` is the BOARD's timezone for start-time labels (None = server-local).
@@ -358,10 +432,10 @@ fn status_for(g: &Game, tz: Option<chrono_tz::Tz>) -> (String, Rgb888) {
 /// leaderboard rows. `None` = the normal frame. Pregame frames are already
 /// spoiler-free (no result exists yet), so they always render normally.
 /// `tz` localizes start-time labels to the board's zone.
-pub fn render_frame(g: &Game, spoiler: Option<SpoilerMode>, tz: Option<chrono_tz::Tz>) -> (FrameId, Vec<u8>) {
+pub fn render_frame(g: &Game, spoiler: Option<SpoilerMode>, tz: Option<chrono_tz::Tz>, style: NameStyle) -> (FrameId, Vec<u8>) {
     match spoiler {
-        Some(mode) if g.status != GameStatus::Pregame => render_spoiled(g, mode),
-        _ => render_game(g, tz),
+        Some(mode) if g.status != GameStatus::Pregame => render_spoiled(g, mode, style),
+        _ => render_game(g, tz, style),
     }
 }
 
@@ -369,7 +443,7 @@ pub fn render_frame(g: &Game, spoiler: Option<SpoilerMode>, tz: Option<chrono_tz
 /// result goes. Strict shows only when the game started (and FINAL when done);
 /// Normal adds basic progress — period/quarter for team games, the lap count
 /// for F1 — never scores, situations, or leaderboard rows.
-fn render_spoiled(g: &Game, mode: SpoilerMode) -> (FrameId, Vec<u8>) {
+fn render_spoiled(g: &Game, mode: SpoilerMode, style: NameStyle) -> (FrameId, Vec<u8>) {
     let (text, color) = match g.status {
         GameStatus::Final => ("FINAL".to_string(), YELLOW),
         _ => match mode {
@@ -413,8 +487,8 @@ fn render_spoiled(g: &Game, mode: SpoilerMode) -> (FrameId, Vec<u8>) {
     // but the score slots stay empty and no situation layout is drawn.
     let mut c = Canvas::new();
     let lay = layout_for(&g.sport_id);
-    draw_team_box(&mut c, &g.away, 0, &lay, ACCENT_W, "");
-    draw_team_box(&mut c, &g.home, box_h(&lay), &lay, ACCENT_W, "");
+    draw_team_box(&mut c, &g.sport_id, &g.away, style, 0, &lay, ACCENT_W, "");
+    draw_team_box(&mut c, &g.sport_id, &g.home, style, box_h(&lay), &lay, ACCENT_W, "");
     let strip_top = 2 * box_h(&lay);
     let by = centered_baseline(strip_top, FRAME_HEIGHT as i32 - strip_top, lay.status_big);
     draw_text(&mut c, &text, (FRAME_WIDTH as i32 - text_width(&text, lay.status_big)) / 2, by, lay.status_big, color);
@@ -422,7 +496,7 @@ fn render_spoiled(g: &Game, mode: SpoilerMode) -> (FrameId, Vec<u8>) {
     (frame_id(&px), px)
 }
 
-pub fn render_game(g: &Game, tz: Option<chrono_tz::Tz>) -> (FrameId, Vec<u8>) {
+pub fn render_game(g: &Game, tz: Option<chrono_tz::Tz>, style: NameStyle) -> (FrameId, Vec<u8>) {
     if g.leaderboard.is_some() {
         return render_leaderboard(g, tz);
     }
@@ -444,8 +518,8 @@ pub fn render_game(g: &Game, tz: Option<chrono_tz::Tz>) -> (FrameId, Vec<u8>) {
         ),
         _ => (g.away.score.to_string(), g.home.score.to_string()),
     };
-    draw_team_box(&mut c, &g.away, 0, &lay, away_accent, &away_right);
-    draw_team_box(&mut c, &g.home, box_h(&lay), &lay, home_accent, &home_right);
+    draw_team_box(&mut c, &g.sport_id, &g.away, style, 0, &lay, away_accent, &away_right);
+    draw_team_box(&mut c, &g.sport_id, &g.home, style, box_h(&lay), &lay, home_accent, &home_right);
 
     // Live situational layouts reproduce the ORIGINAL per-sport screens; every
     // other state keeps the centered status line.
@@ -602,11 +676,11 @@ pub const LEADERBOARD_MAX_ROWS: usize = 20;
 /// same 6px pitch) for the board to scroll through; returns whether it
 /// scrolls. A cap of 4 is the static panel layout — no scrolling. App cards
 /// and HTTP renders keep the static 4-row `render_game`.
-pub fn render_board_frame(g: &Game, rows_cap: usize, spoiler: Option<SpoilerMode>, tz: Option<chrono_tz::Tz>) -> (FrameId, Vec<u8>, bool) {
+pub fn render_board_frame(g: &Game, rows_cap: usize, spoiler: Option<SpoilerMode>, tz: Option<chrono_tz::Tz>, style: NameStyle) -> (FrameId, Vec<u8>, bool) {
     // Spoiler-protected leaderboards hide their rows entirely — nothing tall
     // to scroll, and the panel-sized spoiled frame is the whole story.
     if spoiler.is_some() && g.status != GameStatus::Pregame {
-        let (id, px) = render_frame(g, spoiler, tz);
+        let (id, px) = render_frame(g, spoiler, tz, style);
         return (id, px, false);
     }
     let rows_cap = rows_cap.clamp(4, LEADERBOARD_MAX_ROWS);
@@ -614,7 +688,7 @@ pub fn render_board_frame(g: &Game, rows_cap: usize, spoiler: Option<SpoilerMode
         && g.status != GameStatus::Pregame
         && g.leaderboard.as_ref().is_some_and(|lb| lb.rows.len() > 4);
     if !deep {
-        let (id, px) = render_game(g, tz);
+        let (id, px) = render_game(g, tz, style);
         return (id, px, false);
     }
     let (id, px) = render_leaderboard_rows(g, rows_cap, tz);
@@ -660,7 +734,12 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
         // block sits one pixel down from the top so the gap is even (1px) top + bottom.
         let mut by = 12;
         for row in lb.rows.iter().take(max_rows.max(5)) {
-            let ink = row.color.unwrap_or(WHITE);
+            // Leaderboard rows draw the team/driver color as ink on the BLACK
+            // panel — a dark team color (deep blue, maroon) would be unreadable,
+            // so force it to white when it doesn't clear black by enough. The
+            // team-row path already runs colors through ensure_contrast; this
+            // brings the F1/golf tower to parity.
+            let ink = row.color.map(|c| ensure_contrast(Rgb888::BLACK, c)).unwrap_or(WHITE);
             // Tire compound: a 1px strip on the far right edge, full row pitch
             // so consecutive rows read as one continuous color column.
             let value_right = if let Some(t) = row.tire {
@@ -681,10 +760,16 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
                 draw_text(&mut c, &row.rank, rx, by, false, ink);
                 col_w + 3
             };
+            // A golfer last-name / driver code that runs into the value gets
+            // clipped — surface it (deduped) like the team-row overflow.
+            if name_x + text_width(&row.name, false) > name_max_right {
+                warn_overflow(&g.sport_id, NameStyle::Name, &row.name, text_width(&row.name, false), name_max_right - name_x);
+            }
             draw_text_clip(&mut c, &row.name, name_x, by, name_max_right, false, ink);
-            // The timing wears the team color too; golf (no row color) keeps
-            // its green accent values.
-            draw_text_right(&mut c, &row.value, value_right, by, false, row.color.unwrap_or(accent));
+            // The timing wears the team color too (contrast-guarded like the
+            // name); golf (no row color) keeps its green accent values.
+            let value_ink = row.color.map(|c| ensure_contrast(Rgb888::BLACK, c)).unwrap_or(accent);
+            draw_text_right(&mut c, &row.value, value_right, by, false, value_ink);
             by += 6;
         }
     }
@@ -786,6 +871,7 @@ mod kern_tests {
         let side = |name: &str| TeamSide {
             abbrev: "X".into(),
             name: name.into(),
+            location: String::new(),
             score: 0,
             primary: crate::model::hex_to_rgb("003087"),
             secondary: crate::model::hex_to_rgb("ffffff"),
@@ -805,7 +891,7 @@ mod kern_tests {
             pregame: None,
             champ: None,
         };
-        let (_, px) = render_game(&g, None);
+        let (_, px) = render_game(&g, None, NameStyle::Name);
         // Scan the bottom strip (clear of the two team boxes) for the status text.
         let (mut left, mut right, mut any) = (FRAME_WIDTH, 0usize, false);
         for y in 24..FRAME_HEIGHT {
@@ -890,6 +976,7 @@ mod kern_tests {
         let side = |abbrev: &str, name: &str, p: &str, s: &str| TeamSide {
             abbrev: abbrev.into(),
             name: name.into(),
+            location: String::new(),
             score: 3,
             primary: hex_to_rgb(p),
             secondary: hex_to_rgb(s),
@@ -921,7 +1008,7 @@ mod kern_tests {
             ball_position: "SEA 25".into(),
             home_possession: Some(false), // away has the ball
         });
-        let (_, px) = render_game(&g, None);
+        let (_, px) = render_game(&g, None, NameStyle::Name);
 
         let away_primary = c565(g.away.primary);
         let away_secondary = c565(g.away.secondary);
@@ -958,7 +1045,7 @@ mod kern_tests {
             on_first: false, on_second: true, on_third: false,
             is_inning_top: true,
         });
-        let (_, px) = render_game(&g, None);
+        let (_, px) = render_game(&g, None, NameStyle::Name);
         let white = c565(WHITE);
 
         // Second base (runner on): filled diamond centered at (34+3, 17+3).
@@ -998,7 +1085,7 @@ mod kern_tests {
             away_powerplay: true, home_powerplay: false,
             away_players: 5, home_players: 4,
         });
-        let (_, px) = render_game(&g, None);
+        let (_, px) = render_game(&g, None, NameStyle::Name);
         let yellow = c565(YELLOW);
         let white = c565(WHITE);
 
@@ -1028,8 +1115,8 @@ mod kern_tests {
             on_first: true, on_second: true, on_third: true,
             is_inning_top: true,
         });
-        let (_, normal) = render_frame(&g, None, None);
-        let (_, spoiled) = render_frame(&g, Some(SpoilerMode::Normal), None);
+        let (_, normal) = render_frame(&g, None, None, NameStyle::Name);
+        let (_, spoiled) = render_frame(&g, Some(SpoilerMode::Normal), None, NameStyle::Name);
         assert_ne!(normal, spoiled);
         // Score digits draw in the team's SECONDARY color, right-aligned around
         // x 56..=61; the row's primary-color background fill is lit either way,
@@ -1044,13 +1131,13 @@ mod kern_tests {
         let strip_lit = (16..32).any(|y| (0..64).any(|x| px565(&spoiled, x, y) != 0));
         assert!(strip_lit, "normal spoiler mode still shows the period");
         // Strict mode differs from normal (start time instead of period).
-        let (_, strict) = render_frame(&g, Some(SpoilerMode::Strict), None);
+        let (_, strict) = render_frame(&g, Some(SpoilerMode::Strict), None, NameStyle::Name);
         assert_ne!(spoiled, strict);
         // Finals show FINAL even when spoiled.
         let mut done = g.clone();
         done.status = GameStatus::Final;
         done.situation = None;
-        let (_, final_px) = render_frame(&done, Some(SpoilerMode::Strict), None);
+        let (_, final_px) = render_frame(&done, Some(SpoilerMode::Strict), None, NameStyle::Name);
         let final_strip_lit = (16..32).any(|y| (0..64).any(|x| px565(&final_px, x, y) != 0));
         assert!(final_strip_lit, "FINAL marker renders");
     }
@@ -1073,11 +1160,11 @@ mod kern_tests {
         let corner_lit = |px: &[u8]| (1..=2).any(|y| (1..=2).any(|x| px565(px, x, y) != 0));
 
         g.leaderboard = lb("MONACO GP");
-        let (_, px) = render_game(&g, None);
+        let (_, px) = render_game(&g, None, NameStyle::Name);
         assert!(corner_lit(&px), "short title keeps its flags");
 
         g.leaderboard = lb("BRITISH GP Q");
-        let (_, px) = render_game(&g, None);
+        let (_, px) = render_game(&g, None, NameStyle::Name);
         assert!(!corner_lit(&px), "long title takes the corners instead");
     }
 
@@ -1100,7 +1187,7 @@ mod kern_tests {
         g.situation = None;
         g.home = TeamSide::empty("");
         g.leaderboard = Some(Leaderboard { name: "GP".into(), rows: vec![row("1"), row("20")] });
-        let (_, px) = render_game(&g, None);
+        let (_, px) = render_game(&g, None, NameStyle::Name);
 
         // Leftmost lit pixel past the rank column, per row band (baselines 12, 18).
         let code_start = |band: core::ops::RangeInclusive<i32>| {
@@ -1132,7 +1219,7 @@ mod kern_tests {
         });
 
         g.leaderboard = rows(10);
-        let (_, px, scrolls) = render_board_frame(&g, LEADERBOARD_DEFAULT_ROWS, None, None);
+        let (_, px, scrolls) = render_board_frame(&g, LEADERBOARD_DEFAULT_ROWS, None, None, NameStyle::Name);
         assert!(scrolls);
         let h = px.len() / (64 * 2);
         assert_eq!(h, 12 + 9 * 6 + 2, "10 rows on the 6px pitch");
@@ -1143,11 +1230,11 @@ mod kern_tests {
             u16::from_le_bytes([px[i], px[i + 1]]) != 0
         }));
         assert!(lit_below_panel, "rows 5..10 render past the panel bound");
-        let (_, px_static) = render_game(&g, None);
+        let (_, px_static) = render_game(&g, None, NameStyle::Name);
         assert_eq!(px_static.len() / (64 * 2), 32, "app frame stays panel-sized");
 
         g.leaderboard = rows(4);
-        let (_, px, scrolls) = render_board_frame(&g, LEADERBOARD_DEFAULT_ROWS, None, None);
+        let (_, px, scrolls) = render_board_frame(&g, LEADERBOARD_DEFAULT_ROWS, None, None, NameStyle::Name);
         assert!(!scrolls, "a shallow field has nothing to scroll");
         assert_eq!(px.len() / (64 * 2), 32);
     }
@@ -1168,7 +1255,7 @@ mod kern_tests {
             home_record: "9-3".into(),
             broadcast: "ESPN".into(),
         });
-        let (_, px) = render_game(&g, None);
+        let (_, px) = render_game(&g, None, NameStyle::Name);
 
         // The record is wider than the 0 it replaces: the away row has
         // secondary-colored ink starting at 61 - width("10-2").
@@ -1176,7 +1263,7 @@ mod kern_tests {
         let away_secondary = c565(g.away.secondary);
         assert!((1..=5).any(|y| (rx..=61).any(|x| px565(&px, x, y) == away_secondary)), "away record drawn");
         // A bare pregame frame (no records) puts only the 4px-wide "0" there.
-        let plain = { let mut p = g.clone(); p.pregame = None; render_game(&p, None).1 };
+        let plain = { let mut p = g.clone(); p.pregame = None; render_game(&p, None, NameStyle::Name).1 };
         assert!((1..=5).all(|y| (rx..rx + 6).all(|x| px565(&plain, x, y) != away_secondary || x >= 61 - 4)),
             "without records the slot holds just the 0");
 
@@ -1212,12 +1299,97 @@ mod kern_tests {
             away_powerplay: false, home_powerplay: false,
             away_players: 5, home_players: 5,
         });
-        let (_, px) = render_game(&g, None);
+        let (_, px) = render_game(&g, None, NameStyle::Name);
         let yellow = c565(YELLOW);
         for y in 20..32 {
             for x in 0..FRAME_WIDTH as i32 {
                 assert_ne!(px565(&px, x, y), yellow, "no badge at ({x},{y})");
             }
         }
+    }
+
+    /// The rendered frame draws the string the NameStyle selects — Location →
+    /// team.location, Name → team.name, Abbrev → team.abbrev — and the per-league
+    /// DEFAULT resolves correctly (cfb/wc → Location, nhl → Name).
+    #[test]
+    fn name_style_picks_the_right_string() {
+        use crate::model::{hex_to_rgb, Game, GameStatus, TeamSide};
+        use scoreboard_protocol::default_name_style;
+        let side = |loc: &str, name: &str, abbrev: &str| TeamSide {
+            abbrev: abbrev.into(),
+            name: name.into(),
+            location: loc.into(),
+            score: 1,
+            primary: hex_to_rgb("003087"),
+            secondary: hex_to_rgb("ffffff"),
+        };
+        let game = |sport: &str| Game {
+            id: "t".into(),
+            sport_id: sport.into(),
+            away: side("MICHIGAN", "WOLVERINES", "MICH"),
+            home: side("OHIO", "BUCKEYES", "OSU"),
+            status: GameStatus::Final,
+            ordinal: String::new(),
+            clock: String::new(),
+            start_time: String::new(),
+            end_time: None,
+            leaderboard: None,
+            session: None,
+            situation: None,
+            pregame: None,
+            champ: None,
+        };
+
+        // The three styles yield three different frames — the chosen string
+        // really changes what's drawn (location/name/abbrev all differ here).
+        let g = game("cfb");
+        let loc = render_game(&g, None, NameStyle::Location).1;
+        let name = render_game(&g, None, NameStyle::Name).1;
+        let abbrev = render_game(&g, None, NameStyle::Abbrev).1;
+        assert_ne!(loc, name, "Location vs Name differ");
+        assert_ne!(name, abbrev, "Name vs Abbrev differ");
+        assert_ne!(loc, abbrev, "Location vs Abbrev differ");
+
+        // cfb defaults to Location.
+        assert_eq!(
+            render_game(&game("cfb"), None, default_name_style("cfb")).1,
+            loc,
+            "cfb default resolves to Location",
+        );
+        // wc defaults to Location too.
+        assert_eq!(
+            render_game(&game("wc"), None, default_name_style("wc")).1,
+            render_game(&game("wc"), None, NameStyle::Location).1,
+            "wc default resolves to Location",
+        );
+        // nhl defaults to Name (the mascot), not Location.
+        let nhl_default = render_game(&game("nhl"), None, default_name_style("nhl")).1;
+        assert_eq!(
+            nhl_default,
+            render_game(&game("nhl"), None, NameStyle::Name).1,
+            "nhl default resolves to Name",
+        );
+        assert_ne!(
+            nhl_default,
+            render_game(&game("nhl"), None, NameStyle::Location).1,
+            "nhl default is not Location",
+        );
+    }
+
+    /// The width check flags names that overflow their row (and `draw_team_box`
+    /// truncates), while short ones fit. `avail` depends only on the layout, not
+    /// the string.
+    #[test]
+    fn overflow_detected_by_width_check() {
+        let (w_long, avail) = team_name_metrics("cfb", "WESTERN KENTUCKY");
+        assert!(w_long > avail, "long location overflows: width {w_long} > avail {avail}");
+        let (w_short, avail2) = team_name_metrics("cfb", "UM");
+        assert!(w_short <= avail2, "short abbrev fits: width {w_short} <= avail {avail2}");
+        assert_eq!(avail, avail2, "avail is layout-only, independent of the string");
+
+        // Leaderboard names measure against the value column; a positive control
+        // (a real driver code) fits comfortably.
+        let (vw, vavail) = leaderboard_name_metrics("VER", "+1.0", true);
+        assert!(vw <= vavail, "an F1 code fits: {vw} <= {vavail}");
     }
 }
