@@ -31,7 +31,7 @@ fn display_for(sport_id: &str, t: &CatalogTeamRaw, style: NameStyle) -> String {
     match style {
         NameStyle::Location => crate::teams::shorten_location(&t.location).to_ascii_uppercase(),
         NameStyle::Name => {
-            crate::teams::short_name(sport_id, &t.abbrev, &t.short_display_name).to_ascii_uppercase()
+            crate::teams::short_name(sport_id, &t.abbrev, &t.mascot).to_ascii_uppercase()
         }
         NameStyle::Abbrev => t.abbrev.to_ascii_uppercase(),
     }

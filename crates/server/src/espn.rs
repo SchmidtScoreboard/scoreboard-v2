@@ -236,7 +236,8 @@ impl SportsDataSource for EspnSource {
 /// the protocol `Team` (which carries no location) so the report can measure
 /// every style without a protocol change.
 pub(crate) struct CatalogTeamRaw {
-    pub short_display_name: String,
+    /// ESPN `name` (mascot) — the `Name` style's source in the report.
+    pub mascot: String,
     pub abbrev: String,
     pub location: String,
 }
@@ -265,8 +266,9 @@ impl EspnSource {
                             if t.abbreviation.is_empty() {
                                 return None;
                             }
+                            let mascot = if t.name.is_empty() { t.short_display_name } else { t.name };
                             Some(CatalogTeamRaw {
-                                short_display_name: t.short_display_name,
+                                mascot,
                                 abbrev: t.abbreviation,
                                 location: t.location,
                             })
@@ -1337,6 +1339,11 @@ struct EspnTeam {
     abbreviation: String,
     #[serde(default, rename = "shortDisplayName")]
     short_display_name: String,
+    /// The team's NICKNAME / mascot ("Fighting Illini", "Bruins", "Buckeyes")
+    /// — ESPN's `name` field, distinct from `shortDisplayName` which is the
+    /// SCHOOL/city for college ("Illinois"). Drives the `Name` style.
+    #[serde(default)]
+    name: String,
     /// City / college / country ("Boston", "Michigan", "France") — the string
     /// the `Location` name style renders. ESPN provides this on every
     /// competitor's team.
@@ -1494,6 +1501,10 @@ struct CatalogTeam {
     display_name: String,
     #[serde(default, rename = "shortDisplayName")]
     short_display_name: String,
+    /// Mascot/nickname ("Fighting Illini", "Bruins") — the `Name` style's
+    /// source. ESPN's `name`, distinct from the school/city `shortDisplayName`.
+    #[serde(default)]
+    name: String,
     /// City / college / country — the `Location` name style's source (and the
     /// `server team-names` overflow report's).
     #[serde(default)]
@@ -1532,7 +1543,11 @@ fn parse_event(sport_id: &str, ev: Event) -> Option<Game> {
             primary,
             hex_to_rgb(if c.team.alternate_color.is_empty() { "FFFFFF" } else { &c.team.alternate_color }),
         );
-        let name = crate::teams::short_name(sport_id, &c.team.abbreviation, &c.team.short_display_name);
+        // The `Name` style is the mascot (ESPN `name`: "Fighting Illini"), not
+        // the school/city (`shortDisplayName`: "Illinois"). Fall back to
+        // shortDisplayName only if the feed omitted the mascot.
+        let mascot = if c.team.name.is_empty() { &c.team.short_display_name } else { &c.team.name };
+        let name = crate::teams::short_name(sport_id, &c.team.abbreviation, mascot);
         let side = TeamSide {
             abbrev: c.team.abbreviation.clone(),
             name,

@@ -2,17 +2,25 @@
 //! `team_map`. For known teams we use the hand-picked short name; for unknown
 //! ones we fall back to ESPN's shortDisplayName with the original >11-char rule.
 
-/// Resolve the on-scoreboard name for a team.
-pub fn short_name(sport_id: &str, abbrev: &str, espn_short: &str) -> String {
+/// Resolve the on-scoreboard team NAME (mascot). `mascot` is ESPN's `name`
+/// field ("Fighting Illini", "Yellow Jackets", "Bruins").
+pub fn short_name(sport_id: &str, abbrev: &str, mascot: &str) -> String {
     if let Some(curated) = curated(sport_id, abbrev) {
         return curated.to_string();
     }
-    let s = shorten(espn_short);
-    if s.chars().count() <= 11 {
-        s
-    } else {
-        abbrev.to_string()
+    let m = ascii_fold(mascot.trim());
+    if m.chars().count() <= 11 {
+        return m;
     }
+    // A two-plus-word mascot's LAST word is the recognizable core — an
+    // adjective ("Fighting"/"Yellow"/"Golden") or place prefix leads it:
+    // "Fighting Illini" -> "Illini", "Yellow Jackets" -> "Jackets".
+    if let Some(last) = m.split_whitespace().last() {
+        if last.chars().count() > 1 && last.chars().count() <= 11 {
+            return last.to_string();
+        }
+    }
+    abbrev.to_string()
 }
 
 fn curated(sport_id: &str, abbrev: &str) -> Option<&'static str> {
@@ -116,29 +124,6 @@ pub fn shorten_location(name: &str) -> String {
             ("CENTRAL", "C"),
         ] {
             if up(first) == dir {
-                *first = init.to_string();
-                break;
-            }
-        }
-    }
-    parts.join(" ")
-}
-
-/// Original shortening rule (team_generator.py): only applied when >11 chars —
-/// trailing "State" -> "St", leading direction word -> its initial.
-fn shorten(name: &str) -> String {
-    if name.chars().count() <= 11 {
-        return name.to_string();
-    }
-    let mut parts: Vec<String> = name.split_whitespace().map(|s| s.to_string()).collect();
-    if let Some(last) = parts.last_mut() {
-        if last == "State" {
-            *last = "St".to_string();
-        }
-    }
-    if let Some(first) = parts.first_mut() {
-        for (dir, init) in [("North", "N"), ("East", "E"), ("South", "S"), ("West", "W"), ("Central", "C")] {
-            if first == dir {
                 *first = init.to_string();
                 break;
             }
