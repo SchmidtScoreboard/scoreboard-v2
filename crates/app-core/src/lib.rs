@@ -166,6 +166,9 @@ pub struct UiGame {
     /// True when this game's board rendering scrolls (deep golf/F1 leaderboard)
     /// — the card menu offers its scroll toggle only for these.
     pub scrolls: bool,
+    /// ESPN game-page URL for the "View on ESPN" menu item; nil when none can
+    /// be formed (demo games, golf/F1 leaderboards).
+    pub espn_url: Option<String>,
 }
 
 /// Implemented on the Swift/Kotlin side to receive pushed state.
@@ -947,6 +950,7 @@ fn to_ui_games(games: Vec<GameSummary>) -> Vec<UiGame> {
             champ: g.champ,
             spoiled: g.spoiled,
             scrolls: g.scrolls,
+            espn_url: g.espn_url,
         })
         .collect()
 }

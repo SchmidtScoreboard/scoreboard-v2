@@ -1640,6 +1640,11 @@ public struct UiGame {
      * — the card menu offers its scroll toggle only for these.
      */
     public var scrolls: Bool
+    /**
+     * ESPN game-page URL for the "View on ESPN" menu item; nil when none can
+     * be formed (demo games, golf/F1 leaderboards).
+     */
+    public var espnUrl: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1671,7 +1676,11 @@ public struct UiGame {
                 /**
                     * True when this game's board rendering scrolls (deep golf/F1 leaderboard)
                     * — the card menu offers its scroll toggle only for these.
-                    */ scrolls: Bool)
+                    */ scrolls: Bool,
+                /**
+                    * ESPN game-page URL for the "View on ESPN" menu item; nil when none can
+                    * be formed (demo games, golf/F1 leaderboards).
+                    */ espnUrl: String?)
     {
         self.id = id
         self.sportId = sportId
@@ -1688,6 +1697,7 @@ public struct UiGame {
         self.champ = champ
         self.spoiled = spoiled
         self.scrolls = scrolls
+        self.espnUrl = espnUrl
     }
 }
 
@@ -1738,6 +1748,9 @@ extension UiGame: Equatable, Hashable {
         if lhs.scrolls != rhs.scrolls {
             return false
         }
+        if lhs.espnUrl != rhs.espnUrl {
+            return false
+        }
         return true
     }
 
@@ -1757,6 +1770,7 @@ extension UiGame: Equatable, Hashable {
         hasher.combine(champ)
         hasher.combine(spoiled)
         hasher.combine(scrolls)
+        hasher.combine(espnUrl)
     }
 }
 
@@ -1781,7 +1795,8 @@ public struct FfiConverterTypeUiGame: FfiConverterRustBuffer {
                 bumped: FfiConverterBool.read(from: &buf),
                 champ: FfiConverterOptionString.read(from: &buf),
                 spoiled: FfiConverterBool.read(from: &buf),
-                scrolls: FfiConverterBool.read(from: &buf)
+                scrolls: FfiConverterBool.read(from: &buf),
+                espnUrl: FfiConverterOptionString.read(from: &buf)
             )
     }
 
@@ -1801,6 +1816,7 @@ public struct FfiConverterTypeUiGame: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.champ, into: &buf)
         FfiConverterBool.write(value.spoiled, into: &buf)
         FfiConverterBool.write(value.scrolls, into: &buf)
+        FfiConverterOptionString.write(value.espnUrl, into: &buf)
     }
 }
 

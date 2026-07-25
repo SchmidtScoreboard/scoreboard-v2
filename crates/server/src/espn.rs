@@ -58,6 +58,31 @@ impl EspnSource {
     }
 }
 
+/// Deep link to ESPN's full human-readable game page for a game (the app's
+/// "View on ESPN" button). `None` unless the id is a bare numeric ESPN event
+/// id (excludes demo games like "demo-nhl" and F1's "{id}-{session}") in a
+/// sport that HAS a game page. Team sports use `/game/`; soccer uses
+/// `/soccer/match/`; leaderboard sports (golf/F1) have no per-game page.
+/// URL formats verified live against espn.com.
+pub fn espn_game_url(sport_id: &str, game_id: &str) -> Option<String> {
+    // ESPN event ids are numeric; anything else (demo ids, F1 session suffixes)
+    // can't form a valid page.
+    if game_id.is_empty() || !game_id.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    // (web path segment, page kind) per sport. Web paths differ from the API
+    // league slugs — soccer collapses usa.1/eng.1/fifa.world to "soccer/match".
+    let (path, kind) = match sport_id {
+        "nhl" | "nba" | "mlb" | "nfl" | "wnba" => (sport_id, "game"),
+        "cfb" => ("college-football", "game"),
+        "cbb" => ("mens-college-basketball", "game"),
+        "wcbb" => ("womens-college-basketball", "game"),
+        "mls" | "epl" | "wc" => ("soccer", "match"),
+        _ => return None, // golf, f1, unknown
+    };
+    Some(format!("https://www.espn.com/{path}/{kind}/_/gameId/{game_id}"))
+}
+
 /// Every raw feed the debug TUI can fetch/inspect: the team-league
 /// scoreboards, the golf tours, F1, and the NHL situation aux feed.
 pub(crate) const FEEDS: &[(&str, &str)] = &[
@@ -1772,6 +1797,44 @@ fn ordinal_for(status: &Status, gs: GameStatus) -> String {
         format!("{o} INT")
     } else {
         o
+    }
+}
+
+#[cfg(test)]
+mod espn_url_tests {
+    use super::espn_game_url;
+
+    #[test]
+    fn builds_game_pages_per_sport_and_skips_the_rest() {
+        // Team sports -> /game/; verified-live formats.
+        assert_eq!(
+            espn_game_url("nhl", "401881922").as_deref(),
+            Some("https://www.espn.com/nhl/game/_/gameId/401881922")
+        );
+        assert_eq!(
+            espn_game_url("cfb", "401856766").as_deref(),
+            Some("https://www.espn.com/college-football/game/_/gameId/401856766")
+        );
+        assert_eq!(
+            espn_game_url("cbb", "123").as_deref(),
+            Some("https://www.espn.com/mens-college-basketball/game/_/gameId/123")
+        );
+        // Soccer -> /soccer/match/, regardless of the league.
+        assert_eq!(
+            espn_game_url("mls", "761685").as_deref(),
+            Some("https://www.espn.com/soccer/match/_/gameId/761685")
+        );
+        assert_eq!(
+            espn_game_url("epl", "761685").as_deref(),
+            Some("https://www.espn.com/soccer/match/_/gameId/761685")
+        );
+        // No per-game page: leaderboard sports, and non-numeric ids (demo
+        // games, F1's "{id}-{session}") can't form a valid link.
+        assert_eq!(espn_game_url("f1", "401881922-race"), None);
+        assert_eq!(espn_game_url("pga", "401580328"), None);
+        assert_eq!(espn_game_url("nhl", "demo-nhl"), None);
+        assert_eq!(espn_game_url("nhl", ""), None);
+        assert_eq!(espn_game_url("unknown", "123"), None);
     }
 }
 

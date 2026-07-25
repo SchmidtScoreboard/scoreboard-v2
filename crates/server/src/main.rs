@@ -947,6 +947,8 @@ pub(crate) fn to_summary(g: &Game, tz: Option<chrono_tz::Tz>) -> GameSummary {
             champ: g.champ.as_ref().map(|c| c.label.clone()),
             spoiled: false,
             scrolls: false,
+            // Leaderboard sports (golf/F1) have no per-game ESPN page.
+            espn_url: None,
         };
     }
     let detail = pregame_detail().unwrap_or_else(|| {
@@ -972,6 +974,7 @@ pub(crate) fn to_summary(g: &Game, tz: Option<chrono_tz::Tz>) -> GameSummary {
         champ: g.champ.as_ref().map(|c| c.label.clone()),
         spoiled: false,
         scrolls: false,
+        espn_url: crate::espn::espn_game_url(&g.sport_id, &g.id),
     }
 }
 

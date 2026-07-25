@@ -2731,6 +2731,13 @@ struct CardMenu: View {
             } label: {
                 Label("Info", systemImage: "info.circle")
             }
+            // The full human-readable game on ESPN — only when the server could
+            // form a page URL (real numeric event id; not demo/golf/F1).
+            if let espn = game.espnUrl, let url = URL(string: espn) {
+                Link(destination: url) {
+                    Label("View on ESPN", systemImage: "safari")
+                }
+            }
             // Schedule footnote: start/end in the PHONE's zone (the board keeps
             // its own local clock), greyed and inert — information, not actions.
             // Omitted entirely when the feed gave no usable timestamps.

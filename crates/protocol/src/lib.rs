@@ -125,6 +125,12 @@ pub struct GameSummary {
     /// the app offers its per-game scroll toggle only for these.
     #[serde(default)]
     pub scrolls: bool,
+    /// Deep link to ESPN's full human-readable game page ("View on ESPN"),
+    /// when one can be formed — a numeric ESPN event id in a sport with a game
+    /// page. None for demo games, leaderboard sports (golf/F1), and anything
+    /// without a resolvable page. Spoiler-safe: it's just a URL, no result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub espn_url: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
