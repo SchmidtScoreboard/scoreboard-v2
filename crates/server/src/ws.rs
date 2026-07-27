@@ -114,7 +114,9 @@ async fn device_loop(sender: WsSender, mut receiver: WsReceiver, state: AppState
                 }
                 Ok(ClientMsg::EnterSetup { code }) => {
                     tracing::info!("device '{board_id}' entered setup (code {code})");
-                    state.pending.lock().unwrap().insert(code, board_id.clone());
+                    // Registering supersedes this board's previous code and
+                    // expires stale ones — only what's on the panel pairs.
+                    state.register_pairing_code(code, &board_id);
                 }
                 Ok(ClientMsg::ButtonPress) => {
                     crate::handle_button(&state, &board_id);
@@ -192,8 +194,9 @@ async fn controller_loop(
             match serde_json::from_str::<ClientMsg>(&t) {
                 Ok(ClientMsg::Pair { code }) => {
                     // Throttle pairing-code guesses — wrong guesses are otherwise free,
-                    // so the 6-digit code would be brute-forceable.
-                    if !state.pair_limiter.lock().unwrap().allow() {
+                    // so the 6-digit code would be brute-forceable. Budgeted per
+                    // controller identity: one guesser must not lock out real phones.
+                    if !state.allow_pair_attempt(&pubkey) {
                         let _ = out.send(Message::Text(
                             serde_json::to_string(&ServerMsg::PairFailed {
                                 reason: "too many attempts; wait a moment".into(),
@@ -217,6 +220,30 @@ async fn controller_loop(
                         Err(reason) => ServerMsg::PairFailed { reason },
                     };
                     let _ = out.send(Message::Text(serde_json::to_string(&reply).unwrap()));
+                }
+                Ok(ClientMsg::Unpair { board_id }) => {
+                    // A controller may only revoke ITS OWN grant: `pubkey` comes
+                    // from the signed auth handshake, never from the message, so
+                    // no app can unpair someone else's phone. Unpairing a board
+                    // you aren't paired with is a silent no-op.
+                    if state.unpair(&board_id, &pubkey) {
+                        tracing::info!("controller '{pubkey}' unpaired from '{board_id}'");
+                    } else {
+                        tracing::warn!("controller '{pubkey}' asked to unpair '{board_id}': no such pairing");
+                    }
+                    // Drop the subscription in the same breath — a revoked grant
+                    // that kept receiving board state would resurrect the board
+                    // the user just removed.
+                    {
+                        let mut controllers = state.controllers.lock().unwrap();
+                        if let Some(subs) = controllers.get_mut(&board_id) {
+                            subs.retain(|s| !s.same_channel(&out));
+                            if subs.is_empty() {
+                                controllers.remove(&board_id);
+                            }
+                        }
+                    }
+                    subscribed.retain(|b| b != &board_id);
                 }
                 Ok(ClientMsg::Subscribe { board_ids }) => {
                     // Subscribe REPLACES this connection's set: purge our sender
@@ -268,7 +295,7 @@ async fn controller_loop(
                     let games: Vec<GameSummary> = {
                         let g = state.games.lock().unwrap();
                         g.iter()
-                            .filter(|g| crate::browse_shows(g))
+                            .filter(|g| crate::browse_shows_now(&state, g))
                             .map(|g| {
                                 let spoiler = crate::spoiler_for(&cfg, g);
                                 let mut s = crate::to_summary_for(g, spoiler, tz);
@@ -851,6 +878,42 @@ mod tests {
         }).await;
         let ack2 = recv_until(&mut other, |m| matches!(m, ServerMsg::CommandAck { .. })).await;
         assert!(matches!(ack2, Some(ServerMsg::CommandAck { ok: false, .. })));
+    }
+
+    /// "Remove this scoreboard" over the wire: the grant a controller hands
+    /// back is really gone — its next command is refused, and it takes a fresh
+    /// code to get back in. Grants used to be permanent (nothing ever removed
+    /// one), so removal was app-UI only.
+    #[tokio::test]
+    async fn unpair_revokes_the_grant_over_the_wire() {
+        let (url, state) = spawn_server().await;
+        let (mut dev, board_id) = auth(&url, Role::Device, &[1u8; 32]).await;
+        send(&mut dev, &ClientMsg::EnterSetup { code: "424242".into() }).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let (mut ctrl, ctrl_key) = auth(&url, Role::Controller, &[2u8; 32]).await;
+        send(&mut ctrl, &ClientMsg::Pair { code: "424242".into() }).await;
+        let _ = recv_until(&mut ctrl, |m| matches!(m, ServerMsg::Paired { .. })).await;
+        assert!(state.is_allowed(&board_id, &ctrl_key));
+
+        // Unpairing a board this controller was never paired with changes
+        // nothing (no error, no collateral revocation).
+        send(&mut ctrl, &ClientMsg::Unpair { board_id: "some-other-board".into() }).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(state.is_allowed(&board_id, &ctrl_key), "no-op unpair left the real grant alone");
+
+        send(&mut ctrl, &ClientMsg::Unpair { board_id: board_id.clone() }).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!state.is_allowed(&board_id, &ctrl_key), "grant revoked");
+
+        // The very next command from that controller is refused.
+        send(&mut ctrl, &ClientMsg::Command {
+            req_id: 7,
+            board_id: board_id.clone(),
+            cmd: Command::SetBrightness { level: 50 },
+        }).await;
+        let ack = recv_until(&mut ctrl, |m| matches!(m, ServerMsg::CommandAck { .. })).await;
+        assert!(matches!(ack, Some(ServerMsg::CommandAck { ok: false, .. })));
     }
 
     /// Export from one board, import onto a second: the durable preferences

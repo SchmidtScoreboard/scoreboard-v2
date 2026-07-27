@@ -13,6 +13,7 @@ release binary directly — flags are identical).
 | `server --demo` | Same server, synthetic slate — 21 generated games exercising every feature (situations, leaderboards, spoilers, scrolling). Never contacts ESPN. The Railway `dummy` service is exactly this (it sets `DEMO=1`). |
 | `server tui` | Interactive pipeline debugger — see below. |
 | `server tui --feed <id> --dump` | Headless one-shot capture of a feed — see below. |
+| `server team-names` | Headless name-fitting report: every team, in every name style its league offers, measured in the board's own fonts against the team row, plus an OVERFLOW section for anything that still doesn't fit after shortening. Fetches live catalogs (golf/F1 names come from the leaderboard feeds), prints, exits. The "notify me for correction" tool — run it after touching shortening rules. |
 | `server --preview` | Renders a fixed set of sample games to 8×-scaled PNGs in `/tmp/sb_preview` and exits. Quick eyeball of layout changes without any network. |
 | `server --fetch-catalog` | Fetches the full team catalog from ESPN and caches it to disk, then exits. Run this once so `--demo` has real team names/colors to draw from. |
 
@@ -24,6 +25,7 @@ release binary directly — flags are identical).
 | `DEMO` | unset | Any value = demo mode (same as `--demo`). |
 | `POLL_SECS` | `180` | ESPN poll interval. Polling skips entirely while nothing is connected. |
 | `STATE_DIR` | `.` | Where `scoreboard.db` (pairings, board configs) and the catalog cache live. |
+| `FIRMWARE_DIR` | `./firmware-dist` | Where the OTA release channels live (`{stable,beta,dev}/firmware.{bin,json}`). Loaded once at startup and integrity-checked: a missing channel is quietly off, a *broken* one refuses to start (a board must never download an image that won't verify). The Dockerfile ships `firmware-dist/` inside the server image and points here at `/firmware-dist`. |
 
 ## Debug-friendly HTTP routes
 
@@ -37,6 +39,14 @@ All curl-able; the app uses the same ones.
   Omitting `board` serves the raw data. Unknown id → plain-text 404.
 - `GET /sample/{off|normal|strict}.png` — the fixed sample game rendered at
   each spoiler level (drives the app's spoiler-settings preview rows).
+- `GET /firmware/{stable|beta|dev}/latest` — that channel's signed
+  `firmware.json` (version, size, sha256, sig). Plain-text 404 for an unknown
+  channel or one with no dist hosted.
+- `GET /firmware/{stable|beta|dev}.bin` — the image itself. `?u={token}` is the
+  one-time nonce a board's update offer carries: with it the server streams the
+  bytes and reports `FirmwareProgress` to that board's apps; without it (curl,
+  tests) it just serves the file. Either way the bytes are identical and the
+  board verifies the signature before installing.
 
 ## `server tui` — the pipeline debugger
 
@@ -119,7 +129,50 @@ power-play display) and `demo` (the generated demo slate — no network).
 | `scripts/server.sh` | Local server against real ESPN. |
 | `scripts/simulator.sh` | The desktop board simulator. |
 | `scripts/flash.sh [port]` | Build + flash `firmware-rs` over USB (sources `export-esp.sh`; **tap RESET after** — this board parks in the bootloader post-flash). |
+| `scripts/release-firmware.sh [stable\|beta\|dev]` | Build + sign an OTA release into `firmware-dist/<channel>/` — see below. |
 | `scripts/logs.sh` | Tail the local server log. |
+
+A dev firmware build's fallback server address comes from
+`firmware-rs/src/config.rs`, which is tracked and secret-free (a fresh clone
+builds as-is). Point it at your own machine without editing it — and without
+risking a commit — with `SCOREBOARD_DEV_HOST=192.168.x.y`, or keep your values
+in the gitignored `firmware-rs/local.env` and `set -a; source
+firmware-rs/local.env; set +a` first. Provisioned boards get their server over
+BLE anyway; this is only the fallback. Prod builds (`--features prod`, what
+releases ship) always use the prod host.
+
+## Release channels (OTA)
+
+Three channels — `stable`, `beta`, `dev` — each a directory under
+`FIRMWARE_DIR` holding one `firmware.bin` + signed `firmware.json`. A board is
+enrolled in one (`SetFwChannel` from the app) and may be offered dists from its
+channel **and every channel below it**: stable boards see stable only, beta
+sees stable+beta, dev sees all three. Within that set the newest CalVer wins,
+and only if it's strictly newer than what the board reports running.
+
+```
+scripts/release-firmware.sh            # stable (the default)
+scripts/release-firmware.sh beta
+FEATURES="" scripts/release-firmware.sh dev    # dev-server build, dev channel
+```
+
+The script reads the version from `firmware-rs/Cargo.toml` (`[package].version`,
+CalVer `YYYY.M.P`), regenerates `firmware-rs/src/fw_pubkey.rs` from the signing
+key at `~/.config/scoreboard/firmware-signing.key`, builds with `--features
+prod` (override with `FEATURES=`), converts the ELF to an app image sized
+against the 3MB `ota_0` slot, signs it, and appends to
+`firmware-dist/RELEASES.log`.
+
+That ledger is append-only and the reason releases are safe: a release
+*overwrites* its channel's `firmware.json`, so checking only the current dists
+would let a superseded version be republished as different bytes — which no
+board could ever disambiguate. Every version ever published is remembered, and
+versions live in ONE space across all channels. A repeat is refused; bump the
+patch instead.
+
+Commit `firmware-dist/` afterwards (and `fw_pubkey.rs` if the key changed) —
+the Dockerfile ships it inside the server image — then deploy. Boards see the
+update on their next `BoardState`.
 
 ## Recipes
 

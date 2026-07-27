@@ -67,13 +67,13 @@ final class ListenerAdapter: ClientListener {
         Task { @MainActor in self.model?.applyBoardState(boardId, nowShowing, online) }
     }
     func onCatalog(sports: [UiSport]) {
-        Task { @MainActor in self.model?.sports = sports }
+        Task { @MainActor in self.model?.applyCatalog(self.serverUrl, sports) }
     }
     func onConfig(boardId: String, config: UiBoardConfig) {
         Task { @MainActor in self.model?.applyConfig(boardId, config) }
     }
     func onGames(games: [UiGame]) {
-        Task { @MainActor in self.model?.liveGames = games }
+        Task { @MainActor in self.model?.applyGames(self.serverUrl, games) }
     }
     func onFrame(frameId: String, rgba: Data) {
         let img = cgImageFromRGBA(rgba, width: 64, height: 32)
@@ -170,16 +170,27 @@ final class BoardViewModel: ObservableObject {
     /// Rendered frames pushed over the WS, keyed by content-addressed frame id
     /// (shared across boards).
     @Published var frames: [String: CGImage] = [:]
-    /// All live games (Browse) — global, not per board.
-    @Published var liveGames: [UiGame] = []
-    /// Team catalog — global.
-    @Published var sports: [UiSport] = []
+    /// All live games (Browse) and the team catalog, PER SERVER. Both used to be
+    /// single global slots written by whichever adapter answered last, so with
+    /// two boards on different servers the owner was a coin flip per launch —
+    /// when the demo server won, every real league card silently vanished.
+    @Published private var liveGamesByServer: [String: [UiGame]] = [:]
+    @Published private var sportsByServer: [String: [UiSport]] = [:]
+    /// The selected board's server owns what the UI reads.
+    var liveGames: [UiGame] { liveGamesByServer[serverURL(of: selectedBoardId)] ?? [] }
+    var sports: [UiSport] { sportsByServer[serverURL(of: selectedBoardId)] ?? [] }
+    func applyCatalog(_ server: String, _ list: [UiSport]) { sportsByServer[server] = list }
+    func applyGames(_ server: String, _ games: [UiGame]) { liveGamesByServer[server] = games }
     /// The firmware menu the server hosts (reply to `listFirmware`) — global to
     /// the server, refreshed on demand by the DEBUG firmware picker.
     @Published var firmwareImages: [UiFwImage] = []
 
     @Published var isPairing = false
     @Published var pairError: String?
+    /// Bumped on every successful pairing, so a sheet that reuses the pairing
+    /// flow can dismiss itself. A board-count delta misses the common case of
+    /// re-pairing a board the app already knows — the sheet just sat there.
+    @Published private(set) var pairedTick = 0
 
     @Published var serverUrl = UserDefaults.standard.string(forKey: "serverUrl") ?? "ws://127.0.0.1:7878/ws"
 
@@ -188,7 +199,7 @@ final class BoardViewModel: ObservableObject {
     init() {
         boardIds = Self.loadBoardIds()
         selectedBoardId = boardIds.first
-        for id in boardIds { boards[id] = BoardInfo() }
+        for id in boardIds { boards[id] = BoardInfo(name: boardNames[id]) }
     }
 
     var paired: Bool { !boardIds.isEmpty }
@@ -230,6 +241,18 @@ final class BoardViewModel: ObservableObject {
         return boardServers[boardId] ?? serverUrl
     }
 
+    /// boardId -> user-visible name. The name is authoritative server-side, but
+    /// it arrives with the config push: without a local copy the switcher opens
+    /// on a list of identical "Scoreboard" rows every launch.
+    private var boardNames: [String: String] = {
+        (UserDefaults.standard.dictionary(forKey: "boardNames") as? [String: String]) ?? [:]
+    }()
+    private func saveBoardNames() { UserDefaults.standard.set(boardNames, forKey: "boardNames") }
+    private func rememberName(_ id: String, _ name: String?) {
+        if let name, !name.isEmpty { boardNames[id] = name } else { boardNames.removeValue(forKey: id) }
+        saveBoardNames()
+    }
+
     /// One client per distinct server; the active one follows the selection.
     private var clients: [String: (client: ScoreboardClient, adapter: ListenerAdapter)] = [:]
     private var client: ScoreboardClient? { clients[serverURL(of: selectedBoardId)]?.client }
@@ -237,6 +260,19 @@ final class BoardViewModel: ObservableObject {
     /// selected board's in a multi-server model).
     private func clientFor(_ boardId: String) -> ScoreboardClient? {
         clients[serverURL(of: boardId)]?.client
+    }
+    /// Drop every client no board needs any more. `clients` used to be
+    /// append-only, so an abandoned pairing against a typo'd URL — or removing
+    /// the last board on a server — leaked a socket and a tokio runtime for the
+    /// rest of the session. The default server always stays: pairing and the
+    /// no-boards splash live there.
+    private func pruneClients() {
+        var needed = Set(boardIds.map { serverURL(of: $0) })
+        needed.insert(serverUrl)
+        if let pending = pendingPairServer { needed.insert(pending) }
+        clients = clients.filter { needed.contains($0.key) }
+        sportsByServer = sportsByServer.filter { needed.contains($0.key) }
+        liveGamesByServer = liveGamesByServer.filter { needed.contains($0.key) }
     }
     /// Where an in-flight pairing will file the new board.
     private var pendingPairServer: String?
@@ -318,19 +354,60 @@ final class BoardViewModel: ObservableObject {
     func setServer(_ url: String) {
         let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed != serverUrl else { return }
+        // Whatever the old server was mid-way through is void now — an orphaned
+        // spinner would keep the Pair button disabled against the NEW server.
+        cancelPairing()
         serverUrl = trimmed
         UserDefaults.standard.set(trimmed, forKey: "serverUrl")
         // app-core has no disconnect API; dropping a client stops its task.
         clients = [:]
         connectedServers = []
         boards = [:]
-        for id in boardIds { boards[id] = BoardInfo() }
-        sports = []
-        liveGames = []
+        for id in boardIds { boards[id] = BoardInfo(name: boardNames[id]) }
+        sportsByServer = [:]
+        liveGamesByServer = [:]
+        frames = [:]
         start()
     }
 
+    /// Repoint ONE board at a different server. Without this a board pinned to a
+    /// dead URL had no repair path at all: its server being down replaces the
+    /// whole dashboard with the connecting splash, so every in-dashboard control
+    /// is out of reach.
+    func setBoardServer(_ boardId: String, _ url: String) {
+        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != serverURL(of: boardId) else { return }
+        if trimmed == serverUrl {
+            boardServers.removeValue(forKey: boardId)
+        } else {
+            boardServers[boardId] = trimmed
+        }
+        saveBoardServers()
+        // app-core takes a client's subscription set at construction, so the
+        // destination client has to be rebuilt to learn about this board.
+        clients.removeValue(forKey: trimmed)
+        pruneClients()
+        boards[boardId] = BoardInfo(name: boardNames[boardId])
+        ensureClient(trimmed)
+    }
+
     // ---- pairing ----
+    /// An unreachable server never answers a pair request — the message just
+    /// waits in the client's outbox. Without a deadline the very first tap on a
+    /// fresh install (whose default is `ws://127.0.0.1…`, which no real phone
+    /// can reach) disabled Pair for the whole session with nothing on screen.
+    private var pairTimeout: DispatchWorkItem?
+    private static let pairTimeoutSecs = 15.0
+
+    /// Warm the client for a server the user is about to pair against, so the
+    /// status dot means something before the first tap. An abandoned one is
+    /// dropped by `pruneClients`.
+    func prepareServer(_ url: String) {
+        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, clients[trimmed] == nil else { return }
+        ensureClient(trimmed)
+    }
+
     /// Pair against a specific server (defaults to the default server); the new
     /// board is remembered as living there.
     func pair(_ code: String, server: String? = nil) {
@@ -339,40 +416,90 @@ final class BoardViewModel: ObservableObject {
         let url = (server?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 } ?? serverUrl
         pendingPairServer = url
         ensureClient(url).pair(code: code)
+        armPairTimeout(url)
+    }
+
+    private func armPairTimeout(_ url: String) {
+        pairTimeout?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.isPairing else { return }
+            self.pairTimeout = nil
+            self.isPairing = false
+            self.pendingPairServer = nil
+            // Distinguish the two silences: a socket that never came up is a
+            // wrong address, a live socket that stayed quiet is a bad code.
+            self.pairError = self.connectedServers.contains(url)
+                ? "The scoreboard didn't answer. Check the code and try again."
+                : "Couldn't reach that server. Check the address and that the scoreboard is online."
+            self.pruneClients()
+        }
+        pairTimeout = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.pairTimeoutSecs, execute: work)
+    }
+
+    /// The pairing sheet went away, or the server changed — drop the in-flight
+    /// state so a stale spinner or error doesn't greet the next attempt.
+    func cancelPairing() {
+        pairTimeout?.cancel()
+        pairTimeout = nil
+        isPairing = false
+        pairError = nil
+        pendingPairServer = nil
+        pruneClients()
     }
 
     func handlePaired(_ boardId: String, server: String) {
+        pairTimeout?.cancel()
+        pairTimeout = nil
         // File the board under the server that paired it (adapter-tagged, with
         // the pending choice as fallback for exotic race timings).
         let url = pendingPairServer ?? server
         pendingPairServer = nil
-        if url != serverUrl { boardServers[boardId] = url; saveBoardServers() }
+        // RECONCILE, don't just set: writing only when the URL differs left a
+        // stale pin in place forever, so re-pairing a board that had moved back
+        // to the default server silently kept aiming it at the dead one — and
+        // re-pairing is the obvious repair.
+        if url != serverUrl {
+            boardServers[boardId] = url
+        } else {
+            boardServers.removeValue(forKey: boardId)
+        }
+        saveBoardServers()
         if !boardIds.contains(boardId) { boardIds.append(boardId) }
-        if boards[boardId] == nil { boards[boardId] = BoardInfo() }
+        if boards[boardId] == nil { boards[boardId] = BoardInfo(name: boardNames[boardId]) }
         selectedBoardId = boardId   // jump to the newly added board
         saveBoardIds()
         isPairing = false
         pairError = nil
+        pairedTick += 1
         client?.requestCatalog()
     }
 
     func handlePairFailed(_ reason: String) {
+        pairTimeout?.cancel()
+        pairTimeout = nil
         isPairing = false
+        pendingPairServer = nil
         pairError = reason
     }
 
     /// Forget one board, but KEEP the Keychain identity — the same pubkey lets us
     /// re-pair, and a re-paired board still trusts us.
     func unpair(_ boardId: String) {
-        // Drop the subscription FIRST (on the board's own server) — otherwise
-        // that server keeps pushing state and the push would resurrect it.
-        clients[serverURL(of: boardId)]?.client.removeBoard(boardId: boardId)
+        // Revoke on the server, not just locally: a UI-only removal left the
+        // grant standing AND the subscription live, so the next push resurrected
+        // the board. `unpairBoard` revokes then resubscribes without it.
+        clients[serverURL(of: boardId)]?.client.unpairBoard(boardId: boardId)
         boardIds.removeAll { $0 == boardId }
         boards[boardId] = nil
         boardServers.removeValue(forKey: boardId)
+        boardNames.removeValue(forKey: boardId)
         saveBoardServers()
+        saveBoardNames()
         saveBoardIds()
         if selectedBoardId == boardId { selectedBoardId = boardIds.first }
+        // That may have been the last board on its server.
+        pruneClients()
     }
 
     func selectBoard(_ id: String) {
@@ -388,6 +515,7 @@ final class BoardViewModel: ObservableObject {
         guard let id = selectedBoardId else { return }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         mutate(id) { $0.name = trimmed.isEmpty ? nil : trimmed }
+        rememberName(id, trimmed)
         client?.rename(boardId: id, name: trimmed)
     }
 
@@ -749,6 +877,23 @@ final class BoardViewModel: ObservableObject {
                 }
             }
         }
+        pruneFrames()
+    }
+
+    /// Frame ids are content-addressed, so every score change mints a NEW one
+    /// and the old CGImage is dead weight — the cache only ever grew, for the
+    /// whole session. Pruning waits for a threshold so a frame that lands just
+    /// BEFORE the board state referencing it isn't evicted in that gap.
+    private func pruneFrames() {
+        guard frames.count > 256 else { return }
+        var live = Set<String>()
+        for st in boards.values {
+            for g in st.nowShowing { live.insert(g.frameId) }
+        }
+        for games in liveGamesByServer.values {
+            for g in games { live.insert(g.frameId) }
+        }
+        frames = frames.filter { live.contains($0.key) }
     }
 
     /// Firmware versions ride along with every board state push.
@@ -866,6 +1011,7 @@ final class BoardViewModel: ObservableObject {
             $0.wakeAt = c.wakeAt
             $0.fwChannel = c.fwChannel
         }
+        rememberName(boardId, c.name)
         // The board's timezone is NOT set from the phone: the board discovers
         // its own zone (IP geolocation at boot) and reports it — a phone that
         // travels must never re-zone the living-room clock.
@@ -1048,6 +1194,13 @@ struct SetupView: View {
     @State private var pairServer = ""
     @State private var serverPreset: ServerPreset = .custom
 
+    /// Reachability of the server THIS pairing will use. `model.connected`
+    /// tracks the selected board's server, which is a different machine when
+    /// adding a second board — the dot used to report the wrong one.
+    private var serverReachable: Bool {
+        model.connectedServers.contains(pairServer.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
     var body: some View {
         VStack(spacing: 20) {
             Spacer()
@@ -1070,7 +1223,10 @@ struct SetupView: View {
                 }
                 .pickerStyle(.menu)
                 .onChange(of: serverPreset) { _, p in
-                    if let url = p.url { pairServer = url }
+                    if let url = p.url {
+                        pairServer = url
+                        model.prepareServer(url)
+                    }
                 }
             }
             if serverPreset == .custom {
@@ -1137,8 +1293,8 @@ struct SetupView: View {
             .padding(.horizontal, 40)
 
             HStack {
-                Circle().fill(model.connected ? .green : .red).frame(width: 8, height: 8)
-                Text(model.connected ? "Connected to server" : "Connecting…")
+                Circle().fill(serverReachable ? .green : .red).frame(width: 8, height: 8)
+                Text(serverReachable ? "Connected to server" : "Connecting…")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Button {
@@ -1158,6 +1314,7 @@ struct SetupView: View {
                 pairServer = model.serverUrl
                 serverPreset = ServerPreset.matching(model.serverUrl)
             }
+            model.prepareServer(pairServer)
         }
         .sheet(isPresented: $showServerSettings) {
             SettingsView(model: model)
@@ -1399,6 +1556,11 @@ struct DashboardView: View {
     @State private var editingSport: UiSport?
     /// The Add League sheet (all leagues grouped by sport).
     @State private var showLeaguePicker = false
+    /// Board whose server pin is being edited (nil = sheet closed).
+    @State private var boardServerEdit: BoardServerEdit?
+    /// The card menu's Info/Share presentations, hoisted OUT of the cards —
+    /// see `CardSheets`.
+    @StateObject private var cardSheets = CardSheets()
 
     /// One clear status for the selected board (replaces the old "Connected /
     /// board offline" pair): server-down vs board-offline vs online.
@@ -1413,7 +1575,16 @@ struct DashboardView: View {
                 if model.connected {
                     dashboardForm
                 } else {
-                    ConnectingSplash(serverUrl: model.serverUrl) { showSettings = true }
+                    // Name (and offer to fix) the server the gate actually
+                    // tested — the SELECTED board's, which for a pinned board
+                    // is not the default one.
+                    ConnectingSplash(serverUrl: model.serverURL(of: model.selectedBoardId)) {
+                        if let id = model.selectedBoardId {
+                            boardServerEdit = BoardServerEdit(id: id)
+                        } else {
+                            showSettings = true
+                        }
+                    }
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
@@ -1433,6 +1604,9 @@ struct DashboardView: View {
             .sheet(isPresented: $showSettings) { SettingsView(model: model) }
             .sheet(isPresented: $showAddBoard) { AddBoardSheet(model: model) }
             .sheet(isPresented: $showLeaguePicker) { LeaguePickerSheet(model: model) }
+            .sheet(item: $boardServerEdit) { edit in
+                SettingsView(model: model, boardId: edit.id)
+            }
             .alert("Name this scoreboard", isPresented: $showRename) {
                 TextField("Name", text: $renameText)
                 Button("Save") { model.rename(renameText) }
@@ -1440,6 +1614,18 @@ struct DashboardView: View {
             } message: {
                 Text("Shown in your scoreboard list. Saved to the server.")
             }
+            // Anchored to the Group, not to the row in `removeSection`: that row
+            // lives inside `dashboardForm`, which disconnection replaces with
+            // the splash — so a board pinned to a dead server could never be
+            // removed. Both branches reach this via `boardMenu` in the toolbar.
+            .confirmationDialog("Remove this scoreboard?", isPresented: $showRemoveConfirm, titleVisibility: .visible) {
+                Button("Remove", role: .destructive) {
+                    if let id = model.selectedBoardId { model.unpair(id) }
+                }
+            } message: {
+                Text("This phone stops controlling it and the pairing is revoked on the server — add it again anytime with a new code.")
+            }
+            .cardSheets(cardSheets)
         }
     }
 
@@ -1564,6 +1750,19 @@ struct DashboardView: View {
                 showRename = true
             } label: { Label("Rename", systemImage: "pencil") }
             Button { showAddBoard = true } label: { Label("Add a scoreboard", systemImage: "plus") }
+            // These two live in the TOOLBAR, which renders in both the dashboard
+            // and the connecting-splash branch. A board pinned to a dead URL
+            // shows only the splash, so this is its only repair — and its only
+            // way out.
+            if let id = model.selectedBoardId {
+                Divider()
+                Button {
+                    boardServerEdit = BoardServerEdit(id: id)
+                } label: { Label("Change this board's server", systemImage: "network") }
+                Button(role: .destructive) {
+                    showRemoveConfirm = true
+                } label: { Label("Remove this scoreboard", systemImage: "trash") }
+            }
         } label: {
             HStack(spacing: 6) {
                 Circle().fill(statusColor).frame(width: 8, height: 8)
@@ -1672,7 +1871,7 @@ struct DashboardView: View {
                                         withAnimation { model.removeFromRotation(game) }
                                     }
                                 }
-                                CardMenu(model: model, game: game)
+                                CardMenu(model: model, game: game, sheets: cardSheets)
                             }
                         }
                         // While something else is pinned, cards go monochrome —
@@ -1975,17 +2174,13 @@ struct DashboardView: View {
     }
     #endif
 
+    /// The in-dashboard shortcut to removal. The confirm itself is anchored on
+    /// the Group so the board menu's copy of this action works from the splash
+    /// too — see the dialog in `body`.
     private var removeSection: some View {
         Section {
             Button("Remove this scoreboard", role: .destructive) {
                 showRemoveConfirm = true
-            }
-            .confirmationDialog("Remove this scoreboard?", isPresented: $showRemoveConfirm, titleVisibility: .visible) {
-                Button("Remove", role: .destructive) {
-                    if let id = model.selectedBoardId { model.unpair(id) }
-                }
-            } message: {
-                Text("It stays paired on the server — add it again anytime with a new code.")
             }
         }
     }
@@ -2451,6 +2646,9 @@ struct AllGamesView: View {
     @State private var refresh = 0
     /// Live filter typed into the bottom search bar; empty = show everything.
     @State private var searchText = ""
+    /// The card menu's Info/Share presentations, hoisted OUT of the cards —
+    /// see `CardSheets`.
+    @StateObject private var cardSheets = CardSheets()
 
     /// League sections that survive the search: each keeps only its matching
     /// games, and sections left with none drop out entirely. Team lookups go
@@ -2511,7 +2709,11 @@ struct AllGamesView: View {
                         VStack(alignment: .leading, spacing: 6) {
                             leagueHeader(league)
                             ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(alignment: .top, spacing: 12) {
+                                // LAZY: a plain HStack built every card in the
+                                // row up front, and each card fires its own
+                                // /render fetch — a busy CBB day meant 100+
+                                // requests to put two cards on screen.
+                                LazyHStack(alignment: .top, spacing: 12) {
                                     ForEach(games, id: \.id) { game in
                                         allGamesCard(game)
                                     }
@@ -2553,6 +2755,7 @@ struct AllGamesView: View {
         // and a CONSTANT value let URLCache pin a stale/failed response (e.g.
         // a 404 cached from before a server restart knew a demo game) forever.
         .onAppear { refresh = Int(Date().timeIntervalSince1970); model.requestGames() }
+        .cardSheets(cardSheets)
     }
 
     /// Section header: league name plus a trailing shortcut into that league's
@@ -2640,7 +2843,7 @@ struct AllGamesView: View {
                         model.addGame(game.id)
                     }
                 }
-                CardMenu(model: model, game: game, canPin: showing)
+                CardMenu(model: model, game: game, sheets: cardSheets, canPin: showing)
             }
         }
         .saturation(dimmed ? 0 : 1)
@@ -2672,21 +2875,76 @@ struct SpoilerChip: View {
     }
 }
 
+/// Where the card menu's Info and Share presentations live: on the SCREEN, not
+/// on the card. A card is a `ForEach` element, so a game leaving the rotation
+/// (a Remove, or the next board-state push) tore the open sheet down mid-use.
+/// Targets carry everything the sheet needs — the game they came from is gone
+/// by the time some of them close.
+@MainActor
+final class CardSheets: ObservableObject {
+    struct InfoTarget: Identifiable {
+        let id: String
+        let title: String
+        let url: URL?
+    }
+
+    @Published var info: InfoTarget?
+    @Published var share: ShareableImage?
+    @Published var shareFailed = false
+
+    /// Fetch the rendered frame and blow it up for sharing. A raw 64×32 PNG is
+    /// a postage stamp in a message thread; the crisp-pixel 512×256 is the
+    /// point, so the upscale is nearest-neighbor, never smoothed.
+    func fetchShareImage(_ url: URL?) {
+        guard let url else { shareFailed = true; return }
+        Task { @MainActor in
+            do {
+                let (data, _) = try await URLSession.shared.data(from: url)
+                guard let small = UIImage(data: data),
+                      let big = upscaledCrisp(small, factor: 8) else {
+                    shareFailed = true
+                    return
+                }
+                share = ShareableImage(image: big)
+            } catch {
+                shareFailed = true
+            }
+        }
+    }
+}
+
+extension View {
+    /// Attach a screen's card-menu presentations. Every screen that renders a
+    /// `CardMenu` owns one holder and applies this once.
+    func cardSheets(_ sheets: CardSheets) -> some View {
+        self
+            .sheet(item: Binding(get: { sheets.share }, set: { sheets.share = $0 })) { item in
+                ActivityShareSheet(items: [item.image])
+            }
+            .sheet(item: Binding(get: { sheets.info }, set: { sheets.info = $0 })) { target in
+                GameInfoSheet(title: target.title, url: target.url)
+            }
+            .alert("Couldn't fetch the image", isPresented: Binding(
+                get: { sheets.shareFailed },
+                set: { sheets.shareFailed = $0 }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("Check that the server is reachable and try again.")
+            }
+    }
+}
+
 /// The card footer's "…" menu: secondary actions (pin, spoilers) live here so
 /// the primary Add/Remove button keeps most of the width. The hidden Text sets
 /// the same line height as the text capsules, so all footer pills match.
 struct CardMenu: View {
     @ObservedObject var model: BoardViewModel
     let game: UiGame
+    /// The owning screen's presentation state (see `CardSheets`).
+    @ObservedObject var sheets: CardSheets
     /// Pinning only applies to games on the board.
     var canPin: Bool = true
-
-    /// Menu actions can't present anything themselves — the sheets and alert
-    /// hang off the Menu view. CardMenu renders at both call sites (dashboard
-    /// carousel and View All), so both get the presentations for free.
-    @State private var shareImage: ShareableImage?
-    @State private var shareFailed = false
-    @State private var showInfo = false
 
     var body: some View {
         let pinned = model.focusedGameId == game.id
@@ -2722,12 +2980,14 @@ struct CardMenu: View {
                 }
             }
             Button {
-                fetchShareImage()
+                sheets.fetchShareImage(renderURL)
             } label: {
                 Label("Share image", systemImage: "square.and.arrow.up")
             }
             Button {
-                showInfo = true
+                sheets.info = CardSheets.InfoTarget(
+                    id: game.id, title: model.gameTitle(game), url: infoURL
+                )
             } label: {
                 Label("Info", systemImage: "info.circle")
             }
@@ -2770,17 +3030,6 @@ struct CardMenu: View {
                 .background(Capsule().fill(.primary.opacity(0.06)))
         }
         .buttonStyle(.plain)
-        .sheet(item: $shareImage) { item in
-            ActivityShareSheet(items: [item.image])
-        }
-        .sheet(isPresented: $showInfo) {
-            GameInfoSheet(title: model.gameTitle(game), url: infoURL)
-        }
-        .alert("Couldn't fetch the image", isPresented: $shareFailed) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text("Check that the server is reachable and try again.")
-        }
     }
 
     /// The same /render URL the card's frame displays (same board, so the same
@@ -2799,26 +3048,6 @@ struct CardMenu: View {
     private var infoURL: URL? {
         let id = game.id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? game.id
         return URL(string: "\(model.httpBase)/game/\(id)?board=\(model.selectedBoardId ?? "")")
-    }
-
-    /// Fetch the rendered frame and blow it up for sharing. A raw 64×32 PNG is
-    /// a postage stamp in a message thread; the crisp-pixel 512×256 is the
-    /// point, so the upscale is nearest-neighbor, never smoothed.
-    private func fetchShareImage() {
-        guard let url = renderURL else { shareFailed = true; return }
-        Task { @MainActor in
-            do {
-                let (data, _) = try await URLSession.shared.data(from: url)
-                guard let small = UIImage(data: data),
-                      let big = upscaledCrisp(small, factor: 8) else {
-                    shareFailed = true
-                    return
-                }
-                shareImage = ShareableImage(image: big)
-            } catch {
-                shareFailed = true
-            }
-        }
     }
 
     /// RFC3339 → a label in the USER'S zone: time alone when the date is today
@@ -2842,7 +3071,7 @@ struct CardMenu: View {
 
 /// A fetched share payload — `sheet(item:)` wants Identifiable, and the image
 /// only exists once the render fetch lands.
-private struct ShareableImage: Identifiable {
+struct ShareableImage: Identifiable {
     let id = UUID()
     let image: UIImage
 }
@@ -2850,7 +3079,7 @@ private struct ShareableImage: Identifiable {
 /// UIActivityViewController bridge: ShareLink needs its item up front, but the
 /// share image is fetched after the menu tap, so the system sheet is presented
 /// the UIKit way.
-private struct ActivityShareSheet: UIViewControllerRepresentable {
+struct ActivityShareSheet: UIViewControllerRepresentable {
     let items: [Any]
     func makeUIViewController(context: Context) -> UIActivityViewController {
         UIActivityViewController(activityItems: items, applicationActivities: nil)
@@ -3110,12 +3339,20 @@ struct BrightnessControl: View {
     }
 }
 
+/// A board id in a form `sheet(item:)` accepts.
+struct BoardServerEdit: Identifiable {
+    let id: String
+}
+
 /// Sheet wrapper that reuses the pairing flow to add another scoreboard, dismissing
 /// once a new board is paired.
 struct AddBoardSheet: View {
     @ObservedObject var model: BoardViewModel
     @Environment(\.dismiss) private var dismiss
-    @State private var startCount = 0
+    /// Watch the PAIRING event, not the board count: re-pairing a board the app
+    /// already knows leaves the count unchanged, so the sheet used to just sit
+    /// there after a successful pair with no feedback at all.
+    @State private var startTick = 0
 
     var body: some View {
         NavigationStack {
@@ -3127,10 +3364,13 @@ struct AddBoardSheet: View {
                     }
                 }
         }
-        .onAppear { startCount = model.boardIds.count }
-        .onChange(of: model.boardIds.count) { _, n in
-            if n > startCount { dismiss() }
+        .onAppear { startTick = model.pairedTick }
+        .onChange(of: model.pairedTick) { _, n in
+            if n != startTick { dismiss() }
         }
+        // Cancelled or dismissed mid-attempt: drop the spinner/error and release
+        // the client an abandoned pairing spun up.
+        .onDisappear { model.cancelPairing() }
     }
 }
 
@@ -3774,6 +4014,10 @@ private enum ServerPreset: String, CaseIterable, Identifiable {
 
 struct SettingsView: View {
     @ObservedObject var model: BoardViewModel
+    /// When set, the sheet edits THIS board's server pin instead of the default
+    /// server for new pairings. A pinned board whose server is down shows only
+    /// the connecting splash, so repointing it has to be reachable from there.
+    var boardId: String? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var preset: ServerPreset = .localhost
     @State private var customUrl = ""
@@ -3781,6 +4025,11 @@ struct SettingsView: View {
     /// The URL the current selection resolves to.
     private var effectiveUrl: String {
         (preset.url ?? customUrl).trimmingCharacters(in: .whitespaces)
+    }
+
+    /// The URL this sheet started from: the board's own when scoped to one.
+    private var startingUrl: String {
+        boardId.map { model.serverURL(of: $0) } ?? model.serverUrl
     }
 
     var body: some View {
@@ -3805,10 +4054,14 @@ struct SettingsView: View {
                 } header: {
                     Text("Server")
                 } footer: {
-                    Text("Prod and Demo are the hosted servers. Localhost works in the Simulator; to reach a dev server from a physical phone, pick Custom and use your Mac's LAN IP (e.g. ws://192.168.1.50:7878/ws).")
+                    if let boardId {
+                        Text("Where “\(model.displayName(boardId))” lives. Changing it points this scoreboard at a different server; new pairings still use the default one.")
+                    } else {
+                        Text("Prod and Demo are the hosted servers. Localhost works in the Simulator; to reach a dev server from a physical phone, pick Custom and use your Mac's LAN IP (e.g. ws://192.168.1.50:7878/ws).")
+                    }
                 }
             }
-            .navigationTitle("Settings")
+            .navigationTitle(boardId == nil ? "Settings" : "Scoreboard server")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -3816,15 +4069,20 @@ struct SettingsView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        model.setServer(effectiveUrl)
+                        if let boardId {
+                            model.setBoardServer(boardId, effectiveUrl)
+                        } else {
+                            model.setServer(effectiveUrl)
+                        }
                         dismiss()
                     }
                     .disabled(effectiveUrl.isEmpty)
                 }
             }
             .onAppear {
-                preset = ServerPreset.matching(model.serverUrl)
-                customUrl = model.serverUrl
+                let url = startingUrl
+                preset = ServerPreset.matching(url)
+                customUrl = url
             }
         }
     }

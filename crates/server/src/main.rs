@@ -39,10 +39,7 @@ impl RateLimiter {
     }
     /// Consume a token; returns false when the bucket is empty (reject the attempt).
     fn allow(&mut self) -> bool {
-        let now = Instant::now();
-        let gained = now.duration_since(self.last).as_secs_f64() * self.refill_per_sec;
-        self.tokens = (self.tokens + gained).min(self.capacity);
-        self.last = now;
+        self.refill();
         if self.tokens >= 1.0 {
             self.tokens -= 1.0;
             true
@@ -50,7 +47,39 @@ impl RateLimiter {
             false
         }
     }
+
+    /// Is this bucket back at capacity? A full bucket holds no history, so the
+    /// per-controller map can drop it instead of remembering every identity
+    /// that ever tried a code.
+    fn is_full(&mut self) -> bool {
+        self.refill();
+        self.tokens >= self.capacity
+    }
+
+    fn refill(&mut self) {
+        let now = Instant::now();
+        let gained = now.duration_since(self.last).as_secs_f64() * self.refill_per_sec;
+        self.tokens = (self.tokens + gained).min(self.capacity);
+        self.last = now;
+    }
 }
+
+/// Per-controller pairing budget: a short burst, refilling slowly. Sized so a
+/// human retyping a mistyped code never notices it.
+const PAIR_BURST: f64 = 10.0;
+const PAIR_REFILL_PER_SEC: f64 = 1.0;
+
+/// Whole-server pairing ceiling. Pubkeys are free to mint, so the per-identity
+/// buckets alone can't bound total guessing load — but this is set far above
+/// any honest simultaneous-pairing burst, so exhausting it takes a deliberate
+/// attack rather than a busy evening.
+const PAIR_GLOBAL_BURST: f64 = 60.0;
+const PAIR_GLOBAL_REFILL_PER_SEC: f64 = 5.0;
+
+/// How long a pairing code shown on a board stays valid. The board leaves setup
+/// long before this; without an expiry every code a board ever displayed stayed
+/// live forever, so the guessable space grew with every setup session.
+const PAIR_CODE_TTL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Clone)]
 pub struct AppState {
@@ -63,9 +92,15 @@ pub struct AppState {
     pub configs: Arc<Mutex<HashMap<String, BoardConfig>>>, // board_id -> prefs
     pub devices: Arc<Mutex<HashMap<String, UnboundedSender<Message>>>>, // board_id -> sink
     pub controllers: Arc<Mutex<HashMap<String, Vec<UnboundedSender<Message>>>>>, // board_id -> app sinks
-    pub pending: Arc<Mutex<HashMap<String, String>>>, // pairing code -> board_id
+    /// Live pairing codes: code -> (board_id, when the board registered it).
+    /// The stamp expires the code (`PAIR_CODE_TTL`) — see `register_pairing_code`.
+    pub pending: Arc<Mutex<HashMap<String, (String, Instant)>>>,
     pub allow: Arc<Mutex<HashMap<String, HashSet<String>>>>, // board_id -> controller ids
     db: Option<Arc<Mutex<Connection>>>,
+    /// Pairing-attempt budget per controller pubkey. One shared bucket meant a
+    /// single attacker's guessing spree locked every other phone out of pairing.
+    pair_limiters: Arc<Mutex<HashMap<String, RateLimiter>>>,
+    /// Backstop above the per-identity buckets (fresh pubkeys are free).
     pair_limiter: Arc<Mutex<RateLimiter>>,
     /// Wakes the poll loop when a client connects, so it fetches fresh games promptly
     /// instead of up to POLL_SECS later (the idle-skip otherwise leaves games stale).
@@ -301,7 +336,11 @@ impl AppState {
             pending: Arc::new(Mutex::new(HashMap::new())),
             allow: Arc::new(Mutex::new(allow)),
             db: db.map(|c| Arc::new(Mutex::new(c))),
-            pair_limiter: Arc::new(Mutex::new(RateLimiter::new(10.0, 1.0))),
+            pair_limiters: Arc::new(Mutex::new(HashMap::new())),
+            pair_limiter: Arc::new(Mutex::new(RateLimiter::new(
+                PAIR_GLOBAL_BURST,
+                PAIR_GLOBAL_REFILL_PER_SEC,
+            ))),
             poll_wake: Arc::new(tokio::sync::Notify::new()),
             notices: Arc::new(Mutex::new(HashMap::new())),
             last_manifest: Arc::new(Mutex::new(HashMap::new())),
@@ -363,6 +402,74 @@ impl AppState {
             "INSERT OR IGNORE INTO pairings (board_pubkey, controller_pubkey) VALUES (?1, ?2)",
             rusqlite::params![board_id, controller],
         );
+    }
+
+    /// Forget a pairing durably (mirrors `persist_pairing`). Without the DB
+    /// delete a revoked grant came straight back on the next server start.
+    fn forget_pairing(&self, board_id: &str, controller: &str) {
+        let Some(db) = &self.db else { return };
+        let _ = db.lock().unwrap().execute(
+            "DELETE FROM pairings WHERE board_pubkey = ?1 AND controller_pubkey = ?2",
+            rusqlite::params![board_id, controller],
+        );
+    }
+
+    /// Revoke ONE controller's grant on a board, in memory and on disk. Returns
+    /// whether that grant existed — unpairing a board you were never paired
+    /// with is a no-op, not an error. The caller supplies the controller from
+    /// the signed connection, so nobody can revoke someone else's phone.
+    pub fn unpair(&self, board_id: &str, controller: &str) -> bool {
+        let removed = {
+            let mut allow = self.allow.lock().unwrap();
+            match allow.get_mut(board_id) {
+                Some(set) => {
+                    let removed = set.remove(controller);
+                    if set.is_empty() {
+                        allow.remove(board_id);
+                    }
+                    removed
+                }
+                None => false,
+            }
+        };
+        if removed {
+            self.forget_pairing(board_id, controller);
+        }
+        removed
+    }
+
+    /// Publish a board's current pairing code. Codes expire (`PAIR_CODE_TTL`),
+    /// swept lazily here and on every pair attempt so no timer task is needed;
+    /// and a board's OLD codes die the moment it shows a new one — what's on
+    /// the panel is the only code that works.
+    pub fn register_pairing_code(&self, code: String, board_id: &str) {
+        let now = Instant::now();
+        let mut pending = self.pending.lock().unwrap();
+        pending.retain(|_, (bid, minted)| {
+            now.duration_since(*minted) < PAIR_CODE_TTL && bid.as_str() != board_id
+        });
+        pending.insert(code, (board_id.to_string(), now));
+    }
+
+    /// Spend one pairing attempt for this controller. Per-identity budget first,
+    /// and a rejected attempt never touches the global bucket — otherwise an
+    /// attacker draining its own would still drain everyone else's.
+    pub fn allow_pair_attempt(&self, controller: &str) -> bool {
+        {
+            let mut limiters = self.pair_limiters.lock().unwrap();
+            // Buckets that have refilled to full are indistinguishable from
+            // fresh ones, so drop them — the map can't grow with every pubkey
+            // that ever guessed.
+            limiters.retain(|k, l| k == controller || !l.is_full());
+            let ok = limiters
+                .entry(controller.to_string())
+                .or_insert_with(|| RateLimiter::new(PAIR_BURST, PAIR_REFILL_PER_SEC))
+                .allow();
+            if !ok {
+                return false;
+            }
+        }
+        self.pair_limiter.lock().unwrap().allow()
     }
 }
 
@@ -438,12 +545,15 @@ fn load_pairings(conn: &Connection) -> HashMap<String, HashSet<String>> {
 /// Resolve a pairing code to its board and authorize the controller.
 /// The code is single-use (consumed on success). Returns the board_id or a reason.
 pub fn try_pair(state: &AppState, code: &str, controller: &str) -> Result<String, String> {
-    let board_id = state
-        .pending
-        .lock()
-        .unwrap()
-        .remove(code)
-        .ok_or_else(|| "invalid or expired code".to_string())?;
+    let board_id = {
+        let now = Instant::now();
+        let mut pending = state.pending.lock().unwrap();
+        // Sweep before the lookup, so an expired code can never be redeemed
+        // (and the map stays bounded without a background task).
+        pending.retain(|_, (_, minted)| now.duration_since(*minted) < PAIR_CODE_TTL);
+        pending.remove(code).map(|(board_id, _)| board_id)
+    }
+    .ok_or_else(|| "invalid or expired code".to_string())?;
     state
         .allow
         .lock()
@@ -1012,10 +1122,20 @@ const PREGAME_WINDOW_MINS: i64 = 30;
 const FINAL_LINGER: Duration = Duration::from_secs(30 * 60);
 
 /// Called with each fresh slate BEFORE it replaces `state.games`: any game that
-/// was live in the old slate and is Final in the new one gets an end stamp NOW.
+/// was live in the old slate and is Final in the new one gets an end stamp.
 /// Games that arrive already-Final (server restart, day-old finals in the feed)
 /// are never stamped — only an observed transition starts a linger.
-pub(crate) fn record_finished_transitions(state: &AppState, incoming: &[Game]) {
+///
+/// `prev_poll` is when we last saw the slate we're comparing against, and it —
+/// NOT `now` — is the stamp: the linger means "we watched it end", so it can
+/// never be fresher than the observation gap. The poll loop skips fetching
+/// while nothing is connected, so the old slate can be arbitrarily stale: a
+/// board connecting on Monday compared Monday's feed against Sunday's frozen
+/// slate and re-lingered a tournament that had ended two days earlier. Stamped
+/// at the earliest moment the game could have ended, that transition is already
+/// expired and the game is dropped, while a normal 3-minute gap still lingers
+/// its ~27 remaining minutes.
+pub(crate) fn record_finished_transitions(state: &AppState, incoming: &[Game], prev_poll: Instant) {
     let was_live: HashSet<String> = state
         .games
         .lock()
@@ -1024,11 +1144,30 @@ pub(crate) fn record_finished_transitions(state: &AppState, incoming: &[Game]) {
         .filter(|g| is_live(g))
         .map(|g| g.id.clone())
         .collect();
+    let now_utc = chrono::Utc::now();
     let mut fin = state.finished.lock().unwrap();
     for g in incoming {
         if g.status == GameStatus::Final && was_live.contains(&g.id) {
-            fin.entry(g.id.clone()).or_insert_with(std::time::Instant::now);
-            tracing::info!("game '{}' ended; lingering {}m", g.id, FINAL_LINGER.as_secs() / 60);
+            // When did it ACTUALLY end? The feed knows for multi-day events
+            // (golf/F1 carry endDate) — use that. Otherwise the best evidence
+            // is the previous poll: the game was still live then, so it ended
+            // somewhere in that gap, and the gap's start is the conservative
+            // choice. Never `now`: a slate frozen while nothing was connected
+            // would otherwise re-linger a tournament that ended days ago.
+            let ended = g
+                .end_time
+                .as_deref()
+                .and_then(parse_espn_time)
+                .and_then(|end| {
+                    // Feed time -> our monotonic clock, only for a PAST end
+                    // (a future/clock-skewed endDate falls back to prev_poll).
+                    let ago = now_utc.signed_duration_since(end).to_std().ok()?;
+                    Instant::now().checked_sub(ago)
+                })
+                .unwrap_or(prev_poll);
+            fin.entry(g.id.clone()).or_insert(ended);
+            let left = FINAL_LINGER.saturating_sub(ended.elapsed());
+            tracing::info!("game '{}' ended; lingering {}m", g.id, left.as_secs() / 60);
         }
     }
     // Keep the map bounded: drop stamps past the linger or for vanished games.
@@ -1140,8 +1279,18 @@ pub(crate) fn board_shows(state: &AppState, g: &Game) -> bool {
 
 /// Should the app's "View all" browse feed show this game? Live plus ALL of the
 /// slate's upcoming games (so you can queue up tonight's game this morning).
+/// Time-only — the state-aware [`browse_shows_now`] is what the app is served.
 pub(crate) fn browse_shows(g: &Game) -> bool {
     is_live(g) || g.status == GameStatus::Pregame
+}
+
+/// The browse feed the app actually gets: the upcoming/live window above, plus
+/// anything the board is showing right now. Whatever is on the panel MUST be
+/// listable — a lingering Final showed up on the board and in "Now showing"
+/// but was missing from View All, so the user could see a game they couldn't
+/// find or remove.
+pub(crate) fn browse_shows_now(state: &AppState, g: &Game) -> bool {
+    browse_shows(g) || board_shows(state, g)
 }
 
 /// Stable per-sport team key shared by the catalog and games: "{sport}-{abbrev}".
@@ -2004,6 +2153,11 @@ async fn poll_loop(state: AppState, source: Arc<dyn SportsDataSource>) {
         .unwrap_or(180);
     tracing::info!("poll loop: every {secs}s, skipped while nothing is connected");
     let mut interval = tokio::time::interval(Duration::from_secs(secs));
+    // When the slate we're about to compare against was fetched. The idle skip
+    // means this can be hours or days back, and `record_finished_transitions`
+    // needs it to date an end it only just noticed. None = nothing fetched yet
+    // (state.games is empty, so no transition can be observed anyway).
+    let mut prev_poll: Option<Instant> = None;
     loop {
         // Wake on the timer OR as soon as a client connects (fresh games promptly).
         let woke_on_connect = tokio::select! {
@@ -2020,6 +2174,7 @@ async fn poll_loop(state: AppState, source: Arc<dyn SportsDataSource>) {
                 continue;
             }
         }
+        let fetched_at = Instant::now();
         let mut games = source.fetch().await;
         // Ingestion filter: far-future scheduled games (a GP two weeks out,
         // week-one CFB) never enter state — no render work, no browse clutter.
@@ -2039,8 +2194,10 @@ async fn poll_loop(state: AppState, source: Arc<dyn SportsDataSource>) {
             tracing::warn!("no games from source; showing empty slate");
         }
         let n = games.len();
-        // Stamp any live -> Final transitions before the old slate disappears.
-        record_finished_transitions(&state, &games);
+        // Stamp any live -> Final transitions before the old slate disappears,
+        // dated to the slate they're measured against (not to now).
+        record_finished_transitions(&state, &games, prev_poll.unwrap_or(fetched_at));
+        prev_poll = Some(fetched_at);
         *state.games.lock().unwrap() = games;
         let board_ids: Vec<String> = state.devices.lock().unwrap().keys().cloned().collect();
         for bid in &board_ids {
@@ -2987,11 +3144,13 @@ mod tests {
         };
         *state.games.lock().unwrap() = vec![live.clone()];
 
-        // Poll observes the transition to Final.
+        // Poll observes the transition to Final, three minutes after the slate
+        // it's comparing against (a normal cadence).
         let ended = Game { status: GameStatus::Final, ordinal: String::new(), clock: String::new(), ..live };
         let already_final = Game { id: "g2".into(), ..ended.clone() };
         let slate = vec![ended, already_final];
-        record_finished_transitions(&state, &slate);
+        let prev_poll = std::time::Instant::now() - Duration::from_secs(180);
+        record_finished_transitions(&state, &slate, prev_poll);
         *state.games.lock().unwrap() = slate;
 
         let cfg = BoardConfig::default(); // unconfigured -> whole slate
@@ -3007,6 +3166,84 @@ mod tests {
             .insert("g1".into(), std::time::Instant::now() - FINAL_LINGER);
         let ids: Vec<String> = candidate_games(&state, &cfg).iter().map(|g| g.id.clone()).collect();
         assert!(!ids.contains(&"g1".to_string()), "linger expires after 30m");
+    }
+
+    /// A live game (in whatever state the previous slate left it) for the
+    /// linger tests below.
+    fn live_game(id: &str) -> Game {
+        Game {
+            id: id.into(),
+            sport_id: "pga".into(),
+            away: TeamSide::empty("A"),
+            home: TeamSide::empty("B"),
+            status: GameStatus::Active,
+            ordinal: String::new(),
+            clock: String::new(),
+            start_time: String::new(), end_time: None,
+            leaderboard: None,
+            champ: None,
+            session: None,
+            situation: None,
+            pregame: None,
+        }
+    }
+
+    /// The reported bug: the poll loop skips fetching while nothing is
+    /// connected, so a board connecting on Monday hands `record_finished_
+    /// transitions` a frozen weekend slate. Dating the end to the previous
+    /// observation (not to now) means an old gap produces an already-expired
+    /// stamp — a tournament that ended Sunday must not reappear Monday — while
+    /// a normal poll gap still lingers.
+    #[test]
+    fn stale_previous_slate_does_not_mint_a_fresh_linger() {
+        // Fresh gap: we really did watch it end, so it lingers.
+        let state = AppState::new_ephemeral();
+        *state.games.lock().unwrap() = vec![live_game("g1")];
+        let ended = Game { status: GameStatus::Final, ..live_game("g1") };
+        record_finished_transitions(
+            &state,
+            std::slice::from_ref(&ended),
+            std::time::Instant::now() - Duration::from_secs(180),
+        );
+        *state.games.lock().unwrap() = vec![ended.clone()];
+        assert!(board_shows(&state, &ended), "3 minutes ago -> lingers");
+
+        // Same transition, weekend-old slate: the end we're "observing" is two
+        // days stale, so the linger is over before it starts.
+        let state = AppState::new_ephemeral();
+        *state.games.lock().unwrap() = vec![live_game("g1")];
+        record_finished_transitions(
+            &state,
+            std::slice::from_ref(&ended),
+            std::time::Instant::now() - Duration::from_secs(48 * 3600),
+        );
+        *state.games.lock().unwrap() = vec![ended.clone()];
+        assert!(!board_shows(&state, &ended), "ended before we stopped watching -> no linger");
+        assert!(
+            state.finished.lock().unwrap().is_empty(),
+            "the expired stamp is swept, not left to accumulate"
+        );
+    }
+
+    /// Board and browse must never disagree: a Final the board is lingering is
+    /// visible on the panel and in "Now showing", so View All has to list it —
+    /// otherwise the user sees a game they can't find or remove.
+    #[test]
+    fn browse_lists_everything_the_board_shows() {
+        let state = AppState::new_ephemeral();
+        *state.games.lock().unwrap() = vec![live_game("g1")];
+        let ended = Game { status: GameStatus::Final, ..live_game("g1") };
+        record_finished_transitions(&state, std::slice::from_ref(&ended), std::time::Instant::now());
+        *state.games.lock().unwrap() = vec![ended.clone()];
+
+        assert!(board_shows(&state, &ended), "precondition: the board is lingering it");
+        assert!(!browse_shows(&ended), "the time-only rule alone would hide it");
+        assert!(browse_shows_now(&state, &ended), "…so the browse feed must add it back");
+
+        // A Final nobody watched end is on neither list.
+        let cold = Game { status: GameStatus::Final, ..live_game("g2") };
+        assert!(!board_shows(&state, &cold));
+        assert!(!browse_shows_now(&state, &cold));
     }
 
     /// The board shows live games plus scheduled ones inside the 30-minute
@@ -3732,7 +3969,7 @@ mod tests {
     #[test]
     fn pairing_rendezvous() {
         let s = AppState::new_ephemeral();
-        s.pending.lock().unwrap().insert("123456".into(), "board-x".into());
+        s.register_pairing_code("123456".into(), "board-x");
         // correct code pairs + authorizes the controller
         assert_eq!(try_pair(&s, "123456", "ctrl-1").unwrap(), "board-x");
         assert!(s.allow.lock().unwrap().get("board-x").unwrap().contains("ctrl-1"));
@@ -3740,6 +3977,80 @@ mod tests {
         assert!(try_pair(&s, "123456", "ctrl-1").is_err());
         // an unknown code fails
         assert!(try_pair(&s, "999999", "ctrl-2").is_err());
+    }
+
+    /// Codes are short-lived and singular per board: an old one can't be
+    /// redeemed, and showing a new code retires whatever was on the panel.
+    #[test]
+    fn pairing_codes_expire_and_supersede() {
+        let s = AppState::new_ephemeral();
+
+        // A code from a setup session ten minutes ago is dead.
+        s.pending
+            .lock()
+            .unwrap()
+            .insert("111111".into(), ("board-x".into(), Instant::now() - PAIR_CODE_TTL));
+        assert!(try_pair(&s, "111111", "ctrl-1").is_err(), "expired code can't pair");
+
+        // Re-entering setup replaces this board's code; the old one stops working.
+        s.register_pairing_code("222222".into(), "board-x");
+        s.register_pairing_code("333333".into(), "board-x");
+        assert!(try_pair(&s, "222222", "ctrl-1").is_err(), "superseded code can't pair");
+
+        // Another board's live code is untouched by all of that, and the
+        // current code still pairs.
+        s.register_pairing_code("444444".into(), "board-y");
+        assert_eq!(try_pair(&s, "333333", "ctrl-1").unwrap(), "board-x");
+        assert_eq!(try_pair(&s, "444444", "ctrl-1").unwrap(), "board-y");
+    }
+
+    /// Unpairing revokes exactly one controller's grant, durably.
+    #[test]
+    fn unpair_revokes_only_the_asking_controller() {
+        let path = std::env::temp_dir().join(format!("sb-unpair-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let s = AppState::new_inner(Some(open_db(&path).unwrap()), mock_catalog());
+            s.register_pairing_code("123456".into(), "board-x");
+            try_pair(&s, "123456", "ctrl-1").unwrap();
+            s.register_pairing_code("654321".into(), "board-x");
+            try_pair(&s, "654321", "ctrl-2").unwrap();
+
+            // No-ops: a board you're not paired with, and someone else's grant.
+            assert!(!s.unpair("board-y", "ctrl-1"), "never paired with board-y");
+            assert!(!s.unpair("board-x", "ctrl-3"), "not a paired controller");
+            assert!(s.is_allowed("board-x", "ctrl-1"));
+
+            // The real thing: ctrl-1 hands its grant back. Commands from it are
+            // refused afterwards (`is_allowed` is the gate every command path
+            // checks); the other phone keeps working.
+            assert!(s.unpair("board-x", "ctrl-1"));
+            assert!(!s.is_allowed("board-x", "ctrl-1"), "revoked controller is refused");
+            assert!(s.is_allowed("board-x", "ctrl-2"), "the other phone is untouched");
+        }
+        {
+            // …and it stays revoked across a restart: the DB row is gone, not
+            // just the in-memory entry.
+            let s = AppState::new_inner(Some(open_db(&path).unwrap()), mock_catalog());
+            assert!(!s.is_allowed("board-x", "ctrl-1"));
+            assert!(s.is_allowed("board-x", "ctrl-2"));
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The pairing throttle is per identity: one guesser can drain its own
+    /// budget without locking anyone else out of pairing.
+    #[test]
+    fn pair_throttle_is_per_controller() {
+        let s = AppState::new_ephemeral();
+        let mut spent = 0;
+        while s.allow_pair_attempt("attacker") {
+            spent += 1;
+            assert!(spent <= PAIR_BURST as usize, "bucket must empty within its capacity");
+        }
+        assert_eq!(spent, PAIR_BURST as usize);
+        assert!(!s.allow_pair_attempt("attacker"), "stays empty");
+        assert!(s.allow_pair_attempt("someone-else"), "a real phone can still pair");
     }
 
     #[test]

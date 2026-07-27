@@ -1,5 +1,7 @@
 /target
 Cargo.lock
-# real WiFi credentials — never commit (mirror of firmware/src/config.h)
-/src/config.rs
+# src/config.rs is TRACKED now (secret-free defaults, so a fresh clone builds).
+# Machine-local values — LAN server address, any revived Wi-Fi fallback — live
+# here instead and are fed to the build as environment variables.
+/local.env
 /target.nosync

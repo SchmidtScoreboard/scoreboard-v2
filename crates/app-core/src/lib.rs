@@ -211,6 +211,8 @@ enum Out {
     GetCatalog,
     GetGames(Option<String>),
     Pair(String),
+    /// Give up this controller's grant on a board (server-side revoke).
+    Unpair(String),
     /// Re-send Subscribe with the CURRENT board list (after a removal).
     Resubscribe,
     /// Ask for a board's durable settings as a portable JSON blob.
@@ -451,6 +453,10 @@ impl ScoreboardClient {
                                 let m = ClientMsg::Pair { code };
                                 let _ = write.send(Message::Text(serde_json::to_string(&m).unwrap())).await;
                             }
+                            Some(Out::Unpair(bid)) => {
+                                let m = ClientMsg::Unpair { board_id: bid };
+                                let _ = write.send(Message::Text(serde_json::to_string(&m).unwrap())).await;
+                            }
                             Some(Out::Resubscribe) => {
                                 let sub = ClientMsg::Subscribe { board_ids: boards.lock().unwrap().clone() };
                                 let _ = write.send(Message::Text(serde_json::to_string(&sub).unwrap())).await;
@@ -510,9 +516,25 @@ impl ScoreboardClient {
     /// so its pushes stop. Without this, "Remove this scoreboard" was app-UI
     /// only — the still-subscribed connection kept receiving board state and
     /// the next push resurrected the board.
+    ///
+    /// This forgets locally but keeps the server-side grant. To also hand back
+    /// the pairing (so this phone can no longer command the board at all), use
+    /// [`Self::unpair_board`].
     pub fn remove_board(&self, board_id: String) {
         self.boards.lock().unwrap().retain(|b| b != &board_id);
         let _ = self.tx.send(Out::Resubscribe);
+    }
+
+    /// Remove a board AND revoke this app's pairing on the server. The grant
+    /// used to be permanent — re-adding the board later means pairing again
+    /// with a fresh code, which is what "Remove this scoreboard" implies.
+    /// Only this controller's own grant is revoked; other paired phones keep
+    /// theirs.
+    pub fn unpair_board(&self, board_id: String) {
+        // Revoke before resubscribing, so the server has already dropped the
+        // grant when the new (shorter) subscription set arrives.
+        let _ = self.tx.send(Out::Unpair(board_id.clone()));
+        self.remove_board(board_id);
     }
 
     /// Keep the board off with no auto-wake (cancels a running sleep timer).

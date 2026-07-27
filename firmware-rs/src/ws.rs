@@ -33,12 +33,24 @@ pub async fn handshake<S: Read + Write>(sock: &mut S, host: &str) -> Result<(), 
         buf[got] = b[0];
         got += 1;
         if got >= 4 && &buf[got - 4..got] == b"\r\n\r\n" {
-            return if buf[..got].windows(3).any(|w| w == b"101") { Ok(()) } else { Err(()) };
+            return if is_switching_protocols(&buf[..got]) { Ok(()) } else { Err(()) };
         }
         if got == buf.len() {
             return Err(());
         }
     }
+}
+
+/// Did the server actually switch protocols? Only the STATUS LINE may answer
+/// that. Searching the whole header block for "101" said yes to any response
+/// carrying those three bytes anywhere — `Content-Length: 101`, a `Date` with
+/// 10:1x, an ETag, a redirect body length — so an error page could be mistaken
+/// for a live socket, and every "frame" parsed afterwards would be garbage from
+/// an HTML body.
+fn is_switching_protocols(head: &[u8]) -> bool {
+    let end = head.windows(2).position(|w| w == b"\r\n").unwrap_or(head.len());
+    let status = &head[..end];
+    status.starts_with(b"HTTP/1.1 101") || status.starts_with(b"HTTP/1.0 101")
 }
 
 /// Frame reader whose ENTIRE parse state lives on `self`, not in the future.

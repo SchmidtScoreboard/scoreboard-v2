@@ -609,6 +609,12 @@ pub enum ClientMsg {
     EnterSetup { code: String },
     // controller asks to pair with whichever board is showing this code
     Pair { code: String },
+    // controller gives up its own grant on a board ("Remove this scoreboard").
+    // The server revokes only the SENDING controller's pairing — the identity
+    // comes from the signed handshake, so this can't touch anyone else's.
+    // Without it a grant was permanent: removal was app-UI only and the board
+    // came back on the next launch.
+    Unpair { board_id: String },
     // device reports a single knob press — the server decides sleep/wake/notice
     ButtonPress,
     // device reports a knob turn — the server adopts this as the board's one

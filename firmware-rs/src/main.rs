@@ -17,7 +17,7 @@ use embassy_net::tcp::TcpSocket;
 use embassy_net::{Runner, Stack, StackResources};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{with_timeout, Duration, Instant, Timer};
 use embedded_graphics::{pixelcolor::Rgb888, prelude::*, Pixel};
 use esp_alloc as _;
 use esp_backtrace as _;
@@ -127,7 +127,15 @@ async fn main(spawner: Spawner) -> ! {
         clock: p.GPIO2.degrade(),
         latch: p.GPIO47.degrade(),
     };
-    let hub75 = Hub75::new_async(p.LCD_CAM, pins, p.DMA_CH0, tx_descriptors, Rate::from_mhz(20))
+    // 10MHz, not 20: the driver blanks the panel for exactly ONE clock cycle
+    // around each row-address change and latch (hub75-framebuffer's
+    // BLANKING_DELAY). At 20MHz that window is 50ns — too short for the row
+    // drivers to switch off and the address lines to settle, so the previous
+    // row bleeds onto the next and "black" pixels glow faintly (worst next to
+    // a bright full-width row, e.g. the brightness bar). Halving the clock
+    // doubles the blanking window and the data settling time; one 64x32 panel
+    // has refresh headroom to spare at 10MHz.
+    let hub75 = Hub75::new_async(p.LCD_CAM, pins, p.DMA_CH0, tx_descriptors, Rate::from_mhz(10))
         .expect("hub75");
     let fb_a = mk_static!(FBType, FBType::new());
     let fb_b = mk_static!(FBType, FBType::new());
@@ -150,10 +158,16 @@ async fn main(spawner: Spawner) -> ! {
     // including mid-download).
     let flash: &'static ota::SharedFlash = mk_static!(ota::SharedFlash, Mutex::new(flash));
     // An unconfirmed image must prove itself (one ws auth) within five minutes
-    // or the watchdog reverts to the previous slot — armed in EVERY mode: an
-    // update that breaks credential loading strands the board in provisioning,
-    // and that must revert too. See ota.rs for the whole strategy.
-    if fw_unconfirmed {
+    // or the watchdog reverts to the previous slot. Armed ONLY on the
+    // provisioned path: BLE provisioning has no Wi-Fi and no server, so the
+    // auth that clears the watchdog is impossible there by construction — a
+    // board that hold-to-resets right after an update would sit in setup and
+    // silently throw away a perfectly good image five minutes later. An update
+    // that breaks credential loading is left to the three-strike boot counter
+    // in ota::boot_check instead (every power cycle of an unconfirmed image
+    // counts a strike, and the rebooting panic handler turns a crashing image
+    // into strikes on its own). See ota.rs for the whole strategy.
+    if fw_unconfirmed && stored_creds.is_some() {
         spawner.spawn(ota::revert_watchdog(flash).unwrap());
     }
 
@@ -165,18 +179,37 @@ async fn main(spawner: Spawner) -> ! {
         // Provisioned: connect WiFi, run the device protocol + encoder.
         Some(creds) => {
             println!("[creds] loaded from flash; connecting to '{}'…", creds.ssid);
-            // Mint-or-load this board's Ed25519 identity; its pubkey is the board_id.
-            let mut id_rng = Rng::new();
-            let secret = identity::load_or_create(&mut *flash.lock().await, &mut id_rng);
+            // Physical entropy, switched on before anything mints a secret.
+            // esp-hal's plain `Rng` is only a TRUE random source while the RF
+            // subsystem or the SAR ADC is feeding it noise, and NEITHER is up
+            // here — the radio starts further down. `load_or_create` mints this
+            // board's permanent Ed25519 seed on first boot, and that seed IS the
+            // board_id: written once, read on every boot after. A pseudo-random
+            // one would be a forgeable board identity for the life of the board.
+            let trng_source = esp_hal::rng::TrngSource::new(p.RNG, p.ADC1);
+            // `try_new` only fails with no live `TrngSource`; one is right above,
+            // so this is an invariant, not a runtime condition.
+            let trng = esp_hal::rng::Trng::try_new().expect("TrngSource constructed above");
+            let secret = identity::load_or_create(&mut *flash.lock().await, &trng);
             let board_id = pubkey_hex(&secret);
             println!("[id] board {}", board_id);
 
             // Fresh 6-digit pairing code per boot: shown on the pairing screen
             // (double-press) and registered with the server via EnterSetup so
             // the app's code entry actually resolves to this board.
-            let code = format!("{:06}", Rng::new().random() % 1_000_000);
+            let code = format!("{:06}", trng.random() % 1_000_000);
             board.lock().await.set_setup_code(code.clone());
             println!("[pair] code {code}");
+
+            // Hand the SAR ADC back BEFORE the radio comes up. Espressif's
+            // equivalent (bootloader_random_enable) is documented as needing to
+            // be disabled before Wi-Fi/BT or ADC init — it leaves the SAR ADC
+            // force-powered in a sampling mode the PHY calibration also touches.
+            // Nothing is lost: from wifi::new onward the RF subsystem is itself
+            // the hardware RNG's entropy source. `trng` first — dropping the
+            // source while a `Trng` is outstanding panics by design.
+            drop(trng);
+            drop(trng_source);
 
             // Server: BLE-provisioned host:port, else the compiled default.
             let (server_host, server_port) = if creds.server_host.is_empty() {
@@ -391,7 +424,19 @@ async fn device(
         }
         if timezone.is_none() && tz_tries < 3 {
             tz_tries += 1;
-            timezone = fetch_timezone(stack, &mut rx, &mut tx).await;
+            // Hard 3s cap. This lookup is a nicety, but it sits in front of the
+            // one thing the board exists for: on a network that blackholes
+            // ip-api.com (captive portal, egress filter) its own DNS + connect +
+            // 10s socket timeout stall EVERY pass, delaying first contact with
+            // the scoreboard server by tens of seconds. Timing out here is
+            // cheaper than reordering — a failed attempt just burns one of the
+            // three tries and the server keeps its stored zone.
+            timezone = with_timeout(
+                Duration::from_secs(3),
+                fetch_timezone(stack, &mut rx, &mut tx),
+            )
+            .await
+            .unwrap_or(None);
             match &timezone {
                 Some(tz) => println!("[tz] discovered {tz}"),
                 None => println!("[tz] lookup failed (attempt {tz_tries}/3)"),

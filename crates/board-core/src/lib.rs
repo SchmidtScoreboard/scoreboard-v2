@@ -46,6 +46,10 @@ const RESET_FILL_MS: u64 = 9500;
 // Field-tuned up from 5s: every deploy and proxy blip was flashing CONNECTING
 // at people, which reads as "broken", not "briefly offline".
 const OFFLINE_GRACE_MS: u64 = 45_000;
+// The pair code is only useful while someone is standing at the board typing it
+// into the app. An accidental double press would otherwise park the panel on it
+// forever (the code screen shows no scores), so it returns to content on its own.
+const SYNC_TIMEOUT_MS: u64 = 90_000;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
@@ -91,10 +95,12 @@ pub struct Board {
     prev_release: Option<u64>,
     local_brightness: u8, // encoder-controlled, 10..=100
     online: bool,         // is the websocket currently connected
-    offline_since: Option<u64>, // when it dropped (starts the offline grace window)
+    offline_since: Option<u64>, // last loss of CONTACT (starts the offline grace window)
     wifi_up: bool,        // host-reported Wi-Fi link/DHCP state (connect screen)
     setup_phase: SetupPhase, // which BLE-provisioning stage the setup screen shows
     brightness_changed_at: Option<u64>, // transient brightness-bar overlay window
+    brightness_pending: bool, // a turn the server hasn't heard yet (see `encoder`)
+    syncing_since: Option<u64>, // when the pair-code screen went up (it times out)
 
     // hold-to-reset (factory reset of the stored Wi-Fi credentials)
     reset_active: bool,         // bar on screen (held past the grace window)
@@ -143,6 +149,8 @@ impl Board {
             wifi_up: false,
             setup_phase: SetupPhase::WaitingBluetooth,
             brightness_changed_at: None,
+            brightness_pending: false,
+            syncing_since: None,
             reset_active: false,
             reset_progress: 0,
             reset_done: false,
@@ -206,13 +214,15 @@ impl Board {
     }
 
     /// Host reports websocket connectivity; drives the reconnecting screen.
-    /// A drop starts the offline grace window (see `framebuffer`) — timed from
-    /// the true->false transition only, so a host that re-reports "offline"
-    /// every poll can't keep extending the window forever.
+    /// The offline grace window (see `framebuffer`) is stamped here but only
+    /// CLEARED by `on_manifest`: a socket is not freshness. A link that
+    /// completes the handshake and dies before delivering anything would
+    /// otherwise restart the window on every retry, holding an hour-old score
+    /// on the panel as if it were live. Stamping only when the window isn't
+    /// already running keeps a host that re-reports "offline" every poll (or
+    /// flaps the socket) from extending it either.
     pub fn set_online(&mut self, online: bool) {
-        if online {
-            self.offline_since = None;
-        } else if self.online {
+        if !online && self.offline_since.is_none() {
             self.offline_since = Some(self.clock);
         }
         self.online = online;
@@ -240,6 +250,7 @@ impl Board {
     /// The board has been paired; leave the setup / sync screen.
     pub fn setup_done(&mut self) {
         if matches!(self.mode, Mode::Setup | Mode::Syncing) {
+            self.syncing_since = None;
             self.mode = Mode::Running;
         }
     }
@@ -252,13 +263,21 @@ impl Board {
     /// Encoder rotation -> brightness (mirrors the real device's encoder).
     /// While online the new level is reported to the server, which adopts it as
     /// the board's one brightness and echoes it back in the next manifest — the
-    /// knob and the app's slider move the same value. Offline it stays a purely
-    /// local dim so the knob is never a dead end.
+    /// knob and the app's slider move the same value. Offline the dim applies
+    /// locally at once and is REPORTED once the server can hear it (see
+    /// `tick`), otherwise the first manifest after the reconnect would echo the
+    /// server's stale level and undo the turn in front of the user.
     pub fn encoder(&mut self, delta: i32) {
         self.local_brightness = (self.local_brightness as i32 + delta * 10).clamp(10, 100) as u8;
         self.brightness_changed_at = Some(self.clock);
         if self.online && matches!(self.mode, Mode::Running) {
             self.outbox.push(ClientMsg::DeviceBrightness { level: self.local_brightness });
+        } else {
+            // A flag, not one queued message per click: the firmware's outbox
+            // is 4 deep and drops on overflow, so ten clicks of queued
+            // messages would lose the newest and leave the server on a level
+            // the knob passed through. One message, the final level, on flush.
+            self.brightness_pending = true;
         }
     }
 
@@ -270,13 +289,26 @@ impl Board {
             .map(|r| r.frame_id.clone())
             .filter(|id| !self.cache.contains_key(id))
             .collect();
+        // Content is the only proof the server is still there, so freshness is
+        // stamped HERE — a socket that reconnects and delivers nothing leaves
+        // the grace window running (see `set_online`).
+        self.offline_since = None;
         if self.mode == Mode::Booting && !m.rotation.is_empty() {
             self.mode = Mode::Running;
         }
+        // A manifest is the server reasserting ownership of the panel: its
+        // `display_on` decides darkness from here on. Without this, a sleep
+        // toggled locally while offline survives the reconnect forever — the
+        // panel stays black while the server (and the app's power toggle) both
+        // read "on", and only a second physical press gets the board back.
+        if self.mode == Mode::Asleep {
+            self.mode = Mode::Running;
+        }
         // The server owns brightness; adopt its value unless the knob was just
-        // turned (the transient bar is still up) — a manifest racing a turn in
-        // flight would rubber-band the knob.
-        if self.brightness_changed_at.is_none() {
+        // turned (the transient bar is still up) or a turn it hasn't heard yet
+        // is waiting to be reported — a manifest racing either would
+        // rubber-band the knob back to the level the user just left.
+        if self.brightness_changed_at.is_none() && !self.brightness_pending {
             self.local_brightness = m.brightness.clamp(10, 100);
         }
         // A same-length rotation keeps the current slot and dwell timer —
@@ -410,6 +442,23 @@ impl Board {
                 }
             }
         }
+        // The pair code outlives its usefulness the moment nobody's typing it
+        // in: a stray double press must not cost the panel its scores until
+        // someone walks over and presses again.
+        if self.mode == Mode::Syncing {
+            if let Some(t) = self.syncing_since {
+                if now_ms.saturating_sub(t) >= SYNC_TIMEOUT_MS {
+                    self.syncing_since = None;
+                    self.mode = Mode::Running;
+                }
+            }
+        }
+        // Report a knob turn the server missed (turned while offline, or on a
+        // local screen) as soon as it can hear it — one message, final level.
+        if self.brightness_pending && self.online && self.mode == Mode::Running {
+            self.brightness_pending = false;
+            self.outbox.push(ClientMsg::DeviceBrightness { level: self.local_brightness });
+        }
         if self.mode == Mode::Running {
             let current_id = if let Some(m) = &self.manifest {
                 if m.rotation.len() > 1 {
@@ -452,6 +501,11 @@ impl Board {
                     } else {
                         Mode::Running
                     };
+                    // Tell the server anyway. The local flip is what makes the
+                    // knob work with no socket, but it's invisible to `power`
+                    // until this lands — queued now, sent on reconnect, so the
+                    // app's toggle and the panel agree again.
+                    self.outbox.push(ClientMsg::ButtonPress);
                 }
             }
             // double press: show the pairing code — but only while online.
@@ -461,8 +515,10 @@ impl Board {
             // dropped while it was up — leaving must never be gated).
             Gesture::Double => {
                 if self.mode == Mode::Syncing {
+                    self.syncing_since = None;
                     self.mode = Mode::Running;
                 } else if self.online {
+                    self.syncing_since = Some(self.clock);
                     self.mode = Mode::Syncing;
                 }
             }
@@ -470,6 +526,7 @@ impl Board {
             Gesture::Long => {
                 self.manifest = None;
                 self.cache.clear();
+                self.syncing_since = None;
                 // Fresh provisioning always starts from the top of the handshake.
                 self.setup_phase = SetupPhase::WaitingBluetooth;
                 self.mode = Mode::Setup;
@@ -494,6 +551,13 @@ impl Board {
         if self.updating.is_some() {
             return vec![0u32; FRAME_PIXELS];
         }
+        // Only server content gets the transient brightness bar. On the
+        // firmware-local screens the bottom rows are the status LINE — measured
+        // baselines: "FINDING SERVER" and "REBOOTING" fill rows 25-29, the
+        // pair-code spinner 28-30 — so even a 4-row bar eats the word the user
+        // is standing there reading. Those screens already report the level by
+        // dimming whole (`scale_buf` below), which is feedback enough.
+        let mut server_content = false;
         let mut buf = match self.mode {
             Mode::Booting => self.screen_boot(),
             Mode::Setup => self.screen_setup(),
@@ -510,7 +574,14 @@ impl Board {
                     && self
                         .offline_since
                         .is_some_and(|t| self.clock.saturating_sub(t) < OFFLINE_GRACE_MS);
-                if self.online || holding {
+                // Power intent outlives the socket. A board the user turned OFF
+                // must stay off through an ISP hiccup or a 30-60s server
+                // deploy: an animated CONNECTING screen lighting up a dark
+                // bedroom at 3am is worse than any outage it reports, and
+                // nobody is standing there to read it anyway.
+                let dark_by_intent = self.manifest.as_ref().is_some_and(|m| !m.display_on);
+                if self.online || holding || dark_by_intent {
+                    server_content = true;
                     self.screen_running()
                 } else {
                     self.screen_connecting()
@@ -523,7 +594,7 @@ impl Board {
         scale_buf(&mut buf, self.local_brightness);
         // Transient indicator for ~2s after a knob turn, drawn at full level so it
         // stays legible even when the screen itself is dimmed.
-        if self.brightness_changed_at.is_some() {
+        if server_content && self.brightness_changed_at.is_some() {
             overlay_brightness_bar(&mut buf, self.local_brightness);
         }
         buf
@@ -881,14 +952,19 @@ fn draw_checkmark(c: &mut Canvas, cx: i32, cy: i32) {
         .ok();
 }
 
-/// Transient brightness bar across the bottom rows (amber fill proportional to level).
+/// Transient brightness bar across the bottom rows (amber fill proportional to
+/// level). Four rows, not seven: it lands on a live game frame, and the taller
+/// bar swallowed the score line on frames that use the full panel height.
 fn overlay_brightness_bar(buf: &mut [u32], brightness: u8) {
-    let bar_h = 7usize;
+    let bar_h = 4usize;
     let y0 = FRAME_HEIGHT - bar_h;
     let fill = (brightness as usize * FRAME_WIDTH) / 100;
     for y in y0..FRAME_HEIGHT {
         for x in 0..FRAME_WIDTH {
-            buf[y * FRAME_WIDTH + x] = if x < fill { 0x00FF_CC00 } else { 0x0033_3333 };
+            // The unfilled track is deliberately lit, but keep it FAINT: at
+            // 0x333333 on a panel at full brightness it reads as a band of
+            // stuck-on pixels rather than an empty track.
+            buf[y * FRAME_WIDTH + x] = if x < fill { 0x00FF_CC00 } else { 0x0018_1818 };
         }
     }
 }
@@ -990,7 +1066,8 @@ mod tests {
     }
 
     /// There is ONE brightness. Online knob turns are reported to the server
-    /// (which owns the value); offline turns stay local and silent.
+    /// (which owns the value); offline turns dim immediately and wait for a
+    /// socket rather than going out on a dead one.
     #[test]
     fn knob_reports_brightness_when_online() {
         let mut b = Board::new();
@@ -1007,7 +1084,53 @@ mod tests {
         b.set_online(false);
         b.encoder(1);
         assert_eq!(b.brightness(), 90, "offline turns still dim locally");
-        assert!(b.take_outgoing().is_empty(), "offline turns are not queued");
+        assert!(b.take_outgoing().is_empty(), "nothing to send while the socket is down");
+    }
+
+    /// A knob turned while offline is still the user's intent, not a local-only
+    /// dim: the FINAL level (one message, however many clicks) reaches the
+    /// outbox once the socket returns, and the reconnect manifest must not
+    /// revert the panel to the server's stale level on the way.
+    #[test]
+    fn offline_knob_turn_reaches_the_server_on_reconnect() {
+        let m = |bright: u8| Manifest {
+            rotation: Vec::new(),
+            display_on: true,
+            off_state: Default::default(),
+            epoch: 0,
+            brightness: bright,
+        };
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.tick(0);
+        b.on_manifest(m(100));
+        b.set_online(false);
+
+        b.encoder(-1); // 100 -> 90
+        b.encoder(-1); // -> 80
+        b.encoder(-1); // -> 70
+        b.tick(1000);
+        assert!(b.take_outgoing().is_empty(), "nothing goes out while offline");
+
+        // The socket returns and the server's first manifest still carries its
+        // OLD level — adopting it here would undo the turn in front of the user.
+        b.set_online(true);
+        b.on_manifest(m(100));
+        assert_eq!(b.brightness(), 70, "the pending turn outranks a stale echo");
+        b.tick(2000);
+        let out = b.take_outgoing();
+        assert!(
+            matches!(out.as_slice(), [ClientMsg::DeviceBrightness { level: 70 }]),
+            "one message with the final level, got {out:?}"
+        );
+
+        // Reported once; the server now owns 70 and its echo is adopted again.
+        b.tick(3000);
+        assert!(b.take_outgoing().is_empty(), "the flush doesn't repeat every tick");
+        b.tick(10_000); // knob bar expired
+        b.on_manifest(m(40));
+        assert_eq!(b.brightness(), 40, "adoption resumes once the server has heard us");
     }
 
     /// The manifest's brightness is adopted as the local level — except while the
@@ -1016,6 +1139,10 @@ mod tests {
     fn manifest_brightness_adopted_unless_knob_active() {
         let mut b = Board::new();
         b.mode = Mode::Running;
+        // Online: manifests only arrive over a live socket, and an ONLINE turn
+        // is reported straight away (an offline one holds adoption off until it
+        // has been — see `offline_knob_turn_reaches_the_server_on_reconnect`).
+        b.set_online(true);
         let m = |bright: u8| Manifest {
             rotation: Vec::new(),
             display_on: true,
@@ -1285,10 +1412,12 @@ mod tests {
     }
 
     /// A deliberately dark panel (display_on: false — the server always ships
-    /// that with an empty rotation) is content too: a ws blip at 3am must not
-    /// light the bedroom up with the connect screen.
+    /// that with an empty rotation) stays dark for as long as the outage lasts.
+    /// Power intent is not a cache that expires: a board the user turned OFF
+    /// must never light the bedroom up with the connect screen, whether the
+    /// server is gone for two seconds or all night.
     #[test]
-    fn offline_grace_holds_a_deliberately_dark_panel() {
+    fn power_off_survives_the_whole_outage() {
         let mut b = Board::new();
         b.mode = Mode::Running;
         b.set_online(true);
@@ -1307,7 +1436,9 @@ mod tests {
         b.tick(2000);
         assert_eq!(b.framebuffer(), dark, "blip mid-sleep: stays dark");
         b.tick(1000 + OFFLINE_GRACE_MS + 100);
-        assert_ne!(b.framebuffer(), dark, "a real outage still surfaces eventually");
+        assert_eq!(b.framebuffer(), dark, "grace expired: an OFF board stays off");
+        b.tick(6 * 3_600_000); // six hours of outage
+        assert_eq!(b.framebuffer(), dark, "hours later: still off");
     }
 
     /// A same-LENGTH manifest with a different EPOCH is a different program
@@ -1465,6 +1596,223 @@ mod tests {
         assert_ne!(b.framebuffer(), without, "version line changes the boot screen");
     }
 
+    /// A press with no socket sleeps the panel locally AND tells the server the
+    /// moment there's a socket again — otherwise the board is dark while
+    /// `cfg.power` reads true and the app's toggle is a confirmed no-op.
+    #[test]
+    fn offline_press_sleeps_locally_and_still_reports() {
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.button_down(0);
+        b.button_up(50);
+        b.tick(500);
+        assert_eq!(b.mode(), Mode::Asleep, "offline press still works with no server");
+        let out = b.take_outgoing();
+        assert!(
+            matches!(out.as_slice(), [ClientMsg::ButtonPress]),
+            "the press must be queued so power converges on reconnect, got {out:?}"
+        );
+    }
+
+    /// The server owns the panel: an arriving manifest ends a locally-toggled
+    /// sleep, and its own `display_on` decides whether the board is dark. Without
+    /// this the offline sleep survives every reconnect and only a second
+    /// physical press recovers the board.
+    #[test]
+    fn manifest_ends_a_local_sleep() {
+        use scoreboard_protocol::RotationEntry;
+        let solid = |r: u8, g: u8, b: u8| -> Vec<u8> {
+            let px = scoreboard_protocol::rgb888_to_565(r, g, b).to_le_bytes();
+            (0..FRAME_PIXELS).flat_map(|_| px).collect()
+        };
+        let mk = |on: bool| Manifest {
+            rotation: if on {
+                vec![RotationEntry { frame_id: "a".into(), dwell_ms: 1000, scroll: false }]
+            } else {
+                vec![]
+            },
+            display_on: on,
+            off_state: Default::default(),
+            epoch: 0,
+            brightness: 100,
+        };
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.tick(0);
+        b.button_down(0);
+        b.button_up(50);
+        b.tick(500);
+        assert_eq!(b.mode(), Mode::Asleep);
+
+        // Back online: the server says the display is ON, so the panel lights up.
+        b.set_online(true);
+        b.on_manifest(mk(true));
+        b.on_frame("a".into(), solid(255, 0, 0));
+        assert_eq!(b.mode(), Mode::Running, "the manifest reasserts server ownership");
+        b.tick(600);
+        assert_eq!(b.framebuffer()[0], 0xFF0000, "content is back on the panel");
+
+        // And a manifest that says OFF leaves it dark — via display_on, not mode.
+        b.on_manifest(mk(false));
+        assert_eq!(b.mode(), Mode::Running);
+        assert!(b.framebuffer().iter().all(|&p| p == 0), "display_on: false is still black");
+    }
+
+    /// Freshness is stamped by CONTENT, not by the socket: a link that
+    /// handshakes and dies before delivering a manifest must not restart the
+    /// grace window, or an hour-old score renders as live forever. A reconnect
+    /// that DOES deliver a manifest starts the clock over.
+    #[test]
+    fn reconnect_without_a_manifest_does_not_restart_the_grace_window() {
+        use scoreboard_protocol::RotationEntry;
+        let solid = |r: u8, g: u8, b: u8| -> Vec<u8> {
+            let px = scoreboard_protocol::rgb888_to_565(r, g, b).to_le_bytes();
+            (0..FRAME_PIXELS).flat_map(|_| px).collect()
+        };
+        let manifest = || Manifest {
+            rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 1000, scroll: false }],
+            display_on: true,
+            off_state: Default::default(),
+            epoch: 0,
+            brightness: 100,
+        };
+        let connect_screen = |t: u64| {
+            let mut r = Board::new();
+            r.mode = Mode::Running;
+            r.tick(t);
+            r.framebuffer()
+        };
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.tick(0);
+        b.on_manifest(manifest());
+        b.on_frame("a".into(), solid(255, 0, 0));
+        b.tick(1000);
+        let content = b.framebuffer();
+
+        // Contact is lost at t=1000, then the socket flaps: each retry
+        // handshakes and dies with nothing to show for it.
+        b.set_online(false);
+        for t in [10_000u64, 20_000, 30_000, 40_000] {
+            b.tick(t);
+            assert_eq!(b.framebuffer(), content, "inside the window: content held");
+            b.set_online(true); // handshake completes…
+            b.tick(t + 100);
+            b.set_online(false); // …and dies before any manifest arrives
+        }
+        b.tick(1000 + OFFLINE_GRACE_MS + 100);
+        assert_eq!(
+            b.framebuffer(),
+            connect_screen(1000 + OFFLINE_GRACE_MS + 100),
+            "empty reconnects don't buy another 45s of stale scores"
+        );
+
+        // A reconnect that delivers content IS contact: the window restarts.
+        b.set_online(true);
+        b.on_manifest(manifest());
+        b.tick(1000 + OFFLINE_GRACE_MS + 200);
+        assert_eq!(b.framebuffer(), content, "fresh content is shown again");
+        b.set_online(false);
+        b.tick(2 * OFFLINE_GRACE_MS);
+        assert_eq!(b.framebuffer(), content, "the window is timed from that manifest");
+    }
+
+    /// The pair code is only useful while someone is at the board typing it in.
+    /// An accidental double press must not cost the panel its scores until
+    /// somebody walks back over and presses again.
+    #[test]
+    fn pair_code_screen_times_out() {
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.tick(0);
+        b.gesture(Gesture::Double);
+        assert_eq!(b.mode(), Mode::Syncing);
+        b.tick(SYNC_TIMEOUT_MS - 1000);
+        assert_eq!(b.mode(), Mode::Syncing, "still up while someone could be typing");
+        b.tick(SYNC_TIMEOUT_MS + 100);
+        assert_eq!(b.mode(), Mode::Running, "the code screen returns to content on its own");
+
+        // The timer is per visit: a later double press gets its own full window.
+        b.gesture(Gesture::Double);
+        assert_eq!(b.mode(), Mode::Syncing);
+        b.tick(SYNC_TIMEOUT_MS + 200);
+        assert_eq!(b.mode(), Mode::Syncing, "the second visit starts its own clock");
+        b.tick(2 * SYNC_TIMEOUT_MS + 300);
+        assert_eq!(b.mode(), Mode::Running);
+    }
+
+    /// The brightness bar may cover pixels the SERVER drew; it must never cover
+    /// the board's own status lines, whose text reaches row 29 (connect,
+    /// "REBOOTING") and row 30 (the pair-code spinner). On content it stays in
+    /// the bottom four rows.
+    #[test]
+    fn brightness_bar_spares_the_local_screens() {
+        use scoreboard_protocol::RotationEntry;
+        // Lit-pixel mask: brightness scaling dims every pixel, so compare which
+        // pixels are lit rather than their exact color.
+        let lit = |fb: &[u32]| -> Vec<bool> { fb.iter().map(|&p| p != 0).collect() };
+
+        // Connect screen and setup screen: the turn must change nothing but the
+        // overall dim — no bar, no erased status line.
+        for setup in [false, true] {
+            let mut b = Board::new();
+            b.tick(0);
+            if setup {
+                b.gesture(Gesture::Long);
+            } else {
+                b.mode = Mode::Running;
+                b.set_wifi(true);
+            }
+            b.tick(800);
+            let before = lit(&b.framebuffer());
+            b.encoder(-1);
+            assert_eq!(lit(&b.framebuffer()), before, "no overlay on a local screen (setup={setup})");
+        }
+
+        // Pair-code screen: same, spinner included.
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.tick(0);
+        b.gesture(Gesture::Double);
+        b.tick(800);
+        let before = lit(&b.framebuffer());
+        b.encoder(-1);
+        assert_eq!(lit(&b.framebuffer()), before, "the pair code keeps all 32 rows");
+
+        // Server content: the bar DOES draw, confined to rows 28-31.
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.tick(0);
+        b.on_manifest(Manifest {
+            rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 10_000, scroll: false }],
+            display_on: true,
+            off_state: Default::default(),
+            epoch: 0,
+            brightness: 100,
+        });
+        let px = scoreboard_protocol::rgb888_to_565(255, 0, 0).to_le_bytes();
+        b.on_frame("a".into(), (0..FRAME_PIXELS).flat_map(|_| px).collect());
+        b.tick(100);
+        b.encoder(-1);
+        let with_bar = b.framebuffer();
+        b.tick(4000); // same dim, bar expired: the difference IS the bar
+        let without_bar = b.framebuffer();
+        assert_eq!(
+            with_bar[..28 * FRAME_WIDTH],
+            without_bar[..28 * FRAME_WIDTH],
+            "rows above 28 belong to the game"
+        );
+        assert_ne!(
+            with_bar[28 * FRAME_WIDTH..],
+            without_bar[28 * FRAME_WIDTH..],
+            "the bar draws in the bottom four rows"
+        );
+    }
+
     /// Not a test — renders the new screens to raw RGB888 files for eyeballing.
     /// Run: cargo test -p board-core -- --ignored dump_screens
     #[test]
@@ -1508,3 +1856,4 @@ mod tests {
         }
     }
 }
+

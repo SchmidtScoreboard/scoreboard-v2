@@ -562,6 +562,11 @@ void uniffi_app_core_fn_method_scoreboardclient_set_team_spoiler(void*_Nonnull p
 void uniffi_app_core_fn_method_scoreboardclient_set_timezone(void*_Nonnull ptr, RustBuffer board_id, RustBuffer tz, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_UNPAIR_BOARD
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_UNPAIR_BOARD
+void uniffi_app_core_fn_method_scoreboardclient_unpair_board(void*_Nonnull ptr, RustBuffer board_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_UPDATE_FIRMWARE
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_UPDATE_FIRMWARE
 void uniffi_app_core_fn_method_scoreboardclient_update_firmware(void*_Nonnull ptr, RustBuffer board_id, RustCallStatus *_Nonnull out_status
@@ -1093,6 +1098,12 @@ uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_team_spoiler(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_TIMEZONE
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_TIMEZONE
 uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_timezone(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_UNPAIR_BOARD
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_UNPAIR_BOARD
+uint16_t uniffi_app_core_checksum_method_scoreboardclient_unpair_board(void
     
 );
 #endif

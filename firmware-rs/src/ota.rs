@@ -83,17 +83,19 @@ fn valid_path(p: &str) -> bool {
 /// The revert watchdog checks it at the five-minute mark.
 static FW_CONFIRMED: AtomicBool = AtomicBool::new(false);
 
-/// Flash sector size (the OTA slots start 64KB-aligned).
+/// Flash sector size — the erase granularity, and the unit esp-storage works in
+/// however much you hand it (the OTA slots start 64KB-aligned).
 const CHUNK: usize = 4096;
-/// Writes are batched into bursts of this many bytes. Every flash program
-/// disables the SPI cache, stalling all code that executes from flash —
-/// including the render task — so per-sector writes locked the flash mutex at
-/// ~16Hz for the whole download. The panel is now BLANK throughout the update
-/// (board-core `set_updating` — a black panel can't strobe), so this is purely
-/// a flash-efficiency choice: one 32KB program per lock acquisition instead of
-/// eight 4KB ones. The mutex is still taken PER burst, so a hold-to-reset
-/// gesture only ever waits out a single burst write.
-const BURST: usize = CHUNK * 8;
+/// Bytes buffered before each flash program. ONE sector, deliberately: esp-storage's
+/// `Storage::write` read-modify-erase-writes a sector at a time internally, so a
+/// bigger buffer programs the exact same sectors with the exact same erases —
+/// it buys nothing. What it costs is real: this is the largest contiguous heap
+/// request the firmware makes, on the one path where a failed allocation aborts
+/// (`handle_alloc_error`) instead of returning `Err`, and it is made while the
+/// whole board-core frame cache is still resident. A sector-sized buffer also
+/// keeps the flash mutex held for exactly one sector program, which is what
+/// [`SharedFlash`] promises hold-to-reset.
+const BURST: usize = CHUNK;
 
 /// Boot-attempt counter for unconfirmed images: its own nvs sector (after
 /// creds 0x9000 / brightness 0xA000 / identity 0xB000). Incremented by
@@ -230,10 +232,12 @@ pub fn boot_check(flash: &mut FlashStorage<'static>) -> bool {
             println!("[ota] booted a slot condemned by an interrupted revert — completing it");
             revert_now(flash);
         }
-        // Undefined/Valid/other (or unreadable): treat as confirmed. Undefined
-        // can also appear if power died between commit()'s two otadata writes;
-        // reverting to a possibly-stale other slot on that guess would be
-        // worse than trusting the image the bootloader just ran.
+        // Undefined/Valid/other (or unreadable): treat as confirmed. A commit()
+        // interrupted between its two otadata writes also lands here — as
+        // Undefined on the first OTA, as a recycled Valid on every one after
+        // (see commit()) — but reverting to a possibly-stale other slot on that
+        // guess would be worse than trusting the image the bootloader just ran,
+        // which passed every verification before otadata moved at all.
         _ => {
             if read_attempts(flash) != 0 {
                 write_attempts(flash, 0); // stale strikes from a confirmed past
@@ -266,9 +270,14 @@ pub async fn confirm_running_image(flash: &'static SharedFlash) {
 /// normally seconds; five minutes forgives a slow router reboot). If it
 /// doesn't, we assume the update broke connectivity — the one thing this board
 /// exists for — flip otadata back to the previous slot, and reboot into it.
+///
 /// The previous image is guaranteed intact: installs only write the INACTIVE
 /// slot, and this task exists precisely because the bootloader can't be
 /// trusted to do the rollback itself.
+///
+/// Spawned ONLY when the board has stored credentials: in BLE provisioning
+/// there is no network to auth over, so the deadline could never be met and
+/// this would condemn a working image (see main).
 #[embassy_executor::task]
 pub async fn revert_watchdog(flash: &'static SharedFlash) {
     Timer::after(Duration::from_secs(5 * 60)).await;
@@ -350,18 +359,28 @@ async fn commit(flash: &SharedFlash, expected: AppPartitionSubType) -> Result<()
     }
     up.activate_next_partition().map_err(|_| "otadata activate failed")?;
     // New = "unconfirmed": the next boot arms the revert watchdog. The two
-    // otadata writes aren't atomic; power loss between them leaves Undefined,
-    // which boot_check deliberately reads as confirmed (see there).
+    // otadata writes aren't atomic, and the gap is wider than it looks —
+    // activate_next_partition RECYCLES the other otadata entry, rewriting its
+    // sequence number but keeping whatever ota_state was already sitting there.
+    // On the FIRST OTA that entry is blank, so an interrupted commit leaves
+    // Undefined; from the SECOND OTA onward it holds the Valid this slot earned
+    // when it last ran, so the interrupted state reads as already-confirmed and
+    // the new image boots with neither the watchdog nor a strike behind it.
+    // Accepted: nothing reaches this line until length, sha256 AND the Ed25519
+    // signature have all passed, so the worst case is an image we signed running
+    // unsupervised — not an unverified one.
     up.set_current_ota_state(OtaImageState::New)
         .map_err(|_| "otadata state write failed")?;
     Ok(())
 }
 
-/// Burst-buffered writer into the inactive slot. Accumulates BURST bytes in
-/// RAM, then programs them under one flash lock (~200ms — hold-to-reset only
-/// touches flash AFTER its 10s gesture, so this never blocks the escape hatch).
-/// The panel is black for the whole update, so there's no visual pacing to do:
-/// bursts just cut the number of cache-stalling flash programs (see BURST).
+/// Sector-buffered writer into the inactive slot. Re-chunks arbitrary TCP read
+/// sizes into BURST-sized, sector-aligned programs, each under its own short
+/// flash lock — so a hold-to-reset gesture never waits on more than one sector
+/// (and only touches flash after its 10s hold anyway). Every flash program
+/// disables the SPI cache and stalls all code executing from flash, including
+/// the render task; the panel is deliberately BLACK for the whole update
+/// (board-core `set_updating`) so those stalls have nothing to strobe.
 struct SlotWriter<'a> {
     flash: &'a SharedFlash,
     base: u32,

@@ -597,6 +597,10 @@ public protocol ScoreboardClientProtocol: AnyObject {
      * so its pushes stop. Without this, "Remove this scoreboard" was app-UI
      * only — the still-subscribed connection kept receiving board state and
      * the next push resurrected the board.
+     *
+     * This forgets locally but keeps the server-side grant. To also hand back
+     * the pairing (so this phone can no longer command the board at all), use
+     * [`Self::unpair_board`].
      */
     func removeBoard(boardId: String)
 
@@ -713,6 +717,15 @@ public protocol ScoreboardClientProtocol: AnyObject {
      * idle clock and start-time labels. Invalid names are ignored server-side.
      */
     func setTimezone(boardId: String, tz: String)
+
+    /**
+     * Remove a board AND revoke this app's pairing on the server. The grant
+     * used to be permanent — re-adding the board later means pairing again
+     * with a fresh code, which is what "Remove this scoreboard" implies.
+     * Only this controller's own grant is revoked; other paired phones keep
+     * theirs.
+     */
+    func unpairBoard(boardId: String)
 
     /**
      * Tell a board to download, verify, and install the server-hosted
@@ -908,6 +921,10 @@ open class ScoreboardClient:
      * so its pushes stop. Without this, "Remove this scoreboard" was app-UI
      * only — the still-subscribed connection kept receiving board state and
      * the next push resurrected the board.
+     *
+     * This forgets locally but keeps the server-side grant. To also hand back
+     * the pairing (so this phone can no longer command the board at all), use
+     * [`Self::unpair_board`].
      */
     open func removeBoard(boardId: String) { try! rustCall {
         uniffi_app_core_fn_method_scoreboardclient_remove_board(self.uniffiClonePointer(),
@@ -1150,6 +1167,19 @@ open class ScoreboardClient:
         uniffi_app_core_fn_method_scoreboardclient_set_timezone(self.uniffiClonePointer(),
                                                                 FfiConverterString.lower(boardId),
                                                                 FfiConverterString.lower(tz), $0)
+    }
+    }
+
+    /**
+     * Remove a board AND revoke this app's pairing on the server. The grant
+     * used to be permanent — re-adding the board later means pairing again
+     * with a fresh code, which is what "Remove this scoreboard" implies.
+     * Only this controller's own grant is revoked; other paired phones keep
+     * theirs.
+     */
+    open func unpairBoard(boardId: String) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_unpair_board(self.uniffiClonePointer(),
+                                                                FfiConverterString.lower(boardId), $0)
     }
     }
 
@@ -3230,7 +3260,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_method_scoreboardclient_pubkey() != 28199 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_method_scoreboardclient_remove_board() != 4192 {
+    if uniffi_app_core_checksum_method_scoreboardclient_remove_board() != 62526 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_remove_game() != 42137 {
@@ -3303,6 +3333,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_timezone() != 2955 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_scoreboardclient_unpair_board() != 59912 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_update_firmware() != 35440 {

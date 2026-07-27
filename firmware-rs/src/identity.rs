@@ -9,7 +9,7 @@
 //! the identity.
 
 use embedded_storage::{ReadStorage, Storage};
-use esp_hal::rng::Rng;
+use esp_hal::rng::Trng;
 use esp_storage::FlashStorage;
 
 const OFFSET: u32 = 0xB000; // own nvs sector, after creds (0x9000) + brightness (0xA000)
@@ -35,14 +35,21 @@ fn save(flash: &mut FlashStorage, secret: &[u8; 32]) {
 }
 
 /// Load the persisted identity, or mint + persist a fresh one on first boot.
-pub fn load_or_create(flash: &mut FlashStorage, rng: &mut Rng) -> [u8; 32] {
+///
+/// Takes a [`Trng`] rather than esp-hal's plain `Rng` on purpose. `Rng` is only
+/// truly random while the RF subsystem or the SAR ADC is mixing physical noise
+/// into the hardware generator; with neither up — which is exactly the state
+/// this early in boot — it is documented as PSEUDO-random. That would make the
+/// seed guessable, and this seed is minted once and read forever: a guessable
+/// one is a permanently forgeable board identity. `Trng::try_new` only succeeds
+/// while a `TrngSource` is alive, so the parameter type IS the proof that
+/// physical entropy is switched on.
+pub fn load_or_create(flash: &mut FlashStorage, rng: &Trng) -> [u8; 32] {
     if let Some(secret) = load(flash) {
         return secret;
     }
     let mut secret = [0u8; 32];
-    for chunk in secret.chunks_mut(4) {
-        chunk.copy_from_slice(&rng.random().to_le_bytes());
-    }
+    rng.read(&mut secret);
     save(flash, &secret);
     secret
 }

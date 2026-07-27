@@ -168,6 +168,20 @@ async fn gatt_loop<P: PacketPool>(
                         Timer::after(Duration::from_millis(900)).await;
                         esp_hal::system::software_reset();
                     }
+                    // Only reachable when the save was REFUSED — the success arm
+                    // above reboots. A refusal used to be silent, which is the
+                    // worst possible failure here: the phone's write was ACKed at
+                    // the GATT layer, so the app declares success while the board
+                    // has nothing in flash and will come back up unprovisioned.
+                    // Say exactly why on the console, and deliberately leave the
+                    // panel in WaitingCreds — "still waiting for Wi-Fi details" is
+                    // the truth, and a rewritten characteristic retries from here.
+                    println!(
+                        "[ble] creds REJECTED (ssid {}B, pass {}B, host {}B; flash record allows 32/64/96, ssid must be non-empty) — still waiting",
+                        s.len(),
+                        p.len(),
+                        host.len()
+                    );
                 }
             }
             _ => {}
