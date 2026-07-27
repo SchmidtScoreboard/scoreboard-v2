@@ -292,6 +292,9 @@ async fn controller_loop(
                         .map(|b| state.config_for(b))
                         .unwrap_or_default();
                     let tz = crate::board_tz(&cfg);
+                    // Only a board-scoped browse can say what's coming to THAT
+                    // panel; an unscoped one leaves `queued` false throughout.
+                    let prefs = board_id.as_deref().map(|_| crate::board_prefs(&cfg));
                     let games: Vec<GameSummary> = {
                         let g = state.games.lock().unwrap();
                         g.iter()
@@ -300,6 +303,9 @@ async fn controller_loop(
                                 let spoiler = crate::spoiler_for(&cfg, g);
                                 let mut s = crate::to_summary_for(g, spoiler, tz);
                                 s.scrolls = crate::game_scrolls(&cfg, g);
+                                s.queued = prefs
+                                    .as_ref()
+                                    .is_some_and(|p| crate::game_queued(&state, &cfg, p, g));
                                 s
                             })
                             .collect()

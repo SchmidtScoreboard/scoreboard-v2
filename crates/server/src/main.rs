@@ -1059,6 +1059,8 @@ pub(crate) fn to_summary(g: &Game, tz: Option<chrono_tz::Tz>) -> GameSummary {
             scrolls: false,
             // Leaderboard sports (golf/F1) have no per-game ESPN page.
             espn_url: None,
+            // Board-scoped; the browse path fills it in.
+            queued: false,
         };
     }
     let detail = pregame_detail().unwrap_or_else(|| {
@@ -1085,6 +1087,8 @@ pub(crate) fn to_summary(g: &Game, tz: Option<chrono_tz::Tz>) -> GameSummary {
         spoiled: false,
         scrolls: false,
         espn_url: crate::espn::espn_game_url(&g.sport_id, &g.id),
+        // Board-scoped; the browse path fills it in.
+        queued: false,
     }
 }
 
@@ -1401,13 +1405,16 @@ fn game_priority(g: &Game, cfg: &BoardConfig, favs: &HashSet<String>, unconfigur
 /// How many games fit in the board's rotation.
 const ROTATION_CAP: usize = 20;
 
-/// All games this board WANTS, split into (shown, bumped): priority-ordered, the
-/// first `ROTATION_CAP` get rotation slots; the rest are reported to the app as
-/// bumped so the user can promote them (manual adds outrank everything).
-/// Unconfigured boards sample the slate without reporting bumps — nothing there
-/// was chosen, so nothing was "lost".
-fn candidates_with_bumped(state: &AppState, cfg: &BoardConfig) -> (Vec<Game>, Vec<Game>) {
-    let games = state.games.lock().unwrap();
+/// A board's selection rules, derived once and reused per game — resolving the
+/// favorites set for every game in a 300-game slate is pure waste.
+pub(crate) struct Prefs {
+    favs: HashSet<String>,
+    /// Nothing chosen at all: the board samples the whole live slate, so every
+    /// game "qualifies" and nothing was ever lost to the cap.
+    unconfigured: bool,
+}
+
+pub(crate) fn board_prefs(cfg: &BoardConfig) -> Prefs {
     let favs: HashSet<String> = cfg
         .sports
         .iter()
@@ -1418,6 +1425,25 @@ fn candidates_with_bumped(state: &AppState, cfg: &BoardConfig) -> (Vec<Game>, Ve
         .iter()
         .any(|s| s.championship_option_id.as_deref().is_some_and(|o| o != "none"));
     let unconfigured = favs.is_empty() && cfg.extra_game_ids.is_empty() && !has_champ_prefs;
+    Prefs { favs, unconfigured }
+}
+
+/// Will this game join the rotation once it starts? True when the board's
+/// preferences already claim it but it isn't on the panel yet — which is
+/// exactly "upcoming, and coming to your scoreboard". Anything already showing
+/// (live, or a pregame inside the lead-in window) is not queued: it's HERE.
+pub(crate) fn game_queued(state: &AppState, cfg: &BoardConfig, prefs: &Prefs, g: &Game) -> bool {
+    !board_shows(state, g) && game_priority(g, cfg, &prefs.favs, prefs.unconfigured).is_some()
+}
+
+/// All games this board WANTS, split into (shown, bumped): priority-ordered, the
+/// first `ROTATION_CAP` get rotation slots; the rest are reported to the app as
+/// bumped so the user can promote them (manual adds outrank everything).
+/// Unconfigured boards sample the slate without reporting bumps — nothing there
+/// was chosen, so nothing was "lost".
+fn candidates_with_bumped(state: &AppState, cfg: &BoardConfig) -> (Vec<Game>, Vec<Game>) {
+    let games = state.games.lock().unwrap();
+    let Prefs { favs, unconfigured } = board_prefs(cfg);
 
     let mut seen: HashSet<String> = HashSet::new();
     let mut wanted: Vec<(u8, usize, Game)> = Vec::new();
@@ -3244,6 +3270,52 @@ mod tests {
         let cold = Game { status: GameStatus::Final, ..live_game("g2") };
         assert!(!board_shows(&state, &cold));
         assert!(!browse_shows_now(&state, &cold));
+    }
+
+    /// "Coming to your scoreboard": a game the board's preferences already
+    /// claim, that just hasn't started yet. Anything already on the panel is
+    /// not queued (it's here), and a game no preference claims never is.
+    #[test]
+    fn queued_marks_upcoming_games_the_board_will_show() {
+        use chrono::{Duration as D, Utc};
+        let scheduled = |id: &str, abbrev: &str, hours: i64| Game {
+            id: id.into(),
+            sport_id: "nhl".into(),
+            away: TeamSide { abbrev: abbrev.into(), ..TeamSide::empty(abbrev) },
+            home: TeamSide::empty("ZZZ"),
+            status: GameStatus::Pregame,
+            ordinal: String::new(),
+            clock: String::new(),
+            start_time: (Utc::now() + D::hours(hours)).format("%Y-%m-%dT%H:%MZ").to_string(),
+            end_time: None,
+            leaderboard: None,
+            champ: None,
+            session: None,
+            situation: None,
+            pregame: None,
+        };
+        let state = AppState::new_ephemeral();
+        // Tonight's Blackhawks game, a stranger's game, and a live favorite.
+        let mine = scheduled("mine", "CHI", 6);
+        let theirs = scheduled("theirs", "TOR", 6);
+        let now_playing = Game { away: TeamSide { abbrev: "CHI".into(), ..TeamSide::empty("CHI") }, ..live_game("live") };
+        *state.games.lock().unwrap() =
+            vec![mine.clone(), theirs.clone(), now_playing.clone()];
+
+        let mut cfg = BoardConfig::default();
+        cfg.sports.push(SportConfig {
+            sport_id: "nhl".into(),
+            favorite_team_ids: vec!["nhl-chi".into()],
+            ..Default::default()
+        });
+        let prefs = board_prefs(&cfg);
+
+        assert!(game_queued(&state, &cfg, &prefs, &mine), "a favorite's upcoming game is coming");
+        assert!(!game_queued(&state, &cfg, &prefs, &theirs), "a game no preference claims is not");
+        assert!(
+            !game_queued(&state, &cfg, &prefs, &now_playing),
+            "a game already on the panel is here, not coming"
+        );
     }
 
     /// The board shows live games plus scheduled ones inside the 30-minute

@@ -169,6 +169,9 @@ pub struct UiGame {
     /// ESPN game-page URL for the "View on ESPN" menu item; nil when none can
     /// be formed (demo games, golf/F1 leaderboards).
     pub espn_url: Option<String>,
+    /// The board's preferences already claim this game, but it hasn't started
+    /// — All Games marks it so you can see what's coming to the panel.
+    pub queued: bool,
 }
 
 /// Implemented on the Swift/Kotlin side to receive pushed state.
@@ -973,6 +976,7 @@ fn to_ui_games(games: Vec<GameSummary>) -> Vec<UiGame> {
             spoiled: g.spoiled,
             scrolls: g.scrolls,
             espn_url: g.espn_url,
+            queued: g.queued,
         })
         .collect()
 }

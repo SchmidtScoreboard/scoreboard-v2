@@ -131,6 +131,13 @@ pub struct GameSummary {
     /// without a resolvable page. Spoiler-safe: it's just a URL, no result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub espn_url: Option<String>,
+    /// This board's preferences already claim the game (favorite team, big-game
+    /// option, league blanket, or a manual add) but it is NOT on the panel yet
+    /// — it hasn't started. The app marks these in All Games so you can see
+    /// what's coming without hunting through the slate. Board-scoped: only set
+    /// when the browse request named a board.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub queued: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

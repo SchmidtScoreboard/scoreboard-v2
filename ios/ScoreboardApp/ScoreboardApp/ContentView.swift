@@ -1446,9 +1446,11 @@ struct GameCard<Footer: View>: View {
     var refresh: Int = 0
     /// Board id, forwarded to the HTTP render fallback for spoiler scoping.
     var board: String = ""
-    /// Card emphasis: `.included` (on the scoreboard — teal ring) or `.pinned`
-    /// (overriding the rotation — orange ring + pin badge).
-    enum Highlight { case none, included, pinned }
+    /// Card emphasis: `.included` (on the scoreboard now — solid teal ring),
+    /// `.queued` (your preferences claim it, but it hasn't started — dashed
+    /// teal ring + clock badge), or `.pinned` (overriding the rotation —
+    /// orange ring + pin badge).
+    enum Highlight { case none, included, queued, pinned }
     var highlight: Highlight = .none
     /// Action buttons row at the bottom of the card.
     @ViewBuilder var footer: Footer
@@ -1467,6 +1469,14 @@ struct GameCard<Footer: View>: View {
                         .font(.caption)
                         .foregroundStyle(.orange)
                         .accessibilityLabel("Pinned")
+                }
+                if highlight == .queued {
+                    // "Coming to the scoreboard" — the card is otherwise
+                    // indistinguishable from a game the board will never show.
+                    Image(systemName: "clock.badge.checkmark")
+                        .font(.caption)
+                        .foregroundStyle(.teal)
+                        .accessibilityLabel("Scheduled for your scoreboard")
                 }
                 if game.spoiled {
                     // Only the hidden state earns a badge; visible is the norm.
@@ -1499,8 +1509,15 @@ struct GameCard<Footer: View>: View {
                 .strokeBorder(
                     highlight == .pinned
                         ? AnyShapeStyle(Color.orange)
-                        : highlight == .included ? AnyShapeStyle(Color.teal.opacity(0.8)) : AnyShapeStyle(.primary.opacity(0.08)),
-                    lineWidth: highlight == .none ? 1 : 3
+                        : highlight == .included ? AnyShapeStyle(Color.teal.opacity(0.8))
+                        : highlight == .queued ? AnyShapeStyle(Color.teal.opacity(0.55))
+                        : AnyShapeStyle(.primary.opacity(0.08)),
+                    // Dashed for queued: same teal family as "on the board",
+                    // but visibly not-yet — solid means it's on the panel now.
+                    style: StrokeStyle(
+                        lineWidth: highlight == .none ? 1 : 3,
+                        dash: highlight == .queued ? [7, 5] : []
+                    )
                 )
         )
     }
@@ -2832,7 +2849,7 @@ struct AllGamesView: View {
         // Teal ring = on the scoreboard; orange ring + badge = pinned. While a
         // pin is active everything else grays out, exactly like the carousel.
         let dimmed = model.focusedGameId != nil && !pinned
-        return GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId], refresh: refresh, board: model.selectedBoardId ?? "", highlight: pinned ? .pinned : showing ? .included : .none) {
+        return GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId], refresh: refresh, board: model.selectedBoardId ?? "", highlight: pinned ? .pinned : showing ? .included : game.queued ? .queued : .none) {
             HStack(spacing: 8) {
                 if showing {
                     AllGamesCardButton(title: "Remove", icon: "minus.circle", tint: .red) {
