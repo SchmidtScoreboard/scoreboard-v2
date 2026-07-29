@@ -2966,8 +2966,13 @@ struct CardMenu: View {
     var body: some View {
         let pinned = model.focusedGameId == game.id
         let noScroll = model.current.noScrollGameIds.contains(game.id)
-        let starts = game.startTime.flatMap(Self.localTimeLabel)
-        let ends = game.endTime.flatMap(Self.localTimeLabel)
+        // Golf's timestamps are midnight-Eastern DATE boundaries, not tee
+        // times (the server renders those as a day too) — showing a clock here
+        // would put a Thursday-morning tournament at "11:00 PM" the night
+        // before for anyone west of Eastern.
+        let dayOnly = game.sportId == "pga" || game.sportId == "lpga"
+        let starts = game.startTime.flatMap { Self.localTimeLabel($0, dayOnly: dayOnly) }
+        let ends = game.endTime.flatMap { Self.localTimeLabel($0, dayOnly: dayOnly) }
         Menu {
             if canPin {
                 Button {
@@ -3071,7 +3076,7 @@ struct CardMenu: View {
     /// ("6:30 PM"), weekday appended otherwise ("4:00 PM Sun"), plus whether
     /// the moment already passed (drives Starts/Started wording). nil when the
     /// string doesn't parse (so the caller drops the row instead of lying).
-    static func localTimeLabel(_ rfc3339: String) -> (label: String, past: Bool)? {
+    static func localTimeLabel(_ rfc3339: String, dayOnly: Bool = false) -> (label: String, past: Bool)? {
         let iso = ISO8601DateFormatter() // internet date-time by default
         var date = iso.date(from: rfc3339)
         if date == nil {
@@ -3079,8 +3084,16 @@ struct CardMenu: View {
             date = iso.date(from: rfc3339)
         }
         guard let date else { return nil }
-        let time = date.formatted(date: .omitted, time: .shortened)
         let past = date < Date()
+        if dayOnly {
+            // Resolve the day in Eastern, where the boundary was drawn.
+            var cal = Calendar(identifier: .gregorian)
+            cal.timeZone = TimeZone(identifier: "America/New_York") ?? .current
+            var fmt = Date.FormatStyle(date: .abbreviated, time: .omitted)
+            fmt.timeZone = cal.timeZone
+            return (date.formatted(fmt), past)
+        }
+        let time = date.formatted(date: .omitted, time: .shortened)
         guard !Calendar.current.isDateInToday(date) else { return (time, past) }
         return ("\(time) \(date.formatted(.dateTime.weekday(.abbreviated)))", past)
     }

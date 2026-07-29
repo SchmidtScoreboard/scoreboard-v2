@@ -1024,7 +1024,13 @@ pub(crate) fn to_summary(g: &Game, tz: Option<chrono_tz::Tz>) -> GameSummary {
     // both team games and leaderboard events.
     let pregame_detail = || {
         (g.status == GameStatus::Pregame)
-            .then(|| start_time_label(&g.start_time, tz))
+            .then(|| {
+                if starts_on_a_day(&g.sport_id) {
+                    start_day_label(&g.start_time)
+                } else {
+                    start_time_label(&g.start_time, tz)
+                }
+            })
             .flatten()
     };
     // Normalized machine-readable timestamps (RFC3339 UTC) alongside the
@@ -1227,6 +1233,34 @@ pub(crate) fn start_time_label(iso: &str, tz: Option<chrono_tz::Tz>) -> Option<S
         Some(tz) => t.with_timezone(&tz).format(FMT).to_string(),
         None => t.with_timezone(&chrono::Local).format(FMT).to_string(),
     })
+}
+
+/// Multi-day events (golf tournaments) carry a DATE, not a tee time: ESPN
+/// stamps them at midnight Eastern of the opening day, so the Rocket Classic
+/// that tees off Thursday 6am reads as `2026-07-30T04:00Z`. Rendering that as
+/// a clock time is wrong twice — the number is a boundary nobody plays at, and
+/// west of Eastern it lands on the PREVIOUS day ("11:00 PM tonight" for a
+/// Thursday-morning start). So show the day instead, resolved in Eastern where
+/// the boundary was drawn.
+pub(crate) fn start_day_label(iso: &str) -> Option<String> {
+    let t = parse_espn_time(iso)?;
+    let et = t.with_timezone(&chrono_tz::America::New_York);
+    let today = chrono::Utc::now().with_timezone(&chrono_tz::America::New_York).date_naive();
+    let days = (et.date_naive() - today).num_days();
+    Some(match days {
+        0 => "TODAY".to_string(),
+        1 => "TOMORROW".to_string(),
+        // Inside the week a weekday reads instantly; past that, a date does.
+        2..=6 => et.format("%a").to_string().to_uppercase(),
+        _ => et.format("%b %-d").to_string().to_uppercase(),
+    })
+}
+
+/// Does this game's start timestamp mean a DAY rather than a moment? True for
+/// golf, whose feed dates are midnight-Eastern boundaries (see
+/// `start_day_label`). F1 sessions carry real session times, so they don't.
+pub(crate) fn starts_on_a_day(sport_id: &str) -> bool {
+    matches!(sport_id, "pga" | "lpga")
 }
 
 /// How far ahead a scheduled game may start and still enter `state.games`.
@@ -3316,6 +3350,69 @@ mod tests {
             !game_queued(&state, &cfg, &prefs, &now_playing),
             "a game already on the panel is here, not coming"
         );
+    }
+
+    /// Golf's feed timestamp is a midnight-Eastern DATE boundary, not a tee
+    /// time — the exact case that showed a Thursday-morning tournament as
+    /// "11:00 PM" the night before on a Central board.
+    #[test]
+    fn golf_starts_render_as_a_day_not_a_clock_time() {
+        use chrono::{Duration as D, Utc};
+        // Midnight ET on a day two from now = 04:00Z, the shape ESPN sends.
+        let iso = (Utc::now() + D::days(2))
+            .with_timezone(&chrono_tz::America::New_York)
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono_tz::America::New_York)
+            .unwrap()
+            .with_timezone(&Utc)
+            .format("%Y-%m-%dT%H:%MZ")
+            .to_string();
+
+        assert!(starts_on_a_day("pga") && starts_on_a_day("lpga"));
+        assert!(!starts_on_a_day("nhl"), "team games have real start times");
+        assert!(!starts_on_a_day("f1"), "F1 sessions have real session times");
+
+        // A weekday, not a time — and NOT shifted a day earlier by the board's
+        // western timezone, which is what produced the bogus "11:00 PM".
+        let label = start_day_label(&iso).expect("parses");
+        assert!(!label.contains(':'), "a day label, not a clock: {label}");
+        let chicago = start_time_label(&iso, Some(chrono_tz::America::Chicago)).unwrap();
+        assert!(chicago.contains("11:00 PM"), "precondition: the old label was {chicago}");
+
+        // Near days read as words.
+        let tomorrow = (Utc::now() + D::days(1))
+            .with_timezone(&chrono_tz::America::New_York)
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_local_timezone(chrono_tz::America::New_York)
+            .unwrap()
+            .with_timezone(&Utc)
+            .format("%Y-%m-%dT%H:%MZ")
+            .to_string();
+        assert_eq!(start_day_label(&tomorrow).as_deref(), Some("TOMORROW"));
+    }
+
+    /// Leaderboard sports have ESPN pages too — just not /gameId/ ones.
+    #[test]
+    fn leaderboard_sports_get_espn_links() {
+        use crate::espn::espn_game_url;
+        assert_eq!(
+            espn_game_url("pga", "401811960").as_deref(),
+            Some("https://www.espn.com/golf/leaderboard?tournamentId=401811960")
+        );
+        assert_eq!(
+            espn_game_url("lpga", "123").as_deref(),
+            Some("https://www.espn.com/golf/leaderboard?tournamentId=123")
+        );
+        // F1 games are per-session; the results page wants the bare event id.
+        assert_eq!(
+            espn_game_url("f1", "600057440-race").as_deref(),
+            Some("https://www.espn.com/racing/results/_/raceId/600057440")
+        );
+        assert_eq!(espn_game_url("pga", "demo-golf"), None, "demo ids still have no page");
     }
 
     /// The board shows live games plus scheduled ones inside the 30-minute

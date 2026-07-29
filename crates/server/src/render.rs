@@ -422,7 +422,11 @@ fn status_for(g: &Game, tz: Option<chrono_tz::Tz>) -> (String, Rgb888) {
         // Scheduled games show WHEN they start (like the original scoreboard);
         // "PREGAME" only if ESPN's timestamp doesn't parse.
         GameStatus::Pregame => (
-            crate::start_time_label(&g.start_time, tz).unwrap_or_else(|| "PREGAME".to_string()),
+            if crate::starts_on_a_day(&g.sport_id) {
+                crate::start_day_label(&g.start_time).unwrap_or_else(|| "PREGAME".to_string())
+            } else {
+                crate::start_time_label(&g.start_time, tz).unwrap_or_else(|| "PREGAME".to_string())
+            },
             GREY,
         ),
     }

@@ -67,8 +67,26 @@ impl EspnSource {
 pub fn espn_game_url(sport_id: &str, game_id: &str) -> Option<String> {
     // ESPN event ids are numeric; anything else (demo ids, F1 session suffixes)
     // can't form a valid page.
+    // F1 games are one-per-session ("{event}-race"); the results page keys on
+    // the bare event id, so strip the suffix before the all-digits check.
+    let game_id = match game_id.split_once('-') {
+        Some((base, _)) if sport_id == "f1" => base,
+        _ => game_id,
+    };
     if game_id.is_empty() || !game_id.bytes().all(|b| b.is_ascii_digit()) {
         return None;
+    }
+    // Leaderboard sports have pages too — they just aren't /gameId/ pages.
+    // (Verified live: golf 200s on the tournamentId query form, F1 on the
+    // /racing/results raceId form.)
+    match sport_id {
+        "pga" | "lpga" => {
+            return Some(format!(
+                "https://www.espn.com/golf/leaderboard?tournamentId={game_id}"
+            ))
+        }
+        "f1" => return Some(format!("https://www.espn.com/racing/results/_/raceId/{game_id}")),
+        _ => {}
     }
     // (web path segment, page kind) per sport. Web paths differ from the API
     // league slugs — soccer collapses usa.1/eng.1/fifa.world to "soccer/match".
@@ -78,7 +96,7 @@ pub fn espn_game_url(sport_id: &str, game_id: &str) -> Option<String> {
         "cbb" => ("mens-college-basketball", "game"),
         "wcbb" => ("womens-college-basketball", "game"),
         "mls" | "epl" | "wc" => ("soccer", "match"),
-        _ => return None, // golf, f1, unknown
+        _ => return None,
     };
     Some(format!("https://www.espn.com/{path}/{kind}/_/gameId/{game_id}"))
 }
@@ -1828,11 +1846,13 @@ mod espn_url_tests {
             espn_game_url("epl", "761685").as_deref(),
             Some("https://www.espn.com/soccer/match/_/gameId/761685")
         );
-        // No per-game page: leaderboard sports, and non-numeric ids (demo
-        // games, F1's "{id}-{session}") can't form a valid link.
-        assert_eq!(espn_game_url("f1", "401881922-race"), None);
-        assert_eq!(espn_game_url("pga", "401580328"), None);
+        // Leaderboard sports DO have pages — just not /gameId/ ones (see
+        // `leaderboard_sports_get_espn_links` in main.rs for those forms).
+        assert!(espn_game_url("f1", "401881922-race").is_some());
+        assert!(espn_game_url("pga", "401580328").is_some());
+        // Non-numeric ids (demo games) still can't form a valid link.
         assert_eq!(espn_game_url("nhl", "demo-nhl"), None);
+        assert_eq!(espn_game_url("pga", "demo-golf"), None);
         assert_eq!(espn_game_url("nhl", ""), None);
         assert_eq!(espn_game_url("unknown", "123"), None);
     }
