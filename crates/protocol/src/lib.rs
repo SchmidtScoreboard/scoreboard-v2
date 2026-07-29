@@ -627,6 +627,12 @@ pub enum ClientMsg {
     // device reports a knob turn — the server adopts this as the board's one
     // brightness (the same value SetBrightness writes and the manifest echoes)
     DeviceBrightness { level: u8 },
+    // device reports OTA download progress (0..=100) while installing. The
+    // server relays it to the board's apps as `ServerMsg::FirmwareProgress`.
+    // Only the DEVICE can measure this honestly: bytes the server hands to the
+    // socket are absorbed by kernel buffers and Railway's TCP proxy long
+    // before the board has written them to flash.
+    DeviceUpdateProgress { pct: u8 },
     // device reports its self-discovered IANA timezone (IP-geolocated at boot)
     // — the server adopts it for this board's clock and start-time labels, so
     // the zone tracks where the BOARD lives with no phone involved (and DST is

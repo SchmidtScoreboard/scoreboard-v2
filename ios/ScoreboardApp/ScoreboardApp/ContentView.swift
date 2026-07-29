@@ -2061,9 +2061,12 @@ struct DashboardView: View {
                 #endif
             }
             if let pct = model.current.firmwareProgress {
-                // Determinate bar while the server streams the image to the
-                // board. The panel is dark (writing flash), which alarms
-                // people — reassure them and warn against unplugging.
+                // Determinate bar, driven by the BOARD's own byte counter
+                // (ClientMsg::DeviceUpdateProgress). The panel is dark while
+                // it writes flash, which alarms people — reassure them and
+                // warn against unplugging. Boards on firmware older than
+                // 2026.7.6 don't report, so they stay on the spinner below
+                // rather than showing a number that isn't true.
                 VStack(alignment: .leading, spacing: 6) {
                     ProgressView(value: Double(pct) / 100)
                     Text("Updating \(pct)%. The panel stays dark while it writes — that's normal; don't unplug it.")

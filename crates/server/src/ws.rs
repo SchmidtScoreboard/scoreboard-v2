@@ -130,6 +130,12 @@ async fn device_loop(sender: WsSender, mut receiver: WsReceiver, state: AppState
                 Ok(ClientMsg::DeviceVersion { version }) => {
                     crate::handle_device_version(&state, &board_id, version);
                 }
+                Ok(ClientMsg::DeviceUpdateProgress { pct }) => {
+                    // The board's own byte counter — the only honest measure
+                    // (see the protocol variant's note). Relayed straight to
+                    // the apps watching this board.
+                    crate::push_firmware_progress(&state, &board_id, pct.min(100));
+                }
                 _ => {}
             }
         }
@@ -1291,14 +1297,12 @@ mod tests {
     /// controller, reaching exactly 100; the token is dropped once the stream
     /// drains; and the delivered body is byte-identical to the dist.
     #[tokio::test]
-    async fn tokenized_download_streams_progress_and_clears() {
+    async fn tokenized_download_serves_bytes_and_retires_its_token() {
         let (state, image) = state_with_big_stable_dist();
         let (ws_url, http, state) = spawn_full_server(state).await;
         let (mut dev, board_id) = auth(&ws_url, Role::Device, &[1u8; 32]).await;
         let mut ctrl = paired_subscriber(&ws_url, &mut dev, &board_id, &[2u8; 32]).await;
 
-        // A real token arrives inside an UpdateFirmware offer; here we mint one
-        // directly to isolate the streaming route from the offer plumbing.
         let nonce = "abad1deacafef00d".to_string();
         state
             .fw_download_tokens
@@ -1314,26 +1318,17 @@ mod tests {
             .unwrap();
         assert_eq!(&body[..], &image[..], "streamed body is byte-identical to the dist");
 
-        let mut last = 0u8;
-        let mut reached_100 = false;
-        for _ in 0..128 {
-            match try_recv(&mut ctrl, 1000).await {
-                Some(ServerMsg::FirmwareProgress { board_id: b, pct }) => {
-                    assert_eq!(b, board_id, "progress names the downloading board");
-                    assert!(pct >= last, "progress is monotonic ({last} -> {pct})");
-                    last = pct;
-                    if pct == 100 {
-                        reached_100 = true;
-                        break;
-                    }
-                }
-                Some(_) => continue,
-                None => break,
+        // The server does NOT invent progress from its own send loop: those
+        // bytes are absorbed by kernel buffers and the TCP proxy, so they hit
+        // 100% while the board is still writing flash. Progress arrives from
+        // the DEVICE instead (see `device_reported_progress_reaches_the_app`).
+        for _ in 0..4 {
+            if let Some(ServerMsg::FirmwareProgress { .. }) = try_recv(&mut ctrl, 300).await {
+                panic!("the download stream must not fabricate progress");
             }
         }
-        assert!(reached_100, "progress reached 100% (last seen {last})");
 
-        // The one-time token is cleared once the stream completes.
+        // The one-time token is still retired once the stream completes.
         let mut cleared = false;
         for _ in 0..40 {
             if !state.fw_download_tokens.lock().unwrap().contains_key(&nonce) {
@@ -1343,6 +1338,24 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         assert!(cleared, "download token cleared after the stream drained");
+    }
+
+    /// The board's own byte counter is what the app shows: a device progress
+    /// report is relayed to exactly that board's subscribed controllers.
+    #[tokio::test]
+    async fn device_reported_progress_reaches_the_app() {
+        let (url, _state) = spawn_server_with(AppState::new_ephemeral()).await;
+        let (mut dev, board_id) = auth(&url, Role::Device, &[1u8; 32]).await;
+        let mut ctrl = paired_subscriber(&url, &mut dev, &board_id, &[2u8; 32]).await;
+
+        send(&mut dev, &ClientMsg::DeviceUpdateProgress { pct: 42 }).await;
+        match recv_until(&mut ctrl, |m| matches!(m, ServerMsg::FirmwareProgress { .. })).await {
+            Some(ServerMsg::FirmwareProgress { board_id: b, pct }) => {
+                assert_eq!(b, board_id);
+                assert_eq!(pct, 42, "the board's number, relayed verbatim");
+            }
+            other => panic!("expected FirmwareProgress, got {other:?}"),
+        }
     }
 
     /// The RAW HTTP framing of the tokenized stream, read exactly the way the

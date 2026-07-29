@@ -777,11 +777,12 @@ fn progress_stream_body(
         let end = (st.offset + FW_CHUNK).min(total);
         let chunk = st.bytes.slice(st.offset..end);
         st.offset = end;
-        let pct = ((st.offset as u64 * 100) / total as u64) as u8;
-        if pct != st.last_pct && (pct >= st.last_pct + 2 || pct == 100) {
-            push_firmware_progress(&st.app, &st.board_id, pct);
-            st.last_pct = pct;
-        }
+        // Deliberately NO progress push here. Bytes handed to this socket are
+        // swallowed by the kernel send buffer and Railway's TCP proxy, so they
+        // reach 100% while the board is still writing flash — the app's bar
+        // jumped straight to full. The DEVICE reports its own progress over
+        // the websocket it now keeps open (ClientMsg::DeviceUpdateProgress);
+        // the token still scopes the download to one board and expires it.
         Some((Ok::<_, std::convert::Infallible>(chunk), st))
     });
     axum::body::Body::from_stream(stream)

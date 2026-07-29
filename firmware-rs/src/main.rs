@@ -542,9 +542,9 @@ async fn device(
                         }
                     }
                     Ok(ServerMsg::UpdateFirmware { version, size, sha256, sig, path, channel }) => {
-                        // Leave the ws loop: the download reuses this task's
-                        // socket buffers (the connection can't survive that,
-                        // and the server's keepalive stops anyway).
+                        // Leave the read loop but KEEP the socket: the download
+                        // writes progress back over it, which is the only
+                        // honest measure of how far along we are.
                         println!("[ota] server offers {version} ({channel}) at {path} ({size} bytes)");
                         pending_update = Some(ota::UpdateJob { version, size, sha256, sig, path, channel });
                         break;
@@ -573,13 +573,22 @@ async fn device(
         // The websocket is done. If the server ordered an update, run the
         // download HERE, exactly like fetch_timezone: this task owns the
         // socket buffers, and the ws socket is dropped first so they're free.
-        drop(sock);
+        // `sock` falls out of scope at the end of this iteration, which frees
+        // its rx/tx borrow for the next connect — no early drop needed now
+        // that the download brings its own buffers.
         if let Some(job) = pending_update.take() {
             board.lock().await.set_online(false);
-            match ota::download_and_install(
-                stack, &mut rx, &mut tx, ip, server_port, &host, &job, flash, board,
+            // The download needs its own buffers because the ws socket still
+            // holds rx/tx — it stays open so the board can report progress
+            // (~4KB, affordable now that the 32KB OTA burst buffer is gone).
+            let mut dl_rx = alloc::vec![0u8; 2048];
+            let mut dl_tx = alloc::vec![0u8; 2048];
+            let result = ota::download_and_install(
+                stack, &mut dl_rx, &mut dl_tx, ip, server_port, &host, &job, flash, board,
+                &mut sock,
             )
-            .await
+            .await;
+            match result
             {
                 Ok(()) => {
                     // Keep the panel black for a beat (it already is — the
