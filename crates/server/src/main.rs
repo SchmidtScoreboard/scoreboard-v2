@@ -1064,8 +1064,9 @@ pub(crate) fn to_summary(g: &Game, tz: Option<chrono_tz::Tz>) -> GameSummary {
             champ: g.champ.as_ref().map(|c| c.label.clone()),
             spoiled: false,
             scrolls: false,
-            // Leaderboard sports (golf/F1) have no per-game ESPN page.
-            espn_url: None,
+            // Leaderboard sports DO have ESPN pages — golf a tournament
+            // leaderboard, F1 a race result — they just aren't /gameId/ ones.
+            espn_url: crate::espn::espn_game_url(&g.sport_id, &g.id),
             // Board-scoped; the browse path fills it in.
             queued: false,
         };
@@ -3394,6 +3395,33 @@ mod tests {
             .format("%Y-%m-%dT%H:%MZ")
             .to_string();
         assert_eq!(start_day_label(&tomorrow).as_deref(), Some("TOMORROW"));
+    }
+
+    /// The summary a golf card is built from must actually CARRY the link —
+    /// fixing the URL builder wasn't enough, because the leaderboard branch of
+    /// `to_summary` returned early with a hardcoded None and never called it.
+    #[test]
+    fn leaderboard_summaries_carry_the_espn_link() {
+        let mut g = live_game("401811960");
+        g.sport_id = "pga".into();
+        g.leaderboard = Some(crate::model::Leaderboard {
+            name: "ROCKET".into(),
+            rows: Vec::new(),
+        });
+        let s = to_summary(&g, None);
+        assert_eq!(
+            s.espn_url.as_deref(),
+            Some("https://www.espn.com/golf/leaderboard?tournamentId=401811960"),
+            "the golf card's View on ESPN link"
+        );
+
+        // And a team game keeps its own form (live_game defaults to pga).
+        let mut team = live_game("401881922");
+        team.sport_id = "nhl".into();
+        assert_eq!(
+            to_summary(&team, None).espn_url.as_deref(),
+            Some("https://www.espn.com/nhl/game/_/gameId/401881922")
+        );
     }
 
     /// Leaderboard sports have ESPN pages too — just not /gameId/ ones.
