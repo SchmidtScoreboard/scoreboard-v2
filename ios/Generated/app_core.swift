@@ -2503,14 +2503,6 @@ public protocol ClientListener: AnyObject {
      * board. Drives the DEBUG firmware picker.
      */
     func onFirmwareList(images: [UiFwImage])
-
-    /**
-     * Server-observed progress (0..=100) of `board_id`'s in-flight firmware
-     * download. The device's ws is dropped while it fetches, so the server
-     * counts the bytes it streams. Stops when the download ends (the board
-     * reboots into the new image and re-pushes BoardState).
-     */
-    func onFirmwareProgress(boardId: String, pct: UInt8)
 }
 
 // Magic number for the Rust proxy to call using the same mechanism as every other method,
@@ -2810,31 +2802,6 @@ private enum UniffiCallbackInterfaceClientListener {
                 }
                 return try uniffiObj.onFirmwareList(
                     images: FfiConverterSequenceTypeUiFwImage.lift(images)
-                )
-            }
-
-            let writeReturn = { () }
-            uniffiTraitInterfaceCall(
-                callStatus: uniffiCallStatus,
-                makeCall: makeCall,
-                writeReturn: writeReturn
-            )
-        },
-        onFirmwareProgress: { (
-            uniffiHandle: UInt64,
-            boardId: RustBuffer,
-            pct: UInt8,
-            _: UnsafeMutableRawPointer,
-            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
-        ) in
-            let makeCall = {
-                () throws in
-                guard let uniffiObj = try? FfiConverterCallbackInterfaceClientListener.handleMap.get(handle: uniffiHandle) else {
-                    throw UniffiInternalError.unexpectedStaleHandle
-                }
-                return try uniffiObj.onFirmwareProgress(
-                    boardId: FfiConverterString.lift(boardId),
-                    pct: FfiConverterUInt8.lift(pct)
                 )
             }
 
@@ -3402,9 +3369,6 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_clientlistener_on_firmware_list() != 1495 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_app_core_checksum_method_clientlistener_on_firmware_progress() != 48610 {
         return InitializationResult.apiChecksumMismatch
     }
 

@@ -43,9 +43,9 @@ All curl-able; the app uses the same ones.
   `firmware.json` (version, size, sha256, sig). Plain-text 404 for an unknown
   channel or one with no dist hosted.
 - `GET /firmware/{stable|beta|dev}.bin` — the image itself. `?u={token}` is the
-  one-time nonce a board's update offer carries: with it the server streams the
-  bytes and reports `FirmwareProgress` to that board's apps; without it (curl,
-  tests) it just serves the file. Either way the bytes are identical and the
+  one-time nonce a board's update offer carries, scoping the download to that
+  board (the token retires when the stream drains); without it (curl, tests)
+  it just serves the file. Either way the bytes are identical and the
   board verifies the signature before installing.
 
 ## `server tui` — the pipeline debugger

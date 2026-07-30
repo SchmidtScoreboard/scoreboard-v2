@@ -472,7 +472,7 @@ impl SlotWriter<'_> {
 /// board (the device's ws is down, so it can't report progress itself).
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
-pub async fn download_and_install<S: embedded_io_async::Read + embedded_io_async::Write>(
+pub async fn download_and_install(
     stack: Stack<'static>,
     rx: &mut [u8],
     tx: &mut [u8],
@@ -482,12 +482,6 @@ pub async fn download_and_install<S: embedded_io_async::Read + embedded_io_async
     job: &UpdateJob,
     flash: &'static SharedFlash,
     board: &'static SharedBoard,
-    // The LIVE websocket, kept open purely so the DEVICE can report progress.
-    // Only it can measure this honestly: bytes the server hands to its socket
-    // disappear into kernel buffers and Railway's TCP proxy long before the
-    // board has written them to flash, which is why server-observed progress
-    // jumped straight to 100%.
-    ws_sock: &mut S,
 ) -> Result<(), &'static str> {
     // Downgrade/replay guard: the plain-HTTP channel means anyone on-path can
     // replay an OLD signed release as an "update". Accept only a strictly-newer
@@ -568,7 +562,6 @@ pub async fn download_and_install<S: embedded_io_async::Read + embedded_io_async
         written: 0,
     };
     let mut hasher = Sha256::new();
-    let mut last_pct: u8 = 0;
 
     // Body bytes that rode in with the headers, then the socket until exactly
     // `size` bytes. More than `size` is as fatal as fewer: the image on the
@@ -595,18 +588,11 @@ pub async fn download_and_install<S: embedded_io_async::Read + embedded_io_async
         verifier.update(data);
         out.feed(data).await?;
         received += n;
-        // Bytes we have actually taken off the wire and handed to flash — the
-        // only honest measure. Reported every 2% (the panel is black by
-        // design, so the app is the only place the user can see this).
-        let pct = (received as u64 * 100 / size as u64) as u8;
-        if pct >= last_pct.saturating_add(2) || (pct == 100 && last_pct != 100) {
-            board.lock().await.set_updating(Some(pct));
-            let msg = scoreboard_protocol::ClientMsg::DeviceUpdateProgress { pct };
-            if let Ok(json) = serde_json::to_vec(&msg) {
-                let _ = crate::ws::write_text(ws_sock, &json).await;
-            }
-            last_pct = pct;
-        }
+        // Deliberately NO progress anywhere: the panel is black by design,
+        // reporting over a kept-open websocket cost a concurrent socket the
+        // net stack's pool couldn't hold (the 2026.7.6 lesson — accepting an
+        // update panicked on TcpSocket::new), and the app just shows a
+        // spinner: the whole download runs well under a minute.
     }
     out.flush().await?;
 

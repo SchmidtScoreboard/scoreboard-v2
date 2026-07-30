@@ -97,9 +97,6 @@ final class ListenerAdapter: ClientListener {
     func onFirmwareList(images: [UiFwImage]) {
         Task { @MainActor in self.model?.firmwareImages = images }
     }
-    func onFirmwareProgress(boardId: String, pct: UInt8) {
-        Task { @MainActor in self.model?.applyFirmwareProgress(boardId, pct) }
-    }
 }
 
 /// Everything the app tracks for a single paired board.
@@ -140,12 +137,6 @@ struct BoardInfo {
     /// comes back online — drives the passive "Updating…" hint. The board
     /// itself shows real progress on its panel; the app just waits.
     var updatingFirmware = false
-    /// Server-observed download progress (0…100) of an in-flight firmware
-    /// update, pushed via `on_firmware_progress`; nil when none is running.
-    /// Drives the determinate progress bar. Cleared on the SAME events that
-    /// end `updatingFirmware` — the board reports a changed version, or it
-    /// dropped offline (to reboot) and came back online.
-    var firmwareProgress: UInt8?
     /// What the board reported when the update started (a later, different
     /// report means the update landed).
     var updatingFromVersion: String?
@@ -153,10 +144,10 @@ struct BoardInfo {
     /// the next online push then ends the "Updating…" hint.
     var sawOfflineDuringUpdate = false
     /// The last update attempt died before it began: 90s passed with no
-    /// download progress and no reboot edge. A board whose firmware panics on
-    /// the offer reboots in seconds and reconnects at the SAME version, which
-    /// satisfies neither of the normal clear conditions — without this flag
-    /// the UI said "Updating…" forever.
+    /// reboot edge. A board whose firmware panics on the offer reboots in
+    /// seconds and reconnects at the SAME version, which satisfies neither of
+    /// the normal clear conditions — without this flag the UI said
+    /// "Updating…" forever.
     var updateFailed = false
     /// The board's power-on self-test browned out its supply, so it's running
     /// with brightness capped at 10%. Rides every state push (like `online`)
@@ -888,7 +879,6 @@ final class BoardViewModel: ObservableObject {
                 } else if $0.sawOfflineDuringUpdate {
                     $0.updatingFirmware = false
                     $0.sawOfflineDuringUpdate = false
-                    $0.firmwareProgress = nil // reboot done — drop the bar
                 }
             }
         }
@@ -922,26 +912,7 @@ final class BoardViewModel: ObservableObject {
             if $0.updatingFirmware, let v = version, v != $0.updatingFromVersion {
                 $0.updatingFirmware = false
                 $0.sawOfflineDuringUpdate = false
-                $0.firmwareProgress = nil // new version reported — drop the bar
                 $0.updateFailed = false
-            }
-        }
-    }
-
-    /// Server-observed firmware download progress (0…100) for a board. Any
-    /// progress means an update is under way, so the passive "Updating…" gating
-    /// is armed too (the determinate bar supersedes the indeterminate hint).
-    /// Cleared alongside `updatingFirmware` when the board reboots (offline →
-    /// online) or reports a changed version.
-    func applyFirmwareProgress(_ boardId: String, _ pct: UInt8) {
-        guard boardIds.contains(boardId) else { return }
-        mutate(boardId) {
-            $0.firmwareProgress = pct
-            $0.updateFailed = false // progress = it IS running; retract any stale verdict
-            if !$0.updatingFirmware {
-                $0.updatingFirmware = true
-                $0.updatingFromVersion = $0.firmwareVersion
-                $0.sawOfflineDuringUpdate = false
             }
         }
     }
@@ -972,7 +943,7 @@ final class BoardViewModel: ObservableObject {
     /// clear conditions (a reboot edge, a changed version) both assume the
     /// update at least STARTED — a board that dies on the offer and comes
     /// back at the same version satisfies neither, so a timer catches it:
-    /// 90s with no progress and no reboot edge means it never began.
+    /// 90s with no reboot edge means it never began.
     private func armUpdating(_ boardId: String) {
         mutate(boardId) {
             $0.updatingFirmware = true
@@ -984,7 +955,7 @@ final class BoardViewModel: ObservableObject {
             try? await Task.sleep(nanoseconds: 90_000_000_000)
             guard let self else { return }
             self.mutate(boardId) {
-                if $0.updatingFirmware && $0.firmwareProgress == nil && !$0.sawOfflineDuringUpdate {
+                if $0.updatingFirmware && !$0.sawOfflineDuringUpdate {
                     $0.updatingFirmware = false
                     $0.updateFailed = true
                 }
@@ -1594,8 +1565,6 @@ struct DashboardView: View {
     @State private var showRename = false
     @State private var renameText = ""
     @State private var showRemoveConfirm = false
-    /// Firmware update tapped — confirm before telling the board to reflash.
-    @State private var showUpdateConfirm = false
     /// Import tapped with nothing usable on the clipboard.
     @State private var showImportEmptyAlert = false
     /// Which settings-row explainer card is up (nil = none).
@@ -1664,10 +1633,10 @@ struct DashboardView: View {
             } message: {
                 Text("Shown in your scoreboard list. Saved to the server.")
             }
-            // Anchored to the Group, not to the row in `removeSection`: that row
-            // lives inside `dashboardForm`, which disconnection replaces with
-            // the splash — so a board pinned to a dead server could never be
-            // removed. Both branches reach this via `boardMenu` in the toolbar.
+            // Anchored to the Group so `boardMenu`'s Remove works from BOTH
+            // branches — a board pinned to a dead server only ever shows the
+            // splash, and it still has to be removable from there. Settings
+            // carries its own Remove row with its own confirm.
             .confirmationDialog("Remove this scoreboard?", isPresented: $showRemoveConfirm, titleVisibility: .visible) {
                 Button("Remove", role: .destructive) {
                     if let id = model.selectedBoardId { model.unpair(id) }
@@ -1698,11 +1667,6 @@ struct DashboardView: View {
             settingsSection
             spoilerSection
             transferSection
-            aboutSection
-            #if DEBUG
-            firmwareDeveloperSection
-            #endif
-            removeSection
         }
         // One uniform gap between top-level sections. Individual sections that
         // belong to the section above them (the league cards under the
@@ -1710,10 +1674,9 @@ struct DashboardView: View {
         .listSectionSpacing(20)
     }
 
-    /// Board-level settings, tucked at the bottom: off behavior, sleep duration,
-    /// and removal (with its confirm anchored to the row it belongs to). The
-    /// pickers get little info buttons — what "off" and "sleep" actually do on
-    /// the physical board isn't guessable from a one-word menu.
+    /// Board-level settings, tucked at the bottom: off behavior and sleep
+    /// duration. The pickers get little info buttons — what "off" and "sleep"
+    /// actually do on the physical board isn't guessable from a one-word menu.
     private var settingsSection: some View {
         Section("Settings") {
             HStack(spacing: 6) {
@@ -2096,203 +2059,6 @@ struct DashboardView: View {
             Button("OK", role: .cancel) {}
         } message: { outcome in
             Text(outcome.error ?? "This scoreboard now uses the transferred settings.")
-        }
-    }
-
-    /// Versions of the two halves the user can see: the board's firmware (as it
-    /// last reported) and this app. When the server hosts a newer image, an
-    /// Update button appears; after confirming, a passive "Updating…" hint
-    /// holds until the board reports back — the BOARD shows real progress on
-    /// its own panel, so the app deliberately has no progress bar.
-    private var aboutSection: some View {
-        Section {
-            HStack {
-                Text("Scoreboard firmware")
-                Spacer()
-                Text(model.current.firmwareVersion ?? "—")
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
-            HStack {
-                Text("App")
-                Spacer()
-                Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—")
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
-            // Which release channel this board's updates come from. Dev is a
-            // development-build affordance (#if DEBUG); a release app facing a
-            // board that IS on Dev still shows the truth — the Dev option
-            // appears, selected but inert, rather than lying about the channel.
-            Picker("Update channel", selection: Binding(
-                get: { model.current.fwChannel },
-                set: { model.setFwChannel($0) }
-            )) {
-                Text("Stable").tag(UiFwChannel.stable)
-                Text("Beta").tag(UiFwChannel.beta)
-                #if DEBUG
-                Text("Dev").tag(UiFwChannel.dev)
-                #else
-                if model.current.fwChannel == .dev {
-                    Text("Dev").tag(UiFwChannel.dev)
-                        .selectionDisabled()
-                }
-                #endif
-            }
-            if let pct = model.current.firmwareProgress {
-                // Determinate bar, driven by the BOARD's own byte counter
-                // (ClientMsg::DeviceUpdateProgress). The panel is dark while
-                // it writes flash, which alarms people — reassure them and
-                // warn against unplugging. Boards on firmware older than
-                // 2026.7.6 don't report, so they stay on the spinner below
-                // rather than showing a number that isn't true.
-                VStack(alignment: .leading, spacing: 6) {
-                    ProgressView(value: Double(pct) / 100)
-                    Text("Updating \(pct)%. The panel stays dark while it writes — that's normal; don't unplug it.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            } else if model.current.updatingFirmware {
-                HStack(spacing: 10) {
-                    ProgressView()
-                    Text("Updating… the panel flickers while it writes — that's normal. It restarts itself when it's done.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            } else if let target = model.current.firmwareUpdate {
-                if model.current.updateFailed {
-                    // The watchdog's verdict: the attempt died before any
-                    // progress. The Update button below stays available.
-                    Label {
-                        Text("The last update didn't start — the board restarted without installing. If this repeats, it needs a one-time USB flash.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    } icon: {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                    }
-                }
-                Button {
-                    showUpdateConfirm = true
-                } label: {
-                    Label("Update to \(target)", systemImage: "arrow.down.circle.fill")
-                        .font(.body.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                }
-                .confirmationDialog(
-                    "Update to \(target)?",
-                    isPresented: $showUpdateConfirm,
-                    titleVisibility: .visible
-                ) {
-                    Button("Update") { model.updateFirmware() }
-                } message: {
-                    Text("The scoreboard downloads the update and restarts itself — about a minute. The panel flickers while it writes, which is normal — don't unplug it. It keeps working if the update fails.")
-                }
-            }
-        } header: {
-            Text("About")
-        } footer: {
-            #if DEBUG
-            Text("Beta gets updates before everyone else. Dev is for development builds — expect breakage.")
-            #else
-            Text("Beta gets updates before everyone else.")
-            #endif
-        }
-    }
-
-    #if DEBUG
-    /// DEBUG-only firmware picker: reinstall the running build (the firmware
-    /// now accepts a same-version install, so this exercises the OTA path), or
-    /// install any hosted image. The board refuses downgrades, so an image
-    /// older than the board's reported version is shown as "USB only" with its
-    /// Install button disabled. Populated by `model.listFirmware()`.
-    private var firmwareDeveloperSection: some View {
-        Section {
-            Button {
-                if let id = model.selectedBoardId {
-                    model.installFirmware(id, model.current.fwChannel)
-                }
-            } label: {
-                Label("Reinstall current firmware", systemImage: "arrow.clockwise")
-            }
-            .disabled(model.selectedBoardId == nil)
-
-            ForEach(model.firmwareImages, id: \.self) { img in
-                let installable = firmwareInstallable(img)
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(img.channel.capitalized)
-                        Text(img.version)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    }
-                    Spacer()
-                    if installable {
-                        Button("Install") {
-                            if let id = model.selectedBoardId {
-                                model.installFirmware(id, channelFromName(img.channel))
-                            }
-                        }
-                        .buttonStyle(.borderless)
-                    } else {
-                        Text("older — USB only")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-        } header: {
-            Text("Firmware (developer)")
-        } footer: {
-            Text("Reinstalls and installs go through the same OTA path as a real update. The board refuses downgrades — those need a USB flash.")
-        }
-        // Refresh the menu whenever this section appears.
-        .task { model.listFirmware() }
-    }
-
-    /// Map a hosted image's channel name to the enum the install command wants.
-    private func channelFromName(_ name: String) -> UiFwChannel {
-        switch name {
-        case "beta": return .beta
-        case "dev": return .dev
-        default: return .stable
-        }
-    }
-
-    /// An image is installable unless it's strictly OLDER than the board's
-    /// reported firmware (the board refuses downgrades). Same version is fine
-    /// (reinstall). Unknown board version or an unparseable string can't prove
-    /// a downgrade, so we don't block — matching the protocol's "unparseable
-    /// sorts as not-newer" (and therefore not-older either).
-    private func firmwareInstallable(_ image: UiFwImage) -> Bool {
-        guard let board = model.current.firmwareVersion,
-              let i = parseCalVer(image.version),
-              let b = parseCalVer(board) else {
-            return true
-        }
-        return !(i < b) // installable when same-or-newer; older is USB-only
-    }
-
-    /// Parse a CalVer firmware version ("2026.7.3") into a comparable tuple;
-    /// nil unless it's exactly three '.'-separated integers.
-    private func parseCalVer(_ v: String) -> (Int, Int, Int)? {
-        let parts = v.split(separator: ".", omittingEmptySubsequences: false)
-        guard parts.count == 3,
-              let a = Int(parts[0]), let b = Int(parts[1]), let c = Int(parts[2])
-        else { return nil }
-        return (a, b, c)
-    }
-    #endif
-
-    /// The in-dashboard shortcut to removal. The confirm itself is anchored on
-    /// the Group so the board menu's copy of this action works from the splash
-    /// too — see the dialog in `body`.
-    private var removeSection: some View {
-        Section {
-            Button("Remove this scoreboard", role: .destructive) {
-                showRemoveConfirm = true
-            }
         }
     }
 
@@ -4143,6 +3909,12 @@ struct SettingsView: View {
     /// the connecting splash, so repointing it has to be reachable from there.
     var boardId: String? = nil
     @Environment(\.dismiss) private var dismiss
+    /// Firmware update tapped — confirm before telling the board to reflash.
+    @State private var showUpdateConfirm = false
+    /// Settings' OWN remove confirm — independent of the dashboard toolbar's,
+    /// which stays anchored outside any sheet so it survives the splash.
+    @State private var showRemoveConfirm = false
+    #if DEBUG
     @State private var preset: ServerPreset = .localhost
     @State private var customUrl = ""
 
@@ -4155,39 +3927,30 @@ struct SettingsView: View {
     private var startingUrl: String {
         boardId.map { model.serverURL(of: $0) } ?? model.serverUrl
     }
+    #endif
 
     var body: some View {
         NavigationStack {
             Form {
-                Section {
-                    Picker("Server", selection: $preset) {
-                        ForEach(ServerPreset.allCases) { p in
-                            Text(p.label).tag(p)
-                        }
-                    }
-                    .pickerStyle(.menu)
-
-                    if preset == .custom {
-                        TextField("ws://host:port/ws", text: $customUrl)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .keyboardType(.URL)
-                    } else if let u = preset.url {
-                        Text(u).font(.footnote).foregroundStyle(.secondary)
-                    }
-                } header: {
-                    Text("Server")
-                } footer: {
-                    if let boardId {
-                        Text("Where “\(model.displayName(boardId))” lives. Changing it points this scoreboard at a different server; new pairings still use the default one.")
-                    } else {
-                        Text("Prod and Demo are the hosted servers. Localhost works in the Simulator; to reach a dev server from a physical phone, pick Custom and use your Mac's LAN IP (e.g. ws://192.168.1.50:7878/ws).")
-                    }
+                // Customers never repoint the server; only dev builds get the picker.
+                #if DEBUG
+                serverSection
+                #endif
+                // This sheet also opens from the connecting splash and the
+                // pairing screen, where no board may be selected — the
+                // board-scoped sections would just be empty rows there.
+                if model.selectedBoardId != nil {
+                    aboutSection
+                    #if DEBUG
+                    firmwareDeveloperSection
+                    #endif
+                    removeSection
                 }
             }
             .navigationTitle(boardId == nil ? "Settings" : "Scoreboard server")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                #if DEBUG
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
@@ -4202,11 +3965,246 @@ struct SettingsView: View {
                     }
                     .disabled(effectiveUrl.isEmpty)
                 }
+                #else
+                // Without the server form there is nothing to save or abandon —
+                // every remaining row applies immediately.
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+                #endif
             }
+            #if DEBUG
             .onAppear {
                 let url = startingUrl
                 preset = ServerPreset.matching(url)
                 customUrl = url
+            }
+            #endif
+        }
+    }
+
+    #if DEBUG
+    private var serverSection: some View {
+        Section {
+            Picker("Server", selection: $preset) {
+                ForEach(ServerPreset.allCases) { p in
+                    Text(p.label).tag(p)
+                }
+            }
+            .pickerStyle(.menu)
+
+            if preset == .custom {
+                TextField("ws://host:port/ws", text: $customUrl)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.URL)
+            } else if let u = preset.url {
+                Text(u).font(.footnote).foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("Server")
+        } footer: {
+            if let boardId {
+                Text("Where “\(model.displayName(boardId))” lives. Changing it points this scoreboard at a different server; new pairings still use the default one.")
+            } else {
+                Text("Prod and Demo are the hosted servers. Localhost works in the Simulator; to reach a dev server from a physical phone, pick Custom and use your Mac's LAN IP (e.g. ws://192.168.1.50:7878/ws).")
+            }
+        }
+    }
+    #endif
+
+    /// Versions of the two halves the user can see: the board's firmware (as it
+    /// last reported) and this app. When the server hosts a newer image, an
+    /// Update button appears; after confirming, a passive "Updating…" hint
+    /// holds until the board reports back — the BOARD shows real progress on
+    /// its own panel, so the app deliberately has no progress bar.
+    private var aboutSection: some View {
+        Section {
+            HStack {
+                Text("Scoreboard firmware")
+                Spacer()
+                Text(model.current.firmwareVersion ?? "—")
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            HStack {
+                Text("App")
+                Spacer()
+                Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—")
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            // Which release channel this board's updates come from. Dev is a
+            // development-build affordance (#if DEBUG); a release app facing a
+            // board that IS on Dev still shows the truth — the Dev option
+            // appears, selected but inert, rather than lying about the channel.
+            Picker("Update channel", selection: Binding(
+                get: { model.current.fwChannel },
+                set: { model.setFwChannel($0) }
+            )) {
+                Text("Stable").tag(UiFwChannel.stable)
+                Text("Beta").tag(UiFwChannel.beta)
+                #if DEBUG
+                Text("Dev").tag(UiFwChannel.dev)
+                #else
+                if model.current.fwChannel == .dev {
+                    Text("Dev").tag(UiFwChannel.dev)
+                        .selectionDisabled()
+                }
+                #endif
+            }
+            if model.current.updatingFirmware {
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text("Updating… this usually takes a minute, but can take 2–3. The panel goes dark while it writes — don't unplug it. It restarts itself when it's done.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            } else if let target = model.current.firmwareUpdate {
+                if model.current.updateFailed {
+                    // The watchdog's verdict: the attempt died before the
+                    // reboot edge. The Update button below stays available.
+                    Label {
+                        Text("The last update didn't start — the board restarted without installing. If this repeats, it needs a one-time USB flash.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
+                }
+                Button {
+                    showUpdateConfirm = true
+                } label: {
+                    Label("Update to \(target)", systemImage: "arrow.down.circle.fill")
+                        .font(.body.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                }
+                .confirmationDialog(
+                    "Update to \(target)?",
+                    isPresented: $showUpdateConfirm,
+                    titleVisibility: .visible
+                ) {
+                    Button("Update") { model.updateFirmware() }
+                } message: {
+                    Text("The scoreboard downloads the update and restarts itself — about a minute. The panel flickers while it writes, which is normal — don't unplug it. It keeps working if the update fails.")
+                }
+            }
+        } header: {
+            Text("About")
+        } footer: {
+            #if DEBUG
+            Text("Beta gets updates before everyone else. Dev is for development builds — expect breakage.")
+            #else
+            Text("Beta gets updates before everyone else.")
+            #endif
+        }
+    }
+
+    #if DEBUG
+    /// DEBUG-only firmware picker: reinstall the running build (the firmware
+    /// now accepts a same-version install, so this exercises the OTA path), or
+    /// install any hosted image. The board refuses downgrades, so an image
+    /// older than the board's reported version is shown as "USB only" with its
+    /// Install button disabled. Populated by `model.listFirmware()`.
+    private var firmwareDeveloperSection: some View {
+        Section {
+            Button {
+                if let id = model.selectedBoardId {
+                    model.installFirmware(id, model.current.fwChannel)
+                }
+            } label: {
+                Label("Reinstall current firmware", systemImage: "arrow.clockwise")
+            }
+            .disabled(model.selectedBoardId == nil)
+
+            ForEach(model.firmwareImages, id: \.self) { img in
+                let installable = firmwareInstallable(img)
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(img.channel.capitalized)
+                        Text(img.version)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                    Spacer()
+                    if installable {
+                        Button("Install") {
+                            if let id = model.selectedBoardId {
+                                model.installFirmware(id, channelFromName(img.channel))
+                            }
+                        }
+                        .buttonStyle(.borderless)
+                    } else {
+                        Text("older — USB only")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        } header: {
+            Text("Firmware (developer)")
+        } footer: {
+            Text("Reinstalls and installs go through the same OTA path as a real update. The board refuses downgrades — those need a USB flash.")
+        }
+        // Refresh the menu whenever this section appears.
+        .task { model.listFirmware() }
+    }
+
+    /// Map a hosted image's channel name to the enum the install command wants.
+    private func channelFromName(_ name: String) -> UiFwChannel {
+        switch name {
+        case "beta": return .beta
+        case "dev": return .dev
+        default: return .stable
+        }
+    }
+
+    /// An image is installable unless it's strictly OLDER than the board's
+    /// reported firmware (the board refuses downgrades). Same version is fine
+    /// (reinstall). Unknown board version or an unparseable string can't prove
+    /// a downgrade, so we don't block — matching the protocol's "unparseable
+    /// sorts as not-newer" (and therefore not-older either).
+    private func firmwareInstallable(_ image: UiFwImage) -> Bool {
+        guard let board = model.current.firmwareVersion,
+              let i = parseCalVer(image.version),
+              let b = parseCalVer(board) else {
+            return true
+        }
+        return !(i < b) // installable when same-or-newer; older is USB-only
+    }
+
+    /// Parse a CalVer firmware version ("2026.7.3") into a comparable tuple;
+    /// nil unless it's exactly three '.'-separated integers.
+    private func parseCalVer(_ v: String) -> (Int, Int, Int)? {
+        let parts = v.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 3,
+              let a = Int(parts[0]), let b = Int(parts[1]), let c = Int(parts[2])
+        else { return nil }
+        return (a, b, c)
+    }
+    #endif
+
+    /// Removal where people expect it — the bottom of Settings. The dashboard
+    /// toolbar keeps its own independent copy because a board pinned to a dead
+    /// server never renders the dashboard (or this sheet's opener) at all.
+    private var removeSection: some View {
+        Section {
+            Button("Remove this scoreboard", role: .destructive) {
+                showRemoveConfirm = true
+            }
+            .confirmationDialog("Remove this scoreboard?", isPresented: $showRemoveConfirm, titleVisibility: .visible) {
+                Button("Remove", role: .destructive) {
+                    if let id = model.selectedBoardId {
+                        model.unpair(id)
+                        // The sheet was about the board that just ceased to
+                        // exist — lingering would show it half-empty.
+                        dismiss()
+                    }
+                }
+            } message: {
+                Text("This phone stops controlling it and the pairing is revoked on the server — add it again anytime with a new code.")
             }
         }
     }

@@ -206,11 +206,6 @@ pub trait ClientListener: Send + Sync {
     /// regardless of any board's enrollment. Global to the server, not per
     /// board. Drives the DEBUG firmware picker.
     fn on_firmware_list(&self, images: Vec<UiFwImage>);
-    /// Server-observed progress (0..=100) of `board_id`'s in-flight firmware
-    /// download. The device's ws is dropped while it fetches, so the server
-    /// counts the bytes it streams. Stops when the download ends (the board
-    /// reboots into the new image and re-pushes BoardState).
-    fn on_firmware_progress(&self, board_id: String, pct: u8);
 }
 
 enum Out {
@@ -417,9 +412,6 @@ impl ScoreboardClient {
                                         }
                                         ServerMsg::FirmwareList { images } => {
                                             if let Some(l) = listener.lock().unwrap().as_ref() { l.on_firmware_list(to_ui_fw_images(images)); }
-                                        }
-                                        ServerMsg::FirmwareProgress { board_id: bid, pct } => {
-                                            if let Some(l) = listener.lock().unwrap().as_ref() { l.on_firmware_progress(bid, pct); }
                                         }
                                         _ => {}
                                     }
@@ -793,7 +785,6 @@ mod wss_tests {
         fn on_import_result(&self, _: String, _: Option<String>) {}
         fn on_board_version(&self, _: String, _: Option<String>, _: Option<String>) {}
         fn on_firmware_list(&self, _: Vec<UiFwImage>) {}
-        fn on_firmware_progress(&self, _: String, _: u8) {}
     }
 
     /// The order-of-operations regression: the app launches while the server is

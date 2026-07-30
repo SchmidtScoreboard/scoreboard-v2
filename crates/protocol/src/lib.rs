@@ -627,12 +627,6 @@ pub enum ClientMsg {
     // device reports a knob turn — the server adopts this as the board's one
     // brightness (the same value SetBrightness writes and the manifest echoes)
     DeviceBrightness { level: u8 },
-    // device reports OTA download progress (0..=100) while installing. The
-    // server relays it to the board's apps as `ServerMsg::FirmwareProgress`.
-    // Only the DEVICE can measure this honestly: bytes the server hands to the
-    // socket are absorbed by kernel buffers and Railway's TCP proxy long
-    // before the board has written them to flash.
-    DeviceUpdateProgress { pct: u8 },
     // device reports its self-discovered IANA timezone (IP-geolocated at boot)
     // — the server adopts it for this board's clock and start-time labels, so
     // the zone tracks where the BOARD lives with no phone involved (and DST is
@@ -736,7 +730,6 @@ pub enum ServerMsg {
     // real consumption) and pushes progress as it streams. Cleared (implicitly)
     // when the stream ends: the board reboots into the new image and re-pushes
     // BoardState, or a failure just stops the updates.
-    FirmwareProgress { board_id: String, pct: u8 },
     // reply to `ClientMsg::ListFirmware`: every firmware image the server hosts,
     // one per channel that has a current dist (the DEBUG picker's full menu).
     FirmwareList { images: Vec<FwImage> },
@@ -925,12 +918,6 @@ mod firmware_msg_tests {
             other => panic!("expected FirmwareList, got {other:?}"),
         }
 
-        let prog = ServerMsg::FirmwareProgress { board_id: "b1".into(), pct: 42 };
-        let json = serde_json::to_string(&prog).unwrap();
-        assert!(matches!(
-            serde_json::from_str::<ServerMsg>(&json).unwrap(),
-            ServerMsg::FirmwareProgress { board_id, pct } if board_id == "b1" && pct == 42
-        ));
 
         // The controller request + the channel-targeted install command.
         assert!(matches!(

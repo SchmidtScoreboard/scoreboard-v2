@@ -139,7 +139,7 @@ pub struct AppState {
     /// One-time OTA download tokens: a fresh hex nonce (minted per firmware
     /// offer) → the board_id it was minted for + when. The offer's download
     /// path carries `?u={nonce}`; the streaming `/firmware/{chan}.bin` GET
-    /// resolves it to know whose controllers should see `FirmwareProgress`.
+    /// resolves it to scope the download to that one board.
     /// The nonce is deliberately UNSIGNED (only version/size/channel/bytes are
     /// signed — the board verifies the image regardless). Entries older than
     /// `FW_TOKEN_TTL` are swept lazily on every touch (offers the board never
@@ -727,7 +727,7 @@ const FW_CHUNK: usize = 16 * 1024;
 
 /// Query string of `GET /firmware/{chan}.bin`. `u` is the one-time download
 /// token an offer's path carries (`?u=…`): present -> this is a board's real
-/// OTA fetch, so stream it and push `FirmwareProgress`; absent -> a plain
+/// OTA fetch, so stream it and retire the token when drained; absent -> a plain
 /// download (curl, tests), served whole with no progress.
 #[derive(serde::Deserialize)]
 struct FwDownloadQuery {
@@ -748,22 +748,16 @@ fn resolve_fw_token(state: &AppState, nonce: &str) -> Option<String> {
 /// A streamed image body that reports server-observed download progress. Emits
 /// the SAME `bytes` in ~`FW_CHUNK` slices (byte-identical to the plain path —
 /// the board verifies sha256 + Ed25519), and after each slice pushes
-/// `FirmwareProgress{board_id, pct}` to that board's subscribed controllers
-/// when pct advanced by ≥2 (or reached 100). When the stream drains it drops
-/// the one-time token.
-fn progress_stream_body(
+fn tokenized_stream_body(
     app: AppState,
-    board_id: String,
     nonce: String,
     bytes: axum::body::Bytes,
 ) -> axum::body::Body {
     struct St {
         app: AppState,
-        board_id: String,
         nonce: String,
         bytes: axum::body::Bytes,
         offset: usize,
-        last_pct: u8,
     }
     // Single-use token cleanup rides on Drop, NOT on the stream being polled to
     // its terminal None: with an explicit Content-Length, hyper stops polling
@@ -775,7 +769,7 @@ fn progress_stream_body(
             self.app.fw_download_tokens.lock().unwrap().remove(&self.nonce);
         }
     }
-    let init = St { app, board_id, nonce, bytes, offset: 0, last_pct: 0 };
+    let init = St { app, nonce, bytes, offset: 0 };
     let stream = futures_util::stream::unfold(init, |mut st| async move {
         let total = st.bytes.len();
         if st.offset >= total {
@@ -784,12 +778,12 @@ fn progress_stream_body(
         let end = (st.offset + FW_CHUNK).min(total);
         let chunk = st.bytes.slice(st.offset..end);
         st.offset = end;
-        // Deliberately NO progress push here. Bytes handed to this socket are
-        // swallowed by the kernel send buffer and Railway's TCP proxy, so they
-        // reach 100% while the board is still writing flash — the app's bar
-        // jumped straight to full. The DEVICE reports its own progress over
-        // the websocket it now keeps open (ClientMsg::DeviceUpdateProgress);
-        // the token still scopes the download to one board and expires it.
+        // Deliberately NO progress anywhere: bytes handed to this socket are
+        // swallowed by the kernel send buffer and Railway's TCP proxy (they
+        // read 100% while the board still writes flash), and device-reported
+        // progress cost a concurrent socket the firmware's pool couldn't
+        // hold. The app shows a plain spinner; the token still scopes the
+        // download to one board and expires when the stream drains.
         Some((Ok::<_, std::convert::Infallible>(chunk), st))
     });
     axum::body::Body::from_stream(stream)
@@ -812,11 +806,12 @@ async fn get_firmware_bin(
     let Some(fw) = chan.and_then(|c| s.firmware.get(&c)) else {
         return (axum::http::StatusCode::NOT_FOUND, "no firmware hosted for that channel").into_response();
     };
-    // A token that resolves to a board makes this a monitored OTA fetch.
+    // A token that resolves to a board makes this a single-use, board-scoped
+    // OTA fetch (the token retires when the stream drains or aborts).
     match q.u.as_deref().and_then(|nonce| resolve_fw_token(&s, nonce).map(|b| (nonce.to_string(), b))) {
-        Some((nonce, board_id)) => {
+        Some((nonce, _board_id)) => {
             let len = fw.bytes.len();
-            let body = progress_stream_body(s.clone(), board_id, nonce, fw.bytes.clone());
+            let body = tokenized_stream_body(s.clone(), nonce, fw.bytes.clone());
             // CRITICAL: an unknown-length streamed body makes hyper frame the
             // response as `transfer-encoding: chunked` — but the board's bare
             // HTTP client (firmware-rs/src/ota.rs) does NOT decode chunking; it
@@ -1936,7 +1931,7 @@ pub fn handle_device_power_limited(state: &AppState, board_id: &str, limited: bo
 /// Mint a fresh one-time download token for `board_id` and return the
 /// tokenized image path for a dist that lives in `chan`
 /// (`/firmware/{chan}.bin?u={nonce}`). Sweeps expired tokens as it inserts.
-/// The token lets the streaming GET route push `FirmwareProgress` to the
+/// The token scopes the streaming GET route to the
 /// board's subscribed controllers; it is NOT part of the signed message.
 fn mint_fw_offer_path(state: &AppState, board_id: &str, chan: FwChannel) -> String {
     let mut tokens = state.fw_download_tokens.lock().unwrap();
@@ -2168,18 +2163,6 @@ pub fn push_board_state(state: &AppState, board_id: &str) {
 /// `push_board_state` uses. Called from the streaming `/firmware/{chan}.bin`
 /// handler as it hands bytes to the board's HTTP fetch (the device's WS is
 /// dropped during the download, so progress is SERVER-observed).
-pub fn push_firmware_progress(state: &AppState, board_id: &str, pct: u8) {
-    let msg = ServerMsg::FirmwareProgress { board_id: board_id.to_string(), pct };
-    let json = Message::Text(serde_json::to_string(&msg).unwrap());
-    let mut controllers = state.controllers.lock().unwrap();
-    if let Some(subs) = controllers.get_mut(board_id) {
-        subs.retain(|tx| tx.send(json.clone()).is_ok());
-        if subs.is_empty() {
-            controllers.remove(board_id);
-        }
-    }
-}
-
 pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
     let cfg = state.config_for(board_id);
     // Render each now-showing game, cache its frame, and tag the summary with the

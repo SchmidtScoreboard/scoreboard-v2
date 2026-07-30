@@ -335,13 +335,6 @@ typedef void (*UniffiCallbackInterfaceClientListenerMethod11)(uint64_t, RustBuff
     );
 
 #endif
-#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD12
-#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD12
-typedef void (*UniffiCallbackInterfaceClientListenerMethod12)(uint64_t, RustBuffer, uint8_t, void* _Nonnull, 
-        RustCallStatus *_Nonnull uniffiCallStatus
-    );
-
-#endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_CLIENT_LISTENER
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_CLIENT_LISTENER
 typedef struct UniffiVTableCallbackInterfaceClientListener {
@@ -357,7 +350,6 @@ typedef struct UniffiVTableCallbackInterfaceClientListener {
     UniffiCallbackInterfaceClientListenerMethod9 _Nonnull onImportResult;
     UniffiCallbackInterfaceClientListenerMethod10 _Nonnull onBoardVersion;
     UniffiCallbackInterfaceClientListenerMethod11 _Nonnull onFirmwareList;
-    UniffiCallbackInterfaceClientListenerMethod12 _Nonnull onFirmwareProgress;
     UniffiCallbackInterfaceFree _Nonnull uniffiFree;
 } UniffiVTableCallbackInterfaceClientListener;
 
@@ -1188,12 +1180,6 @@ uint16_t uniffi_app_core_checksum_method_clientlistener_on_board_version(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_FIRMWARE_LIST
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_FIRMWARE_LIST
 uint16_t uniffi_app_core_checksum_method_clientlistener_on_firmware_list(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_FIRMWARE_PROGRESS
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_FIRMWARE_PROGRESS
-uint16_t uniffi_app_core_checksum_method_clientlistener_on_firmware_progress(void
     
 );
 #endif

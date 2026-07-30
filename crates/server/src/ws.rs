@@ -133,12 +133,6 @@ async fn device_loop(sender: WsSender, mut receiver: WsReceiver, state: AppState
                 Ok(ClientMsg::DevicePowerLimited { limited }) => {
                     crate::handle_device_power_limited(&state, &board_id, limited);
                 }
-                Ok(ClientMsg::DeviceUpdateProgress { pct }) => {
-                    // The board's own byte counter — the only honest measure
-                    // (see the protocol variant's note). Relayed straight to
-                    // the apps watching this board.
-                    crate::push_firmware_progress(&state, &board_id, pct.min(100));
-                }
                 _ => {}
             }
         }
@@ -1322,24 +1316,20 @@ mod tests {
         (format!("ws://{addr}/ws"), format!("http://{addr}"), state)
     }
 
-    /// Read one ServerMsg within `ms`, or None if the socket stays quiet.
-    async fn try_recv(ws: &mut Client, ms: u64) -> Option<ServerMsg> {
-        match tokio::time::timeout(Duration::from_millis(ms), ws.next()).await {
-            Ok(Some(Ok(TMessage::Text(t)))) => serde_json::from_str(&t).ok(),
-            _ => None,
-        }
-    }
-
-    /// A tokenized `GET /firmware/stable.bin?u=<nonce>` streams the image and
-    /// drives monotonic `FirmwareProgress` to the board's subscribed
-    /// controller, reaching exactly 100; the token is dropped once the stream
-    /// drains; and the delivered body is byte-identical to the dist.
+    /// A tokenized `GET /firmware/stable.bin?u=<nonce>` streams the image,
+    /// retires the token once the stream drains, and delivers a body
+    /// byte-identical to the dist. (Deliberately NO progress anywhere: the
+    /// server-side estimate measured kernel/proxy buffers, and device-reported
+    /// progress cost a concurrent socket the firmware's pool couldn't hold.
+    /// The app shows a plain spinner.)
     #[tokio::test]
     async fn tokenized_download_serves_bytes_and_retires_its_token() {
         let (state, image) = state_with_big_stable_dist();
         let (ws_url, http, state) = spawn_full_server(state).await;
         let (mut dev, board_id) = auth(&ws_url, Role::Device, &[1u8; 32]).await;
-        let mut ctrl = paired_subscriber(&ws_url, &mut dev, &board_id, &[2u8; 32]).await;
+        // The subscriber's own setup assertions still run; nothing is expected
+        // on it afterwards (there is no download progress to observe).
+        let _ctrl = paired_subscriber(&ws_url, &mut dev, &board_id, &[2u8; 32]).await;
 
         let nonce = "abad1deacafef00d".to_string();
         state
@@ -1356,16 +1346,6 @@ mod tests {
             .unwrap();
         assert_eq!(&body[..], &image[..], "streamed body is byte-identical to the dist");
 
-        // The server does NOT invent progress from its own send loop: those
-        // bytes are absorbed by kernel buffers and the TCP proxy, so they hit
-        // 100% while the board is still writing flash. Progress arrives from
-        // the DEVICE instead (see `device_reported_progress_reaches_the_app`).
-        for _ in 0..4 {
-            if let Some(ServerMsg::FirmwareProgress { .. }) = try_recv(&mut ctrl, 300).await {
-                panic!("the download stream must not fabricate progress");
-            }
-        }
-
         // The one-time token is still retired once the stream completes.
         let mut cleared = false;
         for _ in 0..40 {
@@ -1376,24 +1356,6 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         assert!(cleared, "download token cleared after the stream drained");
-    }
-
-    /// The board's own byte counter is what the app shows: a device progress
-    /// report is relayed to exactly that board's subscribed controllers.
-    #[tokio::test]
-    async fn device_reported_progress_reaches_the_app() {
-        let (url, _state) = spawn_server_with(AppState::new_ephemeral()).await;
-        let (mut dev, board_id) = auth(&url, Role::Device, &[1u8; 32]).await;
-        let mut ctrl = paired_subscriber(&url, &mut dev, &board_id, &[2u8; 32]).await;
-
-        send(&mut dev, &ClientMsg::DeviceUpdateProgress { pct: 42 }).await;
-        match recv_until(&mut ctrl, |m| matches!(m, ServerMsg::FirmwareProgress { .. })).await {
-            Some(ServerMsg::FirmwareProgress { board_id: b, pct }) => {
-                assert_eq!(b, board_id);
-                assert_eq!(pct, 42, "the board's number, relayed verbatim");
-            }
-            other => panic!("expected FirmwareProgress, got {other:?}"),
-        }
     }
 
     /// The RAW HTTP framing of the tokenized stream, read exactly the way the
@@ -1447,7 +1409,9 @@ mod tests {
         let (state, image) = state_with_big_stable_dist();
         let (ws_url, http, _state) = spawn_full_server(state).await;
         let (mut dev, board_id) = auth(&ws_url, Role::Device, &[1u8; 32]).await;
-        let mut ctrl = paired_subscriber(&ws_url, &mut dev, &board_id, &[2u8; 32]).await;
+        // The subscriber's own setup assertions still run; nothing is expected
+        // on it afterwards (there is no download progress to observe).
+        let _ctrl = paired_subscriber(&ws_url, &mut dev, &board_id, &[2u8; 32]).await;
 
         let body = reqwest::get(format!("{http}/firmware/stable.bin"))
             .await
@@ -1456,14 +1420,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&body[..], &image[..], "un-tokenized body is byte-identical");
-
-        // The test server runs no poll/tick loop, so the controller is
-        // otherwise silent: any FirmwareProgress here would be a bug.
-        for _ in 0..4 {
-            if let Some(ServerMsg::FirmwareProgress { .. }) = try_recv(&mut ctrl, 300).await {
-                panic!("un-tokenized download must emit no progress");
-            }
-        }
     }
 
     /// ListFirmware returns one entry per hosted channel (stable-first), with
