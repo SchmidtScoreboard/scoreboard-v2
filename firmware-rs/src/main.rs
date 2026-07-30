@@ -49,6 +49,7 @@ mod creds;
 mod fw_pubkey;
 mod identity;
 mod ota;
+mod power;
 mod seesaw;
 mod ws;
 
@@ -104,7 +105,12 @@ async fn main(spawner: Spawner) -> ! {
     // the brick-proofing: every boot of an unconfirmed image lands here and
     // counts a strike before anything riskier runs (see ota::boot_check).
     let mut flash = FlashStorage::new(p.FLASH);
-    let fw_unconfirmed = ota::boot_check(&mut flash);
+    // POST brownout marker first (read-and-clear): boot_check needs to know
+    // when this reset was the power test's own doing BEFORE it counts a
+    // strike — a weak supply must never burn the three strikes and revert
+    // good firmware (see power.rs).
+    let post_died = power::take_marker(&mut flash);
+    let fw_unconfirmed = ota::boot_check(&mut flash, post_died);
 
     // board-core state, shared by the device + render tasks
     let board: &'static SharedBoard = mk_static!(SharedBoard, Mutex::new(Board::new()));
@@ -175,6 +181,30 @@ async fn main(spawner: Spawner) -> ! {
     // (BLE mode), whatever board-core's current mode is.
     spawner.spawn(render(hub75, fb_a, fb_b, board).unwrap());
 
+    // Encoder BEFORE the power test: the button must be able to reset the
+    // board in EVERY state it can be in, including the 3s of POST (a hold
+    // begun mid-animation REPLACES the test frame with the reset screen —
+    // which is safe: it only ever lowers the draw). One construction serves
+    // both the WiFi and BLE paths below. (seesaw over I2C / STEMMA QT:
+    // SDA=16, SCL=17)
+    let i2c = I2c::new(p.I2C0, I2cConfig::default())
+        .expect("i2c")
+        .with_sda(p.GPIO16)
+        .with_scl(p.GPIO17);
+    spawner.spawn(encoder_task(Encoder::new(i2c), board).unwrap());
+
+    // Power-on self-test, strictly BEFORE any radio init: reach the panel's
+    // peak draw now, while a brownout can't corrupt anything — no flash write
+    // in flight, no Wi-Fi association to drop. A supply that already failed
+    // one test (the marker) skips straight to the capped, warned state:
+    // rerunning it would just brown out into a boot loop.
+    if post_died {
+        println!("[post] last boot reset inside the power test — entering low-power mode");
+        power::enter_low_power(board).await;
+    } else {
+        power::run_test(flash, board).await;
+    }
+
     match stored_creds {
         // Provisioned: connect WiFi, run the device protocol + encoder.
         Some(creds) => {
@@ -241,30 +271,21 @@ async fn main(spawner: Spawner) -> ! {
             spawner.spawn(connection(controller).unwrap());
             spawner.spawn(net_task(runner).unwrap());
             spawner.spawn(
-                device(stack, board, board_id, secret, code, server_host, server_port, flash, fw_unconfirmed)
+                device(stack, board, board_id, secret, code, server_host, server_port, flash, fw_unconfirmed, post_died)
                     .unwrap(),
             );
-            // encoder (seesaw over I2C / STEMMA QT: SDA=16, SCL=17)
-            let i2c = I2c::new(p.I2C0, I2cConfig::default())
-                .expect("i2c")
-                .with_sda(p.GPIO16)
-                .with_scl(p.GPIO17);
-            spawner.spawn(encoder_task(Encoder::new(i2c), board).unwrap());
             // Owns flash in WiFi mode: persists brightness + handles hold-to-reset.
+            // (The encoder task itself is up already — spawned before the POST.)
             spawner.spawn(flash_task(flash, board).unwrap());
         }
         // Unprovisioned: show the setup screen + provision over BLE, then reboot.
         None => {
             println!("[creds] none — starting BLE provisioning");
             board.lock().await.gesture(Gesture::Long); // -> Setup screen
-            let i2c = I2c::new(p.I2C0, I2cConfig::default())
-                .expect("i2c")
-                .with_sda(p.GPIO16)
-                .with_scl(p.GPIO17);
             // Button stays live in BLE mode too — the board must NEVER be in a
             // state where hold-to-reset doesn't work. (Single press is inert on
-            // the setup screen; board-core guards it.)
-            spawner.spawn(encoder_task(Encoder::new(i2c), board).unwrap());
+            // the setup screen; board-core guards it. The encoder task itself
+            // is up already — spawned before the POST.)
             spawner.spawn(setup_reset_task(board).unwrap());
 
             // Scan for nearby networks BEFORE BLE starts (no coex feature — the
@@ -400,6 +421,7 @@ async fn device(
     server_port: u16,
     flash: &'static ota::SharedFlash,
     fw_unconfirmed: bool,
+    post_died: bool,
 ) {
     let mut rx = alloc::vec![0u8; 2048];
     let mut tx = alloc::vec![0u8; 2048];
@@ -521,14 +543,31 @@ async fn device(
                             version: String::from(env!("CARGO_PKG_VERSION")),
                         };
                         let _ = ws::write_text(&mut sock, &serde_json::to_vec(&ver).unwrap()).await;
+                        // Low-power state rides with the version report on
+                        // every connect — `false` is sent affirmatively so a
+                        // fixed supply clears the app's warning by itself.
+                        // (The bool is read in its own statement: the board
+                        // guard must not be held across the socket await, or
+                        // a slow send would freeze the 30fps render task.)
+                        let limited = board.lock().await.power_limited();
+                        let lp = ClientMsg::DevicePowerLimited { limited };
+                        let _ = ws::write_text(&mut sock, &serde_json::to_vec(&lp).unwrap()).await;
                         println!("[ws] authed (pair code {pair_code})");
                     }
                     Ok(ServerMsg::AuthOk) => {
                         // First contact with the server: if this boot is a fresh
-                        // OTA image, this is the proof it works — persist Valid
-                        // so the revert watchdog stands down.
+                        // OTA image, this is the proof it works. But an image
+                        // may only CONFIRM itself on a boot that ran the power
+                        // test — a post-death boot skipped that exact code, so
+                        // it gets the watchdog stood down and strikes cleared,
+                        // and confirmation waits for the next full POST (see
+                        // acknowledge_auth_after_post_death).
                         if fw_unconfirmed {
-                            ota::confirm_running_image(flash).await;
+                            if post_died {
+                                ota::acknowledge_auth_after_post_death(flash).await;
+                            } else {
+                                ota::confirm_running_image(flash).await;
+                            }
                         }
                     }
                     Ok(ServerMsg::SetupDone) => {

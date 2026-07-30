@@ -130,6 +130,9 @@ async fn device_loop(sender: WsSender, mut receiver: WsReceiver, state: AppState
                 Ok(ClientMsg::DeviceVersion { version }) => {
                     crate::handle_device_version(&state, &board_id, version);
                 }
+                Ok(ClientMsg::DevicePowerLimited { limited }) => {
+                    crate::handle_device_power_limited(&state, &board_id, limited);
+                }
                 Ok(ClientMsg::DeviceUpdateProgress { pct }) => {
                     // The board's own byte counter — the only honest measure
                     // (see the protocol variant's note). Relayed straight to
@@ -163,6 +166,10 @@ async fn device_loop(sender: WsSender, mut receiver: WsReceiver, state: AppState
         // An offline board has no CURRENT firmware version (the contract: None
         // while offline; devices re-report on every connect).
         state.device_versions.lock().unwrap().remove(&board_id);
+        // Same contract for the power-limited flag: it describes THIS
+        // connection's device, and the next connect re-reports — keeping it
+        // would pin a stale warning on a board whose supply was since fixed.
+        state.power_limited.lock().unwrap().remove(&board_id);
     }
     keepalive.abort();
     forward.abort();
@@ -1075,9 +1082,10 @@ mod tests {
         send(&mut ctrl, &ClientMsg::Subscribe { board_ids: vec![board_id.to_string()] }).await;
         let first = recv_until(&mut ctrl, |m| matches!(m, ServerMsg::BoardState { .. })).await;
         match first {
-            Some(ServerMsg::BoardState { firmware_version, firmware_update, .. }) => {
+            Some(ServerMsg::BoardState { firmware_version, firmware_update, power_limited, .. }) => {
                 assert_eq!(firmware_version, None, "no version before the device reports one");
                 assert_eq!(firmware_update, None, "no offer without a reported version");
+                assert!(!power_limited, "a board that never reported reads NOT limited");
             }
             other => panic!("expected the initial BoardState, got {other:?}"),
         }
@@ -1120,6 +1128,36 @@ mod tests {
             }
             other => panic!("expected a BoardState push after DeviceVersion, got {other:?}"),
         }
+    }
+
+    /// DevicePowerLimited flows into BoardState like DeviceVersion does: a
+    /// limited=true report reaches the subscribed app promptly (someone
+    /// watching through a reboot sees the warning appear), limited=false
+    /// clears it, and a board that never reports shows false (covered by
+    /// `paired_subscriber`'s initial-push assertion).
+    #[tokio::test]
+    async fn device_power_limited_flows_to_board_state() {
+        let (url, _state) = spawn_server().await;
+        let (mut dev, board_id) = auth(&url, Role::Device, &[1u8; 32]).await;
+        let mut ctrl = paired_subscriber(&url, &mut dev, &board_id, &[2u8; 32]).await;
+
+        // The board's POST browned out: the warning reaches the app.
+        send(&mut dev, &ClientMsg::DevicePowerLimited { limited: true }).await;
+        let pushed = recv_until(&mut ctrl, |m| {
+            matches!(m, ServerMsg::BoardState { power_limited: true, .. })
+        })
+        .await;
+        assert!(pushed.is_some(), "limited=true must push a BoardState carrying the warning");
+
+        // Supply fixed, the next boot's test passed: the report clears it.
+        // (Every push after the true-report carried true, so a false push can
+        // only be the clearing one.)
+        send(&mut dev, &ClientMsg::DevicePowerLimited { limited: false }).await;
+        let pushed = recv_until(&mut ctrl, |m| {
+            matches!(m, ServerMsg::BoardState { power_limited: false, .. })
+        })
+        .await;
+        assert!(pushed.is_some(), "limited=false must push a BoardState with the warning cleared");
     }
 
     /// Command::UpdateFirmware re-runs the offer pick at command time and

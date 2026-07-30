@@ -6,3 +6,8 @@ version.workspace = true
 [dependencies]
 scoreboard-protocol = { path = "../protocol" }
 embedded-graphics = "0.8"
+
+# Tests only (the dump_* screenshot tests) — never reaches the no_std firmware
+# build, which sees board-core solely through [dependencies].
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }

@@ -648,6 +648,15 @@ pub enum ClientMsg {
     // sent once after auth — the server echoes it into `BoardState` and uses it
     // to decide whether to offer the hosted image as an update
     DeviceVersion { version: String },
+    // device reports whether it is running power-limited (brightness capped
+    // after its power-on self-test browned out), sent once after auth alongside
+    // DeviceVersion — the server echoes it into `BoardState` so the app can
+    // warn too. Only the DEVICE can know this: a brownout is a supply sag at
+    // the board's own USB port, invisible from the network side (the server
+    // just sees a reconnect), and the surviving marker lives in the board's
+    // RAM/flash. `limited: false` is sent affirmatively so a fixed supply
+    // clears the warning on the next connect.
+    DevicePowerLimited { limited: bool },
     // controller (DEBUG firmware picker) asks for every firmware image the
     // server hosts, across ALL channels regardless of board enrollment —
     // answered by `ServerMsg::FirmwareList`
@@ -678,6 +687,13 @@ pub enum ServerMsg {
         /// shows its Update button exactly when this is Some.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         firmware_update: Option<String>,
+        /// True while the connected device says it is running power-limited
+        /// (`ClientMsg::DevicePowerLimited` after a failed power-on self-test).
+        /// `#[serde(default)]` keeps both directions compatible: firmware that
+        /// predates the report never sends it (reads false here), and old apps
+        /// simply ignore the extra field.
+        #[serde(default)]
+        power_limited: bool,
     },
     CommandAck {
         req_id: u64,
@@ -929,6 +945,30 @@ mod firmware_msg_tests {
             serde_json::from_str::<Command>(&serde_json::to_string(&install).unwrap()).unwrap(),
             Command::InstallFirmware { channel: FwChannel::Beta }
         ));
+    }
+
+    #[test]
+    fn power_limited_report_round_trips_and_defaults_off() {
+        // The device report round-trips both ways (a fixed supply must be able
+        // to CLEAR the flag, not just set it).
+        for limited in [true, false] {
+            let msg = ClientMsg::DevicePowerLimited { limited };
+            assert!(matches!(
+                serde_json::from_str::<ClientMsg>(&serde_json::to_string(&msg).unwrap()).unwrap(),
+                ClientMsg::DevicePowerLimited { limited: l } if l == limited
+            ));
+        }
+
+        // A BoardState from a server that predates the field (no
+        // "power_limited" key) must read as NOT limited — old servers never
+        // put a healthy board into a warning state.
+        let old = r#"{"t":"BoardState","board_id":"b1","online":true,"now_showing":[],"config":{"brightness":80,"power":true,"sports":[]}}"#;
+        match serde_json::from_str::<ServerMsg>(old).unwrap() {
+            ServerMsg::BoardState { power_limited, .. } => {
+                assert!(!power_limited, "absent field must default to false")
+            }
+            other => panic!("expected BoardState, got {other:?}"),
+        }
     }
 }
 

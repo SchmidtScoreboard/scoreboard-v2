@@ -63,8 +63,8 @@ final class ListenerAdapter: ClientListener {
     func onConnection(connected: Bool) {
         Task { @MainActor in self.model?.setConnected(self.serverUrl, connected) }
     }
-    func onBoardState(boardId: String, nowShowing: [UiGame], online: Bool) {
-        Task { @MainActor in self.model?.applyBoardState(boardId, nowShowing, online) }
+    func onBoardState(boardId: String, nowShowing: [UiGame], online: Bool, powerLimited: Bool) {
+        Task { @MainActor in self.model?.applyBoardState(boardId, nowShowing, online, powerLimited) }
     }
     func onCatalog(sports: [UiSport]) {
         Task { @MainActor in self.model?.applyCatalog(self.serverUrl, sports) }
@@ -152,6 +152,11 @@ struct BoardInfo {
     /// The board dropped offline mid-update (expected: it reboots to flash);
     /// the next online push then ends the "Updating…" hint.
     var sawOfflineDuringUpdate = false
+    /// The board's power-on self-test browned out its supply, so it's running
+    /// with brightness capped at 10%. Rides every state push (like `online`)
+    /// rather than being latched here: a power cycle on a good supply clears
+    /// it on the board, and the next push must clear the warning too.
+    var powerLimited = false
 }
 
 @MainActor
@@ -215,6 +220,7 @@ final class BoardViewModel: ObservableObject {
     var online: Bool { current.online }
     var nowShowing: [UiGame] { current.nowShowing }
     var power: Bool { current.power }
+    var powerLimited: Bool { current.powerLimited }
     var brightness: Double { current.brightness }
     var focusedGameId: String? { current.focusedGameId }
     var extraGameIds: Set<String> { current.extraGameIds }
@@ -856,7 +862,7 @@ final class BoardViewModel: ObservableObject {
 
     // ---- listener callbacks (already hopped to main) ----
 
-    func applyBoardState(_ boardId: String, _ nowShowing: [UiGame], _ online: Bool) {
+    func applyBoardState(_ boardId: String, _ nowShowing: [UiGame], _ online: Bool, _ powerLimited: Bool) {
         // Pushes never ADD boards — pairing does (handlePaired). A stray push
         // for a removed board must not resurrect it out of the setup screen.
         guard boardIds.contains(boardId) else { return }
@@ -864,6 +870,9 @@ final class BoardViewModel: ObservableObject {
         mutate(boardId) {
             $0.nowShowing = nowShowing
             $0.online = online
+            // Assigned (not OR-ed) so a power cycle onto a fixed supply clears
+            // the dashboard warning without any user action.
+            $0.powerLimited = powerLimited
             // A firmware update takes the board offline (it reboots to flash);
             // coming back online afterwards ends the "Updating…" hint — the
             // version row updating on reconnect is the real feedback.
@@ -1649,6 +1658,7 @@ struct DashboardView: View {
     private var dashboardForm: some View {
         Form {
             nowShowingSection
+            powerWarningSection
             controlsSection
             // The "League Preferences" title rides as the FIRST league card's
             // section header, so the header→card gap matches the other
@@ -1914,6 +1924,41 @@ struct DashboardView: View {
         }
     }
 
+    /// Device-health warning, NOT game info (the board carries game data — a
+    /// supply problem belongs at the dashboard level, never on the cards). It
+    /// sits directly above Controls because Controls holds the brightness
+    /// slider the cap silently overrides. Presence is driven by the board's
+    /// own report riding each state push, so a power cycle onto a good supply
+    /// clears it with no app-side action.
+    @ViewBuilder private var powerWarningSection: some View {
+        if model.powerLimited {
+            Section {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "bolt.trianglebadge.exclamationmark.fill")
+                        .font(.title3)
+                        .foregroundStyle(.orange)
+                        // Top-align with the headline, not the two-line block —
+                        // matches the offline card's icon-beside-title look.
+                        .padding(.top, 1)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Weak power supply")
+                            .font(.subheadline.weight(.semibold))
+                        Text("This scoreboard's power supply couldn't sustain full brightness, so it's limited to 10% — plug it into the included 5V/3A USB-C adapter to restore full brightness.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.vertical, 4)
+                // Orange wash instead of the standard cell background: loud
+                // enough to be unmissable in the scroll, but still a Form row —
+                // it never blocks or floats over the controls it explains.
+                .listRowBackground(Color.orange.opacity(0.16))
+                .accessibilityElement(children: .combine)
+            }
+        }
+    }
+
     /// One compact controls row (power + brightness), then off-behavior + sleep
     /// duration; a footer explains an active sleep timer.
     private var controlsSection: some View {
@@ -1932,11 +1977,21 @@ struct DashboardView: View {
                 .accessibilityLabel("Power")
                 .accessibilityValue(model.power ? "On" : "Off")
 
-                BrightnessControl(
-                    value: model.brightness,
-                    onPreview: { model.previewBrightness($0) },
-                    onCommit: { model.setBrightness($0) }
-                )
+                VStack(alignment: .leading, spacing: 2) {
+                    BrightnessControl(
+                        value: model.brightness,
+                        onPreview: { model.previewBrightness($0) },
+                        onCommit: { model.setBrightness($0) }
+                    )
+                    // The slider still moves (the setting is preserved for
+                    // when the supply is fixed), but the panel won't go past
+                    // 10% — without this note the slider just looks broken.
+                    if model.powerLimited {
+                        Text("Capped at 10% — weak power supply")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
+                }
             }
         } header: {
             Text("Controls")

@@ -178,7 +178,11 @@ pub struct UiGame {
 #[uniffi::export(callback_interface)]
 pub trait ClientListener: Send + Sync {
     fn on_connection(&self, connected: bool);
-    fn on_board_state(&self, board_id: String, now_showing: Vec<UiGame>, online: bool);
+    /// `power_limited` rides with every state push (like `online`): true while
+    /// the board says it is running brightness-capped because its power-on
+    /// self-test browned out the USB supply — surface a "weak power" warning.
+    /// Clears to false the moment a reconnected board's test passes.
+    fn on_board_state(&self, board_id: String, now_showing: Vec<UiGame>, online: bool, power_limited: bool);
     fn on_catalog(&self, sports: Vec<UiSport>);
     fn on_config(&self, board_id: String, config: UiBoardConfig);
     fn on_games(&self, games: Vec<UiGame>);
@@ -398,9 +402,9 @@ impl ScoreboardClient {
                                         ServerMsg::Games { games } => {
                                             if let Some(l) = listener.lock().unwrap().as_ref() { l.on_games(to_ui_games(games)); }
                                         }
-                                        ServerMsg::BoardState { board_id: bid, online, now_showing, config, firmware_version, firmware_update } => {
+                                        ServerMsg::BoardState { board_id: bid, online, now_showing, config, firmware_version, firmware_update, power_limited } => {
                                             if let Some(l) = listener.lock().unwrap().as_ref() {
-                                                l.on_board_state(bid.clone(), to_ui_games(now_showing), online);
+                                                l.on_board_state(bid.clone(), to_ui_games(now_showing), online, power_limited);
                                                 l.on_config(bid.clone(), to_ui_board_config(config));
                                                 l.on_board_version(bid, firmware_version, firmware_update);
                                             }
@@ -776,7 +780,7 @@ mod wss_tests {
         fn on_connection(&self, connected: bool) {
             let _ = self.tx.lock().unwrap().send(format!("conn={connected}"));
         }
-        fn on_board_state(&self, _: String, _: Vec<UiGame>, _: bool) {}
+        fn on_board_state(&self, _: String, _: Vec<UiGame>, _: bool, _: bool) {}
         fn on_catalog(&self, _: Vec<UiSport>) {}
         fn on_config(&self, _: String, _: UiBoardConfig) {}
         fn on_games(&self, games: Vec<UiGame>) {

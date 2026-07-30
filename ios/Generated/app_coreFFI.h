@@ -260,7 +260,7 @@ typedef void (*UniffiCallbackInterfaceClientListenerMethod0)(uint64_t, int8_t, v
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD1
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD1
-typedef void (*UniffiCallbackInterfaceClientListenerMethod1)(uint64_t, RustBuffer, RustBuffer, int8_t, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceClientListenerMethod1)(uint64_t, RustBuffer, RustBuffer, int8_t, int8_t, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 

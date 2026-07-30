@@ -104,6 +104,11 @@ const BURST: usize = CHUNK;
 /// during early init boot-loops into this counter and reverts after three
 /// strikes. This is the case the 5-minute watchdog can't reach: a halted CPU
 /// runs no tasks.
+///
+/// This sector is SHARED with the POST brownout marker at 0xC800 (power.rs):
+/// esp-storage's whole-sector read-modify-erase-write keeps each record intact
+/// across the other's writes, but the offsets must never drift into each other
+/// — change them in lockstep or not at all.
 const ATTEMPTS_OFFSET: u32 = 0xC000;
 const ATTEMPTS_MAGIC: u32 = 0x4F54_4131; // "OTA1"
 const MAX_BOOT_ATTEMPTS: u8 = 3;
@@ -166,7 +171,12 @@ fn as_table_arr(buf: &mut [u8]) -> &mut [u8; PARTITION_TABLE_MAX_LEN] {
 ///
 /// Any read failure returns false — no OTA partitions just means the feature
 /// is off, never a scary state.
-pub fn boot_check(flash: &mut FlashStorage<'static>) -> bool {
+///
+/// `post_died` — main found the POST brownout marker, i.e. the reset that got
+/// us here was the power test's own doing (see power.rs). An unconfirmed boot
+/// after one must NOT count a strike: a too-weak USB port is a supply fault,
+/// not an image fault, and burning strikes on it would revert good firmware.
+pub fn boot_check(flash: &mut FlashStorage<'static>, post_died: bool) -> bool {
     let mut buf = table_buf();
     // Which slot are we physically executing from? (MMU-derived; None if the
     // crate can't tell — then we skip the fallback repair and trust otadata.)
@@ -211,6 +221,17 @@ pub fn boot_check(flash: &mut FlashStorage<'static>) -> bool {
     }
     match up.current_ota_state() {
         Ok(OtaImageState::New) | Ok(OtaImageState::PendingVerify) => {
+            // Skip the strike ENTIRELY on a post-brownout boot, rather than
+            // count-and-refund: at attempts == MAX-1 the transient increment
+            // would trip the revert below before any refund could run. The
+            // arithmetic is otherwise identical (read+1-1 == read). Still
+            // returns true — the image is unconfirmed, so the watchdog arms
+            // and the first ws auth confirms as usual (low-power mode caps the
+            // panel, not the radio).
+            if post_died {
+                println!("[ota] unconfirmed image; last reset was the power test's — not counting a strike");
+                return true;
+            }
             // Three strikes: a panic-looping image never keeps the watchdog
             // alive long enough to revert, but (with the panic handler
             // REBOOTING rather than halting) it re-enters this early check on
@@ -245,6 +266,26 @@ pub fn boot_check(flash: &mut FlashStorage<'static>) -> bool {
             false
         }
     }
+}
+
+/// Auth succeeded on a boot that SKIPPED the power test (the marker said the
+/// last boot died inside it). Stand the revert watchdog down and zero the
+/// strike counter — a weak supply must never accumulate strikes across power
+/// cycles — but do NOT mark the image Valid: this boot's defining property is
+/// that the POST path never ran, and an image is only allowed to confirm
+/// itself on a boot that exercised it. Otherwise an image that panics ONLY
+/// inside the POST window would crash (marker set), get a strike-free skip
+/// boot, confirm itself there, and become immune to the three-strike revert
+/// forever while every later power-on gets a false "weak supply" diagnosis.
+/// Deferring costs nothing real: the next power cycle reruns the POST, and a
+/// healthy image confirms then.
+pub async fn acknowledge_auth_after_post_death(flash: &'static SharedFlash) {
+    if FW_CONFIRMED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    println!("[ota] auth ok, but the POST was skipped this boot — confirmation deferred");
+    let mut f = flash.lock().await;
+    write_attempts(&mut f, 0);
 }
 
 /// Mark the running image Valid — called after the first successful ws auth of

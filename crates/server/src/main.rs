@@ -130,6 +130,12 @@ pub struct AppState {
     /// every connect, and the entry is dropped on disconnect (BoardState says
     /// None while offline).
     pub device_versions: Arc<Mutex<HashMap<String, String>>>,
+    /// Boards whose connected device reported it is running power-limited
+    /// (`ClientMsg::DevicePowerLimited` — its POST brownout marker). Volatile
+    /// like `device_versions`: devices re-report on every connect and the
+    /// entry is dropped on disconnect, so a board on a fixed supply clears its
+    /// warning simply by reconnecting without the report.
+    pub power_limited: Arc<Mutex<HashSet<String>>>,
     /// One-time OTA download tokens: a fresh hex nonce (minted per firmware
     /// offer) → the board_id it was minted for + when. The offer's download
     /// path carries `?u={nonce}`; the streaming `/firmware/{chan}.bin` GET
@@ -349,6 +355,7 @@ impl AppState {
             finished: Arc::new(Mutex::new(HashMap::new())),
             firmware: HashMap::new(),
             device_versions: Arc::new(Mutex::new(HashMap::new())),
+            power_limited: Arc::new(Mutex::new(HashSet::new())),
             fw_download_tokens: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -1907,6 +1914,25 @@ pub fn handle_device_version(state: &AppState, board_id: &str, version: String) 
     }
 }
 
+/// The board reported whether it is running power-limited (its boot self-test
+/// browned out the supply). Record it and — on change only — re-push board
+/// state so an app watching through the reboot sees the warning appear (or
+/// clear) immediately, not at the next games refresh.
+pub fn handle_device_power_limited(state: &AppState, board_id: &str, limited: bool) {
+    let changed = {
+        let mut set = state.power_limited.lock().unwrap();
+        if limited {
+            set.insert(board_id.to_string())
+        } else {
+            set.remove(board_id)
+        }
+    };
+    if changed {
+        tracing::info!("board '{board_id}' power-limited -> {limited}");
+        push_board_state(state, board_id);
+    }
+}
+
 /// Mint a fresh one-time download token for `board_id` and return the
 /// tokenized image path for a dist that lives in `chan`
 /// (`/firmware/{chan}.bin?u={nonce}`). Sweeps expired tokens as it inserts.
@@ -2196,6 +2222,9 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
         .as_deref()
         .and_then(|cur| offer_for(&state.firmware, cfg.fw_channel, cur))
         .map(|(_, fw)| fw.manifest.version.clone());
+    // Same lifecycle as `firmware_version`: only a connected device's report
+    // counts, so a board that never reported (or is offline) reads false.
+    let power_limited = state.power_limited.lock().unwrap().contains(board_id);
     ServerMsg::BoardState {
         board_id: board_id.to_string(),
         online,
@@ -2203,6 +2232,7 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
         config: cfg,
         firmware_version,
         firmware_update,
+        power_limited,
     }
 }
 

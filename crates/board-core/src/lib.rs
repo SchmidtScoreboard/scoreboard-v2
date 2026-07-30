@@ -51,6 +51,31 @@ const OFFLINE_GRACE_MS: u64 = 45_000;
 // forever (the code screen shows no scores), so it returns to content on its own.
 const SYNC_TIMEOUT_MS: u64 = 90_000;
 
+// ---- power-on self-test (POST) ----
+// Total length of the boot gradient. It is a LOAD TEST wearing a boot
+// animation's clothes: the panel is driven to its true worst-case draw at the
+// safest possible moment — radio still down, no flash writes in flight — so an
+// undersized USB supply browns out NOW instead of mid-Wi-Fi-burst later, or
+// worst of all mid-flash-write during an OTA.
+pub const POWER_TEST_DURATION_MS: u64 = 3000;
+// The final stretch holds EVERY pixel at POST_PEAK — the actual peak-draw
+// moment. Long enough that bulk capacitance can't mask a sagging supply for
+// the whole hold.
+const POST_WHITE_HOLD_MS: u64 = 350;
+// Colors start bleaching toward white here, so the hold is reached smoothly
+// instead of snapping from saturated color to white.
+const POST_DESAT_START_MS: u64 = POWER_TEST_DURATION_MS * 2 / 3;
+// Peak drive of the POST's white hold. Full white IS the panel's worst case,
+// which is the point — but if the shipped 5V 3A adapter turns out to sag at
+// true all-white, this single knob dials the whole test (and its tests) down.
+const POST_PEAK: u8 = 255;
+// A board that browned out during the POST reboots, finds the marker, and
+// comes up power-limited: effective brightness capped at POWER_LIMIT_PCT and a
+// warning held on the panel for POWER_WARN_SECS so the user learns WHY the
+// board went dim (and which adapter fixes it).
+pub const POWER_LIMIT_PCT: u8 = 10;
+pub const POWER_WARN_SECS: u64 = 30;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode {
     Booting,
@@ -117,6 +142,11 @@ pub struct Board {
     // Firmware version shown on the boot screen (env!("CARGO_PKG_VERSION")).
     version: Option<String>,
 
+    // power-on self-test / low-power mode (see the POST consts above)
+    power_test_started: Option<u64>, // device-clock anchor while the gradient runs
+    power_limited: bool,             // effective brightness capped at POWER_LIMIT_PCT
+    power_limited_at: Option<u64>,   // warning-screen window anchor (device time)
+
     /// Messages for the host to send to the server (drained via `take_outgoing`).
     outbox: Vec<ClientMsg>,
 }
@@ -157,6 +187,9 @@ impl Board {
             reset_done_at: None,
             updating: None,
             version: None,
+            power_test_started: None,
+            power_limited: false,
+            power_limited_at: None,
             outbox: Vec::new(),
         }
     }
@@ -183,6 +216,56 @@ impl Board {
     /// Restore a persisted brightness on boot (clamped to the encoder range).
     pub fn set_brightness(&mut self, level: u8) {
         self.local_brightness = level.clamp(10, 100);
+    }
+
+    /// Begin the power-on self-test: the boot gradient that deliberately ramps
+    /// the panel to its worst-case draw while nothing fragile (radio, flash
+    /// writes) is running yet. Overrides every screen below hold-to-reset
+    /// until `finish_power_test`. The HOST owns the timing — only it knows
+    /// when it's safe to bring the radio up afterwards — so a host that never
+    /// finishes parks the panel at peak; call `finish_power_test` at
+    /// `POWER_TEST_DURATION_MS` without fail.
+    pub fn start_power_test(&mut self) {
+        self.power_test_started = Some(self.clock);
+    }
+
+    /// End the power-on self-test. The test is an overlay, not a `Mode`, so
+    /// whatever the board was doing (boot screen, running content, setup) is
+    /// simply uncovered — nothing to restore.
+    pub fn finish_power_test(&mut self) {
+        self.power_test_started = None;
+    }
+
+    /// Low-power mode: a previous POST browned the supply out, so effective
+    /// brightness is clamped to `min(user, POWER_LIMIT_PCT)` until cleared or
+    /// reboot. The clamp is a CAP, never a write — the stored brightness (and
+    /// the knob, and the app's slider) keep their values, so a fixed supply
+    /// restores exactly the level the user chose.
+    pub fn set_power_limited(&mut self, limited: bool) {
+        if limited && !self.power_limited {
+            // Arm the warning only on the off->on EDGE: a host that re-asserts
+            // the brownout marker every poll must not pin the warning screen
+            // up forever.
+            self.power_limited_at = Some(self.clock);
+        }
+        if !limited {
+            self.power_limited_at = None;
+        }
+        self.power_limited = limited;
+    }
+
+    pub fn power_limited(&self) -> bool {
+        self.power_limited
+    }
+
+    /// The level `scale_buf` actually applies: the user's, capped while in
+    /// low-power mode. A read-side clamp, so the stored value survives intact.
+    fn effective_brightness(&self) -> u8 {
+        if self.power_limited {
+            self.local_brightness.min(POWER_LIMIT_PCT)
+        } else {
+            self.local_brightness
+        }
     }
 
     /// OTA update in flight. `Some(_)` BLANKS the panel to all-black, overriding
@@ -539,8 +622,16 @@ impl Board {
         // Hold-to-reset takes over the whole screen, from any mode (even asleep).
         if self.reset_active || self.reset_done {
             let mut buf = self.screen_reset();
-            scale_buf(&mut buf, self.local_brightness);
+            scale_buf(&mut buf, self.effective_brightness());
             return buf;
+        }
+        // The power-on self-test outranks everything below reset AND bypasses
+        // both dimmers (user brightness and the low-power cap): the animation
+        // IS the load ramp, and a user whose stored level is 20% must not have
+        // the test silently defanged. Only hold-to-reset draws over it — the
+        // escape hatch stays sacred even mid-test.
+        if let Some(started) = self.power_test_started {
+            return self.screen_power_test(started);
         }
         // An OTA update in flight BLANKS the panel, overriding every mode below
         // reset. The download's flash writes stall the render task per sector,
@@ -550,6 +641,20 @@ impl Board {
         // hatch is sacred, and stays fully lit even mid-download.)
         if self.updating.is_some() {
             return vec![0u32; FRAME_PIXELS];
+        }
+        // Fresh out of a brownout reboot, the panel leads with WHY it's dim:
+        // the warning owns the screen for POWER_WARN_SECS of device time, then
+        // normal screens resume at the capped level. Below `updating` on
+        // purpose — a lit warning would strobe through a flash download, and
+        // black is also the lowest draw a struggling supply could ask for.
+        if self.power_limited {
+            if let Some(t0) = self.power_limited_at {
+                if self.clock.saturating_sub(t0) < POWER_WARN_SECS * 1000 {
+                    let mut buf = self.screen_power_warning();
+                    scale_buf(&mut buf, self.effective_brightness());
+                    return buf;
+                }
+            }
         }
         // Only server content gets the transient brightness bar. On the
         // firmware-local screens the bottom rows are the status LINE — measured
@@ -591,11 +696,16 @@ impl Board {
         // Brightness is applied exactly once, here — `local_brightness` tracks the
         // server's value while online (see `on_manifest`) and doubles as the local
         // fallback offline, so it dims every screen (boot/setup/sync/running).
-        scale_buf(&mut buf, self.local_brightness);
+        scale_buf(&mut buf, self.effective_brightness());
         // Transient indicator for ~2s after a knob turn, drawn at full level so it
         // stays legible even when the screen itself is dimmed.
         if server_content && self.brightness_changed_at.is_some() {
-            overlay_brightness_bar(&mut buf, self.local_brightness);
+            // The bar's FILL still reports the user's stored level (the knob
+            // keeps moving that value even while capped), but its pixels honor
+            // the low-power cap — the overlay must not poke a full-drive hole
+            // in the very clamp that's protecting the supply.
+            let drive = if self.power_limited { POWER_LIMIT_PCT } else { 100 };
+            overlay_brightness_bar(&mut buf, self.local_brightness, drive);
         }
         buf
     }
@@ -777,6 +887,56 @@ impl Board {
         }
         c.into_u32()
     }
+
+    /// The POST gradient: a diagonal rainbow sliding across the panel while
+    /// luminance ramps ~8% -> POST_PEAK, bleaching to pure white for the final
+    /// POST_WHITE_HOLD_MS. Keyed off `self.clock` like every other animation —
+    /// device time only, never network time. Integer math throughout: it runs
+    /// on the bare-metal render path.
+    fn screen_power_test(&self, started: u64) -> Vec<u32> {
+        // Clamp at the end so a host that's late calling `finish_power_test`
+        // holds steady white instead of wrapping the animation.
+        let t = self.clock.saturating_sub(started).min(POWER_TEST_DURATION_MS);
+        let ramp_end = POWER_TEST_DURATION_MS - POST_WHITE_HOLD_MS;
+        let peak = POST_PEAK as u64;
+        // Luminance 8% -> 100% of POST_PEAK by the start of the white hold.
+        let v = if t >= ramp_end { peak } else { peak * (80 + 920 * t / ramp_end) / 1000 } as u8;
+        // Saturation full -> zero across the last stretch, hitting pure white
+        // exactly when the hold begins.
+        let s = if t <= POST_DESAT_START_MS {
+            255
+        } else if t >= ramp_end {
+            0
+        } else {
+            (255 * (ramp_end - t) / (ramp_end - POST_DESAT_START_MS)) as u8
+        };
+        let mut buf = vec![0u32; FRAME_PIXELS];
+        for y in 0..FRAME_HEIGHT {
+            for x in 0..FRAME_WIDTH {
+                // Diagonal: hue advances along x + y/2 (×3 spans most of the
+                // wheel across the 64px panel), plus a time term so the whole
+                // gradient visibly slides while it brightens.
+                let h = ((x + y / 2) as u64 * 3 + t / 6) % 256;
+                let (r, g, b) = hsv_to_rgb(h as u8, s, v);
+                buf[y * FRAME_WIDTH + x] =
+                    ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
+            }
+        }
+        buf
+    }
+
+    /// Full-screen brownout warning. Only max-value colors (amber, white) —
+    /// this screen ships under the 10% cap, and anything dimmer than full
+    /// drive would vanish once scaled.
+    fn screen_power_warning(&self) -> Vec<u32> {
+        let mut c = Canvas::new();
+        // Widths against the 64px panel: FONT_5X8 "LOW POWER" = 9×5 = 45px;
+        // FONT_4X6 "USE 5V 3A" = 9×4 = 36px. Both fit with margin.
+        center_text(&mut c, "LOW POWER", 6, &FONT_5X8, Rgb888::new(0xFF, 0xB4, 0x00));
+        center_text(&mut c, "USE 5V 3A", 17, &FONT_4X6, Rgb888::WHITE);
+        center_text(&mut c, "ADAPTER", 25, &FONT_4X6, Rgb888::WHITE);
+        c.into_u32()
+    }
 }
 
 // ---- tiny canvas for the firmware-local screens ----
@@ -926,17 +1086,45 @@ fn scroll_offset(t: u64, dwell_ms: u64, max_off: usize) -> usize {
     }
 }
 
+fn scale_px(px: u32, brightness: u8) -> u32 {
+    let b = brightness as u32;
+    let r = ((px >> 16) & 0xFF) * b / 100;
+    let g = ((px >> 8) & 0xFF) * b / 100;
+    let bl = (px & 0xFF) * b / 100;
+    (r << 16) | (g << 8) | bl
+}
+
 fn scale_buf(buf: &mut [u32], brightness: u8) {
     if brightness >= 100 {
         return;
     }
-    let b = brightness as u32;
     for px in buf.iter_mut() {
-        let r = ((*px >> 16) & 0xFF) * b / 100;
-        let g = ((*px >> 8) & 0xFF) * b / 100;
-        let bl = (*px & 0xFF) * b / 100;
-        *px = (r << 16) | (g << 8) | bl;
+        *px = scale_px(*px, brightness);
     }
+}
+
+/// Integer HSV -> RGB with `h` wrapping the full wheel over 0..=255. Written
+/// for the POST gradient: piecewise-linear ramps whose regions meet exactly
+/// (q and t both equal v at every boundary), so the sweep has no seams.
+fn hsv_to_rgb(h: u8, s: u8, v: u8) -> (u8, u8, u8) {
+    if s == 0 {
+        return (v, v, v);
+    }
+    let (h, s, v) = (h as u32, s as u32, v as u32);
+    let region = h * 6 / 256; // 0..=5
+    let rem = h * 6 % 256; // position within the region, 0..=255
+    let p = v * (255 - s) / 255;
+    let q = v * (255 * 255 - s * rem) / (255 * 255);
+    let t = v * (255 * 255 - s * (255 - rem)) / (255 * 255);
+    let (r, g, b) = match region {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    };
+    (r as u8, g as u8, b as u8)
 }
 
 /// A white checkmark centered on `(cx, cy)` — shown when the reset bar fills.
@@ -955,16 +1143,20 @@ fn draw_checkmark(c: &mut Canvas, cx: i32, cy: i32) {
 /// Transient brightness bar across the bottom rows (amber fill proportional to
 /// level). Four rows, not seven: it lands on a live game frame, and the taller
 /// bar swallowed the score line on frames that use the full panel height.
-fn overlay_brightness_bar(buf: &mut [u32], brightness: u8) {
+/// `drive` caps the bar's own pixels — normally 100 (drawn post-scale so it
+/// stays legible on a dimmed screen), but POWER_LIMIT_PCT in low-power mode.
+fn overlay_brightness_bar(buf: &mut [u32], brightness: u8, drive: u8) {
     let bar_h = 4usize;
     let y0 = FRAME_HEIGHT - bar_h;
     let fill = (brightness as usize * FRAME_WIDTH) / 100;
+    // The unfilled track is deliberately lit, but keep it FAINT: at
+    // 0x333333 on a panel at full brightness it reads as a band of
+    // stuck-on pixels rather than an empty track.
+    let fill_c = scale_px(0x00FF_CC00, drive);
+    let track_c = scale_px(0x0018_1818, drive);
     for y in y0..FRAME_HEIGHT {
         for x in 0..FRAME_WIDTH {
-            // The unfilled track is deliberately lit, but keep it FAINT: at
-            // 0x333333 on a panel at full brightness it reads as a band of
-            // stuck-on pixels rather than an empty track.
-            buf[y * FRAME_WIDTH + x] = if x < fill { 0x00FF_CC00 } else { 0x0018_1818 };
+            buf[y * FRAME_WIDTH + x] = if x < fill { fill_c } else { track_c };
         }
     }
 }
@@ -1811,6 +2003,263 @@ mod tests {
             without_bar[28 * FRAME_WIDTH..],
             "the bar draws in the bottom four rows"
         );
+    }
+
+    /// The POST's whole-panel luminance must only ever rise: the point is a
+    /// RAMP to worst-case draw, and any dip would let a marginal supply
+    /// recover mid-test and falsely pass.
+    #[test]
+    fn power_test_luminance_ramps_monotonically() {
+        let mut b = Board::new();
+        b.tick(0);
+        b.start_power_test();
+        let mut sums = Vec::new();
+        for pct in [0u64, 25, 50, 75, 100] {
+            b.tick(POWER_TEST_DURATION_MS * pct / 100);
+            let sum: u64 = b
+                .framebuffer()
+                .iter()
+                .map(|&p| ((p >> 16 & 0xFF) + (p >> 8 & 0xFF) + (p & 0xFF)) as u64)
+                .sum();
+            sums.push(sum);
+        }
+        for w in sums.windows(2) {
+            assert!(w[1] >= w[0], "luminance dipped mid-run: {sums:?}");
+        }
+        assert!(sums[0] < sums[4], "the run must actually ramp, not hold flat: {sums:?}");
+        // The 100% sample is the peak itself: every channel at POST_PEAK.
+        assert_eq!(sums[4], FRAME_PIXELS as u64 * 3 * POST_PEAK as u64);
+    }
+
+    /// The final stretch is EVERY pixel at POST_PEAK — the true load peak —
+    /// and it must bypass both the user's stored brightness and a leftover
+    /// low-power cap: a dimmed test proves nothing about the supply.
+    #[test]
+    fn power_test_ends_all_white_at_peak_and_bypasses_dimmers() {
+        let peak =
+            ((POST_PEAK as u32) << 16) | ((POST_PEAK as u32) << 8) | POST_PEAK as u32;
+        let mut b = Board::new();
+        b.set_brightness(20); // a stored dim level must not defang the test
+        b.set_power_limited(true); // nor a stale low-power cap from last boot
+        b.tick(0);
+        b.start_power_test();
+        b.tick(POWER_TEST_DURATION_MS - 100); // inside the white hold
+        assert!(
+            b.framebuffer().iter().all(|&p| p == peak),
+            "the white hold starts before the run ends"
+        );
+        b.tick(POWER_TEST_DURATION_MS);
+        assert!(
+            b.framebuffer().iter().all(|&p| p == peak),
+            "final frame: all white at POST_PEAK"
+        );
+        assert_eq!(b.brightness(), 20, "the stored level is untouched by the test");
+    }
+
+    /// Mid-run POST frames are identical whatever the stored brightness — the
+    /// bypass covers the whole ramp, not just the white hold.
+    #[test]
+    fn power_test_ignores_user_brightness_mid_run() {
+        let frame_at = |brightness: u8| {
+            let mut b = Board::new();
+            b.set_brightness(brightness);
+            b.tick(0);
+            b.start_power_test();
+            b.tick(POWER_TEST_DURATION_MS / 2);
+            b.framebuffer()
+        };
+        let full = frame_at(100);
+        assert_eq!(full, frame_at(20), "the ramp must not be scaled by the stored level");
+        assert!(full.iter().any(|&p| p != 0), "mid-run frame is lit");
+    }
+
+    /// The gradient slides with DEVICE time (the same clock as every other
+    /// animation) — two mid-ramp instants render different frames.
+    #[test]
+    fn power_test_gradient_shifts_over_time() {
+        let mut b = Board::new();
+        b.tick(0);
+        b.start_power_test();
+        b.tick(600);
+        let early = b.framebuffer();
+        b.tick(900);
+        assert_ne!(early, b.framebuffer(), "device time slides the gradient");
+    }
+
+    /// `finish_power_test` is a pure overlay pop: the exact pre-test frame
+    /// comes back, whatever the board was doing.
+    #[test]
+    fn finish_power_test_restores_prior_state() {
+        use scoreboard_protocol::RotationEntry;
+        // Booting: the version boot screen survives the test untouched.
+        let mut b = Board::new();
+        b.set_version("2026.7.6".into());
+        b.tick(0);
+        let boot = b.framebuffer();
+        b.start_power_test();
+        assert_ne!(b.framebuffer(), boot, "the POST overlay takes the panel");
+        b.finish_power_test();
+        assert_eq!(b.framebuffer(), boot, "back on the boot screen");
+        assert_eq!(b.mode(), Mode::Booting, "the mode never changed underneath");
+
+        // Running with live content: same shape, around a server frame.
+        let solid = |r: u8, g: u8, bl: u8| -> Vec<u8> {
+            let px = scoreboard_protocol::rgb888_to_565(r, g, bl).to_le_bytes();
+            (0..FRAME_PIXELS).flat_map(|_| px).collect()
+        };
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.tick(0);
+        b.on_manifest(Manifest {
+            rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 10_000, scroll: false }],
+            display_on: true,
+            off_state: Default::default(),
+            epoch: 0,
+            brightness: 100,
+        });
+        b.on_frame("a".into(), solid(255, 0, 0));
+        b.tick(100);
+        let content = b.framebuffer();
+        assert_eq!(content[0], 0xFF0000);
+        b.start_power_test();
+        b.tick(200);
+        assert_ne!(b.framebuffer(), content, "POST overlays running content");
+        b.finish_power_test();
+        assert_eq!(b.framebuffer(), content, "content returns exactly");
+    }
+
+    /// Low-power mode caps EFFECTIVE brightness at POWER_LIMIT_PCT without
+    /// touching the stored value — the knob/app level survives, so a fixed
+    /// supply restores exactly what the user chose.
+    #[test]
+    fn power_limited_caps_effective_brightness_not_stored() {
+        use scoreboard_protocol::RotationEntry;
+        let solid = |r: u8, g: u8, bl: u8| -> Vec<u8> {
+            let px = scoreboard_protocol::rgb888_to_565(r, g, bl).to_le_bytes();
+            (0..FRAME_PIXELS).flat_map(|_| px).collect()
+        };
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.tick(0);
+        b.on_manifest(Manifest {
+            rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 10_000, scroll: false }],
+            display_on: true,
+            off_state: Default::default(),
+            epoch: 0,
+            brightness: 100,
+        });
+        b.on_frame("a".into(), solid(255, 255, 255));
+        b.tick(100);
+        assert_eq!(b.framebuffer()[0], 0xFFFFFF, "full drive before the cap");
+
+        b.set_power_limited(true);
+        assert!(b.power_limited());
+        // Past the warning window, so this is NORMAL content under the cap.
+        b.tick(100 + POWER_WARN_SECS * 1000 + 100);
+        let capped = (255u32 * POWER_LIMIT_PCT as u32) / 100;
+        assert_eq!(
+            b.framebuffer()[0],
+            (capped << 16) | (capped << 8) | capped,
+            "white content driven at POWER_LIMIT_PCT"
+        );
+        assert_eq!(b.brightness(), 100, "stored brightness is a value, the cap is a clamp");
+
+        b.set_power_limited(false);
+        assert_eq!(b.framebuffer()[0], 0xFFFFFF, "clearing the cap restores full drive");
+    }
+
+    /// The warning screen owns the panel for POWER_WARN_SECS of device time
+    /// after the cap is armed, honors the cap itself, then yields to normal
+    /// capped content. Re-asserting the marker mid-window must not re-arm it.
+    #[test]
+    fn power_warning_shows_then_expires() {
+        use scoreboard_protocol::RotationEntry;
+        let solid = |r: u8, g: u8, bl: u8| -> Vec<u8> {
+            let px = scoreboard_protocol::rgb888_to_565(r, g, bl).to_le_bytes();
+            (0..FRAME_PIXELS).flat_map(|_| px).collect()
+        };
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.tick(0);
+        b.on_manifest(Manifest {
+            rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 60_000, scroll: false }],
+            display_on: true,
+            off_state: Default::default(),
+            epoch: 0,
+            brightness: 100,
+        });
+        b.on_frame("a".into(), solid(255, 0, 0));
+        b.tick(1000);
+        let content = b.framebuffer();
+
+        b.set_power_limited(true); // armed at device time 1000
+        let warning = b.framebuffer();
+        assert_ne!(warning, content, "the warning replaces normal content");
+        assert!(warning.iter().any(|&p| p != 0), "the warning is lit (readable)");
+        // The warning itself ships under the cap: no channel above 10% drive.
+        let cap = (255u32 * POWER_LIMIT_PCT as u32) / 100;
+        assert!(
+            warning.iter().all(|&p| (p >> 16 & 0xFF) <= cap
+                && (p >> 8 & 0xFF) <= cap
+                && (p & 0xFF) <= cap),
+            "the warning must not out-drive the very cap it announces"
+        );
+
+        b.tick(1000 + POWER_WARN_SECS * 1000 - 500);
+        assert_eq!(b.framebuffer(), warning, "still warning just inside the window");
+        b.set_power_limited(true); // host re-asserts the marker — no re-arm
+        b.tick(1000 + POWER_WARN_SECS * 1000 + 500);
+        let after = b.framebuffer();
+        assert_ne!(after, warning, "the warning expires on device time");
+        let capped_red = ((255u32 * POWER_LIMIT_PCT as u32) / 100) << 16;
+        assert_eq!(after[0], capped_red, "normal content returns, still capped");
+    }
+
+    /// Not a test — renders the POST gradient at 0/25/50/75/100% of the run
+    /// plus the low-power warning to PNGs (8x nearest-neighbor upscale) for
+    /// eyeballing. Run: cargo test -p board-core -- --ignored dump_power_screens
+    /// Output: $BOARD_SCREEN_DUMP_DIR or <system temp>/board-screens.
+    #[test]
+    #[ignore]
+    fn dump_power_screens() {
+        let dir = std::env::var("BOARD_SCREEN_DUMP_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::env::temp_dir().join("board-screens"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let scale = 8u32;
+        let save = |name: &str, fb: &[u32]| {
+            let mut img =
+                image::RgbImage::new(FRAME_WIDTH as u32 * scale, FRAME_HEIGHT as u32 * scale);
+            for y in 0..FRAME_HEIGHT {
+                for x in 0..FRAME_WIDTH {
+                    let p = fb[y * FRAME_WIDTH + x];
+                    let px = image::Rgb([(p >> 16) as u8, (p >> 8) as u8, p as u8]);
+                    for dy in 0..scale {
+                        for dx in 0..scale {
+                            img.put_pixel(x as u32 * scale + dx, y as u32 * scale + dy, px);
+                        }
+                    }
+                }
+            }
+            let path = dir.join(format!("{name}.png"));
+            img.save(&path).unwrap();
+            println!("wrote {}", path.display());
+        };
+        let mut b = Board::new();
+        b.tick(0);
+        b.start_power_test();
+        for pct in [0u64, 25, 50, 75, 100] {
+            b.tick(POWER_TEST_DURATION_MS * pct / 100);
+            save(&format!("power_test_{pct:03}pct"), &b.framebuffer());
+        }
+        let mut b = Board::new();
+        b.tick(0);
+        b.set_power_limited(true);
+        b.tick(1000);
+        save("power_warning", &b.framebuffer());
     }
 
     /// Not a test — renders the new screens to raw RGB888 files for eyeballing.
