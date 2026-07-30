@@ -5,7 +5,7 @@
 //!
 //! `--headless` runs the websocket/board pipeline with no GUI (prints frame stats).
 
-use board_core::{Board, Gesture, Mode, SetupPhase, POWER_TEST_DURATION_MS};
+use board_core::{Board, Gesture, Mode, SetupPhase};
 use eframe::egui;
 use futures_util::{SinkExt, StreamExt};
 use scoreboard_protocol::*;
@@ -33,28 +33,22 @@ struct Args {
     /// IANA zone reported to the server as this "device's" location. The
     /// firmware IP-geolocates one; the sim's closest analogue is the host's.
     tz: String,
-    /// Simulate a supply brownout mid-POST: the board "reboots" partway
-    /// through the gradient and comes back in low-power mode, so the warning
-    /// screen, its 30s timeout, and the 10% cap can be checked end-to-end.
-    low_power: bool,
 }
 
-/// Parse `--server <url>`, `--board <id>`, `--tz <zone>`, `--headless`,
-/// `--low-power` (defaults = the consts / the host timezone).
+/// Parse `--server <url>`, `--board <id>`, `--tz <zone>`, `--headless`
+/// (defaults = the consts / the host timezone).
 fn parse_args() -> Args {
     let mut a = Args {
         server: SERVER_WS.to_string(),
         board: BOARD_ID.to_string(),
         headless: false,
         tz: host_timezone(),
-        low_power: false,
     };
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--headless" => a.headless = true,
-            "--low-power" => a.low_power = true,
             "--server" => { i += 1; a.server = args.get(i).cloned().unwrap_or(a.server); }
             "--board" => { i += 1; a.board = args.get(i).cloned().unwrap_or(a.board); }
             "--tz" => { i += 1; a.tz = args.get(i).cloned().unwrap_or(a.tz); }
@@ -63,44 +57,6 @@ fn parse_args() -> Args {
         i += 1;
     }
     a
-}
-
-/// Drives the boot POST exactly the way firmware will: play the gradient for
-/// its full length, then return to normal operation. With `--low-power`,
-/// brown out at ~60% the way firmware experiences it — the Board is REBUILT
-/// (a brownout is a reboot, not a state change) and comes back power-limited,
-/// skipping the retest a sagging supply would only fail again.
-struct PostSim {
-    low_power: bool,
-    done: bool,
-}
-
-impl PostSim {
-    fn new(low_power: bool) -> Self {
-        Self { low_power, done: false }
-    }
-
-    fn step(&mut self, board: &Mutex<Board>, now_ms: u64) {
-        if self.done {
-            return;
-        }
-        if self.low_power && now_ms >= POWER_TEST_DURATION_MS * 6 / 10 {
-            println!("simulated brownout at {now_ms}ms: supply sagged mid-POST — rebooting power-limited");
-            let mut b = board.lock().unwrap();
-            *b = Board::new();
-            b.set_version(env!("CARGO_PKG_VERSION").to_string());
-            // A real reboot restarts the device clock at zero; the sim's clock
-            // can't rewind, so tick first to anchor the warning window at "now".
-            b.tick(now_ms);
-            b.set_power_limited(true);
-            self.done = true;
-            return;
-        }
-        if now_ms >= POWER_TEST_DURATION_MS {
-            board.lock().unwrap().finish_power_test();
-            self.done = true;
-        }
-    }
 }
 
 /// The host's IANA zone. Without one the server renders this board's clock and
@@ -128,15 +84,11 @@ fn host_timezone() -> String {
 }
 
 fn main() -> eframe::Result<()> {
-    let Args { server, board: board_id, headless, tz, low_power } = parse_args();
+    let Args { server, board: board_id, headless, tz } = parse_args();
     println!("simulator: server={server} board={board_id} tz={tz}");
     let mut b = Board::new();
     // Same version line the firmware puts on its boot screen.
     b.set_version(env!("CARGO_PKG_VERSION").to_string());
-    // The firmware opens with the power-on self-test — worst-case panel draw
-    // while the radio is still down. The sim plays the identical animation so
-    // the gradient can be judged without hardware (PostSim ends it on time).
-    b.start_power_test();
     // The Wi-Fi leg is driven by the client loop (mirroring the firmware's
     // per-pass link check), so the "WiFi connect fails" toggle renders the
     // Wi-Fi hop down instead of blaming the server.
@@ -159,13 +111,10 @@ fn main() -> eframe::Result<()> {
     if headless {
         // No GUI: tick the board and print frame stats for a while.
         let start = Instant::now();
-        let mut post = PostSim::new(low_power);
         for _ in 0..80 {
-            let now_ms = start.elapsed().as_millis() as u64;
-            post.step(&board, now_ms);
             let lit = {
                 let mut b = board.lock().unwrap();
-                b.tick(now_ms);
+                b.tick(start.elapsed().as_millis() as u64);
                 b.framebuffer().iter().filter(|&&p| p != 0).count()
             };
             println!("headless: mode={:?} lit={}", board.lock().unwrap().mode(), lit);
@@ -192,7 +141,6 @@ fn main() -> eframe::Result<()> {
                 holding_reset: false,
                 updating: false,
                 setup_phase: SetupPhase::WaitingBluetooth,
-                post: PostSim::new(low_power),
             }))
         }),
     )
@@ -211,8 +159,6 @@ struct SimApp {
     /// these as the handshake progresses; here they're a selector, or the
     /// WaitingCreds/Saved screens are unreachable in the sim.
     setup_phase: SetupPhase,
-    /// Boot POST driver (and the `--low-power` brownout, when asked for).
-    post: PostSim,
 }
 
 fn fb_to_image(fb: &[u32]) -> egui::ColorImage {
@@ -242,15 +188,11 @@ impl eframe::App for SimApp {
             if !r_down && self.holding_reset { b.button_up(now_ms); self.holding_reset = false; }
         });
 
-        // Boot POST first: it may REPLACE the board (simulated brownout), so it
-        // must run before this frame's tick touches the old one.
-        self.post.step(&self.board, now_ms);
-
         // tick + grab the framebuffer + status (incl. server/app-controlled values)
-        let (fb, mode, brightness, power, power_limited) = {
+        let (fb, mode, brightness, power) = {
             let mut b = self.board.lock().unwrap();
             b.tick(now_ms);
-            (b.framebuffer(), b.mode(), b.brightness(), b.power(), b.power_limited())
+            (b.framebuffer(), b.mode(), b.brightness(), b.power())
         };
         let img = fb_to_image(&fb);
         let tex = self
@@ -282,13 +224,6 @@ impl eframe::App for SimApp {
             if ui.checkbox(&mut self.updating, "OTA updating (panel blanks)").changed() {
                 let p = if self.updating { Some(0) } else { None };
                 self.board.lock().unwrap().set_updating(p);
-            }
-            // Live toggle for the brownout marker: off->on re-arms the 30s
-            // warning, so the screen can be re-watched without relaunching
-            // with --low-power.
-            let mut lp = power_limited;
-            if ui.checkbox(&mut lp, "Low-power mode (POST brownout)").changed() {
-                self.board.lock().unwrap().set_power_limited(lp);
             }
             ui.label("Setup phase (long-press to see it):");
             let mut phase = self.setup_phase;
@@ -457,12 +392,6 @@ async fn run_client(
                             if wifi_fail || server_down {
                                 break;
                             }
-                            // Re-assert the live socket every poll: a simulated
-                            // brownout (--low-power) swaps in a FRESH Board that
-                            // boots believing it's offline. On hardware the reboot
-                            // reconnects; here the socket never dropped, so this
-                            // re-report is the honest equivalent.
-                            board.lock().unwrap().set_online(true);
                             // Detect entering setup/sync; announce a pairing code.
                             let new_code = {
                                 let mut b = board.lock().unwrap();

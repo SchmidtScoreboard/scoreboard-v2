@@ -2453,13 +2453,7 @@ extension UiOffState: Equatable, Hashable {}
 public protocol ClientListener: AnyObject {
     func onConnection(connected: Bool)
 
-    /**
-     * `power_limited` rides with every state push (like `online`): true while
-     * the board says it is running brightness-capped because its power-on
-     * self-test browned out the USB supply — surface a "weak power" warning.
-     * Clears to false the moment a reconnected board's test passes.
-     */
-    func onBoardState(boardId: String, nowShowing: [UiGame], online: Bool, powerLimited: Bool)
+    func onBoardState(boardId: String, nowShowing: [UiGame], online: Bool)
 
     func onCatalog(sports: [UiSport])
 
@@ -2546,7 +2540,6 @@ private enum UniffiCallbackInterfaceClientListener {
             boardId: RustBuffer,
             nowShowing: RustBuffer,
             online: Int8,
-            powerLimited: Int8,
             _: UnsafeMutableRawPointer,
             uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
         ) in
@@ -2558,8 +2551,7 @@ private enum UniffiCallbackInterfaceClientListener {
                 return try uniffiObj.onBoardState(
                     boardId: FfiConverterString.lift(boardId),
                     nowShowing: FfiConverterSequenceTypeUiGame.lift(nowShowing),
-                    online: FfiConverterBool.lift(online),
-                    powerLimited: FfiConverterBool.lift(powerLimited)
+                    online: FfiConverterBool.lift(online)
                 )
             }
 
@@ -3338,7 +3330,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_method_clientlistener_on_connection() != 53034 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_method_clientlistener_on_board_state() != 27906 {
+    if uniffi_app_core_checksum_method_clientlistener_on_board_state() != 60948 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_clientlistener_on_catalog() != 53052 {
