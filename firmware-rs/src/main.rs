@@ -261,10 +261,19 @@ async fn main(spawner: Spawner) -> ! {
             let net_config = embassy_net::Config::dhcpv4(Default::default());
             let rng = Rng::new();
             let seed = ((rng.random() as u64) << 32) | rng.random() as u64;
+            // FIVE socket slots, and the count is load-bearing: DHCP, DNS, the
+            // websocket, and the OTA download socket — which runs CONCURRENTLY
+            // with the websocket since 2026.7.6 (the ws stays open so the board
+            // can report download progress), plus one spare. At <3> the pool
+            // held exactly one TCP slot, so the download's TcpSocket::new
+            // panicked in smoltcp ("socket set full") the instant an update
+            // was accepted: the board rebooted on the spot, on every attempt,
+            // and OTA was unusable until a USB flash. If a socket is ever
+            // added, grow this — smoltcp's failure mode is a panic, not an Err.
             let (stack, runner) = embassy_net::new(
                 interfaces.station,
                 net_config,
-                mk_static!(StackResources<3>, StackResources::<3>::new()),
+                mk_static!(StackResources<5>, StackResources::<5>::new()),
                 seed,
             );
 

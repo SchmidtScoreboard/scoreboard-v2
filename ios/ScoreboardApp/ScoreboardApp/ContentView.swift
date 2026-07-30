@@ -152,6 +152,12 @@ struct BoardInfo {
     /// The board dropped offline mid-update (expected: it reboots to flash);
     /// the next online push then ends the "Updating…" hint.
     var sawOfflineDuringUpdate = false
+    /// The last update attempt died before it began: 90s passed with no
+    /// download progress and no reboot edge. A board whose firmware panics on
+    /// the offer reboots in seconds and reconnects at the SAME version, which
+    /// satisfies neither of the normal clear conditions — without this flag
+    /// the UI said "Updating…" forever.
+    var updateFailed = false
     /// The board's power-on self-test browned out its supply, so it's running
     /// with brightness capped at 10%. Rides every state push (like `online`)
     /// rather than being latched here: a power cycle on a good supply clears
@@ -917,6 +923,7 @@ final class BoardViewModel: ObservableObject {
                 $0.updatingFirmware = false
                 $0.sawOfflineDuringUpdate = false
                 $0.firmwareProgress = nil // new version reported — drop the bar
+                $0.updateFailed = false
             }
         }
     }
@@ -930,6 +937,7 @@ final class BoardViewModel: ObservableObject {
         guard boardIds.contains(boardId) else { return }
         mutate(boardId) {
             $0.firmwareProgress = pct
+            $0.updateFailed = false // progress = it IS running; retract any stale verdict
             if !$0.updatingFirmware {
                 $0.updatingFirmware = true
                 $0.updatingFromVersion = $0.firmwareVersion
@@ -948,11 +956,7 @@ final class BoardViewModel: ObservableObject {
     /// "reinstall current"). Optimistically arms the "Updating…" gating; the
     /// board's same-or-newer guard decides whether it actually takes.
     func installFirmware(_ boardId: String, _ channel: UiFwChannel) {
-        mutate(boardId) {
-            $0.updatingFirmware = true
-            $0.updatingFromVersion = $0.firmwareVersion
-            $0.sawOfflineDuringUpdate = false
-        }
+        armUpdating(boardId)
         clientFor(boardId)?.installFirmware(boardId: boardId, channel: channel)
     }
 
@@ -964,15 +968,35 @@ final class BoardViewModel: ObservableObject {
         client?.setFwChannel(boardId: id, channel: channel)
     }
 
+    /// Arms the "Updating…" gating plus a failure watchdog. The two normal
+    /// clear conditions (a reboot edge, a changed version) both assume the
+    /// update at least STARTED — a board that dies on the offer and comes
+    /// back at the same version satisfies neither, so a timer catches it:
+    /// 90s with no progress and no reboot edge means it never began.
+    private func armUpdating(_ boardId: String) {
+        mutate(boardId) {
+            $0.updatingFirmware = true
+            $0.updatingFromVersion = $0.firmwareVersion
+            $0.sawOfflineDuringUpdate = false
+            $0.updateFailed = false
+        }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 90_000_000_000)
+            guard let self else { return }
+            self.mutate(boardId) {
+                if $0.updatingFirmware && $0.firmwareProgress == nil && !$0.sawOfflineDuringUpdate {
+                    $0.updatingFirmware = false
+                    $0.updateFailed = true
+                }
+            }
+        }
+    }
+
     /// Kick off the selected board's over-the-air update (it downloads the
     /// image the server advertised, verifies it, flashes, and reboots).
     func updateFirmware() {
         guard let id = selectedBoardId else { return }
-        mutate(id) {
-            $0.updatingFirmware = true
-            $0.updatingFromVersion = $0.firmwareVersion
-            $0.sawOfflineDuringUpdate = false
-        }
+        armUpdating(id)
         client?.updateFirmware(boardId: id)
     }
 
@@ -2136,6 +2160,18 @@ struct DashboardView: View {
                         .foregroundStyle(.secondary)
                 }
             } else if let target = model.current.firmwareUpdate {
+                if model.current.updateFailed {
+                    // The watchdog's verdict: the attempt died before any
+                    // progress. The Update button below stays available.
+                    Label {
+                        Text("The last update didn't start — the board restarted without installing. If this repeats, it needs a one-time USB flash.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
+                }
                 Button {
                     showUpdateConfirm = true
                 } label: {
