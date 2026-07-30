@@ -647,12 +647,6 @@ public protocol ScoreboardClientProtocol: AnyObject {
     func setFwChannel(boardId: String, channel: UiFwChannel)
 
     /**
-     * Per-game scroll toggle for leaderboard games (golf/F1): scroll=false
-     * pins the static top-4 frame; scroll=true restores the league depth.
-     */
-    func setGameScroll(boardId: String, gameId: String, scroll: Bool)
-
-    /**
      * Per-game toggle: hidden=true protects; hidden=false reveals even when
      * team/league/board rules protect it.
      */
@@ -1015,18 +1009,6 @@ open class ScoreboardClient:
     }
 
     /**
-     * Per-game scroll toggle for leaderboard games (golf/F1): scroll=false
-     * pins the static top-4 frame; scroll=true restores the league depth.
-     */
-    open func setGameScroll(boardId: String, gameId: String, scroll: Bool) { try! rustCall {
-        uniffi_app_core_fn_method_scoreboardclient_set_game_scroll(self.uniffiClonePointer(),
-                                                                   FfiConverterString.lower(boardId),
-                                                                   FfiConverterString.lower(gameId),
-                                                                   FfiConverterBool.lower(scroll), $0)
-    }
-    }
-
-    /**
      * Per-game toggle: hidden=true protects; hidden=false reveals even when
      * team/league/board rules protect it.
      */
@@ -1285,11 +1267,6 @@ public struct UiBoardConfig {
      */
     public var revealedGameIds: [String]
     /**
-     * Leaderboard games whose scrolling the user turned OFF (they render the
-     * static top-4 frame). Cleared by Reset, pruned as games end.
-     */
-    public var noScrollGameIds: [String]
-    /**
      * Board-local IANA timezone name ("America/New_York"); nil = server-local.
      */
     public var timezone: String?
@@ -1323,10 +1300,6 @@ public struct UiBoardConfig {
                     * One-off revealed games (exceptions that beat every protection rule).
                     */ revealedGameIds: [String],
                 /**
-                    * Leaderboard games whose scrolling the user turned OFF (they render the
-                    * static top-4 frame). Cleared by Reset, pruned as games end.
-                    */ noScrollGameIds: [String],
-                /**
                     * Board-local IANA timezone name ("America/New_York"); nil = server-local.
                     */ timezone: String?,
                 /**
@@ -1348,7 +1321,6 @@ public struct UiBoardConfig {
         self.spoilerAll = spoilerAll
         self.spoilerGameIds = spoilerGameIds
         self.revealedGameIds = revealedGameIds
-        self.noScrollGameIds = noScrollGameIds
         self.timezone = timezone
         self.fwChannel = fwChannel
     }
@@ -1401,9 +1373,6 @@ extension UiBoardConfig: Equatable, Hashable {
         if lhs.revealedGameIds != rhs.revealedGameIds {
             return false
         }
-        if lhs.noScrollGameIds != rhs.noScrollGameIds {
-            return false
-        }
         if lhs.timezone != rhs.timezone {
             return false
         }
@@ -1429,7 +1398,6 @@ extension UiBoardConfig: Equatable, Hashable {
         hasher.combine(spoilerAll)
         hasher.combine(spoilerGameIds)
         hasher.combine(revealedGameIds)
-        hasher.combine(noScrollGameIds)
         hasher.combine(timezone)
         hasher.combine(fwChannel)
     }
@@ -1457,7 +1425,6 @@ public struct FfiConverterTypeUiBoardConfig: FfiConverterRustBuffer {
                 spoilerAll: FfiConverterBool.read(from: &buf),
                 spoilerGameIds: FfiConverterSequenceString.read(from: &buf),
                 revealedGameIds: FfiConverterSequenceString.read(from: &buf),
-                noScrollGameIds: FfiConverterSequenceString.read(from: &buf),
                 timezone: FfiConverterOptionString.read(from: &buf),
                 fwChannel: FfiConverterTypeUiFwChannel.read(from: &buf)
             )
@@ -1479,7 +1446,6 @@ public struct FfiConverterTypeUiBoardConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.spoilerAll, into: &buf)
         FfiConverterSequenceString.write(value.spoilerGameIds, into: &buf)
         FfiConverterSequenceString.write(value.revealedGameIds, into: &buf)
-        FfiConverterSequenceString.write(value.noScrollGameIds, into: &buf)
         FfiConverterOptionString.write(value.timezone, into: &buf)
         FfiConverterTypeUiFwChannel.write(value.fwChannel, into: &buf)
     }
@@ -3271,9 +3237,6 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_fw_channel() != 58256 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_app_core_checksum_method_scoreboardclient_set_game_scroll() != 8718 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_game_spoiler() != 7018 {

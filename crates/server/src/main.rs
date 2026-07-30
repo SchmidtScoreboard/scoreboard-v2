@@ -1095,17 +1095,25 @@ pub(crate) fn to_summary(g: &Game, tz: Option<chrono_tz::Tz>) -> GameSummary {
     }
 }
 
-/// Would this game's BOARD rendering scroll (before any per-game opt-out)?
-/// Mirrors `render_board_frame`'s `deep` predicate exactly — including the
-/// pregame and spoiler outs that force a static frame regardless of depth —
-/// so the app never offers a scroll toggle on a game that can't scroll.
-/// Membership in `no_scroll_game_ids` travels separately (in the config the
-/// app already receives) and picks the toggle's label.
-pub(crate) fn game_scrolls(cfg: &BoardConfig, g: &Game) -> bool {
+/// CAN this game's board rendering scroll? True for a leaderboard whose field
+/// runs deeper than the static 4 rows — regardless of the league's configured
+/// depth. This drives `GameSummary.scrolls`, i.e. whether the app offers its
+/// league scroll toggle on the card; it must NOT consider the depth setting,
+/// or turning scrolling off (depth = 4) would hide the very button that turns
+/// it back on. The pregame/spoiler outs mirror `render_board_frame`'s static
+/// forcing, so the toggle never appears on a game that can't scroll anyway.
+pub(crate) fn game_scroll_capable(cfg: &BoardConfig, g: &Game) -> bool {
     if g.status == GameStatus::Pregame || spoiler_for(cfg, g).is_some() {
         return false;
     }
-    let deep_field = g.leaderboard.as_ref().is_some_and(|lb| lb.rows.len() > 4);
+    g.leaderboard.as_ref().is_some_and(|lb| lb.rows.len() > 4)
+}
+
+/// WILL this game's board rendering scroll right now? The capability above,
+/// gated by the league's effective depth — the app's "Disable scrolling" is a
+/// shortcut to depth 4, so depth alone decides. Drives the manifest's
+/// `RotationEntry.scroll`, which must reflect what the board actually does.
+pub(crate) fn game_scrolls(cfg: &BoardConfig, g: &Game) -> bool {
     let rows = cfg
         .sports
         .iter()
@@ -1113,7 +1121,7 @@ pub(crate) fn game_scrolls(cfg: &BoardConfig, g: &Game) -> bool {
         .and_then(|s| s.leaderboard_rows)
         .map(|r| r as usize)
         .unwrap_or(render::LEADERBOARD_DEFAULT_ROWS);
-    deep_field && rows > 4
+    game_scroll_capable(cfg, g) && rows > 4
 }
 
 // ---- per-board selection + rendering ----
@@ -1542,17 +1550,13 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
                 // Leaderboard depth (golf/F1): 4 = static top-4, no scrolling;
                 // up to the full field. Deep frames render TALL and the board
                 // scrolls a 32px window over them, one full pass per dwell
-                // (app cards keep the static 4-row frame). A per-game scroll
-                // opt-out overrides the league depth for THIS game only —
-                // rows_cap = 4 IS the static layout.
-                let rows_cap = if cfg.no_scroll_game_ids.contains(&g.id) {
-                    4
-                } else {
-                    league
-                        .and_then(|s| s.leaderboard_rows)
-                        .map(|r| r as usize)
-                        .unwrap_or(render::LEADERBOARD_DEFAULT_ROWS)
-                };
+                // (app cards keep the static 4-row frame). The app's
+                // "Disable scrolling" is just a shortcut that sets this depth
+                // to 4 — one knob, stored on the league, never pruned.
+                let rows_cap = league
+                    .and_then(|s| s.leaderboard_rows)
+                    .map(|r| r as usize)
+                    .unwrap_or(render::LEADERBOARD_DEFAULT_ROWS);
                 let style = name_style_for(&cfg, &g.sport_id);
                 let (id, px, scrolls) = render::render_board_frame(g, rows_cap, spoiler_for(&cfg, g), tz, style);
                 state.cache_frame(id.clone(), px);
@@ -2027,7 +2031,6 @@ pub fn prune_spoiler_lists(state: &AppState) {
             .filter(|(_, c)| {
                 c.spoiler_game_ids.iter().any(|id| !ids.contains(id))
                     || c.revealed_game_ids.iter().any(|id| !ids.contains(id))
-                    || c.no_scroll_game_ids.iter().any(|id| !ids.contains(id))
             })
             .map(|(b, c)| (b.clone(), c.clone()))
             .collect()
@@ -2035,7 +2038,6 @@ pub fn prune_spoiler_lists(state: &AppState) {
     for (bid, mut cfg) in stale {
         cfg.spoiler_game_ids.retain(|id| ids.contains(id));
         cfg.revealed_game_ids.retain(|id| ids.contains(id));
-        cfg.no_scroll_game_ids.retain(|id| ids.contains(id));
         state.configs.lock().unwrap().insert(bid.clone(), cfg.clone());
         state.persist_config(&bid, &cfg);
     }
@@ -2151,7 +2153,7 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
             .map(|g| {
                 let spoiler = spoiler_for(&cfg, g);
                 let mut s = to_summary_for(g, spoiler, tz);
-                s.scrolls = game_scrolls(&cfg, g);
+                s.scrolls = game_scroll_capable(&cfg, g);
                 let (fid, px) = render::render_frame(g, spoiler, tz, name_style_for(&cfg, &g.sport_id));
                 state.cache_frame(fid.clone(), px);
                 s.frame_id = fid;
@@ -2162,7 +2164,7 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
         // falls back to HTTP rendering for those cards).
         out.extend(bumped.iter().map(|g| {
             let mut s = to_summary_for(g, spoiler_for(&cfg, g), tz);
-            s.scrolls = game_scrolls(&cfg, g);
+            s.scrolls = game_scroll_capable(&cfg, g);
             s.bumped = true;
             s
         }));
@@ -3903,12 +3905,13 @@ mod tests {
         assert_eq!(dst.timezone.as_deref(), Some("Asia/Tokyo"), "old blobs keep the board's zone");
     }
 
-    /// The per-game scroll toggle: turning a deep leaderboard off renders the
-    /// static top-4 panel frame (scroll=false) while the rest of the league
-    /// keeps its depth; toggling back restores the tall scroll; ResetRotation
-    /// clears the list; the summaries advertise which games CAN scroll.
+    /// The app's scroll toggle is a shortcut to the LEAGUE's leaderboard
+    /// depth: 4 = static top-4 (no scrolling), None = default (10, scrolls).
+    /// One knob, stored on the league like dwell — which is the fix for the
+    /// old per-game list, whose entries were pruned whenever the event left
+    /// the slate (every server restart, and golf between rounds).
     #[test]
-    fn per_game_scroll_toggle() {
+    fn league_depth_is_the_scroll_toggle() {
         let state = AppState::new_ephemeral();
         *state.games.lock().unwrap() = espn::demo_games(0, 0);
         let entry_for = |m: &Manifest, id: &str| {
@@ -3931,51 +3934,60 @@ mod tests {
         assert!(e.scroll, "demo F1 scrolls by default");
         assert!(frame_h(&e) > FRAME_HEIGHT);
 
-        // Toggle off: THIS game renders the static top-4 frame…
-        crate::ws::apply_command(&state, "b1", Command::SetGameScroll { game_id: "demo-f1".into(), scroll: false });
-        assert_eq!(state.config_for("b1").no_scroll_game_ids, vec!["demo-f1".to_string()]);
+        // "Disable scrolling" = depth 4: the whole league goes static…
+        crate::ws::apply_command(&state, "b1", Command::SetLeagueRows { sport_id: "f1".into(), rows: Some(4) });
         let m = manifest_for_board(&state, "b1");
         let e = entry_for(&m, "demo-f1");
-        assert!(!e.scroll, "opted-out game must not scroll");
+        assert!(!e.scroll, "league at depth 4 must not scroll");
         assert_eq!(frame_h(&e), FRAME_HEIGHT, "static frame is panel-sized");
-        // …while the other deep leaderboard (demo golf) still scrolls.
+        // …while the OTHER leaderboard league (golf) is untouched.
         let golf = entry_for(&m, "demo-golf");
-        assert!(golf.scroll, "the opt-out is per-game, not per-league");
+        assert!(golf.scroll, "the toggle is per-league, not global");
 
-        // Summaries still advertise the game as scroll-capable (the app keys
-        // the toggle's LABEL off config.no_scroll_game_ids).
+        // Summaries still advertise the game as scroll-CAPABLE while the
+        // league is static — hiding the toggle would strand the user with no
+        // way to re-enable it from the card.
         let ServerMsg::BoardState { now_showing, config, .. } = board_state_msg(&state, "b1") else {
             panic!("expected BoardState");
         };
         let f1 = now_showing.iter().find(|g| g.id == "demo-f1").unwrap();
-        assert!(f1.scrolls, "deep leaderboards advertise the toggle");
-        assert!(config.no_scroll_game_ids.contains(&"demo-f1".to_string()));
+        assert!(f1.scrolls, "deep leaderboards advertise the toggle even when static");
+        let f1_cfg = config.sports.iter().find(|s| s.sport_id == "f1").unwrap();
+        assert_eq!(f1_cfg.leaderboard_rows, Some(4), "the app reads the state off the depth");
         let team_game = now_showing.iter().find(|g| !g.home.is_empty()).unwrap();
         assert!(!team_game.scrolls, "team games never offer the toggle");
 
-        // Toggle back on: the tall scrolling frame returns.
-        crate::ws::apply_command(&state, "b1", Command::SetGameScroll { game_id: "demo-f1".into(), scroll: true });
-        assert!(state.config_for("b1").no_scroll_game_ids.is_empty());
+        // "Enable scrolling" = back to the default depth: the tall frame returns.
+        crate::ws::apply_command(&state, "b1", Command::SetLeagueRows { sport_id: "f1".into(), rows: None });
         let m = manifest_for_board(&state, "b1");
         let e = entry_for(&m, "demo-f1");
         assert!(e.scroll && frame_h(&e) > FRAME_HEIGHT, "toggling back restores the scroll");
-
-        // ResetRotation clears the list like the other per-game tweaks.
-        crate::ws::apply_command(&state, "b1", Command::SetGameScroll { game_id: "demo-f1".into(), scroll: false });
-        crate::ws::apply_command(&state, "b1", Command::ResetRotation);
-        assert!(state.config_for("b1").no_scroll_game_ids.is_empty());
     }
 
-    /// Ended/vanished games fall out of no_scroll_game_ids with the other
-    /// per-game lists, so persisted configs stay bounded.
+    /// THE reported bug: the per-game no-scroll list was pruned against the
+    /// live slate, so a server restart (empty slate until the first poll) or a
+    /// tournament's overnight gap silently deleted the setting — and persisted
+    /// the deletion. The league depth must survive both, like favorites do.
     #[test]
-    fn no_scroll_list_is_pruned_with_the_slate() {
+    fn scroll_setting_survives_an_empty_slate() {
         let state = AppState::new_ephemeral();
         *state.games.lock().unwrap() = espn::demo_games(0, 0);
-        crate::ws::apply_command(&state, "b1", Command::SetGameScroll { game_id: "demo-f1".into(), scroll: false });
-        crate::ws::apply_command(&state, "b1", Command::SetGameScroll { game_id: "gone-game".into(), scroll: false });
+        crate::ws::apply_command(&state, "b1", Command::SetLeagueRows { sport_id: "pga".into(), rows: Some(4) });
+
+        // Server restart: the slate is empty until the first fetch. Prune runs.
+        state.games.lock().unwrap().clear();
         prune_spoiler_lists(&state);
-        assert_eq!(state.config_for("b1").no_scroll_game_ids, vec!["demo-f1".to_string()]);
+        tick_once(&state);
+
+        let cfg = state.config_for("b1");
+        let pga = cfg.sports.iter().find(|s| s.sport_id == "pga").unwrap();
+        assert_eq!(pga.leaderboard_rows, Some(4), "scroll-off survives the restart window");
+
+        // And ResetRotation clears rotation tweaks, NOT league settings.
+        crate::ws::apply_command(&state, "b1", Command::ResetRotation);
+        let cfg = state.config_for("b1");
+        let pga = cfg.sports.iter().find(|s| s.sport_id == "pga").unwrap();
+        assert_eq!(pga.leaderboard_rows, Some(4), "reset rotation keeps league scrolling");
     }
 
     /// A lapsed sleep timer flips power back on at the next housekeeping tick.

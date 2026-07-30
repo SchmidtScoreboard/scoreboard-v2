@@ -123,7 +123,6 @@ struct BoardInfo {
     var teamSpoilers: [String: Set<String>] = [:] // sportId -> protected team ids
     var spoilerGameIds: Set<String> = []          // one-off hides
     var revealedGameIds: Set<String> = []         // one-off reveals
-    var noScrollGameIds: Set<String> = []         // leaderboards pinned to the static top-4
     /// Unix seconds when a button-sleep auto-wakes (nil when not sleeping).
     var wakeAt: UInt64?
     /// Firmware release channel this board follows (stable/beta/dev).
@@ -594,7 +593,6 @@ final class BoardViewModel: ObservableObject {
     var rotationModified: Bool {
         current.focusedGameId != nil || !current.extraGameIds.isEmpty || !current.excludedGameIds.isEmpty
             || !current.spoilerGameIds.isEmpty || !current.revealedGameIds.isEmpty
-            || !current.noScrollGameIds.isEmpty
     }
 
     /// Remove a game from the rotation regardless of WHY it's there. A one-off add
@@ -1002,7 +1000,6 @@ final class BoardViewModel: ObservableObject {
             $0.teamSpoilers = tspoil
             $0.spoilerGameIds = Set(c.spoilerGameIds)
             $0.revealedGameIds = Set(c.revealedGameIds)
-            $0.noScrollGameIds = Set(c.noScrollGameIds)
             $0.wakeAt = c.wakeAt
             $0.fwChannel = c.fwChannel
         }
@@ -1092,14 +1089,20 @@ final class BoardViewModel: ObservableObject {
         requestGames()
     }
 
-    /// Per-game scroll toggle for leaderboard games (golf/F1): scroll=false
-    /// pins the static top-4 frame; scroll=true restores the league depth.
-    func setGameScroll(_ gid: String, scroll: Bool) {
-        guard let id = selectedBoardId else { return }
-        mutate(id) {
-            if scroll { $0.noScrollGameIds.remove(gid) } else { $0.noScrollGameIds.insert(gid) }
-        }
-        client?.setGameScroll(boardId: id, gameId: gid, scroll: scroll)
+    /// The card menu's scroll toggle for leaderboard leagues (golf/F1) — a
+    /// shortcut to the league's leaderboard depth, not separate state: off
+    /// sets depth 4 (the static top-4 layout), on restores the default depth.
+    /// Living on the league is what makes it stick: the old per-game list was
+    /// pruned whenever the event left the slate, so the setting silently died
+    /// at every server restart and between tournament rounds.
+    func setLeagueScrolling(_ sportId: String, scrolling: Bool) {
+        setLeagueRows(sportId, scrolling ? nil : 4)
+    }
+
+    /// Whether this league's leaderboards scroll right now (depth > 4).
+    /// nil depth = the server default (10), which scrolls.
+    func leagueScrolls(_ sportId: String) -> Bool {
+        (current.leagueRows[sportId] ?? 10) > 4
     }
 
     func setDwell(_ secs: UInt32) {
@@ -2774,7 +2777,7 @@ struct CardMenu: View {
 
     var body: some View {
         let pinned = model.focusedGameId == game.id
-        let noScroll = model.current.noScrollGameIds.contains(game.id)
+        let leagueScrolls = model.leagueScrolls(game.sportId)
         // Golf's timestamps are midnight-Eastern DATE boundaries, not tee
         // times (the server renders those as a day too) — showing a clock here
         // would put a Thursday-morning tournament at "11:00 PM" the night
@@ -2798,15 +2801,16 @@ struct CardMenu: View {
                     systemImage: game.spoiled ? "eye" : "eye.slash"
                 )
             }
-            // Deep leaderboards (F1/golf) scroll on the board; this pins one
-            // event to the static top-4 frame without touching the league depth.
+            // Deep leaderboards (F1/golf) scroll on the board. The toggle is
+            // the LEAGUE's leaderboard depth in disguise (off = top-4), so it
+            // covers every event in the league and persists like a favorite.
             if game.scrolls {
                 Button {
-                    withAnimation { model.setGameScroll(game.id, scroll: noScroll) }
+                    withAnimation { model.setLeagueScrolling(game.sportId, scrolling: !leagueScrolls) }
                 } label: {
                     Label(
-                        noScroll ? "Enable scrolling" : "Disable scrolling",
-                        systemImage: noScroll ? "rectangle.expand.vertical" : "rectangle.compress.vertical"
+                        leagueScrolls ? "Disable scrolling" : "Enable scrolling",
+                        systemImage: leagueScrolls ? "rectangle.compress.vertical" : "rectangle.expand.vertical"
                     )
                 }
             }

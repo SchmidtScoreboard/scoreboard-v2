@@ -479,11 +479,6 @@ void uniffi_app_core_fn_method_scoreboardclient_set_dwell(void*_Nonnull ptr, Rus
 void uniffi_app_core_fn_method_scoreboardclient_set_fw_channel(void*_Nonnull ptr, RustBuffer board_id, RustBuffer channel, RustCallStatus *_Nonnull out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_GAME_SCROLL
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_GAME_SCROLL
-void uniffi_app_core_fn_method_scoreboardclient_set_game_scroll(void*_Nonnull ptr, RustBuffer board_id, RustBuffer game_id, int8_t scroll, RustCallStatus *_Nonnull out_status
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_GAME_SPOILER
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_GAME_SPOILER
 void uniffi_app_core_fn_method_scoreboardclient_set_game_spoiler(void*_Nonnull ptr, RustBuffer board_id, RustBuffer game_id, int8_t hidden, RustCallStatus *_Nonnull out_status
@@ -1000,12 +995,6 @@ uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_dwell(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_FW_CHANNEL
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_FW_CHANNEL
 uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_fw_channel(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_GAME_SCROLL
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_GAME_SCROLL
-uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_game_scroll(void
     
 );
 #endif

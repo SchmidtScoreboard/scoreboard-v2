@@ -379,10 +379,6 @@ pub struct BoardConfig {
     /// (the app's "Reveal" button on a protected game).
     #[serde(default)]
     pub revealed_game_ids: Vec<String>,
-    /// Leaderboard games (golf/F1) whose scrolling the user turned OFF: they
-    /// render as the static top-4 frame regardless of the league depth setting.
-    #[serde(default)]
-    pub no_scroll_game_ids: Vec<String>,
     /// Board-local IANA timezone name ("America/New_York"); None = server-local.
     /// Set automatically by the app (`Command::SetTimezone`) so the idle clock
     /// and game start-time labels track where the BOARD lives.
@@ -509,7 +505,6 @@ impl Default for BoardConfig {
             spoiler_all: false,
             spoiler_game_ids: Vec::new(),
             revealed_game_ids: Vec::new(),
-            no_scroll_game_ids: Vec::new(),
             timezone: None,
             fw_channel: FwChannel::default(),
         }
@@ -566,7 +561,6 @@ pub enum Command {
     /// Per-game scroll toggle for leaderboard games (golf/F1): scroll=false
     /// pins the game to the static top-4 frame; scroll=true restores the
     /// league depth setting.
-    SetGameScroll { game_id: String, scroll: bool },
     /// Board-local IANA timezone ("America/New_York") — drives the idle clock
     /// and game start-time labels. Unparseable names are ignored.
     SetTimezone { tz: String },

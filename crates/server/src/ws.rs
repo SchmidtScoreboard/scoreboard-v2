@@ -302,7 +302,7 @@ async fn controller_loop(
                             .map(|g| {
                                 let spoiler = crate::spoiler_for(&cfg, g);
                                 let mut s = crate::to_summary_for(g, spoiler, tz);
-                                s.scrolls = crate::game_scrolls(&cfg, g);
+                                s.scrolls = crate::game_scroll_capable(&cfg, g);
                                 s.queued = prefs
                                     .as_ref()
                                     .is_some_and(|p| crate::game_queued(&state, &cfg, p, g));
@@ -569,10 +569,11 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
                 cfg.focused_game_id = None;
                 cfg.extra_game_ids.clear();
                 cfg.excluded_game_ids.clear();
-                // Per-game spoiler + scroll one-offs are rotation tweaks too.
+                // Per-game spoiler one-offs are rotation tweaks too. League
+                // scrolling is NOT reset here: it's the league's leaderboard
+                // depth, a durable setting like dwell, not a rotation tweak.
                 cfg.spoiler_game_ids.clear();
                 cfg.revealed_game_ids.clear();
-                cfg.no_scroll_game_ids.clear();
             }
             Command::Rename { name } => {
                 let trimmed = name.trim();
@@ -647,14 +648,6 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
                     cfg.spoiler_game_ids.push(game_id);
                 } else {
                     cfg.revealed_game_ids.push(game_id);
-                }
-            }
-            // Per-game scroll toggle for leaderboard games: OFF pins the game
-            // to the static top-4 frame; ON restores the league depth.
-            Command::SetGameScroll { game_id, scroll } => {
-                cfg.no_scroll_game_ids.retain(|id| id != &game_id);
-                if !scroll {
-                    cfg.no_scroll_game_ids.push(game_id);
                 }
             }
             // Board-local IANA timezone. An unparseable name is ignored — the
