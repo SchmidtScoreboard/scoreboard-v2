@@ -1089,21 +1089,9 @@ final class BoardViewModel: ObservableObject {
         requestGames()
     }
 
-    /// The card menu's scroll toggle for leaderboard leagues (golf/F1) — a
-    /// shortcut to the league's leaderboard depth, not separate state: off
-    /// sets depth 4 (the static top-4 layout), on restores the default depth.
-    /// Living on the league is what makes it stick: the old per-game list was
-    /// pruned whenever the event left the slate, so the setting silently died
-    /// at every server restart and between tournament rounds.
-    func setLeagueScrolling(_ sportId: String, scrolling: Bool) {
-        setLeagueRows(sportId, scrolling ? nil : 4)
-    }
-
-    /// Whether this league's leaderboards scroll right now (depth > 4).
-    /// nil depth = the server default (10), which scrolls.
-    func leagueScrolls(_ sportId: String) -> Bool {
-        (current.leagueRows[sportId] ?? 10) > 4
-    }
+    // (The card menu's Leaderboard Depth picker drives setLeagueRows
+    // directly — the league's depth IS the scroll setting: 4 = static
+    // top-4, deeper scrolls. Stored on the league, so it persists.)
 
     func setDwell(_ secs: UInt32) {
         guard let id = selectedBoardId else { return }
@@ -2777,7 +2765,6 @@ struct CardMenu: View {
 
     var body: some View {
         let pinned = model.focusedGameId == game.id
-        let leagueScrolls = model.leagueScrolls(game.sportId)
         // Golf's timestamps are midnight-Eastern DATE boundaries, not tee
         // times (the server renders those as a day too) — showing a clock here
         // would put a Thursday-morning tournament at "11:00 PM" the night
@@ -2801,18 +2788,22 @@ struct CardMenu: View {
                     systemImage: game.spoiled ? "eye" : "eye.slash"
                 )
             }
-            // Deep leaderboards (F1/golf) scroll on the board. The toggle is
-            // the LEAGUE's leaderboard depth in disguise (off = top-4), so it
-            // covers every event in the league and persists like a favorite.
+            // Deep leaderboards (F1/golf): the league editor's depth picker,
+            // one tap closer. Same options, same league-wide setting — Top 4
+            // is the static no-scroll layout, deeper depths scroll. Renders
+            // as a submenu with a check on the current choice.
             if game.scrolls {
-                Button {
-                    withAnimation { model.setLeagueScrolling(game.sportId, scrolling: !leagueScrolls) }
+                Picker(selection: Binding(
+                    get: { model.leagueRows(game.sportId) ?? 10 },
+                    set: { model.setLeagueRows(game.sportId, $0 == 10 ? nil : $0) }
+                )) {
+                    Text("Top 4 — no scrolling").tag(UInt32(4))
+                    Text("Top 10").tag(UInt32(10))
+                    Text(game.sportId == "f1" ? "Full field" : "Top 20").tag(UInt32(20))
                 } label: {
-                    Label(
-                        leagueScrolls ? "Disable scrolling" : "Enable scrolling",
-                        systemImage: leagueScrolls ? "rectangle.compress.vertical" : "rectangle.expand.vertical"
-                    )
+                    Label("Leaderboard Depth", systemImage: "list.number")
                 }
+                .pickerStyle(.menu)
             }
             Button {
                 sheets.fetchShareImage(renderURL)
