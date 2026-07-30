@@ -36,5 +36,10 @@
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
 	</array>
+	<!-- Portrait-only by design (a one-hand controller), and the target
+	     includes iPad: a partial orientation set without this flag is the
+	     "All interface orientations must be supported" build warning. -->
+	<key>UIRequiresFullScreen</key>
+	<true/>
 </dict>
 </plist>

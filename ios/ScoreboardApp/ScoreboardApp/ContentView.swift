@@ -1301,12 +1301,16 @@ struct SetupView: View {
                 Text(serverReachable ? "Connected to server" : "Connecting…")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            // Customers pair against the production server the app ships
+            // with; only dev builds get to repoint it.
+            #if DEBUG
             Button {
                 showServerSettings = true
             } label: {
                 Label("Server settings", systemImage: "gear").font(.caption)
             }
             .padding(.top, 2)
+            #endif
             Spacer()
         }
         .padding()
@@ -3164,9 +3168,15 @@ struct ConnectingSplash: View {
                 .foregroundStyle(.secondary)
             ProgressView()
                 .padding(.top, 4)
+            // A customer stuck on this screen has a network problem, not a
+            // server-address problem — the picker (and this shortcut to it)
+            // is a dev-build tool. Remove-this-scoreboard stays reachable
+            // from the toolbar's board menu.
+            #if DEBUG
             Button("Server Settings", action: openSettings)
                 .buttonStyle(.bordered)
                 .padding(.top, 8)
+            #endif
             Spacer()
         }
     }
