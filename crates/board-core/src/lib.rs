@@ -1397,11 +1397,16 @@ fn draw_panel_node(c: &mut Canvas) {
 /// Middle connect-screen node: the classic dot-plus-arcs Wi-Fi mark, tinted
 /// green once the link is up.
 fn draw_wifi_node(c: &mut Canvas, color: Rgb888) {
+    // Even-width mark, mirror-symmetric about the panel's center line
+    // (x = 31.5): a 2x2 dot astride it, then a 6-wide and an 8-wide arc
+    // built up from that base. The old 7-wide glyph was forced half a pixel
+    // off-center, which kept the connect screen from ever being truly
+    // symmetric no matter where the leg dots sat.
     #[rustfmt::skip]
     let px = [
-        (29, 14), (30, 13), (31, 12), (32, 12), (33, 12), (34, 13), (35, 14), // outer arc
-        (30, 16), (31, 15), (32, 15), (33, 15), (34, 16),                     // inner arc
-        (32, 18),                                                             // dot
+        (28, 14), (29, 13), (30, 12), (31, 12), (32, 12), (33, 12), (34, 13), (35, 14), // outer arc
+        (29, 16), (30, 15), (31, 15), (32, 15), (33, 15), (34, 16),                     // inner arc
+        (31, 17), (32, 17), (31, 18), (32, 18),                                         // 2x2 dot
     ];
     for &(x, y) in &px {
         Pixel(Point::new(x, y), color).draw(c).ok();
