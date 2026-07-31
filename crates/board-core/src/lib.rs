@@ -54,13 +54,6 @@ pub const ERASE_HOLD_MS: u64 = 10_000;
 // menu closes itself (device clock) so an interrupted visit can't park the
 // panel on a settings list instead of scores.
 pub const MENU_IDLE_TIMEOUT_MS: u64 = 120_000;
-// Sleep/wake fade: going dark (local tap-sleep, or a manifest with
-// display_on: false — which the server only ships as the Blank off_state) and
-// lighting back up ramp the panel's EFFECTIVE brightness across this window
-// instead of snapping. Device clock, like every animation on this board; the
-// stored user level never moves. Deliberately NO fade for the OTA blank, the
-// reset overlay, or menu open/close — those must be instant.
-pub const SLEEP_FADE_MS: u64 = 400;
 // Offline grace: a dropped websocket usually re-establishes within a second or
 // two — and a server DEPLOY takes 30-60s of reconnect failures. While there's
 // content on screen, keep showing it (scores just pause updating); only admit
@@ -199,13 +192,6 @@ pub struct Board {
     reset_done: bool,           // erase complete — firmware wipes creds + reboots
     reset_done_at: Option<u64>, // for the simulator to auto-dismiss (device reboots first)
 
-    // Sleep/wake fade: was the panel deliberately dark at the last tick, and
-    // when did that intent last flip (the ramp's zero point). A reversal
-    // mid-fade restarts the ramp from the new flip — a sub-400ms double
-    // toggle shows a small level jump, accepted for the state's simplicity.
-    dark_intent: bool,
-    fade_flip_at: Option<u64>,
-
     // settings menu overlay (None = whatever the mode machine was doing)
     menu: Option<MenuState>,
     // Newer firmware the server says exists (`ServerMsg::UpdateAvailable`);
@@ -265,8 +251,6 @@ impl Board {
             hold_fired: false,
             reset_done: false,
             reset_done_at: None,
-            dark_intent: false,
-            fade_flip_at: None,
             menu: None,
             update_available: None,
             diag: Diagnostics::default(),
@@ -722,16 +706,6 @@ impl Board {
                 }
             }
         }
-        // Sleep/wake fade: stamp the moment the deliberate-darkness intent
-        // flips — AFTER the gesture/mode logic above, so a tap-sleep resolved
-        // this very tick starts its ramp now, not one host frame late.
-        // (`on_manifest` flips are picked up on the next tick; hosts tick at
-        // ~30fps, so the ramp starts within a frame.)
-        let dark = self.dark_intent_now();
-        if dark != self.dark_intent {
-            self.dark_intent = dark;
-            self.fade_flip_at = Some(now_ms);
-        }
     }
 
     fn apply(&mut self, g: Gesture) {
@@ -958,23 +932,13 @@ impl Board {
         // pair-code spinner 28-30 — so even a 4-row bar eats the word the user
         // is standing there reading. Those screens already report the level by
         // dimming whole (`scale_buf` below), which is feedback enough.
-        // The sleep/wake fade multiplier for everything below (the overlays
-        // above returned early on purpose — they snap).
-        let fade = self.fade_factor();
         let mut server_content = false;
         let mut buf = match self.mode {
             Mode::Booting => self.screen_boot(),
             Mode::Setup => self.screen_setup(),
             Mode::Syncing => self.screen_syncing(),
-            // Deliberate darkness. Once the fade lands this is a hard black;
-            // during the SLEEP_FADE_MS goodbye the content that was up dims
-            // out instead of snapping off.
-            Mode::Asleep => {
-                if fade == 0 {
-                    return vec![0u32; FRAME_PIXELS];
-                }
-                self.screen_last_content()
-            }
+            // Deliberate darkness.
+            Mode::Asleep => return vec![0u32; FRAME_PIXELS],
             Mode::Running => {
                 // A dropped websocket often re-establishes within a second or
                 // two; swapping screens instantly makes every blip flash
@@ -994,14 +958,7 @@ impl Board {
                 let dark_by_intent = self.manifest.as_ref().is_some_and(|m| !m.display_on);
                 if self.online || holding || dark_by_intent {
                     server_content = true;
-                    if dark_by_intent && fade > 0 {
-                        // A display_on:false manifest ships an EMPTY rotation,
-                        // so the fade-out needs the last shown frame — not
-                        // `screen_running`'s immediate black.
-                        self.screen_last_content()
-                    } else {
-                        self.screen_running()
-                    }
+                    self.screen_running()
                 } else {
                     self.screen_connecting()
                 }
@@ -1035,60 +992,9 @@ impl Board {
         if server_content && self.brightness_changed_at.is_some() {
             overlay_brightness_bar(&mut buf, self.local_brightness);
         }
-        // The fade multiplies the EFFECTIVE brightness on top of the user
-        // level — `local_brightness` itself never moves, so the panel wakes
-        // at exactly the level it slept at.
-        if fade < 100 {
-            scale_buf(&mut buf, fade);
-        }
         buf
     }
 
-    /// Is the panel DELIBERATELY dark — asleep locally, or the server's
-    /// manifest says display off (which it only ever ships as the Blank
-    /// off_state)? Overlays (menu, reset, OTA blank) are invisible to this on
-    /// purpose: they snap, and must not restart the fade underneath.
-    fn dark_intent_now(&self) -> bool {
-        matches!(self.mode, Mode::Asleep)
-            || (self.mode == Mode::Running
-                && self.manifest.as_ref().is_some_and(|m| !m.display_on))
-    }
-
-    /// Effective-brightness multiplier (0..=100) for the sleep/wake fade: a
-    /// linear device-clock ramp across SLEEP_FADE_MS from the last intent
-    /// flip, landing exactly on 0 (dark) or 100 (lit). No flip recorded =
-    /// settled at whatever the current intent is.
-    fn fade_factor(&self) -> u8 {
-        let Some(t) = self.fade_flip_at else {
-            return if self.dark_intent { 0 } else { 100 };
-        };
-        let ramp = (self.clock.saturating_sub(t) * 100 / SLEEP_FADE_MS).min(100) as u8;
-        if self.dark_intent {
-            100 - ramp
-        } else {
-            ramp
-        }
-    }
-
-    /// What the fade-out dims: the running content when the manifest still
-    /// shows it (a local tap-sleep leaves the manifest lit underneath), else
-    /// the last frame that made it to the panel — `last_good` survives cache
-    /// eviction for exactly this hand-off. Tall frames show their top window;
-    /// a 400ms goodbye doesn't need the scroll phase back.
-    fn screen_last_content(&self) -> Vec<u32> {
-        if self
-            .manifest
-            .as_ref()
-            .is_some_and(|m| m.display_on && !m.rotation.is_empty())
-        {
-            return self.screen_running();
-        }
-        let mut buf = vec![0u32; FRAME_PIXELS];
-        if let Some(px) = self.last_good.as_ref().and_then(|id| self.cache.get(id)) {
-            blit_frame_window(&mut buf, px, 0);
-        }
-        buf
-    }
 
     /// Does the board know what the server wants on the panel — a blittable
     /// frame, or deliberate darkness/idle? This is what the offline grace
@@ -2930,211 +2836,23 @@ mod tests {
         b.tick(500);
         assert_eq!(b.mode(), Mode::Asleep);
 
-        // Back online: the server says the display is ON, so the panel lights up
-        // (through the wake fade — tick past it before sampling).
+        // Back online: the server says the display is ON, so the panel lights up.
         b.set_online(true);
         b.on_manifest(mk(true));
         b.on_frame("a".into(), solid(255, 0, 0));
         assert_eq!(b.mode(), Mode::Running, "the manifest reasserts server ownership");
         b.tick(600);
-        b.tick(600 + SLEEP_FADE_MS);
         assert_eq!(b.framebuffer()[0], 0xFF0000, "content is back on the panel");
 
-        // And a manifest that says OFF leaves it dark — via display_on, not
-        // mode (again after the fade-out has run its 400ms).
+        // And a manifest that says OFF leaves it dark — via display_on, not mode.
         b.on_manifest(mk(false));
         assert_eq!(b.mode(), Mode::Running);
-        b.tick(1100 + SLEEP_FADE_MS);
-        b.tick(1100 + 2 * SLEEP_FADE_MS);
+        b.tick(1100);
         assert!(b.framebuffer().iter().all(|&p| p == 0), "display_on: false is still black");
     }
 
-    /// Entering and leaving darkness FADES (~400ms, device clock) instead of
-    /// snapping: a local tap-sleep ramps the lit content down monotonically
-    /// and lands EXACTLY black; the wake ramps back up and lands EXACTLY on
-    /// the content. The stored user brightness never moves.
-    #[test]
-    fn sleep_and_wake_fade_instead_of_snapping() {
-        use scoreboard_protocol::RotationEntry;
-        let solid = |r: u8, g: u8, b: u8| -> Vec<u8> {
-            let px = scoreboard_protocol::rgb888_to_565(r, g, b).to_le_bytes();
-            (0..FRAME_PIXELS).flat_map(|_| px).collect()
-        };
-        let lum = |fb: &[u32]| -> u64 {
-            fb.iter().map(|&p| ((p >> 16 & 0xFF) + (p >> 8 & 0xFF) + (p & 0xFF)) as u64).sum()
-        };
-        let mut b = Board::new();
-        b.mode = Mode::Running;
-        b.set_online(true);
-        b.tick(0);
-        b.on_manifest(Manifest {
-            countdown_ms: None,
-            rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 60_000, scroll: false }],
-            display_on: true,
-            off_state: Default::default(),
-            epoch: 0,
-            brightness: 100,
-        });
-        b.on_frame("a".into(), solid(200, 40, 10));
-        b.tick(1000);
-        let content = b.framebuffer();
-        assert!(lum(&content) > 0, "content is lit before the sleep");
 
-        // OFFLINE tap-sleep is the local toggle (online presses defer to the
-        // server); the offline grace holds the content underneath the fade.
-        b.set_online(false);
-        b.button_down(2000);
-        b.button_up(2050);
-        b.tick(2500); // the single resolves here -> Asleep; the ramp starts NOW
-        assert_eq!(b.mode(), Mode::Asleep);
-        let mut prev = lum(&b.framebuffer());
-        assert_eq!(prev, lum(&content), "the ramp starts from the full content");
-        for t in [2600u64, 2700, 2800, 2900] {
-            b.tick(t);
-            let l = lum(&b.framebuffer());
-            assert!(l < prev, "luminance ramps down monotonically (t={t})");
-            prev = l;
-        }
-        b.tick(2500 + SLEEP_FADE_MS);
-        assert!(b.framebuffer().iter().all(|&p| p == 0), "lands exactly black at 400ms");
-        b.tick(10_000);
-        assert!(b.framebuffer().iter().all(|&p| p == 0), "…and stays black");
-        assert_eq!(b.brightness(), 100, "the fade never touches the stored level");
 
-        // Wake: ramps up from black and lands exactly on the old content.
-        b.button_down(11_000);
-        b.button_up(11_050);
-        b.tick(11_500); // resolves -> Running; the ramp starts NOW
-        assert_eq!(b.mode(), Mode::Running);
-        let mut prev = lum(&b.framebuffer());
-        assert_eq!(prev, 0, "the wake ramp starts from black");
-        for t in [11_600u64, 11_700, 11_800, 11_900] {
-            b.tick(t);
-            let l = lum(&b.framebuffer());
-            assert!(l > prev, "luminance ramps up monotonically (t={t})");
-            prev = l;
-        }
-        b.tick(11_500 + SLEEP_FADE_MS);
-        assert_eq!(b.framebuffer(), content, "lands exactly on the pre-sleep content");
-    }
-
-    /// The server-side sleep fades too: a display_on:false manifest ships an
-    /// EMPTY rotation, so the fade-out dims the LAST SHOWN frame (`last_good`
-    /// survives eviction for this) instead of snapping to black — and
-    /// display_on:true fades back in to the exact content.
-    #[test]
-    fn manifest_power_off_fades_out_the_last_frame() {
-        use scoreboard_protocol::RotationEntry;
-        let solid = |r: u8, g: u8, b: u8| -> Vec<u8> {
-            let px = scoreboard_protocol::rgb888_to_565(r, g, b).to_le_bytes();
-            (0..FRAME_PIXELS).flat_map(|_| px).collect()
-        };
-        let lum = |fb: &[u32]| -> u64 {
-            fb.iter().map(|&p| ((p >> 16 & 0xFF) + (p >> 8 & 0xFF) + (p & 0xFF)) as u64).sum()
-        };
-        let on = Manifest {
-            countdown_ms: None,
-            rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 60_000, scroll: false }],
-            display_on: true,
-            off_state: Default::default(),
-            epoch: 0,
-            brightness: 100,
-        };
-        let off = Manifest {
-            countdown_ms: None,
-            rotation: vec![],
-            display_on: false,
-            off_state: scoreboard_protocol::OffState::Blank,
-            epoch: 0,
-            brightness: 100,
-        };
-        let mut b = Board::new();
-        b.mode = Mode::Running;
-        b.set_online(true);
-        b.tick(0);
-        b.on_manifest(on.clone());
-        b.on_frame("a".into(), solid(0, 180, 60));
-        b.tick(1000);
-        let content = b.framebuffer();
-
-        b.on_manifest(off);
-        b.tick(2000); // first tick after the flip: the ramp starts NOW
-        assert_eq!(b.framebuffer(), content, "the last frame is still up at ramp start");
-        b.tick(2200);
-        let mid = lum(&b.framebuffer());
-        assert!(mid > 0 && mid < lum(&content), "halfway: dimmed, not snapped");
-        b.tick(2000 + SLEEP_FADE_MS);
-        assert!(b.framebuffer().iter().all(|&p| p == 0), "lands exactly black");
-
-        // Power back on: fade in, landing pixel-exact.
-        b.on_manifest(on);
-        b.tick(3000);
-        assert!(b.framebuffer().iter().all(|&p| p == 0), "the wake ramp starts from black");
-        b.tick(3200);
-        let mid = lum(&b.framebuffer());
-        assert!(mid > 0 && mid < lum(&content), "halfway back up");
-        b.tick(3000 + SLEEP_FADE_MS);
-        assert_eq!(b.framebuffer(), content, "lands exactly on the content");
-    }
-
-    /// Deliberately NO fade: the OTA blank, the reset overlay, and menu
-    /// open/close snap — they're overlays, not sleep.
-    #[test]
-    fn ota_reset_and_menu_snap_without_fading() {
-        use scoreboard_protocol::RotationEntry;
-        let solid = |r: u8, g: u8, b: u8| -> Vec<u8> {
-            let px = scoreboard_protocol::rgb888_to_565(r, g, b).to_le_bytes();
-            (0..FRAME_PIXELS).flat_map(|_| px).collect()
-        };
-        let mut b = Board::new();
-        b.mode = Mode::Running;
-        b.set_online(true);
-        b.tick(0);
-        b.on_manifest(Manifest {
-            countdown_ms: None,
-            rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 60_000, scroll: false }],
-            display_on: true,
-            off_state: Default::default(),
-            epoch: 0,
-            brightness: 100,
-        });
-        b.on_frame("a".into(), solid(255, 0, 0));
-        b.tick(1000);
-        let content = b.framebuffer();
-
-        // OTA blank: instant black, instant restore — no ramp either way.
-        b.set_updating(Some(0));
-        assert!(b.framebuffer().iter().all(|&p| p == 0), "OTA blank snaps to black");
-        b.set_updating(None);
-        assert_eq!(b.framebuffer(), content, "clearing the OTA blank snaps back");
-
-        // Menu over an ASLEEP (settled-dark) board: instantly lit at the full
-        // level, and instantly dark again on close.
-        b.set_online(false);
-        b.button_down(2000);
-        b.button_up(2050);
-        b.tick(2500); // -> Asleep
-        b.tick(5000); // fade long since landed
-        assert!(b.framebuffer().iter().all(|&p| p == 0));
-        let t = double_tap(&mut b, 6000);
-        assert!(b.menu_open());
-        assert!(
-            b.framebuffer().contains(&0x00FF_FFFF),
-            "menu text renders at the FULL level instantly — no fade-in"
-        );
-        double_tap(&mut b, t);
-        assert!(!b.menu_open());
-        assert!(b.framebuffer().iter().all(|&p| p == 0), "closing snaps back to dark");
-
-        // The reset overlay over the same dark board: instantly lit too.
-        b.button_down(8000);
-        b.tick(8900); // past the grace window: amber warm-up bar up
-        assert!(b.reset_active());
-        assert!(
-            b.framebuffer().contains(&0x00FF_8800),
-            "the hold bar renders at the FULL level instantly — no fade-in"
-        );
-    }
 
     /// The menu selection (deep-blue fill, white text everywhere) must stay
     /// readable at the darkest user level. At brightness 10 the selected row
