@@ -1,0 +1,3 @@
+- Installing an update from the board now asks for confirmation first, with a reminder not to unplug while the panel is dark.
+- The Wi-Fi icon on the connecting screen has thicker arcs to match its center dot.
+- Fixed a subtle timing issue in the settings menu's idle timer.

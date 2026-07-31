@@ -124,13 +124,14 @@ enum MenuScreen {
     PairCode,
     DebugInfo,
     ResetConfirm,
+    UpdateConfirm,
 }
 
 struct MenuState {
     screen: MenuScreen,
     selected: usize,      // root row (0..MENU_ITEM_COUNT)
     scroll: usize,        // debug-info top line (the root's five rows all fit)
-    erase_selected: bool, // reset-confirm: CANCEL is the default
+    confirm_selected: bool, // confirm screens (reset/update): CANCEL is the default
     last_interaction: u64, // any knob activity; 120s of silence closes the menu
 }
 
@@ -500,6 +501,12 @@ impl Board {
 
     // ---- raw encoder button from the host (seesaw / sim control) ----
     pub fn button_down(&mut self, now_ms: u64) {
+        // Button events carry fresher time than the last tick — adopt it, or
+        // anything stamped from `self.clock` in the gesture path (a menu
+        // opened by this press, say) is timestamped in the past and can be
+        // idle-closed by the very next tick. Invisible at the firmware's
+        // 30fps tick cadence; board-core must not depend on that cadence.
+        self.clock = self.clock.max(now_ms);
         self.pressed_at = Some(now_ms);
         // Captured at press time: only a hold that BEGINS inside the menu
         // closes it at the 2s mark (and labels the amber bar CLOSING MENU).
@@ -518,6 +525,7 @@ impl Board {
     }
 
     pub fn button_up(&mut self, now_ms: u64) {
+        self.clock = self.clock.max(now_ms); // same freshness rule as button_down
         let Some(p) = self.pressed_at.take() else { return };
         if let Some(m) = &mut self.menu {
             m.last_interaction = now_ms;
@@ -761,7 +769,7 @@ impl Board {
                 screen: MenuScreen::Root,
                 selected: 0,
                 scroll: 0,
-                erase_selected: false,
+                confirm_selected: false,
                 last_interaction: self.clock,
             });
         }
@@ -792,10 +800,12 @@ impl Board {
                 m.scroll = (m.scroll as i32 - delta).clamp(0, max as i32) as usize;
             }
             // Direction picks the option outright (rather than toggling) so a
-            // detent that double-reports can't land on ERASE by accident.
-            // Same convention as the list: the down-the-list direction moves
-            // the selection forward, to ERASE.
-            MenuScreen::ResetConfirm => m.erase_selected = delta < 0,
+            // detent that double-reports can't land on the armed side by
+            // accident. Same convention as the list: the down-the-list
+            // direction moves the selection forward, to ERASE / UPDATE.
+            MenuScreen::ResetConfirm | MenuScreen::UpdateConfirm => {
+                m.confirm_selected = delta < 0
+            }
         }
     }
 
@@ -809,13 +819,16 @@ impl Board {
                 // The default selection: one tap in, one tap out.
                 MENU_EXIT => self.menu = None,
                 MENU_UPDATE => {
-                    // Armed only when the server has said a newer image exists.
-                    // The outbox queues, so selecting while offline sends the
-                    // request when the socket returns; with nothing offered the
-                    // row reads UP TO DATE and the tap is a no-op (there is
-                    // nothing to request).
+                    // Armed only when the server has said a newer image exists;
+                    // with nothing offered the row reads UP TO DATE and the tap
+                    // is a no-op. The request itself sits behind a confirm
+                    // screen: the panel goes DARK for the whole install, and a
+                    // user who yanks power at that moment because the board
+                    // "turned off" is the exact failure the warning prevents.
                     if self.update_available.is_some() {
-                        self.outbox.push(ClientMsg::RequestUpdate);
+                        m.screen = MenuScreen::UpdateConfirm;
+                        // CANCEL every visit — same rule as the reset confirm.
+                        m.confirm_selected = false;
                     }
                 }
                 MENU_PAIR => m.screen = MenuScreen::PairCode,
@@ -827,19 +840,30 @@ impl Board {
                     m.screen = MenuScreen::ResetConfirm;
                     // CANCEL every visit — a stale ERASE from a backed-out
                     // attempt must never be one tap from firing.
-                    m.erase_selected = false;
+                    m.confirm_selected = false;
                 }
                 _ => {}
             },
             // The sub-screens tap back to the menu root.
             MenuScreen::PairCode | MenuScreen::DebugInfo => m.screen = MenuScreen::Root,
             MenuScreen::ResetConfirm => {
-                if m.erase_selected {
+                if m.confirm_selected {
                     // Same latch the 10s hold sets — one wipe path, not two.
                     self.menu = None;
                     self.reset_done = true;
                     self.reset_progress = 100;
                     self.reset_done_at = Some(clock);
+                } else {
+                    m.screen = MenuScreen::Root;
+                }
+            }
+            MenuScreen::UpdateConfirm => {
+                if m.confirm_selected {
+                    // The outbox queues, so confirming while offline sends the
+                    // request when the socket returns. Close the menu: the OTA
+                    // blank takes over the panel the moment the offer lands.
+                    self.outbox.push(ClientMsg::RequestUpdate);
+                    self.menu = None;
                 } else {
                     m.screen = MenuScreen::Root;
                 }
@@ -875,6 +899,7 @@ impl Board {
                 MenuScreen::PairCode => self.screen_syncing(),
                 MenuScreen::DebugInfo => self.screen_debug_info(m),
                 MenuScreen::ResetConfirm => self.screen_reset_confirm(m),
+                MenuScreen::UpdateConfirm => self.screen_update_confirm(m),
             };
             scale_buf(&mut buf, self.local_brightness);
             return buf;
@@ -1321,7 +1346,7 @@ impl Board {
         center_text(&mut c, "RESET BOARD?", 4, &FONT_4X6, Rgb888::WHITE);
         center_text(&mut c, "ERASES WI-FI", 11, &FONT_4X6, grey);
         let bar_y = 21i32;
-        let (x, fill) = if m.erase_selected {
+        let (x, fill) = if m.confirm_selected {
             (34, MENU_SELECT_RED)
         } else {
             (2, MENU_SELECT_BLUE)
@@ -1332,6 +1357,34 @@ impl Board {
             .ok();
         center_text_at(&mut c, "CANCEL", 16, bar_y + 4, &FONT_4X6, Rgb888::WHITE);
         center_text_at(&mut c, "ERASE", 48, bar_y + 4, &FONT_4X6, Rgb888::WHITE);
+        c.into_u32()
+    }
+}
+
+impl Board {
+    fn screen_update_confirm(&self, m: &MenuState) -> Vec<u32> {
+        let mut c = Canvas::new();
+        let grey = Rgb888::new(0x88, 0x88, 0x88);
+        let amber = Rgb888::new(0xFF, 0x88, 0x00);
+        center_text(&mut c, "INSTALL UPDATE?", 2, &FONT_4X6, Rgb888::WHITE);
+        // The version gets its own row: "INSTALL 2026.7.15?" is 72px on a
+        // 64px panel.
+        if let Some(v) = &self.update_available {
+            let line = alloc::format!("^{v}");
+            center_text(&mut c, &line, 9, &FONT_4X6, grey);
+        }
+        // THE warning this screen exists for: the panel goes dark for the
+        // whole install, which reads as "it turned off" — and pulling power
+        // mid-flash is the one way a customer can hurt an update.
+        center_text(&mut c, "DO NOT UNPLUG", 15, &FONT_4X6, amber);
+        let bar_y = 22i32;
+        let x = if m.confirm_selected { 34 } else { 2 };
+        Rectangle::new(Point::new(x, bar_y), Size::new(28, 9))
+            .into_styled(PrimitiveStyle::with_fill(MENU_SELECT_BLUE))
+            .draw(&mut c)
+            .ok();
+        center_text_at(&mut c, "CANCEL", 16, bar_y + 4, &FONT_4X6, Rgb888::WHITE);
+        center_text_at(&mut c, "UPDATE", 48, bar_y + 4, &FONT_4X6, Rgb888::WHITE);
         c.into_u32()
     }
 }
@@ -1510,15 +1563,24 @@ fn draw_panel_node(c: &mut Canvas) {
 /// green once the link is up.
 fn draw_wifi_node(c: &mut Canvas, color: Rgb888) {
     // Even-width mark, mirror-symmetric about the panel's center line
-    // (x = 31.5): a 2x2 dot astride it, then a 6-wide and an 8-wide arc
-    // built up from that base. The old 7-wide glyph was forced half a pixel
-    // off-center, which kept the connect screen from ever being truly
-    // symmetric no matter where the leg dots sat.
+    // (x = 31.5): a 2x2 dot astride it, and two 2px-THICK arcs built up from
+    // that base — 1px strokes read spindly next to the chunky dot. Each arc
+    // is two vertically adjacent pixels per column, stepping down at the
+    // ends; grown upward (to y=11) so the single-row gaps between dot, inner
+    // arc, and outer arc survive the thickening.
     #[rustfmt::skip]
     let px = [
-        (28, 14), (29, 13), (30, 12), (31, 12), (32, 12), (33, 12), (34, 13), (35, 14), // outer arc
-        (29, 16), (30, 15), (31, 15), (32, 15), (33, 15), (34, 16),                     // inner arc
-        (31, 17), (32, 17), (31, 18), (32, 18),                                         // 2x2 dot
+        // outer arc: 8 wide, 2px stroke
+        (30, 11), (31, 11), (32, 11), (33, 11),
+        (29, 12), (30, 12), (31, 12), (32, 12), (33, 12), (34, 12),
+        (28, 13), (29, 13), (34, 13), (35, 13),
+        (28, 14), (35, 14),
+        // inner arc: 6 wide, 2px stroke
+        (30, 14), (31, 14), (32, 14), (33, 14),
+        (29, 15), (30, 15), (31, 15), (32, 15), (33, 15), (34, 15),
+        (29, 16), (34, 16),
+        // 2x2 dot
+        (31, 17), (32, 17), (31, 18), (32, 18),
     ];
     for &(x, y) in &px {
         Pixel(Point::new(x, y), color).draw(c).ok();
@@ -2197,18 +2259,20 @@ mod tests {
         let t = double_tap(&mut b, 1000);
         b.tick(t);
         // EXIT (row 0) is selected; -1 must move DOWN to UPDATE (row 1):
-        // selecting it with an update armed proves where the selection sits.
+        // with an offer armed, selecting it opens the CONFIRM screen — which
+        // proves where the selection sat (EXIT would have closed the menu).
         b.set_update_available(Some("9.9.9".into()));
         b.encoder(-1);
         tap(&mut b, t + 500);
-        let out = b.take_outgoing();
+        assert!(b.menu_open(), "encoder(-1) walked EXIT -> UPDATE (down the list)");
         assert!(
-            matches!(out.as_slice(), [ClientMsg::RequestUpdate]),
-            "encoder(-1) walked EXIT -> UPDATE (down the list), got {out:?}"
+            b.take_outgoing().is_empty(),
+            "the confirm screen, not the request, answers the first tap"
         );
-        assert!(b.menu_open(), "…and did not land on EXIT");
 
-        // And +1 walks back UP to EXIT: the next tap closes the menu.
+        // Back out of the confirm (CANCEL is the default), then +1 walks back
+        // UP to EXIT: the next tap closes the menu.
+        b.gesture(Gesture::Single);
         b.encoder(1);
         b.gesture(Gesture::Single);
         assert!(!b.menu_open(), "encoder(+1) walked UPDATE -> EXIT (up the list)");
@@ -2239,10 +2303,13 @@ mod tests {
     }
 
     /// The UPDATE row: inert with nothing offered (it reads UP TO DATE), one
-    /// `RequestUpdate` in the outbox when the server has advertised a newer
-    /// image — queued offline, shipped whenever the host next drains.
+    /// The update sits behind a confirm screen (the panel goes dark for the
+    /// whole install — "DO NOT UNPLUG" must be read before anything happens):
+    /// first tap opens the confirm with CANCEL armed, cancelling is free, and
+    /// only rotate-to-UPDATE + tap queues `RequestUpdate` (offline-safe via
+    /// the outbox) and closes the menu for the blank to take over.
     #[test]
-    fn selecting_update_queues_the_request() {
+    fn update_requires_a_second_confirmation() {
         let mut b = Board::new();
         b.mode = Mode::Running;
         b.tick(0);
@@ -2251,12 +2318,32 @@ mod tests {
         b.encoder(-1); // EXIT is the default selection; step down to UPDATE
         let t = tap(&mut b, t);
         assert!(b.menu_open(), "an inert UPDATE tap must not exit the menu");
-        assert!(b.take_outgoing().is_empty(), "no offer, no message");
+        assert!(b.take_outgoing().is_empty(), "no offer, no confirm, no message");
 
+        // With an offer: tap opens the confirm; nothing is queued yet.
         b.set_update_available(Some("2026.9.9".into()));
+        let t = tap(&mut b, t);
+        assert!(b.take_outgoing().is_empty(), "the confirm gate holds the request");
+
+        // CANCEL is the default: a plain tap backs out to the root, queueless.
+        let t = tap(&mut b, t);
+        assert!(b.menu_open() && b.take_outgoing().is_empty(), "cancel is free");
+
+        // Re-enter, arm UPDATE (down-the-list direction), confirm: the request
+        // queues and the menu closes so the OTA blank owns the panel.
+        let t = tap(&mut b, t);
+        b.encoder(-1);
         tap(&mut b, t);
         let out = b.take_outgoing();
         assert!(matches!(out.as_slice(), [ClientMsg::RequestUpdate]), "got {out:?}");
+        assert!(!b.menu_open(), "confirmed update closes the menu");
+
+        // And the confirm re-defaults to CANCEL on every fresh visit.
+        let t2 = double_tap(&mut b, 500_000);
+        b.encoder(-1);
+        let t2 = tap(&mut b, t2);
+        tap(&mut b, t2);
+        assert!(b.menu_open(), "a stale UPDATE selection must not survive re-entry");
     }
 
     /// The UPDATE row's two renderings: "UPDATE ^<version>" with an offer on
@@ -3175,6 +3262,15 @@ mod tests {
         dump("debug_info", 5000, &mut b);
         b.encoder(-30);
         dump("debug_info_scrolled", 5100, &mut b);
+        // INSTALL UPDATE: the confirm behind the UPDATE row — version line,
+        // the DO-NOT-UNPLUG warning, both selections.
+        let mut b = menu_board();
+        b.set_update_available(Some("2026.8.1".into()));
+        b.encoder(-1);
+        tap_at(&mut b, 4000);
+        dump("update_confirm_cancel", 5000, &mut b);
+        b.encoder(-1);
+        dump("update_confirm_armed", 5100, &mut b);
         // RESET BOARD: both selections (white text, blue/red fills).
         let mut b = menu_board();
         b.encoder(-4);
