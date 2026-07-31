@@ -181,6 +181,14 @@ pub struct Board {
     brightness_changed_at: Option<u64>, // transient brightness-bar overlay window
     brightness_pending: bool, // a turn the server hasn't heard yet (see `encoder`)
     syncing_since: Option<u64>, // when the pair-code screen went up (it times out)
+    /// Countdown-bar anchor: (epoch, started_at). Set when a manifest carrying
+    /// `countdown_ms` arrives with a NEW epoch; same-epoch re-pushes (a
+    /// brightness change mid-notice) keep the anchor so the bar never restarts.
+    countdown_anchor: Option<(u64, u64)>,
+    /// Server-pushed "nobody is paired with you": keeps the pair-code screen
+    /// up without the usual timeout until SetupDone or a user gesture — on a
+    /// first startup the code IS the most useful thing the panel can show.
+    sticky_pairing: bool,
 
     // the one-button erase hold (amber warm-up, red run, raw wipe at 10s)
     reset_active: bool,         // hold bar on screen (held past the grace window)
@@ -248,6 +256,8 @@ impl Board {
             brightness_changed_at: None,
             brightness_pending: false,
             syncing_since: None,
+            countdown_anchor: None,
+            sticky_pairing: false,
             reset_active: false,
             reset_progress: 0,
             hold_erase_phase: false,
@@ -382,6 +392,7 @@ impl Board {
     /// was up via the menu's PAIR CODE screen, "leave" means back to the menu
     /// root — the person pairing is standing at the board, mid-menu-visit.
     pub fn setup_done(&mut self) {
+        self.sticky_pairing = false;
         if matches!(self.mode, Mode::Setup | Mode::Syncing) {
             self.syncing_since = None;
             self.mode = Mode::Running;
@@ -391,6 +402,23 @@ impl Board {
                 m.screen = MenuScreen::Root;
                 m.last_interaction = self.clock;
             }
+        }
+    }
+
+    /// Server says nobody is paired with this board (a first startup after
+    /// provisioning, or every controller was revoked): put the pair code up
+    /// and KEEP it up — no timeout — until `setup_done` or a user gesture.
+    /// The code on the panel is the whole onboarding path; making a brand-new
+    /// owner discover double-tap -> PAIR CODE on their first boot was a wall.
+    pub fn needs_pairing(&mut self) {
+        // Never fight the user: an open menu or an active setup screen wins.
+        if self.menu.is_some() || self.mode == Mode::Setup {
+            return;
+        }
+        if self.mode == Mode::Running || self.mode == Mode::Booting {
+            self.mode = Mode::Syncing;
+            self.syncing_since = Some(self.clock);
+            self.sticky_pairing = true;
         }
     }
 
@@ -472,6 +500,15 @@ impl Board {
                 && old.rotation.len() == m.rotation.len()
                 && old.epoch == m.epoch
         });
+        // The countdown bar anchors at the first manifest of an epoch: the
+        // fill position derives from device time since THIS moment, so a
+        // same-epoch re-push (brightness nudge mid-notice) can't restart it,
+        // and a new notice (new epoch) always starts empty.
+        match (m.countdown_ms, &self.countdown_anchor) {
+            (Some(_), Some((e, _))) if *e == m.epoch => {}
+            (Some(_), _) => self.countdown_anchor = Some((m.epoch, self.clock)),
+            (None, _) => self.countdown_anchor = None,
+        }
         self.manifest = Some(m);
         if !same_shape {
             self.idx = 0;
@@ -647,8 +684,10 @@ impl Board {
         }
         // The pair code outlives its usefulness the moment nobody's typing it
         // in: a stray double press must not cost the panel its scores until
-        // someone walks over and presses again.
-        if self.mode == Mode::Syncing {
+        // someone walks over and presses again. EXCEPT on a server-flagged
+        // unpaired board (`sticky_pairing`): there the code is the only thing
+        // worth showing, and it stays until SetupDone or a gesture.
+        if self.mode == Mode::Syncing && !self.sticky_pairing {
             if let Some(t) = self.syncing_since {
                 if now_ms.saturating_sub(t) >= SYNC_TIMEOUT_MS {
                     self.syncing_since = None;
@@ -737,6 +776,14 @@ impl Board {
                     // until this lands — queued now, sent on reconnect, so the
                     // app's toggle and the panel agree again.
                     self.outbox.push(ClientMsg::ButtonPress);
+                } else if self.mode == Mode::Syncing {
+                    // Dismiss the pair-code screen — including the sticky
+                    // server-initiated one: the owner tapping is the "I'll
+                    // pair later" signal, and the code stays one double-tap
+                    // away in the menu.
+                    self.mode = Mode::Running;
+                    self.syncing_since = None;
+                    self.sticky_pairing = false;
                 }
             }
             // double press: toggles the settings menu (open, since it's closed
@@ -755,6 +802,7 @@ impl Board {
         self.manifest = None;
         self.cache.clear();
         self.syncing_since = None;
+        self.sticky_pairing = false;
         // Fresh provisioning always starts from the top of the handshake.
         self.setup_phase = SetupPhase::WaitingBluetooth;
         self.mode = Mode::Setup;
@@ -959,6 +1007,25 @@ impl Board {
                 }
             }
         };
+        // The notice countdown bar: the server ships ONE frame with the bar's
+        // empty outline and `countdown_ms`; the fill is ours, on the device
+        // clock, anchored per epoch — smooth at the render rate instead of the
+        // old pre-rendered sweep's one chunky step per second. Geometry is in
+        // LOCKSTEP with server render.rs `render_notice` (bar_x 4, bar_y 26,
+        // 56 wide, 5 tall — interior 54x3 at 5,27), color with its fill.
+        if server_content {
+            if let (Some((_, t0)), Some(m)) = (&self.countdown_anchor, &self.manifest) {
+                if let Some(total) = m.countdown_ms {
+                    let elapsed = self.clock.saturating_sub(*t0);
+                    let w = (elapsed.min(total as u64) * 54 / (total as u64).max(1)) as usize;
+                    for y in 27..30usize {
+                        for x in 5..(5 + w) {
+                            buf[y * FRAME_WIDTH + x] = 0x00FF_AA00;
+                        }
+                    }
+                }
+            }
+        }
         // Brightness is applied exactly once, here — `local_brightness` tracks the
         // server's value while online (see `on_manifest`) and doubles as the local
         // fallback offline, so it dims every screen (boot/setup/sync/running).
@@ -1805,6 +1872,7 @@ mod tests {
     #[test]
     fn offline_knob_turn_reaches_the_server_on_reconnect() {
         let m = |bright: u8| Manifest {
+            countdown_ms: None,
             rotation: Vec::new(),
             display_on: true,
             off_state: Default::default(),
@@ -1855,6 +1923,7 @@ mod tests {
         // has been — see `offline_knob_turn_reaches_the_server_on_reconnect`).
         b.set_online(true);
         let m = |bright: u8| Manifest {
+            countdown_ms: None,
             rotation: Vec::new(),
             display_on: true,
             off_state: Default::default(),
@@ -1882,6 +1951,7 @@ mod tests {
     fn same_shape_manifest_keeps_rotation_position() {
         use scoreboard_protocol::RotationEntry;
         let mk = |ids: &[&str]| Manifest {
+            countdown_ms: None,
             rotation: ids
                 .iter()
                 .map(|i| RotationEntry { frame_id: (*i).into(), dwell_ms: 1000, scroll: false })
@@ -1944,6 +2014,7 @@ mod tests {
         b.set_online(true);
         b.tick(0);
         b.on_manifest(Manifest {
+            countdown_ms: None,
             rotation: vec![RotationEntry {
                 frame_id: "tall".into(),
                 dwell_ms: 10_000, // fifths: 2s hold / 2s down / 2s hold / 2s up / 2s hold
@@ -1972,6 +2043,7 @@ mod tests {
 
         // Without the scroll flag a tall frame just shows its top window.
         b.on_manifest(Manifest {
+            countdown_ms: None,
             rotation: vec![RotationEntry { frame_id: "tall".into(), dwell_ms: 10_000, scroll: false }],
             display_on: true,
             off_state: Default::default(),
@@ -2031,6 +2103,91 @@ mod tests {
 
     /// Double-tap (two quick press/release pairs inside the double window) —
     /// the menu toggle. Returns a time safely after the gesture resolved.
+    /// The notice countdown bar is the DEVICE's animation: one server frame,
+    /// smooth local fill anchored per epoch — a same-epoch re-push (brightness
+    /// nudge mid-notice) must not restart it; a new epoch must.
+    #[test]
+    fn countdown_bar_fills_on_the_device_clock() {
+        let mk = |epoch: u64| Manifest {
+            rotation: vec![scoreboard_protocol::RotationEntry {
+                frame_id: "n1".into(),
+                dwell_ms: 6000,
+                scroll: false,
+            }],
+            display_on: true,
+            off_state: Default::default(),
+            brightness: 100,
+            epoch,
+            countdown_ms: Some(4000),
+        };
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.tick(0);
+        b.on_manifest(mk(7));
+        b.on_frame("n1".into(), vec![0u8; scoreboard_protocol::FRAME_BYTES]);
+        let lit = |b: &Board| {
+            let f = b.framebuffer();
+            (27..30).map(|y| (5..59).filter(|&x| f[y * FRAME_WIDTH + x] != 0).count()).max().unwrap()
+        };
+        b.tick(0);
+        assert_eq!(lit(&b), 0, "bar starts empty");
+        b.tick(2000);
+        let half = lit(&b);
+        assert!((25..=29).contains(&half), "half the notice, about half the bar: {half}");
+        // Same-epoch re-push mid-notice: the anchor (and the fill) hold.
+        b.on_manifest(mk(7));
+        b.on_frame("n1".into(), vec![0u8; scoreboard_protocol::FRAME_BYTES]);
+        b.tick(2100);
+        assert!(lit(&b) >= half, "same-epoch re-push must not restart the fill");
+        b.tick(4000);
+        assert_eq!(lit(&b), 54, "lands exactly full");
+        // A NEW notice (new epoch) starts from empty again.
+        b.on_manifest(mk(8));
+        b.on_frame("n1".into(), vec![0u8; scoreboard_protocol::FRAME_BYTES]);
+        b.tick(4100);
+        assert!(lit(&b) <= 2, "a new epoch re-anchors the bar");
+    }
+
+    /// First startup: the server flags an unpaired board and the pair code
+    /// goes up unprompted, sticky past the normal timeout, until pairing
+    /// completes or the owner taps it away.
+    #[test]
+    fn needs_pairing_shows_a_sticky_code_screen() {
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.tick(0);
+        b.needs_pairing();
+        assert_eq!(b.mode(), Mode::Syncing, "code up unprompted");
+        // Way past the normal pair-screen timeout: still up.
+        b.tick(600_000);
+        assert_eq!(b.mode(), Mode::Syncing, "sticky: no timeout while unpaired");
+        // Pairing completes -> back to normal.
+        b.setup_done();
+        assert_eq!(b.mode(), Mode::Running);
+
+        // The owner can also tap it away ("I'll pair later").
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.tick(0);
+        b.needs_pairing();
+        tap(&mut b, 1000);
+        assert_eq!(b.mode(), Mode::Running, "tap dismisses the sticky code");
+        // And a dismissed screen does not come back on its own.
+        b.tick(700_000);
+        assert_eq!(b.mode(), Mode::Running);
+
+        // The menu is never fought: needs_pairing while the menu is up defers.
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.tick(0);
+        double_tap(&mut b, 1000);
+        b.needs_pairing();
+        assert!(b.menu_open(), "menu wins");
+        assert_eq!(b.mode(), Mode::Running, "no mode change underneath");
+    }
+
     fn double_tap(b: &mut Board, t0: u64) -> u64 {
         b.button_down(t0);
         b.button_up(t0 + 40);
@@ -2507,6 +2664,7 @@ mod tests {
         b.set_online(true);
         b.tick(0);
         b.on_manifest(Manifest {
+            countdown_ms: None,
             rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 1000, scroll: false }],
             display_on: true,
             off_state: Default::default(),
@@ -2547,6 +2705,7 @@ mod tests {
         b.set_online(true);
         b.tick(0);
         b.on_manifest(Manifest {
+            countdown_ms: None,
             rotation: vec![],
             display_on: false,
             off_state: Default::default(),
@@ -2576,6 +2735,7 @@ mod tests {
             (0..FRAME_PIXELS).flat_map(|_| px).collect()
         };
         let mk = |ids: &[&str], epoch: u64| Manifest {
+            countdown_ms: None,
             rotation: ids
                 .iter()
                 .map(|id| RotationEntry { frame_id: (*id).into(), dwell_ms: 1000, scroll: false })
@@ -2642,6 +2802,7 @@ mod tests {
         b.set_online(true);
         b.tick(0);
         b.on_manifest(Manifest {
+            countdown_ms: None,
             rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 1000, scroll: false }],
             display_on: true,
             off_state: Default::default(),
@@ -2750,6 +2911,7 @@ mod tests {
             (0..FRAME_PIXELS).flat_map(|_| px).collect()
         };
         let mk = |on: bool| Manifest {
+            countdown_ms: None,
             rotation: if on {
                 vec![RotationEntry { frame_id: "a".into(), dwell_ms: 1000, scroll: false }]
             } else {
@@ -2806,6 +2968,7 @@ mod tests {
         b.set_online(true);
         b.tick(0);
         b.on_manifest(Manifest {
+            countdown_ms: None,
             rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 60_000, scroll: false }],
             display_on: true,
             off_state: Default::default(),
@@ -2870,6 +3033,7 @@ mod tests {
             fb.iter().map(|&p| ((p >> 16 & 0xFF) + (p >> 8 & 0xFF) + (p & 0xFF)) as u64).sum()
         };
         let on = Manifest {
+            countdown_ms: None,
             rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 60_000, scroll: false }],
             display_on: true,
             off_state: Default::default(),
@@ -2877,6 +3041,7 @@ mod tests {
             brightness: 100,
         };
         let off = Manifest {
+            countdown_ms: None,
             rotation: vec![],
             display_on: false,
             off_state: scoreboard_protocol::OffState::Blank,
@@ -2926,6 +3091,7 @@ mod tests {
         b.set_online(true);
         b.tick(0);
         b.on_manifest(Manifest {
+            countdown_ms: None,
             rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 60_000, scroll: false }],
             display_on: true,
             off_state: Default::default(),
@@ -3031,6 +3197,7 @@ mod tests {
             (0..FRAME_PIXELS).flat_map(|_| px).collect()
         };
         let manifest = || Manifest {
+            countdown_ms: None,
             rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 1000, scroll: false }],
             display_on: true,
             off_state: Default::default(),
@@ -3155,6 +3322,7 @@ mod tests {
         b.set_online(true);
         b.tick(0);
         b.on_manifest(Manifest {
+            countdown_ms: None,
             rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 10_000, scroll: false }],
             display_on: true,
             off_state: Default::default(),

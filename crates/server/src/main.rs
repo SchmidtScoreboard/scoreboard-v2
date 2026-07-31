@@ -1600,53 +1600,46 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
                 off_state: cfg.off_state,
                 brightness: cfg.brightness,
                 epoch: 0,
+                countdown_ms: None,
             };
         }
     }
 
     // Priority 2: a transient notice ("SLEEPING…" splash / "NO GAMES…"). The whole
-    // progress-bar sweep is pre-rendered as ONE rotation the board steps through on
-    // its own clock — N frames at descending bar fractions, each dwelling secs/N —
-    // so no network push rides any step (the old per-step repush loop made the
-    // sleep splash visibly stutter). The fractions derive from created/until, not
-    // "now", so a mid-notice re-render yields an IDENTICAL manifest and the dedup
-    // in `push_board` keeps the board's rotation position.
+    // countdown bar is the BOARD's to animate (`Manifest.countdown_ms`): one
+    // frame carrying the empty outlined bar, and the device fills it smoothly
+    // on its own clock, anchored to this notice's epoch. The old pre-rendered
+    // sweep cost ~4KB of board RAM per step, which capped a 4s splash at 4
+    // visibly chunky jumps — and per-step pushes are network animation, which
+    // this system forbids. The frame derives from the notice's fixed lines,
+    // so a mid-notice re-render yields an IDENTICAL manifest and the dedup in
+    // `push_board` leaves the board's anchor alone.
     {
         let mut notices = state.notices.lock().unwrap();
         if let Some(n) = notices.get(board_id) {
             if std::time::Instant::now() < n.until {
                 let lines: Vec<(&str, bool, embedded_graphics::pixelcolor::Rgb888)> =
                     n.lines.iter().map(|(s, b, c)| (s.as_str(), *b, *c)).collect();
-                let secs = n.until.duration_since(n.created).as_secs().max(1);
-                // The board caches every rotation frame in RAM (~4KB each), so
-                // cap the sweep at 12 steps; short notices step once a second.
-                // (FRAME_WIDTH bounds it too: finer steps than bar pixels can't
-                // render distinctly.)
-                let steps = secs.min(12).min(FRAME_WIDTH as u64) as usize;
-                let step_ms = (secs * 1000 / steps as u64) as u32;
-                let rotation = (0..steps)
-                    .map(|i| {
-                        // Bar fraction at the START of step i: full, then evenly
-                        // down to 1/steps — every width distinct, so each step
-                        // mints its own frame id.
-                        let frac = (steps - i) as f32 / steps as f32;
-                        let (id, px) = render::render_notice(&lines, Some(frac));
-                        state.cache_frame(id.clone(), px);
-                        // After the last entry the board would WRAP back to the
-                        // full bar — a jump backward no fraction ordering can
-                        // hide. Instead the last entry dwells 2s past expiry:
-                        // the expiry task's push swaps in the post-notice view
-                        // before the wrap can ever show.
-                        let dwell_ms = if i + 1 == steps { step_ms + 2000 } else { step_ms };
-                        RotationEntry { frame_id: id, dwell_ms, scroll: false }
-                    })
-                    .collect();
+                let total_ms = n.until.duration_since(n.created).as_millis() as u32;
+                // remaining=1.0 renders the outline with an empty interior —
+                // the exact canvas the board's fill animates into.
+                let (id, px) = render::render_notice(&lines, Some(1.0));
+                state.cache_frame(id.clone(), px);
+                // Dwell 2s past expiry: a single-entry rotation never advances,
+                // and the expiry task's push swaps in the post-notice view
+                // before the dwell could matter anyway.
+                let rotation = vec![RotationEntry {
+                    frame_id: id,
+                    dwell_ms: total_ms + 2000,
+                    scroll: false,
+                }];
                 return Manifest {
                     rotation,
                     display_on: true,
                     off_state: cfg.off_state,
                     brightness: cfg.brightness,
                     epoch: n.epoch,
+                    countdown_ms: Some(total_ms),
                 };
             }
             notices.remove(board_id);
@@ -1681,6 +1674,7 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
         off_state: cfg.off_state,
         brightness: cfg.brightness,
         epoch: 0,
+        countdown_ms: None,
     }
 }
 
@@ -2673,7 +2667,8 @@ mod tests {
         assert!((wake as i64 - expect as i64).abs() <= 5, "default sleep is 24h");
         let m = manifest_for_board(&state, "b1");
         // The splash is a pre-baked bar sweep: one step per second of notice.
-        assert!(m.display_on && m.rotation.len() == SPLASH_SECS as usize, "sleep splash notice shows");
+        assert!(m.display_on && m.rotation.len() == 1, "sleep splash notice shows");
+        assert_eq!(m.countdown_ms, Some(SPLASH_SECS as u32 * 1000), "the bar is the board's to fill");
 
         handle_button(&state, "b1");
         let cfg = state.config_for("b1");
@@ -2989,7 +2984,8 @@ mod tests {
         assert!(state.notices.lock().unwrap().contains_key("b1"));
         let m = manifest_for_board(&state, "b1");
         // One dwell-timed step per second of countdown.
-        assert!(m.display_on && m.rotation.len() == NO_GAMES_SECS as usize, "notice rotation shows");
+        assert!(m.display_on && m.rotation.len() == 1, "notice rotation shows");
+        assert_eq!(m.countdown_ms, Some(NO_GAMES_SECS as u32 * 1000), "the bar is the board's to fill");
         assert!(
             state.notices.lock().unwrap().get("b1").unwrap().then_sleep,
             "the countdown notice re-sleeps the board on expiry"
@@ -3783,7 +3779,8 @@ mod tests {
         let cfg = BoardConfig { power: false, ..Default::default() };
         state.configs.lock().unwrap().insert("b1".into(), cfg);
         let m = manifest_for_board(&state, "b1");
-        assert!(m.display_on && m.rotation.len() == SPLASH_SECS as usize, "splash sweep shows");
+        assert!(m.display_on && m.rotation.len() == 1, "splash notice shows");
+        assert_eq!(m.countdown_ms, Some(SPLASH_SECS as u32 * 1000));
         handle_app_power(&state, "b1", true);
         assert!(!state.notices.lock().unwrap().contains_key("b1"), "power on cancels the notice");
     }
@@ -3814,68 +3811,54 @@ mod tests {
         assert_eq!(n, scoreboard_protocol::FRAME_WIDTH - 8, "none-remaining fills the box");
     }
 
-    /// A notice is ONE pre-baked dwell-timed rotation the board steps through on
-    /// its own clock (no per-step network pushes): N distinct frames whose bar
-    /// sweeps down, dwells covering the whole duration, the last entry padded
-    /// past expiry so the wrap back to a full bar never shows.
+    /// A notice manifest is ONE frame (the empty outlined bar) plus
+    /// `countdown_ms` — the fill is the BOARD's device-clock animation. The
+    /// old pre-rendered sweep cost ~4KB of board RAM per step, capping a 4s
+    /// splash at 4 chunky jumps; this is the smooth replacement.
     #[test]
-    fn notice_renders_as_one_dwell_timed_rotation() {
+    fn notice_is_one_frame_plus_a_board_countdown() {
         let state = AppState::new_ephemeral();
         state.games.lock().unwrap().clear();
         handle_button(&state, "b1"); // idle press -> the 10-second "NO GAMES" countdown
         let m = manifest_for_board(&state, "b1");
 
-        let steps = m.rotation.len();
-        assert_eq!(steps, NO_GAMES_SECS as usize, "one 1s step per countdown second");
-        assert!(m.rotation.iter().all(|e| !e.scroll), "notices never scroll");
-        // Distinct content-addressed frames: every step draws a different bar.
-        let ids: HashSet<&FrameId> = m.rotation.iter().map(|e| &e.frame_id).collect();
-        assert_eq!(ids.len(), steps);
+        assert_eq!(m.rotation.len(), 1, "one frame; the bar fill is device-side");
+        assert_eq!(m.countdown_ms, Some(NO_GAMES_SECS as u32 * 1000));
+        assert!(!m.rotation[0].scroll, "notices never scroll");
+        // Dwell pads 2s past expiry: a single entry never advances, and the
+        // expiry push swaps the screen before the pad could matter.
+        assert_eq!(m.rotation[0].dwell_ms as u64, NO_GAMES_SECS * 1000 + 2000);
 
-        // Dwells cover the whole duration; the FINAL entry carries the +2s pad.
-        let step_ms = NO_GAMES_SECS * 1000 / steps as u64;
-        for e in &m.rotation[..steps - 1] {
-            assert_eq!(e.dwell_ms as u64, step_ms);
-        }
-        assert_eq!(m.rotation[steps - 1].dwell_ms as u64, step_ms + 2000, "last entry padded past expiry");
-        let total: u64 = m.rotation.iter().map(|e| e.dwell_ms as u64).sum();
-        assert_eq!(total, NO_GAMES_SECS * 1000 + 2000);
+        // The frame ships the bar EMPTY (outline only): interior row is dark.
+        let frames = state.frames.lock().unwrap();
+        let (_, px) = frames.get(&m.rotation[0].frame_id).cloned().expect("notice frame cached");
+        drop(frames);
+        let y = FRAME_HEIGHT - 4; // interior fill row of the outlined box
+        let lit = (1..FRAME_WIDTH - 1)
+            .filter(|x| {
+                let i = (y * FRAME_WIDTH + x) * 2;
+                px[i] != 0 || px[i + 1] != 0
+            })
+            .count();
+        assert_eq!(lit, 2, "outline verticals only — the interior arrives empty: {lit}");
 
-        // The bar advances (fill strictly GROWS) across entries — reset style.
-        let lit = |id: &FrameId| {
-            let frames = state.frames.lock().unwrap();
-            let (_, px) = frames.get(id).cloned().expect("sweep frame cached");
-            let y = FRAME_HEIGHT - 4; // interior fill row of the outlined box
-            (0..FRAME_WIDTH)
-                .filter(|x| {
-                    let i = (y * FRAME_WIDTH + x) * 2;
-                    px[i] != 0 || px[i + 1] != 0
-                })
-                .count()
-        };
-        let widths: Vec<usize> = m.rotation.iter().map(|e| lit(&e.frame_id)).collect();
-        assert!(widths.windows(2).all(|w| w[1] > w[0]), "bar must fill: {widths:?}");
-
-        // A mid-notice re-render is byte-identical, so push_board's dedup keeps
-        // the board's rotation position — the fix for the stuttering splash.
+        // A mid-notice re-render is identical, so push_board's dedup keeps the
+        // board's countdown anchor (epoch unchanged, same frame id).
         let m2 = manifest_for_board(&state, "b1");
-        assert_eq!(
-            serde_json::to_string(&ServerMsg::Manifest(m)).unwrap(),
-            serde_json::to_string(&ServerMsg::Manifest(m2)).unwrap()
-        );
+        assert_eq!(m.rotation[0].frame_id, m2.rotation[0].frame_id);
+        assert_eq!(m.epoch, m2.epoch);
+        assert_eq!(m.countdown_ms, m2.countdown_ms);
     }
 
-    /// A short splash gets one bar step per second (4s -> 4 entries of ~1s).
+    /// The 4s sleep splash: same single-frame + device-countdown shape.
     #[test]
-    fn short_splash_steps_once_per_second() {
+    fn short_splash_is_one_frame_with_a_device_countdown() {
         let state = AppState::new_ephemeral();
         handle_button(&state, "b1"); // games showing -> sleep + 4s splash
         let m = manifest_for_board(&state, "b1");
-        assert_eq!(m.rotation.len(), SPLASH_SECS as usize);
-        for e in &m.rotation[..m.rotation.len() - 1] {
-            assert_eq!(e.dwell_ms, 1000);
-        }
-        assert_eq!(m.rotation.last().unwrap().dwell_ms, 3000, "1s + the 2s anti-wrap pad");
+        assert_eq!(m.rotation.len(), 1);
+        assert_eq!(m.countdown_ms, Some(SPLASH_SECS as u32 * 1000));
+        assert_eq!(m.rotation[0].dwell_ms as u64, SPLASH_SECS * 1000 + 2000, "dwell + anti-advance pad");
     }
 
     /// Notices carry a fresh nonzero manifest epoch per SHOWING: the board

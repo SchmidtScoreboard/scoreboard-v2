@@ -1,0 +1,2 @@
+- The "sleeping" and "no games" countdown bars now fill smoothly instead of stepping once a second.
+- On first startup after Wi-Fi setup, the board shows its pairing code automatically until you pair (tap to dismiss).

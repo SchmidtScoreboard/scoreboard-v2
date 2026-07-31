@@ -538,6 +538,9 @@ async fn run_client(
                                                     .await;
                                             }
                                         }
+                                        ServerMsg::NeedsPairing => {
+                                            board.lock().unwrap().needs_pairing();
+                                        }
                                         ServerMsg::SetupDone => {
                                             println!("paired — leaving setup");
                                             board.lock().unwrap().setup_done();

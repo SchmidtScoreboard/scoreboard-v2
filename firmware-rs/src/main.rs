@@ -569,6 +569,11 @@ async fn device(
                         // Paired: leave the pairing screen if it's up.
                         board.lock().await.setup_done();
                     }
+                    Ok(ServerMsg::NeedsPairing) => {
+                        // Nobody is paired with this board: show the code
+                        // unprompted (sticky until paired or dismissed).
+                        board.lock().await.needs_pairing();
+                    }
                     Ok(ServerMsg::Manifest(m)) => {
                         let need = board.lock().await.on_manifest(m);
                         if let Some(req) = need {

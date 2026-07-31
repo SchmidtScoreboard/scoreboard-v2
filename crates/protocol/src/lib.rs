@@ -189,11 +189,22 @@ pub struct Manifest {
     pub brightness: u8, // 10..=100, applied device-side (one value: knob and app share it)
     /// Program identity. The board keeps its rotation slot across same-length
     /// refreshes (content-addressed ids change every score tick) — but that
-    /// heuristic can't tell a 4-game rotation from a 4-step notice sweep. A
-    /// changed epoch says "different program: start from the top". 0 = the
-    /// games rotation; notices mint a fresh nonzero value per showing.
+    /// heuristic can't tell a 4-game rotation from a notice. A changed epoch
+    /// says "different program: start from the top". 0 = the games rotation;
+    /// notices mint a fresh nonzero value per showing.
     #[serde(default)]
     pub epoch: u64,
+    /// Countdown-bar duration for a notice: the DEVICE fills the bar smoothly
+    /// on its own clock over this many ms, anchored at the first manifest of
+    /// this `epoch` (same-epoch re-pushes — a brightness change mid-notice —
+    /// don't restart it). The frame arrives with the bar's outline empty; the
+    /// board owns the fill. Same division of labor as `scroll`: pre-rendering
+    /// the sweep as rotation steps cost ~4KB of board RAM per step, capping a
+    /// 4s splash at 4 chunky jumps, and per-step pushes are network animation,
+    /// which this system forbids. None = no bar. Old firmware ignores the
+    /// field and shows the static outline — a graceful downgrade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub countdown_ms: Option<u32>,
 }
 
 // ---- per-league team-name display style ----
@@ -684,6 +695,14 @@ pub enum ServerMsg {
     PairFailed { reason: String },
     // to a device: you've been paired, leave setup
     SetupDone,
+    // server tells a freshly-authed device that NO controller is paired with
+    // it (first startup after provisioning, or every pairing was revoked):
+    // the board puts its pair code up, sticky, until SetupDone or a gesture.
+    // The code itself was already registered — devices send EnterSetup on
+    // every connect — so this is pure presentation. Old firmware drops the
+    // unknown variant harmlessly and keeps its old behavior (code in the
+    // menu only).
+    NeedsPairing,
     // this board's durable settings as a portable JSON blob (pretty-printed
     // `PortableSettings`) — the reply to `ClientMsg::ExportSettings`
     SettingsExport { board_id: String, json: String },

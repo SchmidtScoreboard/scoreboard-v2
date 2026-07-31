@@ -69,6 +69,14 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 async fn device_loop(sender: WsSender, mut receiver: WsReceiver, state: AppState, board_id: String) {
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
     state.devices.lock().unwrap().insert(board_id.clone(), tx.clone());
+    // A board nobody is paired with shows its pair code unprompted — on a
+    // first startup the code is the entire onboarding path, and making a new
+    // owner discover the settings menu to find it was a wall. Purely
+    // presentational: the device registers its code on every connect anyway.
+    let unpaired = state.allow.lock().unwrap().get(&board_id).is_none_or(|c| c.is_empty());
+    if unpaired {
+        let _ = tx.send(Message::Text(serde_json::to_string(&ServerMsg::NeedsPairing).unwrap()));
+    }
     // A (re)connecting board has no manifest — drop the dedup entry so the
     // initial push below always goes out.
     state.forget_last_manifest(&board_id);
@@ -1491,6 +1499,33 @@ mod tests {
     }
 
     // ---- on-device settings menu: RequestUpdate / UpdateAvailable ----
+
+    /// A device nobody is paired with is told so at connect — the board shows
+    /// its pair code unprompted on a first startup. A paired device is not.
+    #[tokio::test]
+    async fn unpaired_device_is_told_to_show_its_code() {
+        let (url, _state) = spawn_server_with(AppState::new_ephemeral()).await;
+        let (mut dev, _board_id) = auth(&url, Role::Device, &[1u8; 32]).await;
+        match recv_until(&mut dev, |m| matches!(m, ServerMsg::NeedsPairing)).await {
+            Some(ServerMsg::NeedsPairing) => {}
+            other => panic!("expected NeedsPairing for a virgin board, got {other:?}"),
+        }
+
+        // Pair a controller, reconnect the device: no prompt this time.
+        let (url, state) = spawn_server_with(AppState::new_ephemeral()).await;
+        let (mut dev, board_id) = auth(&url, Role::Device, &[3u8; 32]).await;
+        let _ctrl = paired_subscriber(&url, &mut dev, &board_id, &[4u8; 32]).await;
+        let (mut dev2, _) = auth(&url, Role::Device, &[3u8; 32]).await;
+        // Bounded wait: NeedsPairing must never arrive for a paired board.
+        let waited = tokio::time::timeout(
+            Duration::from_millis(800),
+            recv_until(&mut dev2, |m| matches!(m, ServerMsg::NeedsPairing)),
+        )
+        .await;
+        assert!(waited.is_err(), "a paired board must not be told to show its code");
+        let _ = state;
+    }
+
 
     /// Every DeviceVersion report is answered with UpdateAvailable at the
     /// DEVICE: Some(dist version) when the channel offers something newer,
