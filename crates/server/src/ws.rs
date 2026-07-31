@@ -130,6 +130,13 @@ async fn device_loop(sender: WsSender, mut receiver: WsReceiver, state: AppState
                 Ok(ClientMsg::DeviceVersion { version }) => {
                     crate::handle_device_version(&state, &board_id, version);
                 }
+                Ok(ClientMsg::RequestUpdate) => {
+                    // The on-device menu's UPDATE row was selected: run the
+                    // exact pick+relay the app's Update button runs. Nothing
+                    // newer (or no reported version) is a logged no-op in
+                    // there — the board asked, there's just nothing to send.
+                    crate::handle_update_firmware(&state, &board_id);
+                }
                 _ => {}
             }
         }
@@ -502,6 +509,10 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
     // (or notice cancel) the physical button produces. Handled outside the config
     // lock below.
     let mut power_toggle: Option<bool> = None;
+    // Set on SetFwChannel: the update answer a connected DEVICE holds
+    // (`UpdateAvailable`, feeding its settings menu) may change with the
+    // channel, so it gets re-pushed alongside the app's BoardState below.
+    let mut fw_channel_switched = false;
     let updated = {
         let mut configs = state.configs.lock().unwrap();
         let cfg = configs.entry(board_id.to_string()).or_default();
@@ -660,8 +671,12 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
             // Firmware release channel. The push_board_state below re-runs the
             // offer computation against the new channel, so switching to Beta
             // with a newer beta dist hosted lights the app's Update button on
-            // THIS push — no reconnect involved.
-            Command::SetFwChannel { channel } => cfg.fw_channel = channel,
+            // THIS push — no reconnect involved. The device's own menu answer
+            // is re-pushed too (see fw_channel_switched).
+            Command::SetFwChannel { channel } => {
+                cfg.fw_channel = channel;
+                fw_channel_switched = true;
+            }
             // Relayed to the device by the early return at the top of this
             // function — never reaches the config fold. The arm stays so a new
             // Command variant is still a compile error here.
@@ -680,6 +695,12 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
     }
     push_board(state, board_id);
     push_board_state(state, board_id);
+    if fw_channel_switched {
+        // The device-side mirror of the recomputed app offer above: a channel
+        // switch changes what RequestUpdate would install, so re-answer the
+        // board's menu too (quiet no-op when offline / pre-report).
+        crate::push_update_available(state, board_id);
+    }
     state.persist_config(board_id, &updated);
 }
 
@@ -1467,5 +1488,174 @@ mod tests {
             }
             other => panic!("expected a reinstall offer at the device, got {other:?}"),
         }
+    }
+
+    // ---- on-device settings menu: RequestUpdate / UpdateAvailable ----
+
+    /// Every DeviceVersion report is answered with UpdateAvailable at the
+    /// DEVICE: Some(dist version) when the channel offers something newer,
+    /// None when up to date. The None case is a real push, not silence — the
+    /// menu must tell "up to date" apart from "never heard back". And an
+    /// UNCHANGED re-report is still answered: a reconnecting board (stale loop
+    /// still holding its old entry) reports the same version but has a fresh
+    /// menu with no answer.
+    #[tokio::test]
+    async fn device_version_is_answered_with_update_available() {
+        let (url, _state) =
+            spawn_server_with(state_with_firmware(&[(FwChannel::Stable, "2026.7.0")])).await;
+        let (mut dev, _board_id) = auth(&url, Role::Device, &[1u8; 32]).await;
+
+        // Older report -> the dist's version.
+        send(&mut dev, &ClientMsg::DeviceVersion { version: "2026.6.0".into() }).await;
+        match recv_until(&mut dev, |m| matches!(m, ServerMsg::UpdateAvailable { .. })).await {
+            Some(ServerMsg::UpdateAvailable { version }) => {
+                assert_eq!(version.as_deref(), Some("2026.7.0"), "older report -> dist offered");
+            }
+            other => panic!("expected UpdateAvailable at the device, got {other:?}"),
+        }
+
+        // Up to date -> an explicit None answer.
+        send(&mut dev, &ClientMsg::DeviceVersion { version: "2026.7.0".into() }).await;
+        match recv_until(&mut dev, |m| matches!(m, ServerMsg::UpdateAvailable { .. })).await {
+            Some(ServerMsg::UpdateAvailable { version }) => {
+                assert_eq!(version, None, "up to date -> explicit None, not silence");
+            }
+            other => panic!("expected UpdateAvailable at the device, got {other:?}"),
+        }
+
+        // The SAME version again (a reconnect's re-report) is still answered.
+        send(&mut dev, &ClientMsg::DeviceVersion { version: "2026.7.0".into() }).await;
+        assert!(
+            matches!(
+                recv_until(&mut dev, |m| matches!(m, ServerMsg::UpdateAvailable { .. })).await,
+                Some(ServerMsg::UpdateAvailable { version: None })
+            ),
+            "an unchanged re-report still gets its answer — the report doubles as the ask"
+        );
+    }
+
+    /// RequestUpdate from the DEVICE runs the same pick the app's Update
+    /// button does and lands the standard signed UpdateFirmware offer on the
+    /// device socket — the on-device menu asks without a phone in the room.
+    #[tokio::test]
+    async fn request_update_receives_the_standard_offer() {
+        let (url, state) =
+            spawn_server_with(state_with_firmware(&[(FwChannel::Stable, "2026.7.0")])).await;
+        let fw = state.firmware.get(&FwChannel::Stable).expect("stable dist hosted").clone();
+        let (mut dev, _board_id) = auth(&url, Role::Device, &[1u8; 32]).await;
+
+        send(&mut dev, &ClientMsg::DeviceVersion { version: "2026.6.0".into() }).await;
+        send(&mut dev, &ClientMsg::RequestUpdate).await;
+        match recv_until(&mut dev, |m| matches!(m, ServerMsg::UpdateFirmware { .. })).await {
+            Some(ServerMsg::UpdateFirmware { version, size, sha256, sig, path, channel }) => {
+                assert_eq!(version, fw.manifest.version);
+                assert_eq!(size, fw.manifest.size);
+                assert_eq!(sha256, fw.manifest.sha256);
+                assert_eq!(sig, fw.manifest.sig, "the offer is the SIGNED flow, unchanged");
+                assert!(path.starts_with("/firmware/stable.bin?u="), "tokenized path, got {path:?}");
+                assert_eq!(channel, "stable");
+            }
+            other => panic!("expected the standard UpdateFirmware offer, got {other:?}"),
+        }
+    }
+
+    /// RequestUpdate with nothing newer hosted: no offer, no error, and the
+    /// device loop stays fully live — the next report is still answered.
+    #[tokio::test]
+    async fn request_update_with_nothing_newer_is_a_quiet_noop() {
+        let (url, _state) =
+            spawn_server_with(state_with_firmware(&[(FwChannel::Stable, "2026.7.0")])).await;
+        let (mut dev, _board_id) = auth(&url, Role::Device, &[1u8; 32]).await;
+
+        send(&mut dev, &ClientMsg::DeviceVersion { version: "2026.7.0".into() }).await;
+        assert!(matches!(
+            recv_until(&mut dev, |m| matches!(m, ServerMsg::UpdateAvailable { .. })).await,
+            Some(ServerMsg::UpdateAvailable { version: None })
+        ));
+
+        send(&mut dev, &ClientMsg::RequestUpdate).await;
+        // Bound the wait: nothing newer must send NOTHING (no offer, no error).
+        let offer = tokio::time::timeout(Duration::from_millis(400), async {
+            loop {
+                match dev.next().await {
+                    Some(Ok(TMessage::Text(t))) => {
+                        if let Ok(ServerMsg::UpdateFirmware { .. }) =
+                            serde_json::from_str::<ServerMsg>(&t)
+                        {
+                            return;
+                        }
+                    }
+                    Some(Ok(_)) => continue,
+                    _ => panic!("device socket died on a no-op RequestUpdate"),
+                }
+            }
+        })
+        .await;
+        assert!(offer.is_err(), "no offer may be sent when nothing newer is hosted");
+
+        // The loop is still alive: a fresh report gets its answer.
+        send(&mut dev, &ClientMsg::DeviceVersion { version: "2026.6.0".into() }).await;
+        assert!(
+            matches!(
+                recv_until(&mut dev, |m| matches!(m, ServerMsg::UpdateAvailable { .. })).await,
+                Some(ServerMsg::UpdateAvailable { version: Some(_) })
+            ),
+            "device loop still answers after the no-op"
+        );
+    }
+
+    /// Switching release channels re-answers the DEVICE too: SetFwChannel
+    /// changes what RequestUpdate would install, so the board's menu gets a
+    /// fresh UpdateAvailable on the very command that switched it — no
+    /// reconnect involved (mirrors the app-side reoffer test above).
+    #[tokio::test]
+    async fn set_fw_channel_repushes_update_available_to_the_device() {
+        let (url, _state) = spawn_server_with(state_with_firmware(&[
+            (FwChannel::Stable, "2026.7.0"),
+            (FwChannel::Beta, "2026.8.0"),
+        ]))
+        .await;
+        let (mut dev, board_id) = auth(&url, Role::Device, &[1u8; 32]).await;
+        let mut ctrl = paired_subscriber(&url, &mut dev, &board_id, &[2u8; 32]).await;
+
+        // Stable board running the current stable: the answer is None.
+        send(&mut dev, &ClientMsg::DeviceVersion { version: "2026.7.0".into() }).await;
+        assert!(matches!(
+            recv_until(&mut dev, |m| matches!(m, ServerMsg::UpdateAvailable { .. })).await,
+            Some(ServerMsg::UpdateAvailable { version: None })
+        ));
+
+        // App switches the board to Beta: the beta dist becomes the answer.
+        send(&mut ctrl, &ClientMsg::Command {
+            req_id: 21,
+            board_id: board_id.clone(),
+            cmd: Command::SetFwChannel { channel: FwChannel::Beta },
+        })
+        .await;
+        match recv_until(&mut dev, |m| matches!(m, ServerMsg::UpdateAvailable { .. })).await {
+            Some(ServerMsg::UpdateAvailable { version }) => {
+                assert_eq!(
+                    version.as_deref(),
+                    Some("2026.8.0"),
+                    "channel switch re-answers the device's menu"
+                );
+            }
+            other => panic!("expected UpdateAvailable after SetFwChannel, got {other:?}"),
+        }
+
+        // And back to Stable: the answer clears just as immediately.
+        send(&mut ctrl, &ClientMsg::Command {
+            req_id: 22,
+            board_id: board_id.clone(),
+            cmd: Command::SetFwChannel { channel: FwChannel::Stable },
+        })
+        .await;
+        assert!(
+            matches!(
+                recv_until(&mut dev, |m| matches!(m, ServerMsg::UpdateAvailable { .. })).await,
+                Some(ServerMsg::UpdateAvailable { version: None })
+            ),
+            "switching back re-answers with None"
+        );
     }
 }

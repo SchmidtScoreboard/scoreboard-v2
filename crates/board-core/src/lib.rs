@@ -12,6 +12,7 @@
 extern crate alloc;
 
 use alloc::collections::BTreeMap;
+use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -33,12 +34,22 @@ use scoreboard_protocol::{
 
 const DOUBLE_WINDOW_MS: u64 = 400;
 const BOOT_TIME_MS: u64 = 1500;
-// Hold-to-reset: ignore the first RESET_GRACE_MS (so taps / double-press don't
-// trigger it), then fill a bar over RESET_FILL_MS — a deliberate ~10s hold so it's
-// never accidental and the user clearly sees the press is doing something. At the
-// end the firmware wipes the Wi-Fi credentials and reboots into BLE provisioning.
-const RESET_GRACE_MS: u64 = 500;
-const RESET_FILL_MS: u64 = 9500;
+// One button, one hold, three thresholds — measured from the moment the press
+// starts. The first HOLD_GRACE_MS are ignored so taps and double-taps never
+// flash the bar. Then an amber bar fills toward the MENU threshold (3s opens
+// the settings menu; inside the menu the shorter CLOSE threshold shuts it).
+// KEEP holding past the menu threshold and the screen turns red: the raw
+// factory reset at ERASE_HOLD_MS. That 15s super-hold is the escape hatch that
+// must survive any bug in the menu logic — it lives in `tick`, below the menu
+// state entirely, and wipes Wi-Fi credentials exactly as it always has.
+pub const HOLD_GRACE_MS: u64 = 500;
+pub const MENU_HOLD_MS: u64 = 3_000;
+pub const MENU_CLOSE_HOLD_MS: u64 = 2_000;
+pub const ERASE_HOLD_MS: u64 = 15_000;
+// Nobody stands at the board for two minutes without touching the knob: the
+// menu closes itself (device clock) so an interrupted visit can't park the
+// panel on a settings list instead of scores.
+pub const MENU_IDLE_TIMEOUT_MS: u64 = 120_000;
 // Offline grace: a dropped websocket usually re-establishes within a second or
 // two — and a server DEPLOY takes 30-60s of reconnect failures. While there's
 // content on screen, keep showing it (scores just pause updating); only admit
@@ -76,6 +87,52 @@ pub enum SetupPhase {
     Saved,
 }
 
+/// Host-reported facts for the WIFI INFO diagnostics screen. Everything is
+/// optional: the screen matters MOST when the board is offline and half-broken,
+/// so each row renders "--" for what the host can't know rather than hiding.
+/// (Uptime, online state, and firmware version come from the board itself.)
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Diagnostics {
+    pub ssid: Option<String>,
+    pub rssi_dbm: Option<i8>,
+    pub ip: Option<[u8; 4]>,
+    /// The server endpoint as "host:port" — what the board is dialing.
+    pub server: Option<String>,
+    /// A short prefix of the board id (the full pubkey never fits on 64px).
+    pub board_id_prefix: Option<String>,
+    pub free_heap_bytes: Option<u32>,
+}
+
+/// Which settings-menu screen is up. The menu is an OVERLAY, not a `Mode`:
+/// the mode machine keeps running untouched underneath, which is what makes
+/// "closing restores exactly the prior state" true by construction — an asleep
+/// board is still asleep, a connect screen is still connecting.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MenuScreen {
+    Root,
+    PairCode,
+    WifiInfo,
+    ResetConfirm,
+}
+
+struct MenuState {
+    screen: MenuScreen,
+    selected: usize,      // root row (0..MENU_ITEM_COUNT)
+    scroll: usize,        // wifi-info top line (the root's four rows all fit)
+    erase_selected: bool, // reset-confirm: CANCEL is the default
+    last_interaction: u64, // any knob activity; 120s of silence closes the menu
+}
+
+// Root menu rows, in owner-specified order.
+const MENU_UPDATE: usize = 0;
+const MENU_PAIR: usize = 1;
+const MENU_WIFI: usize = 2;
+const MENU_RESET: usize = 3;
+const MENU_ITEM_COUNT: usize = 4;
+// The wifi-info screen shows this many FONT_4X6 rows at once (5 × 6px + 1px
+// top margin fills the 32px panel); the rest scroll.
+const WIFI_INFO_VISIBLE: usize = 5;
+
 pub struct Board {
     cache: BTreeMap<FrameId, Vec<u8>>,
     manifest: Option<Manifest>,
@@ -102,11 +159,21 @@ pub struct Board {
     brightness_pending: bool, // a turn the server hasn't heard yet (see `encoder`)
     syncing_since: Option<u64>, // when the pair-code screen went up (it times out)
 
-    // hold-to-reset (factory reset of the stored Wi-Fi credentials)
-    reset_active: bool,         // bar on screen (held past the grace window)
-    reset_progress: u8,         // 0..=100 fill
-    reset_done: bool,           // fill complete — firmware wipes creds + reboots
+    // the one-button hold machine (menu at 3s, raw factory reset at 15s)
+    reset_active: bool,         // hold bar on screen (held past the grace window)
+    reset_progress: u8,         // 0..=100 fill of the CURRENT phase's bar
+    hold_erase_phase: bool,     // past 3s: the bar is red and runs toward the wipe
+    hold_started_in_menu: bool, // decides the amber target: close (2s) vs open (3s)
+    hold_fired: bool,           // this press's open/close action already ran
+    reset_done: bool,           // erase complete — firmware wipes creds + reboots
     reset_done_at: Option<u64>, // for the simulator to auto-dismiss (device reboots first)
+
+    // settings menu overlay (None = whatever the mode machine was doing)
+    menu: Option<MenuState>,
+    // Newer firmware the server says exists (`ServerMsg::UpdateAvailable`);
+    // shown on the UPDATE row, and what makes selecting it send RequestUpdate.
+    update_available: Option<String>,
+    diag: Diagnostics, // host-fed rows for the WIFI INFO screen
 
     // OTA update in progress: Some(_) BLANKS the panel to black. Each flash
     // sector write stalls the flash-resident render task, darkening whatever's
@@ -153,8 +220,14 @@ impl Board {
             syncing_since: None,
             reset_active: false,
             reset_progress: 0,
+            hold_erase_phase: false,
+            hold_started_in_menu: false,
+            hold_fired: false,
             reset_done: false,
             reset_done_at: None,
+            menu: None,
+            update_available: None,
+            diag: Diagnostics::default(),
             updating: None,
             version: None,
             outbox: Vec::new(),
@@ -207,6 +280,32 @@ impl Board {
         self.reset_active
     }
 
+    /// Newer firmware the server advertised (`ServerMsg::UpdateAvailable`).
+    /// `Some(version)` puts an up-arrow + that version on the UPDATE row and
+    /// arms it; `None` shows the running version and selecting is a no-op.
+    pub fn set_update_available(&mut self, v: Option<String>) {
+        self.update_available = v;
+    }
+
+    /// Host-reported diagnostics for the WIFI INFO screen. Feed whenever the
+    /// facts change (link up/down, DHCP, RSSI poll) — cheap either way.
+    pub fn set_diagnostics(&mut self, d: Diagnostics) {
+        self.diag = d;
+    }
+
+    /// Is the settings-menu overlay up (any of its screens)?
+    pub fn menu_open(&self) -> bool {
+        self.menu.is_some()
+    }
+
+    /// Should the host be announcing a pairing code to the server? True for
+    /// the legacy Setup/Syncing modes AND the menu's PAIR CODE screen — the
+    /// host used to infer this from `mode()`, which can't see the overlay.
+    pub fn pairing_active(&self) -> bool {
+        matches!(self.mode, Mode::Setup | Mode::Syncing)
+            || self.menu.as_ref().is_some_and(|m| m.screen == MenuScreen::PairCode)
+    }
+
     /// True once the hold-to-reset bar has filled — the firmware should wipe the
     /// stored Wi-Fi credentials and reboot into BLE provisioning.
     pub fn reset_triggered(&self) -> bool {
@@ -247,11 +346,19 @@ impl Board {
         self.setup_code.clone()
     }
 
-    /// The board has been paired; leave the setup / sync screen.
+    /// The board has been paired; leave the setup / sync screen. When the code
+    /// was up via the menu's PAIR CODE screen, "leave" means back to the menu
+    /// root — the person pairing is standing at the board, mid-menu-visit.
     pub fn setup_done(&mut self) {
         if matches!(self.mode, Mode::Setup | Mode::Syncing) {
             self.syncing_since = None;
             self.mode = Mode::Running;
+        }
+        if let Some(m) = &mut self.menu {
+            if m.screen == MenuScreen::PairCode {
+                m.screen = MenuScreen::Root;
+                m.last_interaction = self.clock;
+            }
         }
     }
 
@@ -268,6 +375,13 @@ impl Board {
     /// `tick`), otherwise the first manifest after the reconnect would echo the
     /// server's stale level and undo the turn in front of the user.
     pub fn encoder(&mut self, delta: i32) {
+        // With the menu up the knob NAVIGATES — brightness must not creep
+        // while someone scrolls the wifi-info screen (and no DeviceBrightness
+        // chatter goes out either; the server would adopt an accidental level).
+        if self.menu.is_some() {
+            self.menu_rotate(delta);
+            return;
+        }
         self.local_brightness = (self.local_brightness as i32 + delta * 10).clamp(10, 100) as u8;
         self.brightness_changed_at = Some(self.clock);
         if self.online && matches!(self.mode, Mode::Running) {
@@ -356,20 +470,36 @@ impl Board {
     // ---- raw encoder button from the host (seesaw / sim control) ----
     pub fn button_down(&mut self, now_ms: u64) {
         self.pressed_at = Some(now_ms);
+        // Captured at press time: a hold that BEGINS inside the menu is a
+        // close (2s), one that begins outside is an open (3s). Deciding at
+        // fire time instead would make the 3s crossing re-open the menu the
+        // same press just closed.
+        self.hold_started_in_menu = self.menu.is_some();
+        self.hold_fired = false;
+        if let Some(m) = &mut self.menu {
+            m.last_interaction = now_ms;
+        }
         if !self.reset_done {
             self.reset_active = false;
             self.reset_progress = 0;
+            self.hold_erase_phase = false;
         }
     }
 
     pub fn button_up(&mut self, now_ms: u64) {
         let Some(p) = self.pressed_at.take() else { return };
-        // A hold past the grace window was a reset attempt; if it didn't complete,
-        // cancel the bar — and don't also treat it as a tap gesture.
-        if now_ms.saturating_sub(p) >= RESET_GRACE_MS {
+        if let Some(m) = &mut self.menu {
+            m.last_interaction = now_ms;
+        }
+        // A hold past the grace window was a hold, not a tap: clear the bar and
+        // leave whatever thresholds already fired (menu open/close) in place.
+        // Releasing anywhere in the red phase keeps everything un-erased — the
+        // wipe only ever fires from `tick`, at the full 15s.
+        if now_ms.saturating_sub(p) >= HOLD_GRACE_MS {
             if !self.reset_done {
                 self.reset_active = false;
                 self.reset_progress = 0;
+                self.hold_erase_phase = false;
             }
             return;
         }
@@ -402,19 +532,58 @@ impl Board {
         // firmware's 30fps loop produced with the old per-tick counter.
         self.anim = (now_ms / 133) as u32;
 
-        // hold-to-reset: after the grace window, fill a bar; when full the firmware
-        // wipes Wi-Fi creds + reboots. (Replaces the old long-press-to-setup.)
+        // The hold machine. One press, timed from its start: amber bar to the
+        // menu action (open at 3s from anywhere; close at 2s when the press
+        // began inside the menu), then the RED phase running to the raw wipe
+        // at 15s. This block is deliberately independent of the menu's own
+        // logic — it reads only `pressed_at` and the flags stamped at press
+        // time, so the 15s escape hatch works even if the menu is ever wrong.
         if let (Some(p), false) = (self.pressed_at, self.reset_done) {
             let held = now_ms.saturating_sub(p);
-            if held >= RESET_GRACE_MS {
-                self.reset_active = true;
-                let fill = held - RESET_GRACE_MS;
-                self.reset_progress = ((fill * 100) / RESET_FILL_MS).min(100) as u8;
-                if fill >= RESET_FILL_MS {
-                    self.reset_done = true;
-                    self.reset_progress = 100;
-                    self.reset_done_at = Some(now_ms);
+            // Fire the menu action exactly once per press, even if a slow host
+            // tick jumps clean over the threshold.
+            let menu_at = if self.hold_started_in_menu { MENU_CLOSE_HOLD_MS } else { MENU_HOLD_MS };
+            if !self.hold_fired && held >= menu_at {
+                self.hold_fired = true;
+                if self.hold_started_in_menu {
+                    // Close = drop the overlay. The mode machine underneath was
+                    // never touched, so "restore the prior state" is a no-op.
+                    self.menu = None;
+                } else {
+                    self.open_menu();
                 }
+            }
+            if held >= HOLD_GRACE_MS {
+                self.reset_active = true;
+                if held >= MENU_HOLD_MS {
+                    // Red phase: 3s..15s runs toward the wipe, clearly labeled
+                    // so nobody erases their Wi-Fi reaching for the menu.
+                    self.hold_erase_phase = true;
+                    let fill = held - MENU_HOLD_MS;
+                    let span = ERASE_HOLD_MS - MENU_HOLD_MS;
+                    self.reset_progress = ((fill * 100) / span).min(100) as u8;
+                    if held >= ERASE_HOLD_MS {
+                        self.reset_done = true;
+                        self.reset_progress = 100;
+                        self.reset_done_at = Some(now_ms);
+                    }
+                } else {
+                    // Amber phase: fill toward this press's menu action. A
+                    // menu-origin press keeps showing the full bar from its 2s
+                    // close until the red phase takes over at 3s — continuous
+                    // feedback that the hold is still doing something.
+                    self.hold_erase_phase = false;
+                    let fill = held - HOLD_GRACE_MS;
+                    let span = menu_at - HOLD_GRACE_MS;
+                    self.reset_progress = ((fill * 100) / span).min(100) as u8;
+                }
+            }
+        }
+        // The menu closes itself after two minutes of an untouched knob —
+        // device clock, like every timeout on this board.
+        if let Some(m) = &self.menu {
+            if now_ms.saturating_sub(m.last_interaction) >= MENU_IDLE_TIMEOUT_MS {
+                self.menu = None;
             }
         }
         // The simulator has no firmware to reboot it, so auto-dismiss the "complete"
@@ -483,6 +652,22 @@ impl Board {
     }
 
     fn apply(&mut self, g: Gesture) {
+        // With the menu up, a tap is a SELECT and never reaches the sleep
+        // toggle below — the modes don't exist while the overlay has the knob.
+        if self.menu.is_some() {
+            match g {
+                Gesture::Single => self.menu_select(),
+                // Reserved here too (see below) — two selects would be worse.
+                Gesture::Double => {}
+                // The post-wipe provisioning entry (firmware/sim injects it
+                // after the credentials are gone); the menu has no say.
+                Gesture::Long => {
+                    self.menu = None;
+                    self.enter_setup();
+                }
+            }
+            return;
+        }
         match g {
             // single press: while online + Running, the SERVER owns what a press
             // means (sleep / wake / "no games" notice) — report it and let the next
@@ -508,28 +693,107 @@ impl Board {
                     self.outbox.push(ClientMsg::ButtonPress);
                 }
             }
-            // double press: show the pairing code — but only while online.
-            // Offline (or in BLE provisioning) the server doesn't know any
-            // code, so the screen would just be a dead end. A second double
-            // press closes the code screen again (even if the connection
-            // dropped while it was up — leaving must never be gated).
-            Gesture::Double => {
-                if self.mode == Mode::Syncing {
-                    self.syncing_since = None;
-                    self.mode = Mode::Running;
-                } else if self.online {
-                    self.syncing_since = Some(self.clock);
-                    self.mode = Mode::Syncing;
-                }
-            }
+            // double press: deliberately SWALLOWED. It used to open the pairing
+            // screen (that lives in the settings menu now), and it must not
+            // fall through to two sleep toggles — a fumbled tap would flash the
+            // panel off-and-on. The gesture stays reserved for a future use.
+            Gesture::Double => {}
             // long press: factory reset -> setup
-            Gesture::Long => {
-                self.manifest = None;
-                self.cache.clear();
-                self.syncing_since = None;
-                // Fresh provisioning always starts from the top of the handshake.
-                self.setup_phase = SetupPhase::WaitingBluetooth;
-                self.mode = Mode::Setup;
+            Gesture::Long => self.enter_setup(),
+        }
+    }
+
+    /// The post-wipe provisioning entry (what `Gesture::Long` injects).
+    fn enter_setup(&mut self) {
+        self.manifest = None;
+        self.cache.clear();
+        self.syncing_since = None;
+        // Fresh provisioning always starts from the top of the handshake.
+        self.setup_phase = SetupPhase::WaitingBluetooth;
+        self.mode = Mode::Setup;
+    }
+
+    /// Open the settings menu (the 3s hold crossing). The mode machine is left
+    /// exactly as it stands — the menu is an overlay, and dropping it later is
+    /// the whole "restore the prior state" story.
+    fn open_menu(&mut self) {
+        if self.menu.is_none() {
+            self.menu = Some(MenuState {
+                screen: MenuScreen::Root,
+                selected: 0,
+                scroll: 0,
+                erase_selected: false,
+                last_interaction: self.clock,
+            });
+        }
+    }
+
+    /// Knob rotation while the menu is up: move the selection / scroll / flip
+    /// the confirm toggle. Never brightness (see `encoder`).
+    fn menu_rotate(&mut self, delta: i32) {
+        let clock = self.clock;
+        let Some(m) = &mut self.menu else { return };
+        m.last_interaction = clock;
+        match m.screen {
+            MenuScreen::Root => {
+                m.selected = (m.selected as i32 + delta).clamp(0, MENU_ITEM_COUNT as i32 - 1)
+                    as usize;
+            }
+            // The code screen has nothing to scroll; the turn only counts as
+            // presence (it keeps the 120s timeout from closing mid-pairing).
+            MenuScreen::PairCode => {}
+            MenuScreen::WifiInfo => {
+                let max = self.wifi_info_lines().len().saturating_sub(WIFI_INFO_VISIBLE);
+                let m = self.menu.as_mut().unwrap();
+                m.scroll = (m.scroll as i32 + delta).clamp(0, max as i32) as usize;
+            }
+            // Direction picks the option outright (rather than toggling) so a
+            // detent that double-reports can't land on ERASE by accident.
+            MenuScreen::ResetConfirm => m.erase_selected = delta > 0,
+        }
+    }
+
+    /// Tap while the menu is up.
+    fn menu_select(&mut self) {
+        let clock = self.clock;
+        let Some(m) = &mut self.menu else { return };
+        m.last_interaction = clock;
+        match m.screen {
+            MenuScreen::Root => match m.selected {
+                MENU_UPDATE => {
+                    // Armed only when the server has said a newer image exists.
+                    // The outbox queues, so selecting while offline sends the
+                    // request when the socket returns; with nothing offered the
+                    // tap is a no-op (there is nothing to request).
+                    if self.update_available.is_some() {
+                        self.outbox.push(ClientMsg::RequestUpdate);
+                    }
+                }
+                MENU_PAIR => m.screen = MenuScreen::PairCode,
+                MENU_WIFI => {
+                    m.screen = MenuScreen::WifiInfo;
+                    m.scroll = 0;
+                }
+                MENU_RESET => {
+                    m.screen = MenuScreen::ResetConfirm;
+                    // CANCEL every visit — a stale ERASE from a backed-out
+                    // attempt must never be one tap from firing.
+                    m.erase_selected = false;
+                }
+                _ => {}
+            },
+            // The sub-screens tap back to the menu root.
+            MenuScreen::PairCode | MenuScreen::WifiInfo => m.screen = MenuScreen::Root,
+            MenuScreen::ResetConfirm => {
+                if m.erase_selected {
+                    // Same latch the 15s hold sets — one wipe path, not two.
+                    self.menu = None;
+                    self.reset_done = true;
+                    self.reset_progress = 100;
+                    self.reset_done_at = Some(clock);
+                } else {
+                    m.screen = MenuScreen::Root;
+                }
             }
         }
     }
@@ -550,6 +814,21 @@ impl Board {
         // hatch is sacred, and stays fully lit even mid-download.)
         if self.updating.is_some() {
             return vec![0u32; FRAME_PIXELS];
+        }
+        // The settings menu suspends whatever the mode machine is showing.
+        // Below updating on purpose: a menu lit during an OTA download would
+        // strobe like any other content. No brightness bar here either — the
+        // knob navigates, it doesn't dim (see `encoder`).
+        if let Some(m) = &self.menu {
+            let mut buf = match m.screen {
+                MenuScreen::Root => self.screen_menu_root(m),
+                // The pairing screen the double-tap used to own, unchanged.
+                MenuScreen::PairCode => self.screen_syncing(),
+                MenuScreen::WifiInfo => self.screen_wifi_info(m),
+                MenuScreen::ResetConfirm => self.screen_reset_confirm(m),
+            };
+            scale_buf(&mut buf, self.local_brightness);
+            return buf;
         }
         // Only server content gets the transient brightness bar. On the
         // firmware-local screens the bottom rows are the status LINE — measured
@@ -738,44 +1017,259 @@ impl Board {
         c.into_u32()
     }
 
+    /// The hold overlay, in its three phases: amber bar filling toward the
+    /// menu action, the red KEEP-HOLDING-TO-ERASE run to 15s, and the green
+    /// completion screen (the firmware reboots moments after that one).
     fn screen_reset(&self) -> Vec<u32> {
         let mut c = Canvas::new();
-        let (title, color) = if self.reset_done {
-            ("RESET COMPLETE", Rgb888::new(0x33, 0xDD, 0x55)) // green
-        } else {
-            ("HOLD TO RESET", Rgb888::new(0xFF, 0x55, 0x33)) // red
-        };
-        center_text(&mut c, title, 6, &FONT_4X6, color);
-
-        // Progress bar (outline + proportional fill).
-        let bar_x = 6i32;
-        let bar_y = 15i32;
-        let bar_w = FRAME_WIDTH as i32 - 12;
-        let bar_h = 9i32;
-        Rectangle::new(Point::new(bar_x, bar_y), Size::new(bar_w as u32, bar_h as u32))
-            .into_styled(PrimitiveStyle::with_stroke(Rgb888::new(0x55, 0x55, 0x55), 1))
-            .draw(&mut c)
-            .ok();
-        let fill_w = (bar_w - 2) as u32 * self.reset_progress as u32 / 100;
-        if fill_w > 0 {
-            Rectangle::new(
-                Point::new(bar_x + 1, bar_y + 1),
-                Size::new(fill_w, (bar_h - 2) as u32),
-            )
-            .into_styled(PrimitiveStyle::with_fill(color))
-            .draw(&mut c)
-            .ok();
-        }
+        let grey = Rgb888::new(0x88, 0x88, 0x88);
         if self.reset_done {
-            draw_checkmark(&mut c, FRAME_WIDTH as i32 / 2, bar_y + bar_h / 2);
-        }
-        // Version at the bottom — with OTA updates, the reset screen is the
-        // handiest place to read what's running: hold the knob a moment,
-        // release before the bar fills.
-        if let Some(v) = &self.version {
-            center_text(&mut c, v, 28, &FONT_4X6, Rgb888::new(0x88, 0x88, 0x88));
+            let green = Rgb888::new(0x33, 0xDD, 0x55);
+            center_text(&mut c, "RESET COMPLETE", 6, &FONT_4X6, green);
+            hold_bar(&mut c, 100, green);
+            draw_checkmark(&mut c, FRAME_WIDTH as i32 / 2, 19);
+        } else if self.hold_erase_phase {
+            // Visibly NOT the menu bar: red, two-line warning, and an explicit
+            // out — nobody should erase their Wi-Fi reaching for settings.
+            let red = Rgb888::new(0xFF, 0x55, 0x33);
+            center_text(&mut c, "KEEP HOLDING", 4, &FONT_4X6, red);
+            center_text(&mut c, "TO ERASE WI-FI", 11, &FONT_4X6, red);
+            hold_bar(&mut c, self.reset_progress, red);
+            center_text(&mut c, "RELEASE TO KEEP", 28, &FONT_4X6, grey);
+        } else {
+            let amber = Rgb888::new(0xFF, 0x88, 0x00);
+            let title =
+                if self.hold_started_in_menu { "CLOSING MENU" } else { "HOLD FOR MENU" };
+            center_text(&mut c, title, 6, &FONT_4X6, amber);
+            hold_bar(&mut c, self.reset_progress, amber);
+            // Version at the bottom — hold the knob a moment and release: the
+            // quickest way to read what's running off the panel itself.
+            if let Some(v) = &self.version {
+                center_text(&mut c, v, 28, &FONT_4X6, grey);
+            }
         }
         c.into_u32()
+    }
+
+    /// Root settings list: a title row and four FONT_4X6 rows, selection as an
+    /// inverse amber bar (black text on amber — the one style that stays
+    /// legible at brightness 10).
+    fn screen_menu_root(&self, m: &MenuState) -> Vec<u32> {
+        let mut c = Canvas::new();
+        let grey = Rgb888::new(0x88, 0x88, 0x88);
+        let amber = Rgb888::new(0xFF, 0x88, 0x00);
+        center_text(&mut c, "SETTINGS", 3, &FONT_4X6, Rgb888::new(0x33, 0xAA, 0xFF));
+        // The UPDATE row carries a version: the offered one (with an up-arrow)
+        // when the server said a newer image exists, otherwise what's running
+        // — offline it simply shows the running version, no arrow, inert.
+        let update_row = match (&self.update_available, &self.version) {
+            (Some(v), _) => format!("UPDATE ^{v}"),
+            (None, Some(v)) => format!("UPDATE {v}"),
+            (None, None) => String::from("UPDATE"),
+        };
+        let items = [update_row.as_str(), "PAIR CODE", "WIFI INFO", "RESET BOARD"];
+        for (i, label) in items.iter().enumerate() {
+            let y = 8 + i as i32 * 6;
+            if i == m.selected {
+                Rectangle::new(Point::new(0, y - 1), Size::new(FRAME_WIDTH as u32, 7))
+                    .into_styled(PrimitiveStyle::with_fill(amber))
+                    .draw(&mut c)
+                    .ok();
+                left_text(&mut c, label, 1, y, Rgb888::BLACK);
+            } else {
+                left_text(&mut c, label, 1, y, grey);
+            }
+        }
+        c.into_u32()
+    }
+
+    /// The rows the WIFI INFO screen scrolls through. Built on demand (also by
+    /// `menu_rotate` for the scroll clamp) — the list is tiny.
+    fn wifi_info_lines(&self) -> Vec<InfoLine> {
+        let grey = Rgb888::new(0x88, 0x88, 0x88);
+        let white = Rgb888::new(0xCC, 0xCC, 0xCC);
+        let line = |text: String, color: Rgb888| InfoLine { text, color, bars: None };
+        let d = &self.diag;
+        let mut ls = Vec::new();
+        ls.push(line(String::from("WIFI INFO"), Rgb888::new(0x33, 0xAA, 0xFF)));
+        ls.push(line(
+            format!("SSID {}", d.ssid.as_deref().unwrap_or("--")),
+            white,
+        ));
+        // Signal row: dBm as text, plus the four ascending bars everyone can
+        // read from across the room (drawn by the renderer, not glyphs).
+        ls.push(match d.rssi_dbm {
+            Some(r) => InfoLine {
+                text: format!("SIG {r}dBm"),
+                color: white,
+                bars: Some(rssi_bars(r)),
+            },
+            None => line(String::from("SIG --"), grey),
+        });
+        ls.push(match d.ip {
+            Some([a, b, cc, dd]) => line(format!("IP {a}.{b}.{cc}.{dd}"), white),
+            None => line(String::from("IP --"), grey),
+        });
+        // The server endpoint can outrun 16 chars (a Railway hostname): give
+        // it its own label row and wrap the value rather than truncating the
+        // one fact a support call needs read back verbatim.
+        match &d.server {
+            Some(srv) if srv.len() > 12 => {
+                ls.push(line(String::from("SRV"), grey));
+                for chunk in srv.as_bytes().chunks(16) {
+                    ls.push(line(String::from_utf8_lossy(chunk).into_owned(), white));
+                }
+            }
+            Some(srv) => ls.push(line(format!("SRV {srv}"), white)),
+            None => ls.push(line(String::from("SRV --"), grey)),
+        }
+        ls.push(if self.online {
+            line(String::from("NET ONLINE"), Rgb888::new(0x33, 0xDD, 0x55))
+        } else {
+            line(String::from("NET OFFLINE"), Rgb888::new(0xFF, 0x55, 0x33))
+        });
+        ls.push(line(
+            format!("ID {}", d.board_id_prefix.as_deref().unwrap_or("--")),
+            white,
+        ));
+        // Uptime from the device clock — the one number that needs no host.
+        let up = self.clock.saturating_sub(self.started.unwrap_or(self.clock));
+        ls.push(line(format!("UP {}", fmt_uptime(up)), white));
+        ls.push(match d.free_heap_bytes {
+            Some(h) => line(format!("HEAP {h}"), white),
+            None => line(String::from("HEAP --"), grey),
+        });
+        ls.push(line(
+            format!("FW {}", self.version.as_deref().unwrap_or("--")),
+            white,
+        ));
+        ls
+    }
+
+    /// Scrollable diagnostics: five rows at a time, chevrons at the right edge
+    /// hinting at more above/below.
+    fn screen_wifi_info(&self, m: &MenuState) -> Vec<u32> {
+        let lines = self.wifi_info_lines();
+        let max_scroll = lines.len().saturating_sub(WIFI_INFO_VISIBLE);
+        let scroll = m.scroll.min(max_scroll);
+        let mut c = Canvas::new();
+        for (row, l) in lines.iter().skip(scroll).take(WIFI_INFO_VISIBLE).enumerate() {
+            let y = 1 + row as i32 * 6;
+            left_text(&mut c, &l.text, 1, y, l.color);
+            if let Some(n) = l.bars {
+                // Four ascending bars, right-aligned on the row; unlit ones
+                // stay faintly visible so "one bar" reads as one-of-four.
+                for i in 0..4i32 {
+                    let h = 2 + i;
+                    let color = if (i as u8) < n {
+                        Rgb888::new(0x33, 0xDD, 0x55)
+                    } else {
+                        Rgb888::new(0x28, 0x28, 0x28)
+                    };
+                    Rectangle::new(
+                        Point::new(50 + i * 3, y + 5 - h),
+                        Size::new(2, h as u32),
+                    )
+                    .into_styled(PrimitiveStyle::with_fill(color))
+                    .draw(&mut c)
+                    .ok();
+                }
+            }
+        }
+        let hint = Rgb888::new(0x88, 0x88, 0x88);
+        if scroll > 0 {
+            for (x, y) in [(61, 0), (60, 1), (62, 1)] {
+                Pixel(Point::new(x, y), hint).draw(&mut c).ok();
+            }
+        }
+        if scroll < max_scroll {
+            for (x, y) in [(61, 31), (60, 30), (62, 30)] {
+                Pixel(Point::new(x, y), hint).draw(&mut c).ok();
+            }
+        }
+        c.into_u32()
+    }
+
+    /// RESET BOARD confirmation. CANCEL selects amber (the ordinary choice);
+    /// ERASE selects RED — the same danger color as the super-hold phase, so
+    /// the two roads to the wipe look like the same decision.
+    fn screen_reset_confirm(&self, m: &MenuState) -> Vec<u32> {
+        let mut c = Canvas::new();
+        let grey = Rgb888::new(0x88, 0x88, 0x88);
+        let red = Rgb888::new(0xFF, 0x55, 0x33);
+        let amber = Rgb888::new(0xFF, 0x88, 0x00);
+        center_text(&mut c, "RESET BOARD?", 4, &FONT_4X6, Rgb888::WHITE);
+        center_text(&mut c, "ERASES WI-FI", 11, &FONT_4X6, grey);
+        let bar_y = 21i32;
+        let (cancel_fg, erase_fg) = if m.erase_selected {
+            Rectangle::new(Point::new(34, bar_y), Size::new(28, 9))
+                .into_styled(PrimitiveStyle::with_fill(red))
+                .draw(&mut c)
+                .ok();
+            (grey, Rgb888::BLACK)
+        } else {
+            Rectangle::new(Point::new(2, bar_y), Size::new(28, 9))
+                .into_styled(PrimitiveStyle::with_fill(amber))
+                .draw(&mut c)
+                .ok();
+            (Rgb888::BLACK, red)
+        };
+        center_text_at(&mut c, "CANCEL", 16, bar_y + 4, &FONT_4X6, cancel_fg);
+        center_text_at(&mut c, "ERASE", 48, bar_y + 4, &FONT_4X6, erase_fg);
+        c.into_u32()
+    }
+}
+
+/// One row of the WIFI INFO screen. `bars` marks the signal row, whose four
+/// ascending bars the renderer draws graphically.
+struct InfoLine {
+    text: String,
+    color: Rgb888,
+    bars: Option<u8>,
+}
+
+/// Signal bars from RSSI, the usual thresholds: -55 and up is all four.
+fn rssi_bars(dbm: i8) -> u8 {
+    match dbm {
+        d if d >= -55 => 4,
+        d if d >= -67 => 3,
+        d if d >= -75 => 2,
+        d if d >= -85 => 1,
+        _ => 0,
+    }
+}
+
+/// Compact uptime for a 16-char row: the two largest units that matter.
+fn fmt_uptime(ms: u64) -> String {
+    let s = ms / 1000;
+    let (d, h, m) = (s / 86_400, (s / 3600) % 24, (s / 60) % 60);
+    if d > 0 {
+        format!("{d}d {h}h")
+    } else if h > 0 {
+        format!("{h}h {m}m")
+    } else {
+        format!("{m}m {}s", s % 60)
+    }
+}
+
+/// The hold bar every phase of the hold overlay shares (outline + proportional
+/// fill) — same geometry the original hold-to-reset bar used, so the visual
+/// language carries over.
+fn hold_bar(c: &mut Canvas, progress: u8, color: Rgb888) {
+    let bar_x = 6i32;
+    let bar_y = 15i32;
+    let bar_w = FRAME_WIDTH as i32 - 12;
+    let bar_h = 9i32;
+    Rectangle::new(Point::new(bar_x, bar_y), Size::new(bar_w as u32, bar_h as u32))
+        .into_styled(PrimitiveStyle::with_stroke(Rgb888::new(0x55, 0x55, 0x55), 1))
+        .draw(c)
+        .ok();
+    let fill_w = (bar_w - 2) as u32 * progress as u32 / 100;
+    if fill_w > 0 {
+        Rectangle::new(Point::new(bar_x + 1, bar_y + 1), Size::new(fill_w, (bar_h - 2) as u32))
+            .into_styled(PrimitiveStyle::with_fill(color))
+            .draw(c)
+            .ok();
     }
 }
 
@@ -817,11 +1311,34 @@ impl DrawTarget for Canvas {
 }
 
 fn center_text<'a>(c: &mut Canvas, s: &str, y_center: i32, font: &'a MonoFont<'a>, color: Rgb888) {
+    center_text_at(c, s, FRAME_WIDTH as i32 / 2, y_center, font, color);
+}
+
+fn center_text_at<'a>(
+    c: &mut Canvas,
+    s: &str,
+    x_center: i32,
+    y_center: i32,
+    font: &'a MonoFont<'a>,
+    color: Rgb888,
+) {
     let style = TextStyleBuilder::new()
         .alignment(Alignment::Center)
         .baseline(Baseline::Middle)
         .build();
-    Text::with_text_style(s, Point::new(FRAME_WIDTH as i32 / 2, y_center), MonoTextStyle::new(font, color), style)
+    Text::with_text_style(s, Point::new(x_center, y_center), MonoTextStyle::new(font, color), style)
+        .draw(c)
+        .ok();
+}
+
+/// Left-aligned FONT_4X6 row with its glyph tops at `y_top` — the menu and
+/// diagnostics screens are lists, and lists read left-to-right.
+fn left_text(c: &mut Canvas, s: &str, x: i32, y_top: i32, color: Rgb888) {
+    let style = TextStyleBuilder::new()
+        .alignment(Alignment::Left)
+        .baseline(Baseline::Top)
+        .build();
+    Text::with_text_style(s, Point::new(x, y_top), MonoTextStyle::new(&FONT_4X6, color), style)
         .draw(c)
         .ok();
 }
@@ -973,6 +1490,10 @@ fn overlay_brightness_bar(buf: &mut [u32], brightness: u8) {
 mod tests {
     use super::*;
 
+    /// DELIBERATE behavior change: double-press used to toggle the pairing
+    /// screen (Mode::Syncing). The pair code lives in the settings menu now,
+    /// and the gesture is a reserved NO-OP — it must not alias to two sleep
+    /// toggles, online or off.
     #[test]
     fn gestures_drive_mode() {
         let mut b = Board::new();
@@ -990,41 +1511,23 @@ mod tests {
         b.tick(1500);
         assert_eq!(b.mode(), Mode::Running);
 
-        // double press OFFLINE: inert — the pairing code means nothing until
-        // the server has been told about it.
-        b.button_down(2000);
-        b.button_up(2040);
-        b.button_down(2120);
-        b.button_up(2160);
-        assert_eq!(b.mode(), Mode::Running, "offline double-press is locked out");
-
-        // Online, the same gesture opens the pairing screen.
-        b.set_online(true);
-        b.button_down(3000);
-        b.button_up(3040);
-        b.button_down(3120);
-        b.button_up(3160);
-        assert_eq!(b.mode(), Mode::Syncing);
-
-        // A second double press closes it again…
-        b.button_down(4000);
-        b.button_up(4040);
-        b.button_down(4120);
-        b.button_up(4160);
-        assert_eq!(b.mode(), Mode::Running, "double-press toggles the code screen off");
-
-        // …and closing works even if the connection dropped while it was up.
-        b.button_down(5000);
-        b.button_up(5040);
-        b.button_down(5120);
-        b.button_up(5160);
-        assert_eq!(b.mode(), Mode::Syncing);
-        b.set_online(false);
-        b.button_down(6000);
-        b.button_up(6040);
-        b.button_down(6120);
-        b.button_up(6160);
-        assert_eq!(b.mode(), Mode::Running, "leaving the code screen is never gated");
+        // double press: swallowed everywhere — no sleep flicker, no pairing
+        // screen, nothing queued for the server.
+        for (i, online) in [(0u64, false), (1, true)] {
+            let t0 = 2000 + i * 2000;
+            b.set_online(online);
+            b.take_outgoing(); // drop the ButtonPress noise from the setup above
+            b.button_down(t0);
+            b.button_up(t0 + 40);
+            b.button_down(t0 + 120);
+            b.button_up(t0 + 160);
+            b.tick(t0 + 160 + DOUBLE_WINDOW_MS + 10);
+            assert_eq!(b.mode(), Mode::Running, "double press is a no-op (online={online})");
+            assert!(
+                b.take_outgoing().is_empty(),
+                "a swallowed double press sends nothing (online={online})"
+            );
+        }
     }
 
     /// Animations are a function of WALL TIME, not tick count — ticking faster
@@ -1271,6 +1774,9 @@ mod tests {
         assert_eq!(top_row(&b), at_top, "no flag -> static top window");
     }
 
+    /// Timings DELIBERATELY reworked with the settings menu: the wipe moved
+    /// from ~10s to the 15s super-hold (the 3s crossing now opens the menu on
+    /// the way). The latch semantics are unchanged.
     #[test]
     fn hold_fills_then_triggers_reset() {
         let mut b = Board::new();
@@ -1278,13 +1784,20 @@ mod tests {
         b.button_down(0);
         b.tick(300); // within the grace window: nothing yet
         assert!(!b.reset_active());
-        b.tick(800); // past grace (500): bar is filling
+        b.tick(800); // past grace (500): amber bar is filling toward the menu
         assert!(b.reset_active());
+        assert!(!b.hold_erase_phase);
         assert!(!b.reset_triggered());
-        b.tick(11000); // past grace + fill (~10s): complete
+        b.tick(MENU_HOLD_MS + 500); // past 3s: menu opened, bar turned red
+        assert!(b.menu_open(), "the 3s crossing opens the menu mid-hold");
+        assert!(b.hold_erase_phase, "past 3s the hold runs toward the erase");
+        assert!(!b.reset_triggered());
+        b.tick(ERASE_HOLD_MS - 100); // just shy of 15s: still not erased
+        assert!(!b.reset_triggered());
+        b.tick(ERASE_HOLD_MS + 100); // the super-hold completes
         assert!(b.reset_triggered());
         // Releasing after completion keeps it latched (the firmware reboots us).
-        b.button_up(3100);
+        b.button_up(ERASE_HOLD_MS + 200);
         assert!(b.reset_triggered());
     }
 
@@ -1295,11 +1808,304 @@ mod tests {
         b.button_down(0);
         b.tick(900); // bar showing
         assert!(b.reset_active());
-        b.button_up(1200); // released before it fills
+        b.button_up(1200); // released before the menu threshold
         assert!(!b.reset_active());
         assert!(!b.reset_triggered());
+        assert!(!b.menu_open(), "released before 3s: no menu either");
         // A long-ish hold no longer enters Setup (that's the app's job now).
         assert_eq!(b.mode(), Mode::Running);
+    }
+
+    // ---- settings-menu helpers: the three knob moves as the host delivers them ----
+
+    /// Hold across the 3s menu threshold, then release. Returns a time safely
+    /// after the release.
+    fn hold_to_menu(b: &mut Board, t0: u64) -> u64 {
+        b.button_down(t0);
+        b.tick(t0 + MENU_HOLD_MS + 50);
+        b.button_up(t0 + MENU_HOLD_MS + 100);
+        t0 + MENU_HOLD_MS + 200
+    }
+
+    /// Hold across the 2s close threshold, then release.
+    fn hold_to_close(b: &mut Board, t0: u64) -> u64 {
+        b.button_down(t0);
+        b.tick(t0 + MENU_CLOSE_HOLD_MS + 50);
+        b.button_up(t0 + MENU_CLOSE_HOLD_MS + 100);
+        t0 + MENU_CLOSE_HOLD_MS + 200
+    }
+
+    /// A quick tap, ticked past the double window so it resolves as Single.
+    fn tap(b: &mut Board, t0: u64) -> u64 {
+        b.button_down(t0);
+        b.button_up(t0 + 50);
+        b.tick(t0 + 50 + DOUBLE_WINDOW_MS + 10);
+        t0 + 50 + DOUBLE_WINDOW_MS + 20
+    }
+
+    fn sim_diag() -> Diagnostics {
+        Diagnostics {
+            ssid: Some("SimNet".into()),
+            rssi_dbm: Some(-55),
+            ip: Some([192, 168, 1, 42]),
+            server: Some("127.0.0.1:7878".into()),
+            board_id_prefix: Some("ab12cd34".into()),
+            free_heap_bytes: Some(123_456),
+        }
+    }
+
+    /// The 3s hold opens the menu from every state, and closing (the 2s hold)
+    /// restores each one EXACTLY — the mode machine never notices the visit.
+    #[test]
+    fn hold_opens_menu_everywhere_and_closing_restores_the_prior_state() {
+        // Running.
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.tick(0);
+        let t = hold_to_menu(&mut b, 1000);
+        assert!(b.menu_open());
+        assert_eq!(b.mode(), Mode::Running, "the mode machine is untouched underneath");
+        hold_to_close(&mut b, t);
+        assert!(!b.menu_open());
+        assert_eq!(b.mode(), Mode::Running);
+
+        // Asleep stays asleep.
+        let mut b = Board::new();
+        b.mode = Mode::Asleep;
+        b.tick(0);
+        let t = hold_to_menu(&mut b, 1000);
+        assert!(b.menu_open());
+        assert!(b.framebuffer().iter().any(|&p| p != 0), "the menu lights an asleep panel");
+        hold_to_close(&mut b, t);
+        assert!(!b.menu_open());
+        assert_eq!(b.mode(), Mode::Asleep, "closing leaves the board asleep");
+        assert!(b.framebuffer().iter().all(|&p| p == 0), "asleep = dark again");
+
+        // The connect screen (Running, offline, nothing cached): pixel-exact
+        // restore, checked against a board that never saw the menu.
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.tick(0);
+        let t = hold_to_menu(&mut b, 1000);
+        assert!(b.menu_open());
+        let t = hold_to_close(&mut b, t);
+        assert!(!b.menu_open());
+        b.tick(t);
+        let mut reference = Board::new();
+        reference.mode = Mode::Running;
+        reference.tick(0);
+        reference.tick(t);
+        assert_eq!(b.framebuffer(), reference.framebuffer(), "connect screen exactly as before");
+
+        // Provisioning: the setup screen survives a menu visit too (the
+        // diagnostics matter exactly when someone is stuck here).
+        let mut b = Board::new();
+        b.tick(0);
+        b.gesture(Gesture::Long);
+        let t = hold_to_menu(&mut b, 1000);
+        assert!(b.menu_open());
+        hold_to_close(&mut b, t);
+        assert_eq!(b.mode(), Mode::Setup, "still provisioning after the visit");
+    }
+
+    /// The 15s super-hold is the escape hatch: it must erase from Running and
+    /// from a press that started INSIDE the menu (closing it on the way).
+    #[test]
+    fn super_hold_fires_the_reset_from_running_and_from_inside_the_menu() {
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.tick(0);
+        b.button_down(1000);
+        b.tick(1000 + ERASE_HOLD_MS + 50);
+        assert!(b.reset_triggered());
+
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.tick(0);
+        let t = hold_to_menu(&mut b, 1000);
+        assert!(b.menu_open());
+        b.button_down(t);
+        b.tick(t + MENU_CLOSE_HOLD_MS + 50);
+        assert!(!b.menu_open(), "the 2s crossing closed the menu");
+        b.tick(t + MENU_HOLD_MS + 500);
+        assert!(!b.menu_open(), "a menu-origin hold must not reopen the menu at 3s");
+        assert!(b.hold_erase_phase, "…it runs on toward the erase instead");
+        b.tick(t + ERASE_HOLD_MS + 50);
+        assert!(b.reset_triggered(), "15s from press start wipes, wherever it began");
+    }
+
+    /// Letting go anywhere in the red phase erases nothing and leaves the menu
+    /// the hold opened at 3s — the wipe fires from `tick` at 15s, never on
+    /// release.
+    #[test]
+    fn releasing_in_the_red_phase_keeps_the_menu_and_the_credentials() {
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.tick(0);
+        b.button_down(1000);
+        b.tick(1000 + MENU_HOLD_MS + 2000); // deep in the red phase
+        assert!(b.hold_erase_phase);
+        assert!(b.menu_open());
+        b.button_up(1000 + MENU_HOLD_MS + 2500);
+        assert!(!b.reset_triggered(), "only the full 15s erases");
+        assert!(b.menu_open(), "the menu the hold opened is still there");
+        assert!(!b.reset_active(), "the red bar is gone");
+    }
+
+    /// Two minutes of an untouched knob closes an abandoned menu (device
+    /// clock), and any interaction restarts the window.
+    #[test]
+    fn menu_times_out_after_two_minutes_of_no_interaction() {
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.tick(0);
+        let t = hold_to_menu(&mut b, 1000);
+        b.tick(t);
+        b.encoder(1); // stamps the interaction clock at `t`
+        b.tick(t + MENU_IDLE_TIMEOUT_MS - 100);
+        assert!(b.menu_open(), "just inside the window");
+        b.tick(t + MENU_IDLE_TIMEOUT_MS + 100);
+        assert!(!b.menu_open(), "an abandoned menu closes itself");
+        assert_eq!(b.mode(), Mode::Running);
+    }
+
+    /// The knob is the whole navigation story: selection moves and clamps on
+    /// the root list, and scrolls (with clamps) on the diagnostics screen.
+    #[test]
+    fn rotate_moves_the_selection_and_clamps_and_scrolls() {
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_diagnostics(sim_diag());
+        b.tick(0);
+        let t = hold_to_menu(&mut b, 1000);
+        b.tick(t);
+        let top = b.framebuffer();
+        b.encoder(-1);
+        assert_eq!(b.framebuffer(), top, "selection clamps at the top");
+        b.encoder(1);
+        assert_ne!(b.framebuffer(), top, "rotation moves the selection");
+        b.encoder(10);
+        let last = b.framebuffer();
+        b.encoder(1);
+        assert_eq!(b.framebuffer(), last, "selection clamps at the bottom");
+
+        // Into WIFI INFO (row 2) and scroll the list.
+        b.encoder(-1);
+        tap(&mut b, t + 1000);
+        let page_top = b.framebuffer();
+        b.encoder(-1);
+        assert_eq!(b.framebuffer(), page_top, "scroll clamps at the top");
+        b.encoder(1);
+        assert_ne!(b.framebuffer(), page_top, "rotation scrolls the diagnostics");
+        b.encoder(30);
+        let bottom = b.framebuffer();
+        b.encoder(1);
+        assert_eq!(b.framebuffer(), bottom, "scroll clamps at the bottom");
+        b.encoder(-30);
+        assert_eq!(b.framebuffer(), page_top, "and scrolls back to the top");
+    }
+
+    /// RESET BOARD arms nothing by itself: CANCEL is the default every visit,
+    /// backs out to the root, and only rotate-to-ERASE + tap runs the wipe.
+    #[test]
+    fn reset_confirm_defaults_to_cancel_and_cancel_backs_out() {
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.tick(0);
+        let t = hold_to_menu(&mut b, 1000);
+        b.encoder(10); // RESET BOARD row
+        let t = tap(&mut b, t + 500); // enter the confirm screen
+        let cancel_screen = b.framebuffer();
+        let t = tap(&mut b, t + 500); // tap the default (CANCEL)
+        assert!(b.menu_open(), "CANCEL leaves the menu open");
+        assert!(!b.reset_triggered(), "…and erases nothing");
+        // Re-enter: still CANCEL by default (a backed-out ERASE doesn't stick).
+        let t = tap(&mut b, t + 500);
+        assert_eq!(b.framebuffer(), cancel_screen, "every visit starts on CANCEL");
+        b.encoder(1); // flip to ERASE
+        assert_ne!(b.framebuffer(), cancel_screen, "ERASE selection renders differently");
+        tap(&mut b, t + 500);
+        assert!(b.reset_triggered(), "ERASE + tap runs the one wipe path");
+        assert!(!b.menu_open());
+    }
+
+    /// The UPDATE row: inert with nothing offered, one `RequestUpdate` in the
+    /// outbox when the server has advertised a newer image — queued offline,
+    /// shipped whenever the host next drains.
+    #[test]
+    fn selecting_update_queues_the_request() {
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.tick(0);
+        let t = hold_to_menu(&mut b, 1000);
+        b.take_outgoing();
+        let t = tap(&mut b, t); // UPDATE row is the default selection
+        assert!(b.take_outgoing().is_empty(), "no offer, no message");
+
+        b.set_update_available(Some("2026.9.9".into()));
+        tap(&mut b, t);
+        let out = b.take_outgoing();
+        assert!(matches!(out.as_slice(), [ClientMsg::RequestUpdate]), "got {out:?}");
+    }
+
+    /// While the menu is up the knob navigates: brightness must not move, no
+    /// DeviceBrightness goes out, and closing flushes no phantom level. The
+    /// first turn AFTER closing dims again.
+    #[test]
+    fn brightness_does_not_move_while_the_menu_is_open() {
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.tick(0);
+        let t = hold_to_menu(&mut b, 1000);
+        b.take_outgoing();
+        b.tick(t);
+        b.encoder(-2);
+        assert_eq!(b.brightness(), 100, "the knob navigates; it must not dim");
+        b.tick(t + 100);
+        assert!(b.take_outgoing().is_empty(), "and reports no DeviceBrightness");
+        let t = hold_to_close(&mut b, t + 200);
+        b.tick(t);
+        assert!(b.take_outgoing().is_empty(), "closing flushes no phantom level");
+        b.encoder(-1);
+        assert_eq!(b.brightness(), 90, "the first turn after closing dims again");
+        let out = b.take_outgoing();
+        assert!(matches!(out.as_slice(), [ClientMsg::DeviceBrightness { level: 90 }]));
+    }
+
+    /// PAIR CODE inside the menu is the very screen the double-press used to
+    /// own — pixel for pixel — with `pairing_active` telling the host to
+    /// announce a code, and tap / SetupDone both landing back on the root.
+    #[test]
+    fn menu_pair_code_reuses_the_syncing_screen_and_taps_back() {
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.tick(0);
+        let t = hold_to_menu(&mut b, 1000);
+        b.encoder(1); // PAIR CODE row
+        let t = tap(&mut b, t);
+        assert!(b.pairing_active(), "the host should announce a code now");
+        let mut reference = Board::new();
+        reference.tick(0);
+        reference.mode = Mode::Syncing;
+        reference.tick(b.clock);
+        assert_eq!(
+            b.framebuffer(),
+            reference.framebuffer(),
+            "same screen the double-press used to own"
+        );
+        // Paired via the app: SetupDone lands back on the menu root.
+        b.setup_done();
+        assert!(b.menu_open(), "still mid-menu-visit");
+        assert!(!b.pairing_active(), "pairing over, announcement off");
+        // A plain tap backs out of the code screen too.
+        let t = tap(&mut b, t + 500); // selection is still PAIR CODE: re-enter
+        assert!(b.pairing_active());
+        tap(&mut b, t + 500);
+        assert!(!b.pairing_active());
+        assert!(b.menu_open(), "tap returns to the menu, not out of it");
     }
 
     /// The three BLE-provisioning phases render distinct screens — the firmware
@@ -1719,24 +2525,28 @@ mod tests {
     }
 
     /// The pair code is only useful while someone is at the board typing it in.
-    /// An accidental double press must not cost the panel its scores until
-    /// somebody walks back over and presses again.
+    /// UPDATED with the settings menu: the double-press entry is gone, so the
+    /// test drives `Mode::Syncing` directly (a host-side entry) — the timeout
+    /// machinery it guards is unchanged. The menu's own PAIR CODE screen rides
+    /// the menu's 120s inactivity timeout instead.
     #[test]
     fn pair_code_screen_times_out() {
+        let enter = |b: &mut Board| {
+            b.syncing_since = Some(b.clock);
+            b.mode = Mode::Syncing;
+        };
         let mut b = Board::new();
         b.mode = Mode::Running;
         b.set_online(true);
         b.tick(0);
-        b.gesture(Gesture::Double);
-        assert_eq!(b.mode(), Mode::Syncing);
+        enter(&mut b);
         b.tick(SYNC_TIMEOUT_MS - 1000);
         assert_eq!(b.mode(), Mode::Syncing, "still up while someone could be typing");
         b.tick(SYNC_TIMEOUT_MS + 100);
         assert_eq!(b.mode(), Mode::Running, "the code screen returns to content on its own");
 
-        // The timer is per visit: a later double press gets its own full window.
-        b.gesture(Gesture::Double);
-        assert_eq!(b.mode(), Mode::Syncing);
+        // The timer is per visit: a later entry gets its own full window.
+        enter(&mut b);
         b.tick(SYNC_TIMEOUT_MS + 200);
         assert_eq!(b.mode(), Mode::Syncing, "the second visit starts its own clock");
         b.tick(2 * SYNC_TIMEOUT_MS + 300);
@@ -1771,12 +2581,12 @@ mod tests {
             assert_eq!(lit(&b.framebuffer()), before, "no overlay on a local screen (setup={setup})");
         }
 
-        // Pair-code screen: same, spinner included.
+        // Pair-code screen: same, spinner included. (Entered directly — the
+        // double-press entry is gone; see `gestures_drive_mode`.)
         let mut b = Board::new();
-        b.mode = Mode::Running;
         b.set_online(true);
         b.tick(0);
-        b.gesture(Gesture::Double);
+        b.mode = Mode::Syncing;
         b.tick(800);
         let before = lit(&b.framebuffer());
         b.encoder(-1);
@@ -1854,6 +2664,53 @@ mod tests {
                 dump(name, t, &mut b);
             }
         }
+
+        // Settings menu + hold phases. Same diagnostics payload the simulator
+        // feeds, so these dumps match what the sim window shows.
+        let menu_board = || {
+            let mut b = Board::new();
+            b.mode = Mode::Running;
+            b.set_version("2026.7.10".into());
+            b.set_diagnostics(sim_diag());
+            b.tick(0);
+            b.button_down(100);
+            b.tick(100 + MENU_HOLD_MS + 50);
+            b.button_up(100 + MENU_HOLD_MS + 100);
+            b
+        };
+        let tap_at = |b: &mut Board, t: u64| {
+            b.button_down(t);
+            b.button_up(t + 50);
+            b.tick(t + 50 + DOUBLE_WINDOW_MS + 10);
+        };
+        // Root list: first row selected (with an update on offer), then last.
+        let mut b = menu_board();
+        b.set_update_available(Some("2026.8.1".into()));
+        dump("menu_root", 4000, &mut b);
+        b.encoder(3);
+        dump("menu_root_last", 4100, &mut b);
+        // WIFI INFO: top page, then scrolled to the bottom.
+        let mut b = menu_board();
+        b.encoder(2);
+        tap_at(&mut b, 4000);
+        dump("wifi_info", 5000, &mut b);
+        b.encoder(30);
+        dump("wifi_info_scrolled", 5100, &mut b);
+        // RESET BOARD: both selections.
+        let mut b = menu_board();
+        b.encoder(3);
+        tap_at(&mut b, 4000);
+        dump("reset_confirm_cancel", 5000, &mut b);
+        b.encoder(1);
+        dump("reset_confirm_erase", 5100, &mut b);
+        // The hold overlay: amber fill toward the menu, then the red erase run.
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_version("2026.7.10".into());
+        b.tick(0);
+        b.button_down(100);
+        dump("hold_menu_fill", 2000, &mut b);
+        dump("hold_erase_phase", 9000, &mut b);
     }
 }
 

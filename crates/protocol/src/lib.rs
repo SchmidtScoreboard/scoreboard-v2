@@ -636,6 +636,13 @@ pub enum ClientMsg {
     // sent once after auth — the server echoes it into `BoardState` and uses it
     // to decide whether to offer the hosted image as an update
     DeviceVersion { version: String },
+    // device asks for whatever its channel would currently offer — the exact
+    // pick the app's Update button runs. Update offers were app-initiated
+    // only; the on-device settings menu needs to ask without a phone in the
+    // room. Nothing newer hosted is a quiet no-op server-side (no offer, no
+    // error) — the answer the menu can DISPLAY already arrived as
+    // `ServerMsg::UpdateAvailable`.
+    RequestUpdate,
     // controller (DEBUG firmware picker) asks for every firmware image the
     // server hosts, across ALL channels regardless of board enrollment —
     // answered by `ServerMsg::FirmwareList`
@@ -711,6 +718,20 @@ pub enum ServerMsg {
     // reply to `ClientMsg::ListFirmware`: every firmware image the server hosts,
     // one per channel that has a current dist (the DEBUG picker's full menu).
     FirmwareList { images: Vec<FwImage> },
+    // to a DEVICE: the version a `RequestUpdate` would install right now;
+    // None = up to date. The None answer is a real push, not silence — the
+    // on-device menu must be able to tell "up to date" from "never heard
+    // back". DISPLAY-ONLY: the actual offer stays the signed `UpdateFirmware`
+    // message above (this carries no size/sig/path, so it can never install
+    // anything). Pushed after every `DeviceVersion` report (each reconnect
+    // re-reports, so the report doubles as the ask) and again when a channel
+    // switch changes the answer for a connected board. Old firmware fails to
+    // parse the unknown variant and drops the message — that must remain
+    // harmless, so the server never waits on any reaction to it.
+    UpdateAvailable {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+    },
 }
 
 // ---- firmware versions (CalVer "YYYY.M.P") ----
@@ -910,6 +931,37 @@ mod firmware_msg_tests {
             serde_json::from_str::<Command>(&serde_json::to_string(&install).unwrap()).unwrap(),
             Command::InstallFirmware { channel: FwChannel::Beta }
         ));
+    }
+
+    /// The on-device menu's ask + answer round-trip. `UpdateAvailable`'s None
+    /// ("up to date") omits the field entirely on the wire, and a version-less
+    /// message parses back to None — the skip/default pair must stay symmetric
+    /// or an up-to-date answer would fail to parse on the board.
+    #[test]
+    fn request_update_and_update_available_round_trip() {
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(
+                &serde_json::to_string(&ClientMsg::RequestUpdate).unwrap()
+            )
+            .unwrap(),
+            ClientMsg::RequestUpdate
+        ));
+
+        let some = ServerMsg::UpdateAvailable { version: Some("2026.8.0".into()) };
+        match serde_json::from_str::<ServerMsg>(&serde_json::to_string(&some).unwrap()).unwrap() {
+            ServerMsg::UpdateAvailable { version } => {
+                assert_eq!(version.as_deref(), Some("2026.8.0"))
+            }
+            other => panic!("expected UpdateAvailable, got {other:?}"),
+        }
+
+        let none = ServerMsg::UpdateAvailable { version: None };
+        let json = serde_json::to_string(&none).unwrap();
+        assert_eq!(json, "{\"t\":\"UpdateAvailable\"}", "None is skipped on the wire");
+        match serde_json::from_str::<ServerMsg>(&json).unwrap() {
+            ServerMsg::UpdateAvailable { version } => assert_eq!(version, None),
+            other => panic!("expected UpdateAvailable, got {other:?}"),
+        }
     }
 }
 

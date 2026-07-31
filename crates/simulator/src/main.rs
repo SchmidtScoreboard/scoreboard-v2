@@ -5,7 +5,7 @@
 //!
 //! `--headless` runs the websocket/board pipeline with no GUI (prints frame stats).
 
-use board_core::{Board, Gesture, Mode, SetupPhase};
+use board_core::{Board, Diagnostics, Gesture, SetupPhase};
 use eframe::egui;
 use futures_util::{SinkExt, StreamExt};
 use scoreboard_protocol::*;
@@ -83,12 +83,29 @@ fn host_timezone() -> String {
     "UTC".to_string()
 }
 
+/// "ws://127.0.0.1:7878/ws" -> "127.0.0.1:7878" (the WIFI INFO screen's SRV row).
+fn server_host_port(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    rest.split('/').next().unwrap_or(rest).to_string()
+}
+
 fn main() -> eframe::Result<()> {
     let Args { server, board: board_id, headless, tz } = parse_args();
     println!("simulator: server={server} board={board_id} tz={tz}");
     let mut b = Board::new();
     // Same version line the firmware puts on its boot screen.
     b.set_version(env!("CARGO_PKG_VERSION").to_string());
+    // Plausible fake diagnostics for the settings menu's WIFI INFO screen —
+    // the sim has no radio, but the screen should look like the real thing.
+    // Server host:port is the REAL one from --server, so the row is honest.
+    b.set_diagnostics(Diagnostics {
+        ssid: Some("SimNet".into()),
+        rssi_dbm: Some(-55),
+        ip: Some([192, 168, 1, 42]),
+        server: Some(server_host_port(&server)),
+        board_id_prefix: Some(board_id.chars().take(8).collect()),
+        free_heap_bytes: Some(123_456),
+    });
     // The Wi-Fi leg is driven by the client loop (mirroring the firmware's
     // per-pass link check), so the "WiFi connect fails" toggle renders the
     // Wi-Fi hop down instead of blaming the server.
@@ -139,6 +156,9 @@ fn main() -> eframe::Result<()> {
                 tex: None,
                 start: Instant::now(),
                 holding_reset: false,
+                holding_knob: false,
+                scroll_accum: 0.0,
+                offer_update: false,
                 updating: false,
                 setup_phase: SetupPhase::WaitingBluetooth,
             }))
@@ -152,6 +172,13 @@ struct SimApp {
     tex: Option<egui::TextureHandle>,
     start: Instant,
     holding_reset: bool,
+    /// Mouse held on the "Hold knob" button (drives the same press/release
+    /// path as the R key, so the menu/erase hold works pointer-only too).
+    holding_knob: bool,
+    /// Mouse-wheel remainder: the wheel is the sim's encoder, ~24px a detent.
+    scroll_accum: f32,
+    /// Pretend the server advertised a newer firmware (arms the UPDATE row).
+    offer_update: bool,
     /// OTA in flight (blanks the panel) — the firmware sets this from the
     /// download task, which the sim has no equivalent of.
     updating: bool,
@@ -177,22 +204,28 @@ impl eframe::App for SimApp {
             let mut b = self.board.lock().unwrap();
             if i.key_pressed(egui::Key::ArrowRight) { b.encoder(1); }
             if i.key_pressed(egui::Key::ArrowLeft) { b.encoder(-1); }
+            // Mouse wheel = the encoder, ~24px a detent: wheel-down walks the
+            // menu selection down (encoder +1), matching list intuition.
+            self.scroll_accum += i.raw_scroll_delta.y;
+            while self.scroll_accum <= -24.0 { b.encoder(1); self.scroll_accum += 24.0; }
+            while self.scroll_accum >= 24.0 { b.encoder(-1); self.scroll_accum -= 24.0; }
             if i.key_pressed(egui::Key::Space) { b.gesture(Gesture::Single); }
             if i.key_pressed(egui::Key::D) { b.gesture(Gesture::Double); }
             // A long press restarts provisioning, and board-core rewinds the
             // phase with it — keep the selector honest.
             if i.key_pressed(egui::Key::L) { b.gesture(Gesture::Long); self.setup_phase = SetupPhase::WaitingBluetooth; }
-            // Hold R to preview the factory-reset animation (simulates a button hold).
+            // Hold R for the whole hold ladder: bar -> menu at 3s -> red erase
+            // phase -> factory reset at 15s (simulates the physical hold).
             let r_down = i.key_down(egui::Key::R);
             if r_down && !self.holding_reset { b.button_down(now_ms); self.holding_reset = true; }
             if !r_down && self.holding_reset { b.button_up(now_ms); self.holding_reset = false; }
         });
 
         // tick + grab the framebuffer + status (incl. server/app-controlled values)
-        let (fb, mode, brightness, power) = {
+        let (fb, mode, brightness, power, menu) = {
             let mut b = self.board.lock().unwrap();
             b.tick(now_ms);
-            (b.framebuffer(), b.mode(), b.brightness(), b.power())
+            (b.framebuffer(), b.mode(), b.brightness(), b.power(), b.menu_open())
         };
         let img = fb_to_image(&fb);
         let tex = self
@@ -208,13 +241,19 @@ impl eframe::App for SimApp {
                 if ui.button("◀ rotate −").clicked() { self.board.lock().unwrap().encoder(-1); }
                 if ui.button("rotate + ▶").clicked() { self.board.lock().unwrap().encoder(1); }
             });
-            if ui.button("Press  (sleep / wake)").clicked() { self.board.lock().unwrap().gesture(Gesture::Single); }
-            if ui.button("Double-press  (sync)").clicked() { self.board.lock().unwrap().gesture(Gesture::Double); }
+            if ui.button("Press  (sleep / wake · menu select)").clicked() { self.board.lock().unwrap().gesture(Gesture::Single); }
+            if ui.button("Double-press  (reserved no-op)").clicked() { self.board.lock().unwrap().gesture(Gesture::Double); }
             if ui.button("Long-press  (setup screen)").clicked() {
                 self.board.lock().unwrap().gesture(Gesture::Long);
                 self.setup_phase = SetupPhase::WaitingBluetooth;
             }
-            ui.small("Hold R to factory-reset (fills a bar, then wipes Wi-Fi)");
+            // A real press-and-HOLD for the mouse: down opens the hold ladder
+            // (menu at 3s, red erase phase, reset at 15s), up releases.
+            let hold_btn = ui.button("HOLD me  (3s menu · 15s erase)");
+            let down = hold_btn.is_pointer_button_down_on();
+            if down && !self.holding_knob { self.board.lock().unwrap().button_down(now_ms); self.holding_knob = true; }
+            if !down && self.holding_knob { self.board.lock().unwrap().button_up(now_ms); self.holding_knob = false; }
+            ui.small("or hold R · in the menu: wheel/← → moves, Space selects, hold ~2s closes");
 
             ui.separator();
             ui.heading("Device state");
@@ -224,6 +263,12 @@ impl eframe::App for SimApp {
             if ui.checkbox(&mut self.updating, "OTA updating (panel blanks)").changed() {
                 let p = if self.updating { Some(0) } else { None };
                 self.board.lock().unwrap().set_updating(p);
+            }
+            // Arms the menu's UPDATE row without a real hosted image (the
+            // server's UpdateAvailable push also drives this when connected).
+            if ui.checkbox(&mut self.offer_update, "Server offers newer firmware").changed() {
+                let v = if self.offer_update { Some("2026.99.0".to_string()) } else { None };
+                self.board.lock().unwrap().set_update_available(v);
             }
             ui.label("Setup phase (long-press to see it):");
             let mut phase = self.setup_phase;
@@ -248,7 +293,7 @@ impl eframe::App for SimApp {
             ui.checkbox(&mut f.ble_fail, "BLE handshake fails");
 
             ui.separator();
-            ui.small("Keys: ←/→ rotate · Space press · D double · L setup · hold R reset");
+            ui.small("Keys: ←/→/wheel rotate · Space press · D double · L setup · hold R menu/erase");
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -256,8 +301,9 @@ impl eframe::App for SimApp {
             let size = egui::vec2(FRAME_WIDTH as f32, FRAME_HEIGHT as f32) * 10.0;
             ui.image(egui::load::SizedTexture::new(tex_id, size));
             ui.label(format!(
-                "mode: {mode:?} · power: {} · brightness: {brightness}",
-                if power { "on" } else { "off" }
+                "mode: {mode:?} · power: {} · brightness: {brightness}{}",
+                if power { "on" } else { "off" },
+                if menu { " · MENU" } else { "" }
             ));
         });
 
@@ -312,9 +358,11 @@ async fn run_client(
                 let mut poll = tokio::time::interval(Duration::from_millis(200));
 
                 // Re-announce an in-progress setup after a (re)connect.
+                // `pairing_active` (not `mode()`): the code screen can be up
+                // via the settings menu, which the mode machine can't see.
                 {
                     let b = board.lock().unwrap();
-                    if matches!(b.mode(), Mode::Setup | Mode::Syncing) {
+                    if b.pairing_active() {
                         let code = b.setup_code();
                         drop(b);
                         let m = ClientMsg::EnterSetup { code };
@@ -367,6 +415,12 @@ async fn run_client(
                                             board.lock().unwrap().setup_done();
                                             prev_setup = false;
                                         }
+                                        // Arms (or clears) the settings menu's
+                                        // UPDATE row — display only; the signed
+                                        // offer still runs the real OTA.
+                                        ServerMsg::UpdateAvailable { version } => {
+                                            board.lock().unwrap().set_update_available(version);
+                                        }
                                         _ => {}
                                     }
                                 }
@@ -392,10 +446,11 @@ async fn run_client(
                             if wifi_fail || server_down {
                                 break;
                             }
-                            // Detect entering setup/sync; announce a pairing code.
+                            // Detect entering setup/sync (incl. the menu's PAIR
+                            // CODE screen); announce a pairing code.
                             let new_code = {
                                 let mut b = board.lock().unwrap();
-                                let in_setup = matches!(b.mode(), Mode::Setup | Mode::Syncing);
+                                let in_setup = b.pairing_active();
                                 let nc = if in_setup && !prev_setup {
                                     let code = gen_code();
                                     b.set_setup_code(code.clone());

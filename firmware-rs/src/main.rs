@@ -11,7 +11,8 @@ extern crate alloc;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use board_core::{Board, Gesture};
+use board_core::{Board, Diagnostics, Gesture};
+use core::sync::atomic::{AtomicI32, Ordering};
 use embassy_executor::Spawner;
 use embassy_net::tcp::TcpSocket;
 use embassy_net::{Runner, Stack, StackResources};
@@ -79,6 +80,15 @@ pub type SharedBoard = Mutex<CriticalSectionRawMutex, Board>;
 /// selects on it alongside the socket read.
 static OUTBOX: embassy_sync::channel::Channel<CriticalSectionRawMutex, ClientMsg, 4> =
     embassy_sync::channel::Channel::new();
+
+/// Latest station RSSI (dBm), published by the `connection` task — the only
+/// task that can reach the `WifiController`, which `rssi()` lives on — and
+/// read by `diagnostics_task` for the menu's WIFI INFO screen. An atomic
+/// letterbox instead of sharing the controller: `connect_async` holds the
+/// controller across long awaits, so a mutex would starve the 5s poll.
+/// `i32::MIN` = unknown (not associated, or the query failed).
+const RSSI_UNKNOWN: i32 = i32::MIN;
+static RSSI_DBM: AtomicI32 = AtomicI32::new(RSSI_UNKNOWN);
 
 macro_rules! mk_static {
     ($t:ty, $val:expr) => {{
@@ -203,8 +213,9 @@ async fn main(spawner: Spawner) -> ! {
             let board_id = pubkey_hex(&secret);
             println!("[id] board {}", board_id);
 
-            // Fresh 6-digit pairing code per boot: shown on the pairing screen
-            // (double-press) and registered with the server via EnterSetup so
+            // Fresh 6-digit pairing code per boot: shown on the settings
+            // menu's PAIR CODE screen (hold 3s -> menu; double-press is
+            // reserved now) and registered with the server via EnterSetup so
             // the app's code entry actually resolves to this board.
             let code = format!("{:06}", trng.random() % 1_000_000);
             board.lock().await.set_setup_code(code.clone());
@@ -258,6 +269,20 @@ async fn main(spawner: Spawner) -> ! {
 
             spawner.spawn(connection(controller).unwrap());
             spawner.spawn(net_task(runner).unwrap());
+            // Facts for the menu's WIFI INFO screen, refreshed forever. The
+            // strings are cloned here because `device` consumes the originals;
+            // the id prefix is 8 chars to match what the screen can show (and
+            // what the simulator feeds — same look on both).
+            spawner.spawn(
+                diagnostics_task(
+                    stack,
+                    board,
+                    creds.ssid.clone(),
+                    format!("{server_host}:{server_port}"),
+                    board_id.chars().take(8).collect(),
+                )
+                .unwrap(),
+            );
             spawner.spawn(
                 device(stack, board, board_id, secret, code, server_host, server_port, flash, fw_unconfirmed)
                     .unwrap(),
@@ -550,6 +575,15 @@ async fn device(
                             let _ = ws::write_text(&mut sock, &serde_json::to_vec(&req).unwrap()).await;
                         }
                     }
+                    Ok(ServerMsg::UpdateAvailable { version }) => {
+                        // Arms (Some) or clears (None) the menu's UPDATE row.
+                        // Selecting an armed row queues RequestUpdate in
+                        // board-core's outbox, which drains through OUTBOX to
+                        // this socket like any other board message — and the
+                        // channel outlives a disconnect, so a tap made offline
+                        // sends on the next connect instead of vanishing.
+                        board.lock().await.set_update_available(version);
+                    }
                     Ok(ServerMsg::UpdateFirmware { version, size, sha256, sig, path, channel }) => {
                         // Leave the ws loop: the download reuses this task's
                         // socket buffers (the connection can't survive that,
@@ -757,7 +791,31 @@ async fn connection(mut controller: WifiController<'static>) {
         match controller.connect_async().await {
             Ok(info) => {
                 println!("[wifi] connected: {:?}", info);
-                let _ = controller.wait_for_disconnect_async().await;
+                // While associated, publish the RSSI every ~5s for the WIFI
+                // INFO screen (esp-radio's `WifiController::rssi`, valid only
+                // in station mode after connect — exactly this window). The
+                // timeout-and-retry shape is safe against a race: if the
+                // disconnect event fires while we're outside the wait,
+                // re-creating `wait_for_disconnect_async` returns
+                // `Err(NotConnected)` immediately rather than waiting forever.
+                loop {
+                    let dbm = controller.rssi().unwrap_or(RSSI_UNKNOWN);
+                    RSSI_DBM.store(dbm, Ordering::Relaxed);
+                    // Ok = the wait completed (disconnected, or already found
+                    // not-connected); Err = the 5s timeout — still up, poll on.
+                    if with_timeout(
+                        Duration::from_secs(5),
+                        controller.wait_for_disconnect_async(),
+                    )
+                    .await
+                    .is_ok()
+                    {
+                        break;
+                    }
+                }
+                // A stale reading would lie on the diagnostics screen right
+                // when someone's debugging a drop — unknown beats wrong.
+                RSSI_DBM.store(RSSI_UNKNOWN, Ordering::Relaxed);
                 println!("[wifi] disconnected; retrying");
             }
             Err(e) => {
@@ -765,6 +823,38 @@ async fn connection(mut controller: WifiController<'static>) {
                 Timer::after(Duration::from_secs(3)).await;
             }
         }
+    }
+}
+
+/// Feed board-core the facts for the settings menu's WIFI INFO screen, every
+/// ~5s, forever. This screen matters MOST when the board is offline and
+/// half-broken, so everything here is local: SSID from the stored creds, RSSI
+/// from the `connection` task's letterbox, IP from the embassy-net stack, the
+/// server endpoint we dial, and free heap from esp-alloc. Costs three small
+/// String clones a pass — nothing that can bloat over a season of uptime.
+#[embassy_executor::task]
+async fn diagnostics_task(
+    stack: Stack<'static>,
+    board: &'static SharedBoard,
+    ssid: String,
+    server: String,
+    board_id_prefix: String,
+) {
+    loop {
+        let rssi = RSSI_DBM.load(Ordering::Relaxed);
+        let d = Diagnostics {
+            ssid: Some(ssid.clone()),
+            // The C API reports i32 but real 802.11 RSSI lives in -100..0;
+            // clamp rather than truncate in case the radio ever reports junk.
+            rssi_dbm: (rssi != RSSI_UNKNOWN)
+                .then(|| rssi.clamp(i8::MIN as i32, i8::MAX as i32) as i8),
+            ip: stack.config_v4().map(|c| c.address.address().octets()),
+            server: Some(server.clone()),
+            board_id_prefix: Some(board_id_prefix.clone()),
+            free_heap_bytes: Some(esp_alloc::HEAP.free() as u32),
+        };
+        board.lock().await.set_diagnostics(d);
+        Timer::after(Duration::from_secs(5)).await;
     }
 }
 

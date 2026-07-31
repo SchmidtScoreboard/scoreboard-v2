@@ -1904,6 +1904,32 @@ pub fn handle_device_version(state: &AppState, board_id: &str, version: String) 
     if changed {
         push_board_state(state, board_id);
     }
+    // Answer the DEVICE every time, changed or not: a board that reconnects
+    // while its stale loop still holds the old entry (OTA reset, power blip)
+    // reports an unchanged version but has a fresh menu with no answer — the
+    // report doubles as the ask.
+    push_update_available(state, board_id);
+}
+
+/// Tell the DEVICE what a `RequestUpdate` would install right now
+/// (`ServerMsg::UpdateAvailable`; None = up to date) — the settings menu's
+/// UPDATE row renders exactly this. Runs the same `offer_for` pick as
+/// `board_state_msg` and `handle_update_firmware`, so the menu, the app's
+/// Update button, and the actual offer can never disagree. No reported version
+/// or an offline board is a quiet no-op: with no version there is no answer to
+/// compute, and every (re)connect re-reports, which re-asks.
+pub fn push_update_available(state: &AppState, board_id: &str) {
+    let Some(running) = state.device_versions.lock().unwrap().get(board_id).cloned() else {
+        return;
+    };
+    let channel = state.config_for(board_id).fw_channel;
+    let version =
+        offer_for(&state.firmware, channel, &running).map(|(_, fw)| fw.manifest.version.clone());
+    if let Some(tx) = state.devices.lock().unwrap().get(board_id) {
+        let _ = tx.send(Message::Text(
+            serde_json::to_string(&ServerMsg::UpdateAvailable { version }).unwrap(),
+        ));
+    }
 }
 
 /// Mint a fresh one-time download token for `board_id` and return the
