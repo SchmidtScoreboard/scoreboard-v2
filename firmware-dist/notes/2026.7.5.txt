@@ -1,0 +1,3 @@
+- Sharper dark pixels: fixed a faint glow on LEDs that should be off.
+- Factory reset now fully erases stored Wi-Fi details.
+- Stronger device identity and more reliable updates.

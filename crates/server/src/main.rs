@@ -140,6 +140,12 @@ pub struct AppState {
     /// acted on, downloads that never finished). Un-tokenized GETs never enter
     /// this map and emit no progress.
     pub fw_download_tokens: Arc<Mutex<HashMap<String, (String, std::time::Instant)>>>,
+    /// Where per-version user-facing patch notes live
+    /// (`{FIRMWARE_DIR}/notes/{version}.txt` — see `get_firmware_notes`).
+    /// Unlike the firmware dists these are NOT loaded at startup: they carry
+    /// no integrity requirement, they're tiny, and they're fetched rarely, so
+    /// a per-request read keeps them cache- and restart-ordering-free.
+    pub fw_notes_dir: PathBuf,
 }
 
 /// The signed metadata half of an OTA dist — exactly the firmware.json that
@@ -350,6 +356,9 @@ impl AppState {
             firmware: HashMap::new(),
             device_versions: Arc::new(Mutex::new(HashMap::new())),
             fw_download_tokens: Arc::new(Mutex::new(HashMap::new())),
+            // Matches FIRMWARE_DIR's default; main() re-points it when the
+            // env var is set (mirroring how `state.firmware` is filled in).
+            fw_notes_dir: PathBuf::from("./firmware-dist/notes"),
         }
     }
 
@@ -663,6 +672,8 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    // Patch notes ride alongside the dists in the same FIRMWARE_DIR.
+    state.fw_notes_dir = fw_dir.join("notes");
     tokio::spawn(poll_loop(state.clone(), source));
     tokio::spawn(tick_loop(state.clone()));
 
@@ -676,6 +687,9 @@ async fn main() {
         // shipped speaking the old flat paths.
         .route("/firmware/:chan/latest", get(get_firmware_latest))
         .route("/firmware/:file", get(get_firmware_bin))
+        // Per-version user-facing patch notes. The static "notes" segment
+        // outranks the :chan capture above, so this coexists cleanly.
+        .route("/firmware/notes/:version", get(get_firmware_notes))
         .route("/ws", get(ws::ws_handler))
         .with_state(state);
 
@@ -827,6 +841,39 @@ async fn get_firmware_bin(
             let headers = [(axum::http::header::CONTENT_TYPE, "application/octet-stream")];
             (headers, fw.bytes.clone()).into_response()
         }
+    }
+}
+
+/// GET /firmware/notes/{version} — the user-facing patch notes for one
+/// released firmware version, as plain-text "- " bullets (the app shows them
+/// verbatim in its update sheet). Served from `{FIRMWARE_DIR}/notes/
+/// {version}.txt`, read at request time — tiny files fetched rarely, so a
+/// cache would only add invalidation problems. Plain-text 404 for a version
+/// with no notes file.
+///
+/// SECURITY: {version} is a path segment that becomes a FILENAME. It is
+/// validated to strictly ASCII digits and dots BEFORE any filesystem call —
+/// anything else (traversal attempts, percent-encoded separators that axum
+/// has already decoded by the time we see the string, null bytes) is a plain
+/// 404, never a path lookup. The whitelist can't build a separator, and the
+/// appended ".txt" means even an all-dots version is a plain filename.
+async fn get_firmware_notes(
+    State(s): State<AppState>,
+    axum::extract::Path(version): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let not_found =
+        || (axum::http::StatusCode::NOT_FOUND, "no notes for that version").into_response();
+    if version.is_empty() || !version.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+        return not_found();
+    }
+    match tokio::fs::read_to_string(s.fw_notes_dir.join(format!("{version}.txt"))).await {
+        Ok(notes) => (
+            [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            notes,
+        )
+            .into_response(),
+        Err(_) => not_found(),
     }
 }
 
@@ -1107,21 +1154,6 @@ pub(crate) fn game_scroll_capable(cfg: &BoardConfig, g: &Game) -> bool {
         return false;
     }
     g.leaderboard.as_ref().is_some_and(|lb| lb.rows.len() > 4)
-}
-
-/// WILL this game's board rendering scroll right now? The capability above,
-/// gated by the league's effective depth — the app's "Disable scrolling" is a
-/// shortcut to depth 4, so depth alone decides. Drives the manifest's
-/// `RotationEntry.scroll`, which must reflect what the board actually does.
-pub(crate) fn game_scrolls(cfg: &BoardConfig, g: &Game) -> bool {
-    let rows = cfg
-        .sports
-        .iter()
-        .find(|s| s.sport_id == g.sport_id)
-        .and_then(|s| s.leaderboard_rows)
-        .map(|r| r as usize)
-        .unwrap_or(render::LEADERBOARD_DEFAULT_ROWS);
-    game_scroll_capable(cfg, g) && rows > 4
 }
 
 // ---- per-board selection + rendering ----
@@ -4605,5 +4637,87 @@ mod tests {
         assert_eq!(offer(&all, Dev, "junk"), None, "unparseable running version");
         let junk_dist = host(&[(Stable, "not-calver")]);
         assert_eq!(offer(&junk_dist, Stable, "2026.1.0"), None, "unparseable dist version");
+    }
+
+    /// GET /firmware/notes/{version}: plain-text patch notes per released
+    /// version — and a hostile {version} 404s BEFORE any filesystem access,
+    /// because that segment becomes a filename. Runs over real HTTP so axum's
+    /// percent-decoding is in the loop (a "..%2F" segment reaches the handler
+    /// as "../"), and so registering the static "notes" segment alongside the
+    /// two :capture /firmware routes is proven conflict-free (a matchit
+    /// conflict would panic at Router build).
+    #[tokio::test]
+    async fn firmware_notes_route_serves_and_rejects_traversal() {
+        let base = std::env::temp_dir().join(format!("scoreboard-fw-notes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("notes")).unwrap();
+        let body = "- Sharper dark pixels.\n- Factory reset now erases Wi-Fi details.\n";
+        std::fs::write(base.join("notes").join("2026.7.5.txt"), body).unwrap();
+        // Bait OUTSIDE the notes dir: reachable only by traversal.
+        std::fs::write(base.join("evil.txt"), "secret").unwrap();
+
+        let mut state = AppState::new_ephemeral();
+        state.fw_notes_dir = base.join("notes");
+        let handler_state = state.clone();
+        let app = Router::new()
+            .route("/firmware/:chan/latest", get(get_firmware_latest))
+            .route("/firmware/:file", get(get_firmware_bin))
+            .route("/firmware/notes/:version", get(get_firmware_notes))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let get_notes = |version: &str| {
+            let url = format!("http://{addr}/firmware/notes/{version}");
+            async move { reqwest::get(url).await.unwrap() }
+        };
+
+        // A released version with notes: exact body, contract content-type.
+        let resp = get_notes("2026.7.5").await;
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.headers().get(reqwest::header::CONTENT_TYPE).unwrap(),
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(resp.text().await.unwrap(), body);
+
+        // A valid-shaped version nobody released: plain 404.
+        assert_eq!(get_notes("2026.7.999").await.status(), 404);
+
+        // Traversal via percent-encoded slashes: the url crate keeps "%2f" as
+        // one segment, axum decodes it to "/", and the digits-and-dots check
+        // 404s the result without touching the filesystem — the bait file one
+        // level up must stay unreachable.
+        for hostile in ["..%2Fevil", "..%2fevil", "2026.7.5%2f..%2f..%2fevil", "..%2Fevil.txt"] {
+            let resp = get_notes(hostile).await;
+            assert_eq!(resp.status(), 404, "hostile version {hostile:?} must 404");
+            assert!(
+                !resp.text().await.unwrap().contains("secret"),
+                "traversal {hostile:?} must not read outside notes/"
+            );
+        }
+        // Junk that isn't strictly [0-9.] is 404 too, per the contract.
+        for junk in ["latest", "2026.7.5.txt", "v2026.7.5", "2026.7.5%00"] {
+            assert_eq!(get_notes(junk).await.status(), 404, "junk version {junk:?}");
+        }
+
+        // Belt and braces below the router: a literal "../evil" handed
+        // straight to the handler (no client-side url normalization in the
+        // way) is rejected by validation, not by a failed filesystem lookup.
+        for hostile in ["../evil", "..", "", "/etc/passwd", "2026.7.5/../../evil"] {
+            let resp = get_firmware_notes(
+                State(handler_state.clone()),
+                axum::extract::Path(hostile.to_string()),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                axum::http::StatusCode::NOT_FOUND,
+                "handler must reject {hostile:?}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

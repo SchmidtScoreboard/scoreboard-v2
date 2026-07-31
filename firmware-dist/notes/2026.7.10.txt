@@ -1,0 +1,2 @@
+- Removed the startup power test; power guidance now lives on the case label.
+- General stability improvements.

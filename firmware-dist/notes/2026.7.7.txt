@@ -1,0 +1,1 @@
+- Added a power self-test at startup, shown as a color gradient (removed again in 2026.7.10).

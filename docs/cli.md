@@ -47,6 +47,10 @@ All curl-able; the app uses the same ones.
   board (the token retires when the stream drains); without it (curl, tests)
   it just serves the file. Either way the bytes are identical and the
   board verifies the signature before installing.
+- `GET /firmware/notes/{version}` — that release's user-facing patch notes as
+  plain text (`- ` bullets), read from `FIRMWARE_DIR/notes/{version}.txt` at
+  request time. `{version}` is strictly digits-and-dots; anything else (and
+  any version without a notes file) is a plain-text 404.
 
 ## `server tui` — the pipeline debugger
 
@@ -169,6 +173,11 @@ would let a superseded version be republished as different bytes — which no
 board could ever disambiguate. Every version ever published is remembered, and
 versions live in ONE space across all channels. A repeat is refused; bump the
 patch instead.
+
+User-facing patch notes live beside the channels in `firmware-dist/notes/`
+(`<version>.txt`, short `- ` bullets) and are served at
+`GET /firmware/notes/<version>`; the release script warns — without failing —
+when the version being released has no notes file.
 
 Commit `firmware-dist/` afterwards (and `fw_pubkey.rs` if the key changed) —
 the Dockerfile ships it inside the server image — then deploy. Boards see the

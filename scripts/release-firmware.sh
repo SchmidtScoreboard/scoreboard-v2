@@ -51,6 +51,16 @@ fi
 
 echo "==> release version $VERSION -> $CHANNEL channel (from firmware-rs/Cargo.toml)"
 
+# Patch notes are served to customers at GET /firmware/notes/<version>. Missing
+# notes must be a choice, never an accident — warn loudly but keep going (a
+# hotfix at 2am shouldn't be blocked on prose).
+NOTES="firmware-dist/notes/$VERSION.txt"
+if [[ ! -f "$NOTES" ]]; then
+    echo "!!! WARNING: no patch notes at $NOTES" >&2
+    echo "!!!          GET /firmware/notes/$VERSION will 404 for customers." >&2
+    echo "!!!          Write the file (short '- ' bullets) before shipping, or ship noteless on purpose." >&2
+fi
+
 # CalVer is one monotonic space ACROSS channels AND across time: a release
 # OVERWRITES its channel's firmware.json, so checking only the current jsons
 # would free superseded versions for re-publication as different bytes — the

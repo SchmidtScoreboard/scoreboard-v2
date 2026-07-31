@@ -3859,8 +3859,16 @@ struct SettingsView: View {
     /// the connecting splash, so repointing it has to be reachable from there.
     var boardId: String? = nil
     @Environment(\.dismiss) private var dismiss
-    /// Firmware update tapped — confirm before telling the board to reflash.
-    @State private var showUpdateConfirm = false
+    /// Which version's patch notes sheet is up. Item-driven so the two entry
+    /// points — the firmware row (running version, read-only) and the Update
+    /// button (offered version, with Install) — share one nested-sheet slot.
+    private struct NotesTarget: Identifiable {
+        let version: String
+        /// True only for the update offer: the sheet gains the Install button.
+        let installable: Bool
+        var id: String { "\(installable)-\(version)" }
+    }
+    @State private var notesTarget: NotesTarget?
     /// Settings' OWN remove confirm — independent of the dashboard toolbar's,
     /// which stays anchored outside any sheet so it survives the splash.
     @State private var showRemoveConfirm = false
@@ -3899,6 +3907,16 @@ struct SettingsView: View {
             }
             .navigationTitle(boardId == nil ? "Settings" : "Scoreboard server")
             .navigationBarTitleDisplayMode(.inline)
+            // A sheet from within the Settings sheet (nested presentation —
+            // fine on iOS 18). Anchored on the stack so both entry points in
+            // the About section share one presentation.
+            .sheet(item: $notesTarget) { t in
+                FirmwareNotesSheet(
+                    version: t.version,
+                    httpBase: model.httpBase,
+                    install: t.installable ? { model.updateFirmware() } : nil
+                )
+            }
             .toolbar {
                 #if DEBUG
                 ToolbarItem(placement: .cancellationAction) {
@@ -3964,19 +3982,33 @@ struct SettingsView: View {
     #endif
 
     /// Versions of the two halves the user can see: the board's firmware (as it
-    /// last reported) and this app. When the server hosts a newer image, an
-    /// Update button appears; after confirming, a passive "Updating…" hint
-    /// holds until the board reports back — the BOARD shows real progress on
-    /// its own panel, so the app deliberately has no progress bar.
+    /// last reported) and this app. Tapping the firmware row shows the running
+    /// version's patch notes ("what did my last update bring"). When the server
+    /// hosts a newer image, an Update button appears; it opens the same notes
+    /// sheet for the OFFERED version, whose Install button starts the update —
+    /// then a passive "Updating…" hint holds until the board reports back. The
+    /// BOARD shows real progress on its own panel, so the app deliberately has
+    /// no progress bar.
     private var aboutSection: some View {
         Section {
-            HStack {
-                Text("Scoreboard firmware")
-                Spacer()
-                Text(model.current.firmwareVersion ?? "—")
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
+            Button {
+                if let v = model.current.firmwareVersion {
+                    notesTarget = NotesTarget(version: v, installable: false)
+                }
+            } label: {
+                HStack {
+                    // Explicit styles: a Form button tints its whole label, which
+                    // would make this read as an action row instead of a fact row
+                    // that happens to open its own patch notes.
+                    Text("Scoreboard firmware")
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    Text(model.current.firmwareVersion ?? "—")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
             }
+            .disabled(model.current.firmwareVersion == nil)
             HStack {
                 Text("App")
                 Spacer()
@@ -4024,20 +4056,14 @@ struct SettingsView: View {
                     }
                 }
                 Button {
-                    showUpdateConfirm = true
+                    // Patch notes replace the bare confirmation dialog: the
+                    // sheet carries the Install button (which must keep working
+                    // even when the notes themselves fail to load).
+                    notesTarget = NotesTarget(version: target, installable: true)
                 } label: {
                     Label("Update to \(target)", systemImage: "arrow.down.circle.fill")
                         .font(.body.weight(.semibold))
                         .frame(maxWidth: .infinity)
-                }
-                .confirmationDialog(
-                    "Update to \(target)?",
-                    isPresented: $showUpdateConfirm,
-                    titleVisibility: .visible
-                ) {
-                    Button("Update") { model.updateFirmware() }
-                } message: {
-                    Text("The scoreboard downloads the update and restarts itself — about a minute. The panel flickers while it writes, which is normal — don't unplug it. It keeps working if the update fails.")
                 }
             }
         } header: {
@@ -4156,6 +4182,140 @@ struct SettingsView: View {
             } message: {
                 Text("This phone stops controlling it and the pairing is revoked on the server — add it again anytime with a new code.")
             }
+        }
+    }
+}
+
+/// Patch notes for one firmware version, fetched from the server's
+/// GET /firmware/notes/{version} (same HTTP base as the /render fetches).
+/// Read-only for the running version; the update-offer flow passes `install`,
+/// which adds a prominent Install button. The notes are decoration on the
+/// install decision, not a gate: a 404 or a network failure shows a fallback
+/// line and the Install button keeps working.
+struct FirmwareNotesSheet: View {
+    let version: String
+    let httpBase: String
+    /// Present only in the update-offer flow; runs the existing update path.
+    /// The caller owns the actual work — this sheet never touches the model.
+    var install: (() -> Void)? = nil
+    @Environment(\.dismiss) private var dismiss
+
+    /// Tri-state so the fallback text doesn't flash while the fetch is still
+    /// in flight — "loading" and "there are no notes" look different.
+    private enum Notes { case loading, loaded(String), unavailable }
+    @State private var notes: Notes = .loading
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                Image(systemName: "sparkles")
+                    .font(.title2)
+                    .foregroundStyle(.yellow)
+                    .frame(width: 36, height: 36)
+                    .background(Color(white: 0.2), in: RoundedRectangle(cornerRadius: 9))
+                Text("What's new in \(version)")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+            }
+            // Scrolls when needed — release notes have no length contract.
+            ScrollView {
+                switch notes {
+                case .loading:
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Loading notes…")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                case .loaded(let body):
+                    // Plain text with "- " bullets, straight from the server;
+                    // extra line spacing keeps multi-line bullets readable.
+                    Text(body)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineSpacing(4)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                case .unavailable:
+                    Text("No notes for this version.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            if let install {
+                // The guidance the old confirmation dialog carried — the sheet
+                // replaced the dialog, so the "don't unplug" warning lives here.
+                Text("The scoreboard downloads the update and restarts itself — about a minute. The panel flickers while it writes, which is normal — don't unplug it. It keeps working if the update fails.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button {
+                    install()
+                    dismiss()
+                } label: {
+                    Label("Install Update", systemImage: "arrow.down.circle.fill")
+                        .font(.body.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                }
+                .buttonStyle(.borderedProminent)
+                Button {
+                    dismiss()
+                } label: {
+                    Text("Cancel")
+                        .font(.body.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                }
+                .buttonStyle(.bordered)
+            } else {
+                Button {
+                    dismiss()
+                } label: {
+                    Text("Done")
+                        .font(.body.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding([.horizontal, .bottom], 20)
+        .padding(.top, 24)
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .task { await fetchNotes() }
+    }
+
+    private func fetchNotes() async {
+        // Versions are CalVer ([0-9.] only), so this never actually escapes
+        // anything — it's here so a malformed version string can't build a
+        // malformed URL and crash the force-unwrap-free path below.
+        let path = version.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? version
+        guard let url = URL(string: "\(httpBase)/firmware/notes/\(path)") else {
+            notes = .unavailable
+            return
+        }
+        do {
+            let (data, resp) = try await URLSession.shared.data(from: url)
+            if let http = resp as? HTTPURLResponse, http.statusCode == 200,
+               let text = String(data: data, encoding: .utf8)?
+                   .trimmingCharacters(in: .whitespacesAndNewlines),
+               !text.isEmpty {
+                notes = .loaded(text)
+            } else {
+                // 404 (unknown version) and a non-text body land together:
+                // nothing worth rendering, same graceful fallback.
+                notes = .unavailable
+            }
+        } catch is CancellationError {
+            // Sheet dismissed mid-fetch — nobody's looking anymore.
+        } catch let e as URLError where e.code == .cancelled {
+            // Same lifecycle event, URLSession's spelling of it.
+        } catch {
+            notes = .unavailable
         }
     }
 }

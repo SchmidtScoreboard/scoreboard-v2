@@ -1,0 +1,7 @@
+- The settings menu now opens with a double-tap; holding the knob is only for factory reset.
+- Menu scrolling now follows the knob's natural direction.
+- Added an EXIT row for leaving the menu.
+- "Wi-Fi Info" is now called "Debug Info".
+- Easier-to-read highlight on the selected menu row.
+- The update row shows "UP TO DATE" when there is nothing to install.
+- The panel now fades in and out when waking up or going to sleep.

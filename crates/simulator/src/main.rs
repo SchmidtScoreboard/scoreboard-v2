@@ -84,20 +84,20 @@ fn host_timezone() -> String {
     "UTC".to_string()
 }
 
-/// "ws://127.0.0.1:7878/ws" -> "127.0.0.1:7878" (the WIFI INFO screen's SRV row).
+/// "ws://127.0.0.1:7878/ws" -> "127.0.0.1:7878" (the DEBUG INFO screen's SRV row).
 fn server_host_port(url: &str) -> String {
     let rest = url.split_once("://").map_or(url, |(_, r)| r);
     rest.split('/').next().unwrap_or(rest).to_string()
 }
 
 /// A board exactly as a fresh boot would produce it: version line + the fake
-/// diagnostics the WIFI INFO screen shows. The server row is the REAL target
+/// diagnostics the DEBUG INFO screen shows. The server row is the REAL target
 /// URL, so the menu stays honest across server switches.
 fn fresh_board(server: &str, board_id: &str) -> Board {
     let mut b = Board::new();
     // Same version line the firmware puts on its boot screen.
     b.set_version(env!("CARGO_PKG_VERSION").to_string());
-    // Plausible fake diagnostics for the settings menu's WIFI INFO screen —
+    // Plausible fake diagnostics for the settings menu's DEBUG INFO screen —
     // the sim has no radio, but the screen should look like the real thing.
     b.set_diagnostics(Diagnostics {
         ssid: Some("SimNet".into()),
@@ -224,7 +224,7 @@ struct SimApp {
     start: Instant,
     holding_reset: bool,
     /// Mouse held on the "Hold knob" button (drives the same press/release
-    /// path as the R key, so the menu/erase hold works pointer-only too).
+    /// path as the R key, so the erase hold works pointer-only too).
     holding_knob: bool,
     /// Mouse-wheel remainder: the wheel is the sim's encoder, ~24px a detent.
     scroll_accum: f32,
@@ -280,18 +280,24 @@ impl eframe::App for SimApp {
             let mut b = self.board.lock().unwrap();
             if i.key_pressed(egui::Key::ArrowRight) { b.encoder(1); }
             if i.key_pressed(egui::Key::ArrowLeft) { b.encoder(-1); }
-            // Mouse wheel = the encoder, ~24px a detent: wheel-down walks the
-            // menu selection down (encoder +1), matching list intuition.
+            // Mouse wheel = the encoder, ~24px a detent. Wheel-down sends
+            // encoder(-1): board-core's menu walks DOWN the list on negative
+            // deltas (the owner-tuned direction flip), so wheel-down still
+            // matches list intuition — and outside the menu it dims, volume
+            // knob style.
             self.scroll_accum += i.raw_scroll_delta.y;
-            while self.scroll_accum <= -24.0 { b.encoder(1); self.scroll_accum += 24.0; }
-            while self.scroll_accum >= 24.0 { b.encoder(-1); self.scroll_accum -= 24.0; }
+            while self.scroll_accum <= -24.0 { b.encoder(-1); self.scroll_accum += 24.0; }
+            while self.scroll_accum >= 24.0 { b.encoder(1); self.scroll_accum -= 24.0; }
             if i.key_pressed(egui::Key::Space) { b.gesture(Gesture::Single); }
+            // Double-tap toggles the settings menu (open when closed, close
+            // when open).
             if i.key_pressed(egui::Key::D) { b.gesture(Gesture::Double); }
             // A long press restarts provisioning, and board-core rewinds the
             // phase with it — keep the selector honest.
             if i.key_pressed(egui::Key::L) { b.gesture(Gesture::Long); self.setup_phase = SetupPhase::WaitingBluetooth; }
-            // Hold R for the whole hold ladder: bar -> menu at 3s -> red erase
-            // phase -> factory reset at 15s (simulates the physical hold).
+            // Hold R for the erase-only hold ladder: amber warm-up bar, red
+            // KEEP-HOLDING phase at 2s, factory reset at 10s (simulates the
+            // physical hold; the menu lives on double-tap now).
             let r_down = i.key_down(egui::Key::R);
             if r_down && !self.holding_reset { b.button_down(now_ms); self.holding_reset = true; }
             if !r_down && self.holding_reset { b.button_up(now_ms); self.holding_reset = false; }
@@ -318,14 +324,14 @@ impl eframe::App for SimApp {
                 if ui.button("rotate + ▶").clicked() { self.board.lock().unwrap().encoder(1); }
             });
             if ui.button("Press  (sleep / wake · menu select)").clicked() { self.board.lock().unwrap().gesture(Gesture::Single); }
-            if ui.button("Double-press  (reserved no-op)").clicked() { self.board.lock().unwrap().gesture(Gesture::Double); }
+            if ui.button("Double-press  (open / close menu)").clicked() { self.board.lock().unwrap().gesture(Gesture::Double); }
             if ui.button("Long-press  (setup screen)").clicked() {
                 self.board.lock().unwrap().gesture(Gesture::Long);
                 self.setup_phase = SetupPhase::WaitingBluetooth;
             }
-            // A real press-and-HOLD for the mouse: down opens the hold ladder
-            // (menu at 3s, red erase phase, reset at 15s), up releases.
-            let hold_btn = ui.button("HOLD me  (3s menu · 15s erase)");
+            // A real press-and-HOLD for the mouse: down starts the erase-only
+            // hold (red KEEP-HOLDING phase at 2s, wipe at 10s), up releases.
+            let hold_btn = ui.button("HOLD me  (erase at 10s)");
             let down = hold_btn.is_pointer_button_down_on();
             if down && !self.holding_knob { self.board.lock().unwrap().button_down(now_ms); self.holding_knob = true; }
             if !down && self.holding_knob { self.board.lock().unwrap().button_up(now_ms); self.holding_knob = false; }
@@ -405,12 +411,12 @@ impl eframe::App for SimApp {
             ui.label("Board goes offline:");
             ui.checkbox(&mut f.wifi_fail, "WiFi connect fails");
             ui.checkbox(&mut f.server_unreachable, "Server unreachable");
-            ui.label("Pairing fails (set before double-press):");
+            ui.label("Pairing fails (set before opening PAIR CODE):");
             ui.checkbox(&mut f.bad_code, "Bad pairing code");
             ui.checkbox(&mut f.ble_fail, "BLE handshake fails");
 
             ui.separator();
-            ui.small("Keys: ←/→/wheel rotate · Space press · D double · L setup · hold R menu/erase");
+            ui.small("Keys: ←/→/wheel rotate · Space press · D double (menu) · L setup · hold R erase");
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {

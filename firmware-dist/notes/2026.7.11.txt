@@ -1,0 +1,4 @@
+- New on-device settings menu: hold the knob to open it.
+- From the menu you can check for updates, show the pairing code, see Wi-Fi diagnostics, or factory reset (with confirmation).
+- Double-tap is no longer used.
+- To erase the board, keep holding the knob past the menu.

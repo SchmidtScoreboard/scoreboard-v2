@@ -1,0 +1,1 @@
+- Fixed updates failing to start: the board restarted without installing the new version.

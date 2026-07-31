@@ -1,0 +1,2 @@
+- Simpler update experience: one spinner instead of a progress bar.
+- Updates now finish well under a minute.
