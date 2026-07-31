@@ -1005,13 +1005,17 @@ impl Board {
         draw_panel_node(&mut c);
         draw_wifi_node(&mut c, if self.wifi_up { green } else { grey });
         draw_server_node(&mut c);
+        // Leg origins 14 and 37 put the ten dots at exact mirror positions
+        // around the panel's center line (x = 31.5): 14,17,20,23,26 reflects
+        // to 49,46,43,40,37. The old 15/38 crowded the Wi-Fi mark from the
+        // left (margins 3-and-1 vs 2-and-1) and read visibly lopsided.
         if self.wifi_up {
-            draw_leg(&mut c, 15, green, None);
-            draw_leg(&mut c, 38, dim, Some(self.anim % 5));
+            draw_leg(&mut c, 14, green, None);
+            draw_leg(&mut c, 37, dim, Some(self.anim % 5));
             center_text(&mut c, "FINDING SERVER", 27, &FONT_4X6, amber);
         } else {
-            draw_leg(&mut c, 15, dim, Some(self.anim % 5));
-            draw_leg(&mut c, 38, dim, None);
+            draw_leg(&mut c, 14, dim, Some(self.anim % 5));
+            draw_leg(&mut c, 37, dim, None);
             center_text(&mut c, "JOINING WI-FI", 27, &FONT_4X6, amber);
         }
         c.into_u32()

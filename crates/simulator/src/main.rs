@@ -9,6 +9,7 @@ use board_core::{Board, Diagnostics, Gesture, SetupPhase};
 use eframe::egui;
 use futures_util::{SinkExt, StreamExt};
 use scoreboard_protocol::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio_tungstenite::connect_async;
@@ -89,41 +90,65 @@ fn server_host_port(url: &str) -> String {
     rest.split('/').next().unwrap_or(rest).to_string()
 }
 
-fn main() -> eframe::Result<()> {
-    let Args { server, board: board_id, headless, tz } = parse_args();
-    println!("simulator: server={server} board={board_id} tz={tz}");
+/// A board exactly as a fresh boot would produce it: version line + the fake
+/// diagnostics the WIFI INFO screen shows. The server row is the REAL target
+/// URL, so the menu stays honest across server switches.
+fn fresh_board(server: &str, board_id: &str) -> Board {
     let mut b = Board::new();
     // Same version line the firmware puts on its boot screen.
     b.set_version(env!("CARGO_PKG_VERSION").to_string());
     // Plausible fake diagnostics for the settings menu's WIFI INFO screen —
     // the sim has no radio, but the screen should look like the real thing.
-    // Server host:port is the REAL one from --server, so the row is honest.
     b.set_diagnostics(Diagnostics {
         ssid: Some("SimNet".into()),
         rssi_dbm: Some(-55),
         ip: Some([192, 168, 1, 42]),
-        server: Some(server_host_port(&server)),
+        server: Some(server_host_port(server)),
         board_id_prefix: Some(board_id.chars().take(8).collect()),
         free_heap_bytes: Some(123_456),
     });
-    // The Wi-Fi leg is driven by the client loop (mirroring the firmware's
-    // per-pass link check), so the "WiFi connect fails" toggle renders the
-    // Wi-Fi hop down instead of blaming the server.
-    let board = Arc::new(Mutex::new(b));
-    let failures = Arc::new(Mutex::new(Failures::default()));
+    b
+}
 
-    // Websocket client feeds the shared board on its own runtime/thread.
-    let board_ws = board.clone();
-    let failures_ws = failures.clone();
-    let server_ws = server.clone();
-    let board_id_ws = board_id.clone();
+/// Start (or restart) the websocket client on its own runtime/thread, aimed at
+/// `server`. Returns the thread's liveness flag: clearing it retires the loop
+/// within one poll tick, which is how the server picker swaps targets without
+/// relaunching the process — the sim equivalent of rebooting the board onto a
+/// different server.
+fn spawn_client(
+    board: Arc<Mutex<Board>>,
+    failures: Arc<Mutex<Failures>>,
+    server: String,
+    board_id: String,
+    tz: String,
+) -> Arc<AtomicBool> {
+    let alive = Arc::new(AtomicBool::new(true));
+    let alive_ws = alive.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        rt.block_on(run_client(board_ws, failures_ws, server_ws, board_id_ws, tz));
+        rt.block_on(run_client(board, failures, server, board_id, tz, alive_ws));
     });
+    alive
+}
+
+fn main() -> eframe::Result<()> {
+    let Args { server, board: board_id, headless, tz } = parse_args();
+    println!("simulator: server={server} board={board_id} tz={tz}");
+    // The Wi-Fi leg is driven by the client loop (mirroring the firmware's
+    // per-pass link check), so the "WiFi connect fails" toggle renders the
+    // Wi-Fi hop down instead of blaming the server.
+    let board = Arc::new(Mutex::new(fresh_board(&server, &board_id)));
+    let failures = Arc::new(Mutex::new(Failures::default()));
+    let client_alive = spawn_client(
+        board.clone(),
+        failures.clone(),
+        server.clone(),
+        board_id.clone(),
+        tz.clone(),
+    );
 
     if headless {
         // No GUI: tick the board and print frame stats for a while.
@@ -153,6 +178,11 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(SimApp {
                 board,
                 failures,
+                board_id,
+                tz,
+                custom_url: if server_preset_label(&server).is_none() { server.clone() } else { String::new() },
+                server,
+                client_alive,
                 tex: None,
                 start: Instant::now(),
                 holding_reset: false,
@@ -166,9 +196,30 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+/// The same fixed targets the iOS app's server picker offers, so the two
+/// tools speak about the same worlds. Returns the preset label for a URL, or
+/// None when it's custom.
+const SERVER_PRESETS: &[(&str, &str)] = &[
+    ("Localhost", "ws://127.0.0.1:7878/ws"),
+    ("Prod", "ws://hayabusa.proxy.rlwy.net:47958/ws"),
+    ("Demo", "ws://tokaido.proxy.rlwy.net:33343/ws"),
+];
+
+fn server_preset_label(url: &str) -> Option<&'static str> {
+    SERVER_PRESETS.iter().find(|(_, u)| *u == url).map(|(l, _)| *l)
+}
+
 struct SimApp {
     board: Arc<Mutex<Board>>,
     failures: Arc<Mutex<Failures>>,
+    /// Everything a server switch needs to relaunch the client: identity and
+    /// zone are per-process, the URL and liveness flag are per-connection.
+    board_id: String,
+    tz: String,
+    server: String,
+    client_alive: Arc<AtomicBool>,
+    /// The custom-URL text box (seeded from --server when it isn't a preset).
+    custom_url: String,
     tex: Option<egui::TextureHandle>,
     start: Instant,
     holding_reset: bool,
@@ -194,6 +245,31 @@ fn fb_to_image(fb: &[u32]) -> egui::ColorImage {
         rgba.extend_from_slice(&[(c >> 16) as u8, (c >> 8) as u8, c as u8, 255]);
     }
     egui::ColorImage::from_rgba_unmultiplied([FRAME_WIDTH, FRAME_HEIGHT], &rgba)
+}
+
+impl SimApp {
+    /// Point the sim at a different server: retire the current client thread,
+    /// reset the board as a reboot would (fresh connect screen, fresh
+    /// diagnostics with the new target), and launch a new client. The old
+    /// thread notices its liveness flag within one poll tick; until then it
+    /// writes into the board we just reset, which the new connection
+    /// immediately overwrites — the same benign overlap a real reboot has.
+    fn restart_with(&mut self, url: String) {
+        if url == self.server {
+            return;
+        }
+        println!("switching server -> {url}");
+        self.client_alive.store(false, Ordering::Release);
+        *self.board.lock().unwrap() = fresh_board(&url, &self.board_id);
+        self.client_alive = spawn_client(
+            self.board.clone(),
+            self.failures.clone(),
+            url.clone(),
+            self.board_id.clone(),
+            self.tz.clone(),
+        );
+        self.server = url;
+    }
 }
 
 impl eframe::App for SimApp {
@@ -254,6 +330,47 @@ impl eframe::App for SimApp {
             if down && !self.holding_knob { self.board.lock().unwrap().button_down(now_ms); self.holding_knob = true; }
             if !down && self.holding_knob { self.board.lock().unwrap().button_up(now_ms); self.holding_knob = false; }
             ui.small("or hold R · in the menu: wheel/← → moves, Space selects, hold ~2s closes");
+
+            ui.separator();
+            ui.heading("Server");
+            // Mirrors the app's picker; selecting relaunches the client at the
+            // new target, board rebooting-style (fresh connect screen).
+            let current_label =
+                server_preset_label(&self.server).unwrap_or("Custom").to_string();
+            let mut picked: Option<String> = None;
+            egui::ComboBox::from_id_salt("server-picker")
+                .selected_text(&current_label)
+                .show_ui(ui, |ui| {
+                    for (label, url) in SERVER_PRESETS {
+                        if ui
+                            .selectable_label(self.server == *url, *label)
+                            .clicked()
+                        {
+                            picked = Some((*url).to_string());
+                        }
+                    }
+                });
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.custom_url)
+                        .hint_text("ws://host:port/ws")
+                        .desired_width(180.0),
+                );
+                let url = self.custom_url.trim().to_string();
+                if ui
+                    .add_enabled(
+                        !url.is_empty() && url != self.server,
+                        egui::Button::new("Connect"),
+                    )
+                    .clicked()
+                {
+                    picked = Some(url);
+                }
+            });
+            ui.small(format!("connected target: {}", self.server));
+            if let Some(url) = picked {
+                self.restart_with(url);
+            }
 
             ui.separator();
             ui.heading("Device state");
@@ -331,10 +448,15 @@ async fn run_client(
     server: String,
     board_id: String,
     tz: String,
+    alive: Arc<AtomicBool>,
 ) {
     let secret = dev_secret(&board_id);
     let mut prev_setup = false;
     loop {
+        // Retired by a server switch: stop touching the (already reset) board.
+        if !alive.load(Ordering::Acquire) {
+            return;
+        }
         // Mirror the firmware's per-pass link check (`stack.config_v4()`): the
         // Wi-Fi leg is up unless the toggle says it failed. Hard-coding it up
         // made "WiFi connect fails" render the SERVER leg down — the one screen
@@ -434,6 +556,11 @@ async fn run_client(
                             _ => break, // closed or error
                         },
                         _ = poll.tick() => {
+                            // Retired by a server switch: drop the connection
+                            // promptly instead of on the next read.
+                            if !alive.load(Ordering::Acquire) {
+                                return;
+                            }
                             // Keep the link state live while connected too, so
                             // flipping the Wi-Fi toggle changes which hop the
                             // connect screen blames on the very next frame.
