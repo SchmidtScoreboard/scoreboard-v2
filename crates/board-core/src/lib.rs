@@ -621,6 +621,11 @@ impl Board {
                         self.reset_done = true;
                         self.reset_progress = 100;
                         self.reset_done_at = Some(now_ms);
+                        // Best-effort heads-up: if a socket is up during the
+                        // ~1.4s before the host wipes and reboots, the server
+                        // forgets this board wholesale (pairings, config).
+                        // The identity wipe covers the offline case.
+                        self.outbox.push(ClientMsg::FactoryReset);
                     }
                 } else {
                     // Amber warm-up: fills to the 2s mark. Sharing that mark
@@ -875,6 +880,8 @@ impl Board {
                     self.reset_done = true;
                     self.reset_progress = 100;
                     self.reset_done_at = Some(clock);
+                    // Same best-effort server heads-up as the hold path.
+                    self.outbox.push(ClientMsg::FactoryReset);
                 } else {
                     m.screen = MenuScreen::Root;
                 }
@@ -2092,6 +2099,45 @@ mod tests {
         b.needs_pairing();
         assert!(b.menu_open(), "menu wins");
         assert_eq!(b.mode(), Mode::Running, "no mode change underneath");
+    }
+
+    /// Both wipe latches queue the best-effort FactoryReset heads-up: the
+    /// server hears "forget me wholesale" whenever a socket happens to be up
+    /// in the second before the reboot. (The identity wipe covers offline.)
+    #[test]
+    fn factory_reset_notifies_the_server_from_both_paths() {
+        // Path 1: the 10s hold.
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.tick(0);
+        b.take_outgoing();
+        b.button_down(1000);
+        b.tick(1000 + ERASE_HOLD_MS + 50);
+        assert!(b.reset_triggered(), "the hold latched the wipe");
+        let out = b.take_outgoing();
+        assert!(
+            out.iter().any(|m| matches!(m, ClientMsg::FactoryReset)),
+            "hold path queues the heads-up, got {out:?}"
+        );
+
+        // Path 2: menu -> RESET BOARD -> ERASE -> tap.
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.tick(0);
+        let t = double_tap(&mut b, 1000);
+        b.take_outgoing();
+        for _ in 0..4 {
+            b.encoder(-1); // EXIT -> UPDATE -> PAIR CODE -> DEBUG INFO -> RESET
+        }
+        let t = tap(&mut b, t);
+        b.encoder(-1); // arm ERASE
+        tap(&mut b, t);
+        assert!(b.reset_triggered(), "menu ERASE latched the wipe");
+        let out = b.take_outgoing();
+        assert!(
+            out.iter().any(|m| matches!(m, ClientMsg::FactoryReset)),
+            "menu path queues the heads-up, got {out:?}"
+        );
     }
 
     fn double_tap(b: &mut Board, t0: u64) -> u64 {

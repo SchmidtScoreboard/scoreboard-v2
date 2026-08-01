@@ -299,7 +299,7 @@ async fn main(spawner: Spawner) -> ! {
             // state where hold-to-reset doesn't work. (Single press is inert on
             // the setup screen; board-core guards it. The encoder task itself
             // is up already — spawned above the split.)
-            spawner.spawn(setup_reset_task(board).unwrap());
+            spawner.spawn(setup_reset_task(board, flash).unwrap());
 
             // Scan for nearby networks BEFORE BLE starts (no coex feature — the
             // two radios must not run at once). wifi::new() itself starts the
@@ -753,9 +753,20 @@ async fn flash_task(flash: &'static ota::SharedFlash, board: &'static SharedBoar
         // Hold-to-reset: let the "reset complete" checkmark show for a beat, then
         // wipe creds + reboot — which comes back up in BLE provisioning mode.
         if reset {
-            println!("[reset] clearing Wi-Fi credentials, rebooting into setup");
+            // Full factory wipe: credentials, the identity seed (the next
+            // boot mints a fresh one — a reset board is a brand-new
+            // scoreboard, unpaired from every phone), and the stored
+            // brightness. The 1s beat lets RESET COMPLETE show AND gives the
+            // ws task its window to flush the best-effort FactoryReset the
+            // latch queued, so the server forgets the old id too.
+            println!("[reset] full factory wipe, rebooting into setup");
             Timer::after(Duration::from_millis(1000)).await;
-            creds::clear(&mut *flash.lock().await);
+            {
+                let mut f = flash.lock().await;
+                creds::clear(&mut f);
+                identity::clear(&mut f);
+                brightness::clear(&mut f);
+            }
             esp_hal::system::software_reset();
         }
         // Brightness persistence (debounced).
@@ -776,15 +787,23 @@ async fn flash_task(flash: &'static ota::SharedFlash, board: &'static SharedBoar
 }
 
 /// Hold-to-reset watcher for BLE provisioning mode (flash_task owns the reset
-/// in WiFi mode). No creds exist in this mode, so reset = reboot — but the
+/// in WiFi mode). No creds exist in this mode, but the identity and brightness
+/// might — a reset must produce a brand-new scoreboard from EVERY state, or
+/// "reset then hand it to a friend" leaks the old pairing identity. The
 /// GESTURE must work everywhere, or the board can get stuck un-resettable.
 #[embassy_executor::task]
-async fn setup_reset_task(board: &'static SharedBoard) {
+async fn setup_reset_task(board: &'static SharedBoard, flash: &'static ota::SharedFlash) {
     loop {
         Timer::after(Duration::from_millis(400)).await;
         if board.lock().await.reset_triggered() {
-            println!("[reset] reboot from setup mode");
+            println!("[reset] full factory wipe from setup mode, rebooting");
             Timer::after(Duration::from_millis(1000)).await;
+            {
+                let mut f = flash.lock().await;
+                creds::clear(&mut f);
+                identity::clear(&mut f);
+                brightness::clear(&mut f);
+            }
             esp_hal::system::software_reset();
         }
     }

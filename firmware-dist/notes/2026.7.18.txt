@@ -1,0 +1,1 @@
+- Factory reset now makes the board a true blank slate: Wi-Fi, identity, brightness, league settings, and all paired phones are cleared. It comes back asking to be set up like a brand-new scoreboard.

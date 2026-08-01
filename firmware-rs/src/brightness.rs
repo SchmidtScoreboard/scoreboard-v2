@@ -21,6 +21,12 @@ pub fn load(flash: &mut FlashStorage) -> Option<u8> {
     (10..=100).contains(&level).then_some(level)
 }
 
+/// Factory reset: forget the stored level (a brand-new board boots at the
+/// default, not the previous owner's midnight dim).
+pub fn clear(flash: &mut FlashStorage) {
+    let _ = flash.write(OFFSET, &[0xFFu8; 4]);
+}
+
 /// Persist the brightness. Erases a flash sector, so callers MUST debounce —
 /// only write once the knob has settled, never on every detent.
 pub fn save(flash: &mut FlashStorage, level: u8) -> bool {

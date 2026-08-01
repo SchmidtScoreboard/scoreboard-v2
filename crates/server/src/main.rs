@@ -423,6 +423,24 @@ impl AppState {
         );
     }
 
+    /// Forget a board ENTIRELY — the factory-reset contract: every pairing
+    /// (memory + DB), the config (memory + DB), the reported version, any
+    /// notice, and any pending pairing codes. The board also wiped its own
+    /// identity, so the old id never returns; this keeps the tables from
+    /// accumulating orphans and makes every phone's grant on it dead.
+    pub fn forget_board(&self, board_id: &str) {
+        self.allow.lock().unwrap().remove(board_id);
+        self.configs.lock().unwrap().remove(board_id);
+        self.device_versions.lock().unwrap().remove(board_id);
+        self.notices.lock().unwrap().remove(board_id);
+        self.pending.lock().unwrap().retain(|_, (b, _)| b != board_id);
+        if let Some(db) = &self.db {
+            let db = db.lock().unwrap();
+            let _ = db.execute("DELETE FROM pairings WHERE board_pubkey = ?1", rusqlite::params![board_id]);
+            let _ = db.execute("DELETE FROM boards WHERE pubkey = ?1", rusqlite::params![board_id]);
+        }
+    }
+
     /// Revoke ONE controller's grant on a board, in memory and on disk. Returns
     /// whether that grant existed — unpairing a board you were never paired
     /// with is a no-op, not an error. The caller supplies the controller from

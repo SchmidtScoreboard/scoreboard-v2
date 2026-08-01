@@ -27,6 +27,18 @@ fn load(flash: &mut FlashStorage) -> Option<[u8; 32]> {
     Some(secret)
 }
 
+/// Factory reset: destroy the identity so the NEXT boot mints a fresh seed —
+/// a reset board IS a brand-new scoreboard, unrecognizable to the server and
+/// to every previously paired phone (works fully offline; the online path
+/// additionally tells the server to forget the old id). Full-record wipe, the
+/// creds::clear lesson: a partial overwrite left recoverable bytes behind.
+pub fn clear(flash: &mut FlashStorage) {
+    const RECORD: usize = 36; // magic(4) + secret(32)
+    let wipe = [0xFFu8; RECORD];
+    debug_assert!(wipe.len() >= 36, "wipe must cover the whole record");
+    let _ = flash.write(OFFSET, &wipe);
+}
+
 fn save(flash: &mut FlashStorage, secret: &[u8; 32]) {
     let mut buf = [0u8; 36];
     buf[0..4].copy_from_slice(&MAGIC.to_le_bytes());

@@ -627,6 +627,14 @@ pub enum ClientMsg {
     // Without it a grant was permanent: removal was app-UI only and the board
     // came back on the next launch.
     Unpair { board_id: String },
+    // device announces it is factory-resetting RIGHT NOW (best-effort, sent
+    // in the second before the wipe+reboot when a socket happens to be up):
+    // the server deletes everything it knows about the board — pairings,
+    // config, version — so it returns as a brand-new scoreboard. The device
+    // also wipes its own identity seed, so even an OFFLINE reset comes back
+    // under a fresh board_id; this message just keeps the server's tables
+    // from accumulating orphans and unpairs the old id from every phone.
+    FactoryReset,
     // device reports a single knob press — the server decides sleep/wake/notice
     ButtonPress,
     // device reports a knob turn — the server adopts this as the board's one

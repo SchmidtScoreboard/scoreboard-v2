@@ -138,6 +138,12 @@ async fn device_loop(sender: WsSender, mut receiver: WsReceiver, state: AppState
                 Ok(ClientMsg::DeviceVersion { version }) => {
                     crate::handle_device_version(&state, &board_id, version);
                 }
+                Ok(ClientMsg::FactoryReset) => {
+                    // The board is wiping itself as we read this. Forget it
+                    // wholesale so it returns as a brand-new scoreboard.
+                    tracing::info!("device '{board_id}' factory reset — forgetting the board");
+                    state.forget_board(&board_id);
+                }
                 Ok(ClientMsg::RequestUpdate) => {
                     // The on-device menu's UPDATE row was selected: run the
                     // exact pick+relay the app's Update button runs. Nothing
@@ -1499,6 +1505,47 @@ mod tests {
     }
 
     // ---- on-device settings menu: RequestUpdate / UpdateAvailable ----
+
+    /// Factory reset is the whole contract: the board's pairings AND config
+    /// are forgotten (memory + DB), and a board with the same id reconnecting
+    /// afterwards is treated as brand-new — told to show its pair code.
+    #[tokio::test]
+    async fn factory_reset_forgets_the_board_wholesale() {
+        let (url, state) = spawn_server_with(AppState::new_ephemeral()).await;
+        let (mut dev, board_id) = auth(&url, Role::Device, &[7u8; 32]).await;
+        let mut ctrl = paired_subscriber(&url, &mut dev, &board_id, &[8u8; 32]).await;
+
+        // Give the board some config worth forgetting.
+        send(&mut ctrl, &ClientMsg::Command {
+            req_id: 1,
+            board_id: board_id.clone(),
+            cmd: Command::SetLeagueRows { sport_id: "pga".into(), rows: Some(4) },
+        }).await;
+        let _ = recv_until(&mut ctrl, |m| matches!(m, ServerMsg::BoardState { .. })).await;
+        assert!(state.config_for(&board_id).sports.iter().any(|s| s.sport_id == "pga"));
+
+        send(&mut dev, &ClientMsg::FactoryReset).await;
+        // Bounded wait for the wipe to land (the message is handled async).
+        let mut forgotten = false;
+        for _ in 0..40 {
+            let gone = state.allow.lock().unwrap().get(&board_id).is_none_or(|c| c.is_empty())
+                && !state.config_for(&board_id).sports.iter().any(|s| s.sport_id == "pga");
+            if gone {
+                forgotten = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(forgotten, "pairings and config both forgotten");
+
+        // The same id reconnecting is a virgin board: pair code prompt again.
+        let (mut dev2, _) = auth(&url, Role::Device, &[7u8; 32]).await;
+        match recv_until(&mut dev2, |m| matches!(m, ServerMsg::NeedsPairing)).await {
+            Some(ServerMsg::NeedsPairing) => {}
+            other => panic!("expected NeedsPairing after a factory reset, got {other:?}"),
+        }
+    }
+
 
     /// A device nobody is paired with is told so at connect — the board shows
     /// its pair code unprompted on a first startup. A paired device is not.
