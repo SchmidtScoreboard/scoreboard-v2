@@ -446,6 +446,13 @@ async fn device(
     // attempts, then give up — the server just keeps its stored zone.
     let mut timezone: Option<String> = None;
     let mut tz_tries = 0u8;
+    // Last server IP that carried a live websocket. The Railway proxy drops
+    // the socket every few minutes, so reconnects are routine — re-running
+    // DNS on every pass added 2-5s of outage for an answer that almost never
+    // changes. Cleared whenever the cached address fails to produce a working
+    // websocket (a Railway redeploy CAN move the server), so a stale entry
+    // costs exactly one failed pass before fresh DNS takes over.
+    let mut cached_ip: Option<core::net::Ipv4Addr> = None;
 
     loop {
         Timer::after(Duration::from_secs(1)).await;
@@ -476,35 +483,55 @@ async fn device(
                 None => println!("[tz] lookup failed (attempt {tz_tries}/3)"),
             }
         }
-        // DNS-resolve the host unless it's an IP literal (prod servers are
-        // names; the LAN dev server is an address).
+        // Resolve the host: IP literal (the LAN dev server) parses directly;
+        // otherwise prefer the cached last-good IP and only hit DNS when
+        // there isn't one (first pass, or the cache was invalidated below).
         let ip: core::net::Ipv4Addr = match server_host.parse() {
             Ok(ip) => ip,
-            Err(_) => {
-                match stack.dns_query(&server_host, embassy_net::dns::DnsQueryType::A).await {
-                    Ok(addrs) if !addrs.is_empty() => match addrs[0] {
-                        embassy_net::IpAddress::Ipv4(v4) => v4,
-                    },
-                    _ => {
-                        println!("[ws] dns failed for {server_host}; retry");
-                        Timer::after(Duration::from_secs(5)).await;
-                        continue;
+            Err(_) => match cached_ip {
+                Some(ip) => ip,
+                None => {
+                    match stack.dns_query(&server_host, embassy_net::dns::DnsQueryType::A).await {
+                        Ok(addrs) if !addrs.is_empty() => match addrs[0] {
+                            embassy_net::IpAddress::Ipv4(v4) => v4,
+                        },
+                        _ => {
+                            println!("[ws] dns failed for {server_host}; retry");
+                            Timer::after(Duration::from_secs(5)).await;
+                            continue;
+                        }
                     }
                 }
-            }
+            },
         };
         let mut sock = TcpSocket::new(stack, &mut rx[..], &mut tx[..]);
-        sock.set_timeout(Some(Duration::from_secs(45)));
+        // 25s = one server ping interval (20s, spawn_keepalive in
+        // crates/server/src/ws.rs) + 5s margin. The Railway TCP proxy recycles
+        // this connection every 5-15 min WITHOUT telling the board: the server
+        // sees the error instantly, the board sees only silence and sits out
+        // this whole timeout before reconnecting. A healthy link is never
+        // silent longer than 20s (the board pongs, the server pings), so one
+        // missed ping window + margin is proof the socket is dead. At the old
+        // 45s the visible outage ran ~45-70s; this cuts detection to ~25-30s.
+        sock.set_timeout(Some(Duration::from_secs(25)));
 
         println!("[ws] connecting to {server_host} ({ip}:{server_port})");
         if sock.connect((ip, server_port)).await.is_err() {
+            // Never retry a possibly-stale address forever: dropping the
+            // cache makes the next pass re-resolve, which is what recovers
+            // when a Railway redeploy hands the server a new IP.
             println!("[ws] tcp connect failed; retry");
+            cached_ip = None;
             Timer::after(Duration::from_secs(2)).await;
             continue;
         }
         let host = format!("{server_host}:{server_port}");
         if ws::handshake(&mut sock, &host).await.is_err() {
+            // TCP came up but the endpoint isn't (or is no longer) our
+            // server — a recycled IP can accept connections yet fail here,
+            // so this must invalidate the cache too or we'd loop on it.
             println!("[ws] handshake failed; retry");
+            cached_ip = None;
             Timer::after(Duration::from_secs(2)).await;
             continue;
         }
@@ -558,6 +585,13 @@ async fn device(
                         println!("[ws] authed (pair code {pair_code})");
                     }
                     Ok(ServerMsg::AuthOk) => {
+                        // Only OUR server can complete the signed auth, so the
+                        // IP cache is written here — not after the handshake,
+                        // which any generic websocket listener passes. A
+                        // recycled IP that 101s but never auths would
+                        // otherwise trap every future pass on the stale
+                        // address with DNS never re-queried.
+                        cached_ip = Some(ip);
                         // First contact with the server: if this boot is a fresh
                         // OTA image, this is the proof it works — persist Valid
                         // so the revert watchdog stands down.

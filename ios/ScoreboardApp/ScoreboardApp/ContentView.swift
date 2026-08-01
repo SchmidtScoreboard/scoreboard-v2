@@ -103,6 +103,12 @@ final class ListenerAdapter: ClientListener {
 struct BoardInfo {
     var name: String?
     var online = false
+    /// When `online` last went false (nil while online). Brief board dropouts
+    /// are routine (the TCP proxy silently recycles idle sockets and the board
+    /// takes tens of seconds to notice), so the dashboard shows a calm
+    /// "Connecting…" spinner until the board has been offline this long
+    /// CONTINUOUSLY — only then does it claim the board is actually offline.
+    var offlineSince: Date?
     var nowShowing: [UiGame] = []
     var brightness: Double = 80
     var power = true
@@ -858,6 +864,14 @@ final class BoardViewModel: ObservableObject {
         if selectedBoardId == nil { selectedBoardId = boardId }
         mutate(boardId) {
             $0.nowShowing = nowShowing
+            // Start the offline clock only on the true→false EDGE (or the very
+            // first offline report), so repeated offline pushes don't keep
+            // resetting the 30s "Connecting…" grace the dashboard shows.
+            if online {
+                $0.offlineSince = nil
+            } else if $0.offlineSince == nil {
+                $0.offlineSince = Date()
+            }
             $0.online = online
             // A firmware update takes the board offline (it reboots to flash);
             // coming back online afterwards ends the "Updating…" hint — the
@@ -1196,6 +1210,8 @@ struct SetupView: View {
             Text("Add your scoreboard")
                 .font(.title2).bold()
 
+            // Customers never repoint the server; only dev builds get the picker.
+            #if DEBUG
             // Which server this board will live on — different boards can use
             // different servers (dev board on the Mac, living room on prod).
             HStack(spacing: 8) {
@@ -1223,6 +1239,7 @@ struct SetupView: View {
                     .font(.callout.monospaced())
                     .padding(.horizontal, 40)
             }
+            #endif
 
             // Step 1 — get a new board onto Wi-Fi over Bluetooth.
             VStack(spacing: 8) {
@@ -1333,6 +1350,45 @@ func groupByLeague(_ games: [UiGame]) -> [(String, [UiGame])] {
         .map { ($0.key, $0.value) }
 }
 
+/// Layout constants shared by GameCard, GameFrame, and the "Now showing"
+/// placeholder cards. The placeholders promise EXACTLY a live card's height
+/// (the section must not jump between states), so every dimension that feeds
+/// that height lives here — a tweak to the card automatically retunes the
+/// placeholders instead of silently un-matching them.
+enum GameCardMetrics {
+    /// Fixed card width (the carousel shows a peek of the next card).
+    static let cardWidth: CGFloat = 212
+    /// Padding between the card edge and its content.
+    static let padding: CGFloat = 10
+    /// Vertical gap between the card's three rows (title / frame / footer).
+    static let rowSpacing: CGFloat = 8
+    /// The upscaled 64×32 LED panel (3px per LED, 2:1 aspect).
+    static let frameWidth: CGFloat = 192
+    static let frameHeight: CGFloat = 96
+    /// Vertical padding inside a footer capsule button.
+    static let footerPadding: CGFloat = 6
+    /// Card corner radius, matching the Form's inset-grouped sections.
+    static let cornerRadius: CGFloat = 26
+}
+
+extension View {
+    /// The LED-matrix treatment every 64×32 render gets — live game frames,
+    /// spoiler previews, and troubleshooting guide screens all pass through
+    /// here so a board screen looks like the same physical panel everywhere:
+    /// crisp upscale, per-LED grid, black panel, and a hairline edge so the
+    /// panel reads as its own bounded rectangle inside a dark card.
+    func ledPanel(
+        width: CGFloat = GameCardMetrics.frameWidth,
+        height: CGFloat = GameCardMetrics.frameHeight
+    ) -> some View {
+        self
+            .frame(width: width, height: height)
+            .overlay { PixelGridOverlay() }
+            .background(.black)
+            .overlay(Rectangle().strokeBorder(.white.opacity(0.10), lineWidth: 1))
+    }
+}
+
 /// A card showing a game's ACTUAL rendered 64×32 frame, fetched from the server's
 /// /render endpoint and scaled up crisp (nearest-neighbor).
 /// Just the rendered 64×32 frame, upscaled crisp with the LED pixel grid. Square
@@ -1366,13 +1422,7 @@ struct GameFrame: View {
                 FetchedFrameImage(url: url)
             }
         }
-        .frame(width: 192, height: 96)
-        .overlay { PixelGridOverlay() }
-        .background(.black)
-        // A hairline edge so the LED panel reads as its own bounded rectangle — without
-        // it, the black frame melts into a dark card and centered text (e.g. the period
-        // ordinal along the bottom) looks off-center against the wider card.
-        .overlay(Rectangle().strokeBorder(.white.opacity(0.10), lineWidth: 1))
+        .ledPanel()
     }
 }
 
@@ -1384,6 +1434,12 @@ struct GameFrame: View {
 /// when the card scrolls back in, so a cancelled load heals itself.
 struct FetchedFrameImage: View {
     let url: URL?
+    /// Failure look. Game frames keep the orange badge (a failed fetch must
+    /// LOOK different from a black frame, or network bugs masquerade as render
+    /// bugs); guide screens degrade to a plain gray panel instead — they're
+    /// consulted while the network is ALREADY suspect, and may 404 on an older
+    /// server, so an alarming badge there is noise, not signal.
+    var grayFailure = false
     @State private var image: UIImage?
     @State private var failed = false
 
@@ -1393,11 +1449,13 @@ struct FetchedFrameImage: View {
                 Image(uiImage: image)
                     .resizable().interpolation(.none).aspectRatio(2, contentMode: .fit)
             } else if failed {
-                // A failed fetch must LOOK different from a black frame, or
-                // network bugs masquerade as render bugs.
-                Rectangle().fill(.black).overlay {
-                    Image(systemName: "wifi.exclamationmark")
-                        .foregroundStyle(.orange)
+                if grayFailure {
+                    Rectangle().fill(Color(.systemGray4))
+                } else {
+                    Rectangle().fill(.black).overlay {
+                        Image(systemName: "wifi.exclamationmark")
+                            .foregroundStyle(.orange)
+                    }
                 }
             } else {
                 Rectangle().fill(.black)
@@ -1446,7 +1504,7 @@ struct GameCard<Footer: View>: View {
     @ViewBuilder var footer: Footer
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: GameCardMetrics.rowSpacing) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(title)
                     .font(.subheadline.weight(.semibold))
@@ -1485,17 +1543,17 @@ struct GameCard<Footer: View>: View {
             GameFrame(game: game, httpBase: httpBase, frame: frame, refresh: refresh, board: board)
             footer
         }
-        .padding(10)
-        .frame(width: 212)
+        .padding(GameCardMetrics.padding)
+        .frame(width: GameCardMetrics.cardWidth)
         // Adaptive card chrome (white in light mode, dark in dark) matching the
         // Form's section cards — only the LED panel stays black, like the real
         // hardware. Radius matches the inset-grouped sections.
         .background(
-            RoundedRectangle(cornerRadius: 26)
+            RoundedRectangle(cornerRadius: GameCardMetrics.cornerRadius)
                 .fill(highlight == .pinned ? AnyShapeStyle(Color.orange.opacity(0.14)) : AnyShapeStyle(Color(.secondarySystemGroupedBackground)))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 26)
+            RoundedRectangle(cornerRadius: GameCardMetrics.cornerRadius)
                 .strokeBorder(
                     highlight == .pinned
                         ? AnyShapeStyle(Color.orange)
@@ -1544,17 +1602,189 @@ struct PixelGridOverlay: View {
     }
 }
 
+/// A "Now showing" stand-in (connecting / offline / nothing live) with EXACTLY
+/// a live GameCard's height, so the section never jumps as the board flaps or
+/// games start. Rather than hard-coding a height (which Dynamic Type would
+/// break), it hides a skeleton of GameCard's three rows — title, LED frame,
+/// footer capsule — built from the same GameCardMetrics, and centers the real
+/// content on top.
+struct NowShowingPlaceholderCard<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: GameCardMetrics.rowSpacing) {
+            // Title row: same font as GameCard's title (badges are smaller).
+            Text(verbatim: " ").font(.subheadline.weight(.semibold))
+            Color.clear
+                .frame(width: GameCardMetrics.frameWidth, height: GameCardMetrics.frameHeight)
+            // Footer row: same font + capsule padding as `cardButton`.
+            Text(verbatim: " ")
+                .font(.caption.weight(.semibold))
+                .padding(.vertical, GameCardMetrics.footerPadding)
+        }
+        .padding(GameCardMetrics.padding)
+        .hidden()
+        .frame(maxWidth: .infinity)
+        .overlay { content }
+        .background(
+            RoundedRectangle(cornerRadius: GameCardMetrics.cornerRadius)
+                .fill(Color(.secondarySystemGroupedBackground))
+        )
+    }
+}
+
+/// The dashboard's not-online stand-in. Brief dropouts are routine (the TCP
+/// proxy silently recycles idle board sockets and the board takes tens of
+/// seconds to notice and reconnect), so the first 30 continuous offline
+/// seconds show a calm "Connecting…" spinner; only after that does the card
+/// claim the board is actually offline. Both states carry an ⓘ opening the
+/// troubleshooting sheet.
+struct OfflineStatusCard: View {
+    /// When the board's `online` went false (BoardInfo.offlineSince); nil while
+    /// the board has never reported at all — that's genuinely "connecting".
+    let offlineSince: Date?
+    let onInfo: () -> Void
+    @State private var showOffline = false
+
+    private static let grace: TimeInterval = 30
+
+    var body: some View {
+        NowShowingPlaceholderCard {
+            if showOffline {
+                VStack(spacing: 6) {
+                    Image(systemName: "antenna.radiowaves.left.and.right.slash")
+                        .font(.title3)
+                        .foregroundStyle(.orange)
+                    Text("Scoreboard is offline")
+                        .font(.subheadline.weight(.semibold))
+                    Text("It may be unplugged or off Wi-Fi. It reconnects on its own; changes you make here apply when it's back.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(.horizontal, 24)
+            } else {
+                VStack(spacing: 10) {
+                    ProgressView()
+                    Text("Connecting to scoreboard…")
+                        .font(.subheadline.weight(.semibold))
+                }
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            Button(action: onInfo) {
+                Image(systemName: "info.circle")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .padding(12)
+            .accessibilityLabel("Scoreboard troubleshooting")
+        }
+        // Re-arms whenever the offline edge moves (board flapped, board
+        // switched), so only 30 CONTINUOUS seconds ever flip the card.
+        .task(id: offlineSince) {
+            guard let since = offlineSince else {
+                showOffline = false
+                return
+            }
+            let remaining = Self.grace - Date().timeIntervalSince(since)
+            if remaining > 0 {
+                showOffline = false
+                try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+            }
+            showOffline = true
+        }
+    }
+}
+
+/// The offline cards' ⓘ sheet: every screen the physical board can be stuck
+/// on, drawn by the REAL board renderer (GET /guide/{name}.png, same 64×32
+/// pipeline as live frames) so the user can match their panel by sight, with
+/// what each screen means and what to do about it.
+struct TroubleshootingSheet: View {
+    let httpBase: String
+    @Environment(\.dismiss) private var dismiss
+
+    private struct Guide: Identifiable {
+        let slug: String // GET /guide/{slug}.png
+        let title: String
+        let advice: String
+        var id: String { slug }
+    }
+
+    private static let guides: [Guide] = [
+        Guide(
+            slug: "joining-wifi",
+            title: "Joining Wi-Fi",
+            advice: "The board can't reach your Wi-Fi: the router may be down, the password may have changed, or the board moved to a new network. If it persists, hold the knob for about 10 seconds to factory reset the board, then set it up again."
+        ),
+        Guide(
+            slug: "finding-server",
+            title: "Finding the server",
+            advice: "Wi-Fi is fine but the internet or the scoreboard service isn't reachable. Check your internet connection — the service may also be briefly restarting. The board reconnects on its own."
+        ),
+        Guide(
+            slug: "setup",
+            title: "Waiting for setup",
+            advice: "The board is waiting to be set up over Bluetooth: open the app and tap Add Scoreboard."
+        ),
+        Guide(
+            slug: "pair-code",
+            title: "Ready to pair",
+            advice: "The board is on Wi-Fi and ready to join the app: tap Add Scoreboard and type in the code shown on the panel."
+        ),
+    ]
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    Text("Match what the scoreboard's panel shows right now:")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    ForEach(Self.guides) { g in
+                        guideRow(g)
+                    }
+                    Text("Whatever the panel shows, power-cycling is a safe first step: unplug the scoreboard and plug it back in. It always recovers on its own once your network is back.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(20)
+            }
+            .navigationTitle("Troubleshooting")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func guideRow(_ g: Guide) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // Gray failure: the guide endpoint may not exist yet on an older
+            // server, and this sheet is read precisely when the network is
+            // suspect — degrade quietly instead of alarming.
+            FetchedFrameImage(url: URL(string: "\(httpBase)/guide/\(g.slug).png"), grayFailure: true)
+                .ledPanel()
+                .frame(maxWidth: .infinity)
+            Text(g.title)
+                .font(.subheadline.weight(.semibold))
+            Text(g.advice)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
 struct DashboardView: View {
     @ObservedObject var model: BoardViewModel
     @State private var showSettings = false
     @State private var showAddBoard = false
-    @State private var showRename = false
-    @State private var renameText = ""
-    @State private var showRemoveConfirm = false
-    /// Import tapped with nothing usable on the clipboard.
-    @State private var showImportEmptyAlert = false
-    /// Which settings-row explainer card is up (nil = none).
-    @State private var settingsInfo: SettingsInfoTopic?
+    /// The offline/connecting cards' ⓘ guide to the board's own screens.
+    @State private var showTroubleshooting = false
     /// Pushes the All-games screen (the "View all" button).
     @State private var showAllGamesScreen = false
     /// League being edited (per-card Edit button).
@@ -1609,26 +1839,11 @@ struct DashboardView: View {
             .sheet(isPresented: $showSettings) { SettingsView(model: model) }
             .sheet(isPresented: $showAddBoard) { AddBoardSheet(model: model) }
             .sheet(isPresented: $showLeaguePicker) { LeaguePickerSheet(model: model) }
+            .sheet(isPresented: $showTroubleshooting) {
+                TroubleshootingSheet(httpBase: model.httpBase)
+            }
             .sheet(item: $boardServerEdit) { edit in
                 SettingsView(model: model, boardId: edit.id)
-            }
-            .alert("Name this scoreboard", isPresented: $showRename) {
-                TextField("Name", text: $renameText)
-                Button("Save") { model.rename(renameText) }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("Shown in your scoreboard list. Saved to the server.")
-            }
-            // Anchored to the Group so `boardMenu`'s Remove works from BOTH
-            // branches — a board pinned to a dead server only ever shows the
-            // splash, and it still has to be removable from there. Settings
-            // carries its own Remove row with its own confirm.
-            .confirmationDialog("Remove this scoreboard?", isPresented: $showRemoveConfirm, titleVisibility: .visible) {
-                Button("Remove", role: .destructive) {
-                    if let id = model.selectedBoardId { model.unpair(id) }
-                }
-            } message: {
-                Text("This phone stops controlling it and the pairing is revoked on the server — add it again anytime with a new code.")
             }
             .cardSheets(cardSheets)
         }
@@ -1649,9 +1864,8 @@ struct DashboardView: View {
             ForEach(Array(model.leaguePrefs.enumerated()), id: \.element.id) { index, pref in
                 leagueCard(pref, showsAreaHeader: index == 0)
             }
-            settingsSection
-            spoilerSection
-            transferSection
+            // Board settings, spoilers, and transfer live in the Settings
+            // sheet (gear) — the dashboard is for what's ON the board now.
         }
         // One uniform gap between top-level sections. Individual sections that
         // belong to the section above them (the league cards under the
@@ -1659,79 +1873,7 @@ struct DashboardView: View {
         .listSectionSpacing(20)
     }
 
-    /// Board-level settings, tucked at the bottom: off behavior and sleep
-    /// duration. The pickers get little info buttons — what "off" and "sleep"
-    /// actually do on the physical board isn't guessable from a one-word menu.
-    private var settingsSection: some View {
-        Section("Settings") {
-            HStack(spacing: 6) {
-                Text("When off")
-                infoButton(.whenOff)
-                Spacer()
-                Picker("When off", selection: Binding(
-                    get: { model.current.offState },
-                    set: { model.setOffState($0) }
-                )) {
-                    Text("Clock").tag(UiOffState.clock)
-                    Text("Blank").tag(UiOffState.blank)
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-            }
-
-            HStack(spacing: 6) {
-                Text("Sleep duration")
-                infoButton(.sleep)
-                Spacer()
-                Picker("Sleep duration", selection: Binding(
-                    get: { model.current.sleepHours },
-                    set: { model.setSleepHours($0) }
-                )) {
-                    ForEach([UInt32(1), 2, 4, 8, 12, 24, 48], id: \.self) { h in
-                        Text(h == 1 ? "1 hour" : "\(h) hours").tag(h)
-                    }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-            }
-
-            HStack(spacing: 6) {
-                Text("Time per event")
-                infoButton(.dwell)
-                Spacer()
-                Picker("Time per event", selection: Binding(
-                    get: { model.current.dwellSecs },
-                    set: { model.setDwell($0) }
-                )) {
-                    ForEach([UInt32(5), 7, 10, 15, 20, 30], id: \.self) { s in
-                        Text("\(s) seconds").tag(s)
-                    }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-            }
-
-        }
-        .sheet(item: $settingsInfo) { topic in
-            SettingsInfoCard(topic: topic)
-        }
-    }
-
-    /// The little ⓘ next to a settings row. `.borderless` so it hit-tests as its
-    /// own button instead of swallowing the whole Form row.
-    private func infoButton(_ topic: SettingsInfoTopic) -> some View {
-        Button {
-            settingsInfo = topic
-        } label: {
-            Image(systemName: "info.circle")
-                .foregroundStyle(.secondary)
-                .font(.subheadline)
-        }
-        .buttonStyle(.borderless)
-        .accessibilityLabel("About this setting")
-    }
-
-    /// Title-bar board switcher: current board name + menu to switch / rename / add.
+    /// Title-bar board switcher: current board name + menu to switch / add.
     private var boardMenu: some View {
         Menu {
             if model.boardIds.count > 1 {
@@ -1744,24 +1886,12 @@ struct DashboardView: View {
                     }
                 }
             }
-            Button {
-                renameText = model.currentName
-                showRename = true
-            } label: { Label("Rename", systemImage: "pencil") }
-            Button { showAddBoard = true } label: { Label("Add a scoreboard", systemImage: "plus") }
-            // These two live in the TOOLBAR, which renders in both the dashboard
-            // and the connecting-splash branch. A board pinned to a dead URL
-            // shows only the splash, so this is its only repair — and its only
-            // way out.
-            if let id = model.selectedBoardId {
-                Divider()
-                Button {
-                    boardServerEdit = BoardServerEdit(id: id)
-                } label: { Label("Change this board's server", systemImage: "network") }
-                Button(role: .destructive) {
-                    showRemoveConfirm = true
-                } label: { Label("Remove this scoreboard", systemImage: "trash") }
-            }
+            // Everything else about a board (rename, remove, server) lives in
+            // the Settings sheet. The gear rides the same toolbar as this menu
+            // — rendered by BOTH dashboard branches — so a board whose server
+            // is dead (splash-only) can still be renamed, repointed (DEBUG),
+            // or removed from there.
+            Button { showAddBoard = true } label: { Label("Add scoreboard", systemImage: "plus") }
         } label: {
             HStack(spacing: 6) {
                 Circle().fill(statusColor).frame(width: 8, height: 8)
@@ -1811,7 +1941,7 @@ struct DashboardView: View {
             .fixedSize(horizontal: false, vertical: true)
             .foregroundStyle(tint)
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 6)
+            .padding(.vertical, GameCardMetrics.footerPadding)
             // Adaptive fill: subtle in both light and dark card chrome.
             .background(Capsule().fill(.primary.opacity(0.06)))
         }
@@ -1823,33 +1953,29 @@ struct DashboardView: View {
     @ViewBuilder private var collapsedCarousel: some View {
         if !model.online {
             // The server is reachable but this board isn't — explain it inline
-            // (the rest of the dashboard still works for configuring). The section
-            // margins are zeroed for the carousel, so this row draws its own card.
-            HStack(spacing: 12) {
-                Image(systemName: "antenna.radiowaves.left.and.right.slash")
-                    .font(.title3)
-                    .foregroundStyle(.orange)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Scoreboard is offline")
-                        .font(.subheadline.weight(.semibold))
-                    Text("It may be unplugged or off Wi-Fi. It reconnects on its own; changes you make here apply when it's back.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 0)
+            // (the rest of the dashboard still works for configuring). The
+            // card shows "Connecting…" for the first 30 offline seconds
+            // (dropouts are routine) before claiming the board is offline;
+            // its ⓘ opens the guide to the board's own screens. The section
+            // margins are zeroed for the carousel, so this row draws its own
+            // card, at exactly a GameCard's height.
+            OfflineStatusCard(offlineSince: model.current.offlineSince) {
+                showTroubleshooting = true
             }
-            .padding(14)
-            .background(RoundedRectangle(cornerRadius: 26).fill(Color(.secondarySystemGroupedBackground)))
             .padding(.horizontal, 20)
             .listRowBackground(Color.clear)
-            .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+            .listRowInsets(EdgeInsets())
             .listRowSeparator(.hidden)
         } else if model.nowShowing.isEmpty {
-            Text("Nothing live right now")
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 20)
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
+            NowShowingPlaceholderCard {
+                Text("Nothing live right now")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 20)
+            .listRowBackground(Color.clear)
+            .listRowInsets(EdgeInsets())
+            .listRowSeparator(.hidden)
         } else {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(alignment: .top, spacing: 12) {
@@ -1946,119 +2072,6 @@ struct DashboardView: View {
                 }
             } else {
                 Text("Asleep until turned back on.")
-            }
-        }
-    }
-
-    /// Export/import the board's durable preferences as a portable blob — the
-    /// way to clone a setup onto a second scoreboard, even one that lives on a
-    /// different server. Export presents a share/copy sheet; import reads the
-    /// clipboard and reports the server's verdict.
-    private var transferSection: some View {
-        Section {
-            // Disabled offline: the request would queue in the client's outbox
-            // and fire whenever the socket returns — a share sheet popping up
-            // minutes later, over whatever the user is doing by then.
-            Button("Export settings") {
-                model.exportSettings()
-            }
-            .disabled(!model.connected)
-            Button("Import settings") {
-                let text = UIPasteboard.general.string?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                if text.isEmpty {
-                    showImportEmptyAlert = true
-                } else {
-                    model.importSettings(text)
-                }
-            }
-            .disabled(!model.connected)
-        } header: {
-            Text("Transfer settings")
-        } footer: {
-            Text(model.connected
-                ? "Exports league preferences, spoiler rules, brightness, and timing for another scoreboard. Pinned or manually added games and this board's name don't transfer."
-                : "Unavailable while disconnected from this scoreboard's server.")
-        }
-        .sheet(item: $model.settingsExport) { export in
-            SettingsExportSheet(json: export.json)
-        }
-        .alert("Nothing to import", isPresented: $showImportEmptyAlert) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text("Copy an export from another scoreboard first (Export settings → Copy), then come back and tap Import settings.")
-        }
-        .alert(
-            model.importOutcome?.error == nil ? "Settings imported" : "Import failed",
-            isPresented: Binding(
-                get: { model.importOutcome != nil },
-                set: { if !$0 { model.importOutcome = nil } }
-            ),
-            presenting: model.importOutcome
-        ) { _ in
-            Button("OK", role: .cancel) {}
-        } message: { outcome in
-            Text(outcome.error ?? "This scoreboard now uses the transferred settings.")
-        }
-    }
-
-    /// Spoiler settings, drawn with the receipts: the two display modes show
-    /// the SAME example game rendered exactly as the board would show it.
-    private var spoilerSection: some View {
-        Section {
-            Toggle("Hide all spoilers", isOn: Binding(
-                get: { model.current.spoilerAll },
-                set: { model.setSpoilerAll($0) }
-            ))
-            Text("When spoilers are hidden…")
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .listRowSeparator(.hidden, edges: .bottom)
-            spoilerOptionRow(
-                "Hide results",
-                "Matchup and period — no scores.",
-                variant: "normal",
-                selected: !model.current.strictSpoilers
-            ) {
-                model.setStrictSpoilers(false)
-            }
-            spoilerOptionRow(
-                "Hide everything",
-                "Matchup only; FINAL when done.",
-                variant: "strict",
-                selected: model.current.strictSpoilers
-            ) {
-                model.setStrictSpoilers(true)
-            }
-        } header: {
-            Text("Spoilers")
-        }
-    }
-
-    private func spoilerOptionRow(
-        _ title: String,
-        _ subtitle: String,
-        variant: String,
-        selected: Bool,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            HStack(spacing: 12) {
-                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title).foregroundStyle(.primary)
-                    Text(subtitle).font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 8)
-                // The example frame, rendered by the server's real pipeline.
-                AsyncImage(url: URL(string: "\(model.httpBase)/sample/\(variant).png")) { image in
-                    image.resizable().interpolation(.none)
-                } placeholder: {
-                    Color.black
-                }
-                .frame(width: 96, height: 48)
-                .overlay(Rectangle().strokeBorder(.primary.opacity(0.15)))
             }
         }
     }
@@ -3111,7 +3124,7 @@ struct ConnectingSplash: View {
             // A customer stuck on this screen has a network problem, not a
             // server-address problem — the picker (and this shortcut to it)
             // is a dev-build tool. Remove-this-scoreboard stays reachable
-            // from the toolbar's board menu.
+            // through the toolbar gear's Settings sheet.
             #if DEBUG
             Button("Server Settings", action: openSettings)
                 .buttonStyle(.bordered)
@@ -3869,9 +3882,15 @@ struct SettingsView: View {
         var id: String { "\(installable)-\(version)" }
     }
     @State private var notesTarget: NotesTarget?
-    /// Settings' OWN remove confirm — independent of the dashboard toolbar's,
-    /// which stays anchored outside any sheet so it survives the splash.
+    /// Settings' own remove confirm.
     @State private var showRemoveConfirm = false
+    /// The rename alert (the About section's Name row).
+    @State private var showRename = false
+    @State private var renameText = ""
+    /// Which settings-row explainer card is up (nil = none).
+    @State private var settingsInfo: SettingsInfoTopic?
+    /// Import tapped with nothing usable on the clipboard.
+    @State private var showImportEmptyAlert = false
     #if DEBUG
     @State private var preset: ServerPreset = .localhost
     @State private var customUrl = ""
@@ -3898,6 +3917,9 @@ struct SettingsView: View {
                 // pairing screen, where no board may be selected — the
                 // board-scoped sections would just be empty rows there.
                 if model.selectedBoardId != nil {
+                    settingsSection
+                    spoilerSection
+                    transferSection
                     aboutSection
                     #if DEBUG
                     firmwareDeveloperSection
@@ -3981,6 +4003,187 @@ struct SettingsView: View {
     }
     #endif
 
+    /// Board-level settings: off behavior, sleep duration, and rotation pace.
+    /// The pickers get little info buttons — what "off" and "sleep" actually
+    /// do on the physical board isn't guessable from a one-word menu.
+    private var settingsSection: some View {
+        Section("Settings") {
+            HStack(spacing: 6) {
+                Text("When off")
+                infoButton(.whenOff)
+                Spacer()
+                Picker("When off", selection: Binding(
+                    get: { model.current.offState },
+                    set: { model.setOffState($0) }
+                )) {
+                    Text("Clock").tag(UiOffState.clock)
+                    Text("Blank").tag(UiOffState.blank)
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+            }
+
+            HStack(spacing: 6) {
+                Text("Sleep duration")
+                infoButton(.sleep)
+                Spacer()
+                Picker("Sleep duration", selection: Binding(
+                    get: { model.current.sleepHours },
+                    set: { model.setSleepHours($0) }
+                )) {
+                    ForEach([UInt32(1), 2, 4, 8, 12, 24, 48], id: \.self) { h in
+                        Text(h == 1 ? "1 hour" : "\(h) hours").tag(h)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+            }
+
+            HStack(spacing: 6) {
+                Text("Time per event")
+                infoButton(.dwell)
+                Spacer()
+                Picker("Time per event", selection: Binding(
+                    get: { model.current.dwellSecs },
+                    set: { model.setDwell($0) }
+                )) {
+                    ForEach([UInt32(5), 7, 10, 15, 20, 30], id: \.self) { s in
+                        Text("\(s) seconds").tag(s)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+            }
+
+        }
+        .sheet(item: $settingsInfo) { topic in
+            SettingsInfoCard(topic: topic)
+        }
+    }
+
+    /// The little ⓘ next to a settings row. `.borderless` so it hit-tests as its
+    /// own button instead of swallowing the whole Form row.
+    private func infoButton(_ topic: SettingsInfoTopic) -> some View {
+        Button {
+            settingsInfo = topic
+        } label: {
+            Image(systemName: "info.circle")
+                .foregroundStyle(.secondary)
+                .font(.subheadline)
+        }
+        .buttonStyle(.borderless)
+        .accessibilityLabel("About this setting")
+    }
+
+    /// Spoiler settings, drawn with the receipts: the two display modes show
+    /// the SAME example game rendered exactly as the board would show it.
+    private var spoilerSection: some View {
+        Section {
+            Toggle("Hide all spoilers", isOn: Binding(
+                get: { model.current.spoilerAll },
+                set: { model.setSpoilerAll($0) }
+            ))
+            Text("When spoilers are hidden…")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .listRowSeparator(.hidden, edges: .bottom)
+            spoilerOptionRow(
+                "Hide results",
+                "Matchup and period — no scores.",
+                variant: "normal",
+                selected: !model.current.strictSpoilers
+            ) {
+                model.setStrictSpoilers(false)
+            }
+            spoilerOptionRow(
+                "Hide everything",
+                "Matchup only; FINAL when done.",
+                variant: "strict",
+                selected: model.current.strictSpoilers
+            ) {
+                model.setStrictSpoilers(true)
+            }
+        } header: {
+            Text("Spoilers")
+        }
+    }
+
+    private func spoilerOptionRow(
+        _ title: String,
+        _ subtitle: String,
+        variant: String,
+        selected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).foregroundStyle(.primary)
+                    Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                // The example frame, rendered by the server's real pipeline,
+                // wearing the same LED treatment as a live frame (half size).
+                FetchedFrameImage(url: URL(string: "\(model.httpBase)/sample/\(variant).png"))
+                    .ledPanel(width: 96, height: 48)
+            }
+        }
+    }
+
+    /// Export/import the board's durable preferences as a portable blob — the
+    /// way to clone a setup onto a second scoreboard, even one that lives on a
+    /// different server. Export presents a share/copy sheet; import reads the
+    /// clipboard and reports the server's verdict.
+    private var transferSection: some View {
+        Section {
+            // Disabled offline: the request would queue in the client's outbox
+            // and fire whenever the socket returns — a share sheet popping up
+            // minutes later, over whatever the user is doing by then.
+            Button("Export settings") {
+                model.exportSettings()
+            }
+            .disabled(!model.connected)
+            Button("Import settings") {
+                let text = UIPasteboard.general.string?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if text.isEmpty {
+                    showImportEmptyAlert = true
+                } else {
+                    model.importSettings(text)
+                }
+            }
+            .disabled(!model.connected)
+        } header: {
+            Text("Transfer settings")
+        } footer: {
+            Text(model.connected
+                ? "Exports league preferences, spoiler rules, brightness, and timing for another scoreboard. Pinned or manually added games and this board's name don't transfer."
+                : "Unavailable while disconnected from this scoreboard's server.")
+        }
+        .sheet(item: $model.settingsExport) { export in
+            SettingsExportSheet(json: export.json)
+        }
+        .alert("Nothing to import", isPresented: $showImportEmptyAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Copy an export from another scoreboard first (Export settings → Copy), then come back and tap Import settings.")
+        }
+        .alert(
+            model.importOutcome?.error == nil ? "Settings imported" : "Import failed",
+            isPresented: Binding(
+                get: { model.importOutcome != nil },
+                set: { if !$0 { model.importOutcome = nil } }
+            ),
+            presenting: model.importOutcome
+        ) { _ in
+            Button("OK", role: .cancel) {}
+        } message: { outcome in
+            Text(outcome.error ?? "This scoreboard now uses the transferred settings.")
+        }
+    }
+
     /// Versions of the two halves the user can see: the board's firmware (as it
     /// last reported) and this app. Tapping the firmware row shows the running
     /// version's patch notes ("what did my last update bring"). When the server
@@ -3991,6 +4194,27 @@ struct SettingsView: View {
     /// no progress bar.
     private var aboutSection: some View {
         Section {
+            // Rename, moved here from the old toolbar menu — a board fact row
+            // like the ones below it, reusing the same rename flow/alert.
+            Button {
+                renameText = model.currentName
+                showRename = true
+            } label: {
+                HStack {
+                    Text("Name")
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    Text(model.currentName)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .alert("Name this scoreboard", isPresented: $showRename) {
+                TextField("Name", text: $renameText)
+                Button("Save") { model.rename(renameText) }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Shown in your scoreboard list. Saved to the server.")
+            }
             Button {
                 if let v = model.current.firmwareVersion {
                     notesTarget = NotesTarget(version: v, installable: false)
@@ -4162,9 +4386,10 @@ struct SettingsView: View {
     }
     #endif
 
-    /// Removal where people expect it — the bottom of Settings. The dashboard
-    /// toolbar keeps its own independent copy because a board pinned to a dead
-    /// server never renders the dashboard (or this sheet's opener) at all.
+    /// Removal where people expect it — the bottom of Settings. This is the
+    /// ONLY remove path now, so its opener (the toolbar gear) must render in
+    /// both dashboard branches: a board pinned to a dead server only ever
+    /// shows the connecting splash, and it still has to be removable.
     private var removeSection: some View {
         Section {
             Button("Remove this scoreboard", role: .destructive) {

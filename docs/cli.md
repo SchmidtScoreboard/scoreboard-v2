@@ -39,6 +39,13 @@ All curl-able; the app uses the same ones.
   Omitting `board` serves the raw data. Unknown id → plain-text 404.
 - `GET /sample/{off|normal|strict}.png` — the fixed sample game rendered at
   each spoiler level (drives the app's spoiler-settings preview rows).
+- `GET /guide/{joining-wifi|finding-server|setup|pair-code}.png` — the board's
+  firmware-local screens (connect progress on either leg, BLE setup, the
+  pairing screen with a fake `000000` code), rendered by the same board-core
+  code the device runs — the app's troubleshooting sheet fetches these so its
+  "if your board shows THIS" images can never drift from the panel. Served
+  with `Cache-Control: public, max-age=86400` (they change only with
+  releases). Unknown name → plain-text 404.
 - `GET /firmware/{stable|beta|dev}/latest` — that channel's signed
   `firmware.json` (version, size, sha256, sig). Plain-text 404 for an unknown
   channel or one with no dist hosted.

@@ -1,0 +1,2 @@
+- Much faster recovery from brief network drops: the board notices a dead connection in ~25 seconds instead of ~45, and reconnects without re-looking-up the server address.
+- Most short outages now pass without the app ever showing "offline."

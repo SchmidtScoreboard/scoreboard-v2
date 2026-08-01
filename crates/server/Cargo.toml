@@ -32,7 +32,9 @@ tracing-subscriber = "0.3"
 rand = "0.8"
 hex = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
+# The /guide routes drive a real board-core Board to render the device's own
+# screens (promoted from dev-dependencies, where the wire tests already used it).
+board-core = { path = "../board-core" }
 
 [dev-dependencies]
-board-core = { path = "../board-core" }
 tokio-tungstenite = "0.21"

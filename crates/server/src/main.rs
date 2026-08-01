@@ -700,6 +700,9 @@ async fn main() {
         .route("/render/:id", get(get_render))
         .route("/game/:id", get(get_game))
         .route("/sample/:variant", get(get_sample))
+        // The app's troubleshooting-sheet images: real board screens rendered
+        // server-side by board-core, so they can never drift from the device.
+        .route("/guide/:name", get(get_guide))
         // Per-channel OTA routes: "/firmware/stable.bin" + "/firmware/stable/latest"
         // (and beta/dev). No un-channeled aliases — no OTA-capable board ever
         // shipped speaking the old flat paths.
@@ -945,6 +948,97 @@ async fn get_sample(
     (
         [(axum::http::header::CONTENT_TYPE, "image/png")],
         render_png(&px),
+    )
+        .into_response()
+}
+
+/// The one timestamp every guide screen is ticked to before capture. Fixed so
+/// the animated bits (spinner, ellipsis, walking connect dot) land at the same
+/// phase on every request — the app caches these for a day, and two fetches of
+/// the same screen must be byte-identical.
+const GUIDE_TICK_MS: u64 = 2000;
+
+/// Drive a fresh board-core Board into the named troubleshooting state and
+/// capture its framebuffer. This is the SAME state machine and renderer the
+/// firmware runs — the guide images can't drift from what a real panel shows.
+/// Unknown name -> None (the route 404s).
+fn guide_screen(name: &str) -> Option<Vec<u32>> {
+    use board_core::{Board, Gesture, SetupPhase};
+    let mut b = Board::new();
+    match name {
+        // The connect-progress screen, on whichever leg is still down. Boot to
+        // Running first (two ticks: the first only sets the boot-time
+        // baseline); with no manifest cached there's nothing to hold through
+        // the offline grace window, so the connect screen shows immediately.
+        "joining-wifi" | "finding-server" => {
+            b.tick(0);
+            b.tick(GUIDE_TICK_MS);
+            b.set_online(false);
+            b.set_wifi(name == "finding-server");
+        }
+        // BLE provisioning, at its entry phase — what a factory-fresh (or
+        // just-erased) board shows while it waits for the app to find it.
+        "setup" => {
+            b.gesture(Gesture::Long); // the provisioning entry -> Mode::Setup
+            b.set_setup_phase(SetupPhase::WaitingBluetooth);
+            b.tick(GUIDE_TICK_MS);
+        }
+        // The pairing screen, via the same server-flagged sticky path a
+        // never-paired board takes. The code is a fixed, obviously-fake
+        // 000000: these images are public and a real code must never be baked
+        // into one.
+        "pair-code" => {
+            b.set_setup_code("000000".into());
+            b.needs_pairing();
+            b.tick(GUIDE_TICK_MS);
+        }
+        _ => return None,
+    }
+    // Full brightness (Board::new's default): the app dims nothing.
+    Some(b.framebuffer())
+}
+
+/// Encode a board-core framebuffer (0RGB u32 words, 64x32) as PNG bytes at 1x.
+/// Companion to `render_png`, which takes the server renderer's RGB565 frames.
+fn board_png(px: &[u32]) -> Vec<u8> {
+    let mut img = image::RgbImage::new(FRAME_WIDTH as u32, FRAME_HEIGHT as u32);
+    for y in 0..FRAME_HEIGHT {
+        for x in 0..FRAME_WIDTH {
+            let p = px[y * FRAME_WIDTH + x];
+            img.put_pixel(
+                x as u32,
+                y as u32,
+                image::Rgb([(p >> 16) as u8, (p >> 8) as u8, p as u8]),
+            );
+        }
+    }
+    let mut buf = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut buf, image::ImageFormat::Png)
+        .ok();
+    buf.into_inner()
+}
+
+/// GET /guide/{joining-wifi|finding-server|setup|pair-code}.png — the board's
+/// firmware-local screens for the app's troubleshooting sheet ("if your board
+/// looks like THIS, do THAT"), rendered by the real board-core renderer (see
+/// `guide_screen`). No board scoping or auth: these are the screens every
+/// board shows the world, so there's nothing to leak. Cached a day — they
+/// change only with releases.
+async fn get_guide(
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let name = name.strip_suffix(".png").unwrap_or(&name);
+    let Some(px) = guide_screen(name) else {
+        return (axum::http::StatusCode::NOT_FOUND, "no guide screen by that name").into_response();
+    };
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "image/png"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        board_png(&px),
     )
         .into_response()
 }
@@ -4720,5 +4814,68 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// GET /guide/{name}.png: every troubleshooting screen serves a 200 PNG
+    /// with the day-long cache header, the four bodies are pairwise DISTINCT
+    /// (a drive-the-state bug — e.g. never leaving Booting, or wifi stuck one
+    /// way — collapses two screens into the same image), and an unknown name
+    /// is a plain 404.
+    #[tokio::test]
+    async fn guide_routes_serve_distinct_board_screens() {
+        let app = Router::new().route("/guide/:name", get(get_guide));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let names = ["joining-wifi", "finding-server", "setup", "pair-code"];
+        let mut bodies = Vec::new();
+        for name in names {
+            let resp = reqwest::get(format!("http://{addr}/guide/{name}.png")).await.unwrap();
+            assert_eq!(resp.status(), 200, "guide screen {name:?}");
+            assert_eq!(
+                resp.headers().get(reqwest::header::CONTENT_TYPE).unwrap(),
+                "image/png",
+                "guide screen {name:?}"
+            );
+            // The contract the app relies on: these are static per release, so
+            // clients may cache them for a day.
+            assert_eq!(
+                resp.headers().get(reqwest::header::CACHE_CONTROL).unwrap(),
+                "public, max-age=86400",
+                "guide screen {name:?}"
+            );
+            let body = resp.bytes().await.unwrap();
+            assert!(
+                body.starts_with(&[0x89, b'P', b'N', b'G']),
+                "guide screen {name:?} must be a real PNG"
+            );
+            bodies.push((name, body));
+        }
+        for i in 0..bodies.len() {
+            for j in (i + 1)..bodies.len() {
+                assert_ne!(
+                    bodies[i].1, bodies[j].1,
+                    "guide screens {:?} and {:?} rendered identically — a state was mis-driven",
+                    bodies[i].0, bodies[j].0
+                );
+            }
+        }
+
+        // Same screen twice -> byte-identical (the fixed tick makes the
+        // animation phase deterministic; without it caching would be a lie).
+        let again = reqwest::get(format!("http://{addr}/guide/setup.png"))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(again, bodies[2].1, "guide screens must render deterministically");
+
+        // Unknown names are plain 404s — including near-misses.
+        for unknown in ["rebooting", "pair-code2", "", "joining-wifi.jpg"] {
+            let resp = reqwest::get(format!("http://{addr}/guide/{unknown}.png")).await.unwrap();
+            assert_eq!(resp.status(), 404, "unknown guide name {unknown:?}");
+        }
     }
 }

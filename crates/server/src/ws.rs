@@ -95,7 +95,7 @@ async fn device_loop(sender: WsSender, mut receiver: WsReceiver, state: AppState
         }
     });
     // Keepalive: quiet content (an overnight leaderboard) can mean minutes of
-    // manifest silence, but the firmware aborts a socket that's idle for 45s
+    // manifest silence, but the firmware aborts a socket that's idle for 25s
     // and prod's TCP proxy reaps idle flows — the connection would flap
     // connect/auth/drop forever. Two pings per timeout window keep it up.
     let keepalive = spawn_keepalive(tx.clone());
@@ -437,7 +437,7 @@ async fn controller_loop(
 
 /// Ws ping every 20s through the connection's outbox channel. Content pushes
 /// are the only other traffic, and a quiet slate can go minutes without one —
-/// while the firmware's 45s read timeout and the TCP proxy's idle reaper both
+/// while the firmware's 25s read timeout and the TCP proxy's idle reaper both
 /// need SOMETHING on the wire. Devices answer with pongs; so do phones.
 fn spawn_keepalive(tx: mpsc::UnboundedSender<Message>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
