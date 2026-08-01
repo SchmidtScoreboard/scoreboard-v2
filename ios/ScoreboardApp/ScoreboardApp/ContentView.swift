@@ -2307,7 +2307,7 @@ struct DashboardView: View {
 
 /// Settings rows that have an explainer card behind an ⓘ button.
 enum SettingsInfoTopic: String, Identifiable {
-    case whenOff, sleep, dwell
+    case whenOff, sleep, dwell, spoilers
     var id: String { rawValue }
 
     var icon: String {
@@ -2315,6 +2315,7 @@ enum SettingsInfoTopic: String, Identifiable {
         case .whenOff: "clock"
         case .sleep: "moon.zzz.fill"
         case .dwell: "timer"
+        case .spoilers: "eye.slash"
         }
     }
 
@@ -2323,6 +2324,7 @@ enum SettingsInfoTopic: String, Identifiable {
         case .whenOff: "When off"
         case .sleep: "Sleep duration"
         case .dwell: "Time per event"
+        case .spoilers: "Spoilers"
         }
     }
 
@@ -2346,6 +2348,16 @@ enum SettingsInfoTopic: String, Identifiable {
 
             Any league can override this from its editor — give F1 30 seconds \
             while baseball flashes by in 10.
+            """
+        case .spoilers:
+            """
+            Spoiler protection hides scores until you're ready. Set it at \
+            three levels: a whole LEAGUE (from the league's editor — every \
+            game in it stays hidden), a single GAME (from the card's menu — \
+            hide one result, or reveal one exception), or EVERYTHING the \
+            scoreboard shows (the switch in this section). The board shows \
+            the matchup and progress; scores stay off the panel and the app \
+            until revealed.
             """
         }
     }
@@ -3932,6 +3944,13 @@ struct SettingsView: View {
             // A sheet from within the Settings sheet (nested presentation —
             // fine on iOS 18). Anchored on the stack so both entry points in
             // the About section share one presentation.
+            // Anchored HERE, not on a Section: Form sections are rebuilt on
+            // every model push (frames land every few seconds), and a sheet
+            // attached to one is torn down with it — it opened and instantly
+            // closed. The stack outlives the rebuilds.
+            .sheet(item: $settingsInfo) { topic in
+                SettingsInfoCard(topic: topic)
+            }
             .sheet(item: $notesTarget) { t in
                 FirmwareNotesSheet(
                     version: t.version,
@@ -4056,9 +4075,6 @@ struct SettingsView: View {
             }
 
         }
-        .sheet(item: $settingsInfo) { topic in
-            SettingsInfoCard(topic: topic)
-        }
     }
 
     /// The little ⓘ next to a settings row. `.borderless` so it hit-tests as its
@@ -4104,7 +4120,14 @@ struct SettingsView: View {
                 model.setStrictSpoilers(true)
             }
         } header: {
-            Text("Spoilers")
+            HStack {
+                Text("Spoilers")
+                Spacer()
+                // Trailing ⓘ: the three spoiler scopes (league / game /
+                // everything) live in three different places, and nothing on
+                // this screen says so.
+                infoButton(.spoilers)
+            }
         }
     }
 
