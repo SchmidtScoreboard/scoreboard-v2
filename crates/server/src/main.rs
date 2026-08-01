@@ -1529,7 +1529,7 @@ fn game_matches(g: &Game, favs: &HashSet<String>) -> bool {
 fn champ_option_covers(sport_id: &str, option_id: &str, tier: &str) -> bool {
     match (sport_id, option_id) {
         (_, "none") => false,
-        // "All playoffs" covers every championship tier for the sport.
+        // The "playoffs" tier covers every championship tier for the sport.
         (_, "playoffs") => true,
         ("nhl", "conf") => tier == "conf" || tier == "final",
         ("nhl", "final") => tier == "final",
@@ -1537,7 +1537,7 @@ fn champ_option_covers(sport_id: &str, option_id: &str, tier: &str) -> bool {
         ("wnba", "final") => tier == "final",
         ("mlb", "ws") => tier == "ws",
         ("nfl", "sb") => tier == "sb",
-        // "Playoff + Bowls" covers both; "Bowl Games" covers just the bowls.
+        // The CFP tier covers both playoff and bowls; "bowl" covers just the bowls.
         ("cfb", "playoff") => true,
         ("cfb", "bowl") => tier == "bowl",
         ("cbb" | "wcbb", "tournament") => tier == "tournament",
@@ -1619,6 +1619,18 @@ fn game_priority(g: &Game, cfg: &BoardConfig, favs: &HashSet<String>, unconfigur
 
 /// How many games fit in the board's rotation.
 const ROTATION_CAP: usize = 20;
+
+/// How many not-yet-started games ride along in the app's "Live and Upcoming"
+/// list. The claim predicate is generous by design — an unconfigured board or a
+/// league set to "Every match" claims the ENTIRE day's slate, which on a fall
+/// Saturday is hundreds of games. Each one costs a render, a cache entry, and a
+/// binary frame pushed down the app's socket on every poll, to produce a list
+/// nobody would scroll. Ten of the soonest is a useful "what's next" without
+/// turning a routine board-state push into a megabyte.
+///
+/// A game past the cap is simply absent — NOT `bumped`, which means something
+/// else entirely (it qualified for the rotation and lost the slot).
+const UPCOMING_CAP: usize = 10;
 
 /// A board's selection rules, derived once and reused per game — resolving the
 /// favorites set for every game in a 300-game slate is pure waste.
@@ -2364,6 +2376,63 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
             s.bumped = true;
             s
         }));
+        // …and then what's COMING. The beta tester opened the app hours before
+        // her team played, saw an empty "Now showing", and concluded the board
+        // was broken — nothing told her tonight's game was already claimed. So
+        // the section is "Live and Upcoming" and the claimed-but-unstarted
+        // games ride along with it, using the same predicate the browse feed
+        // uses for its "coming to your scoreboard" badge.
+        //
+        // DISPLAY-ONLY: `chosen_games` / `manifest_for_board` never see this
+        // list, so the board's rotation is byte-for-byte what it was.
+        let prefs = board_prefs(&cfg);
+        let mut upcoming: Vec<Game> = {
+            let games = state.games.lock().unwrap();
+            // `game_queued` already requires `!board_shows`, so nothing here can
+            // collide with the shown/bumped entries above; the id set only guards
+            // against a duplicate arriving twice in one slate.
+            let mut seen: HashSet<String> = HashSet::new();
+            games
+                .iter()
+                // NOT-STARTED ONLY. `game_queued` is `!board_shows && claimed`,
+                // and a FINAL nobody watched end also satisfies both (the
+                // linger stamp only exists for transitions we observed, so the
+                // day's earlier finals qualify). Without this guard the section
+                // filled with completed games — sorted to the FRONT, since a
+                // past start time is the "soonest" — showing final scores under
+                // a "Scheduled for your scoreboard" badge. Worst on a virgin
+                // board, where every game is claimed. `game_queued`'s other
+                // caller is pre-filtered by `browse_shows_now`, which is why
+                // this never surfaced there.
+                .filter(|g| g.status == GameStatus::Pregame)
+                .filter(|g| game_queued(state, &cfg, &prefs, g))
+                .filter(|g| seen.insert(g.id.clone()))
+                .cloned()
+                .collect()
+        };
+        // Soonest first, so the cap below keeps the most imminent games. A start
+        // time we couldn't parse sorts last — we can't claim it's imminent.
+        upcoming.sort_by_key(|g| {
+            let start = parse_espn_time(&g.start_time);
+            (start.is_none(), start)
+        });
+        out.extend(upcoming.iter().take(UPCOMING_CAP).map(|g| {
+            let spoiler = spoiler_for(&cfg, g);
+            let mut s = to_summary_for(g, spoiler, tz);
+            s.scrolls = game_scroll_capable(&cfg, g);
+            s.queued = true;
+            // The app's "Live and Upcoming" section keys off this status to tell
+            // "on the board right now" from "claimed, hasn't started". The raw
+            // feed word is "pregame"; the app-facing word is "upcoming".
+            s.status = "upcoming".into();
+            // Real cached frame, like the shown entries: a pregame frame is the
+            // matchup + start time, so there's no score to leak — and the card
+            // shows the same art the board will when the puck drops.
+            let (fid, px) = render::render_frame(g, spoiler, tz, name_style_for(&cfg, &g.sport_id));
+            state.cache_frame(fid.clone(), px);
+            s.frame_id = fid;
+            s
+        }));
         out
     };
     let online = state.devices.lock().unwrap().contains_key(board_id);
@@ -2485,40 +2554,97 @@ fn champ(id: &str, label: &str) -> ChampionshipOption {
 
 /// Per-sport "big games" groupings (app-domain, not from ESPN). Shared by the
 /// mock catalog and the live ESPN catalog.
+///
+/// The LABELS carry a load the ids don't: a beta tester read the old
+/// "Off / All playoffs / Every match" as a master switch for the whole league
+/// and assumed picking "Off" would blank their favorite teams too. It never
+/// did — this setting is purely ADDITIVE to the teams you picked. So every
+/// label now says so out loud: "Only selected teams" is the floor, and each
+/// middle tier reads "Selected + <the extra games>". Nobody should have to
+/// learn that from a support thread.
+///
+/// The ids are the contract (boards store them, `champ_option_covers` matches
+/// on them) and must never change; only these strings may.
+///
+/// Leaderboard sports (golf, F1) are the exception: they have no teams to
+/// select — you subscribe by event kind — so "selected teams" would be a lie
+/// there and their labels stay event-shaped.
 pub(crate) fn championship_options_for(sport_id: &str) -> Vec<ChampionshipOption> {
     let opts: &[(&str, &str)] = match sport_id {
         "nhl" => &[
-            ("none", "Off"),
-            ("final", "Stanley Cup Final"),
-            ("conf", "Conference Finals+"),
-            ("playoffs", "All playoffs"),
+            ("none", "Only selected teams"),
+            ("final", "Selected + Stanley Cup"),
+            // "conf" covers the conference finals AND the cup beyond them.
+            ("conf", "Selected + Conf Finals"),
+            ("playoffs", "Selected + playoffs"),
             ("all", "Every match"),
         ],
-        "nba" => &[("none", "Off"), ("final", "NBA Finals"), ("playoffs", "All playoffs"), ("all", "Every match")],
-        "wnba" => &[("none", "Off"), ("final", "WNBA Finals"), ("playoffs", "All playoffs"), ("all", "Every match")],
-        "mlb" => &[("none", "Off"), ("ws", "World Series"), ("playoffs", "All playoffs"), ("all", "Every match")],
-        "nfl" => &[("none", "Off"), ("sb", "Super Bowl"), ("playoffs", "All playoffs"), ("all", "Every match")],
-        "cfb" => &[("none", "Off"), ("playoff", "CFP + bowls"), ("bowl", "Bowl games only"), ("all", "Every match")],
-        "cbb" | "wcbb" => &[("none", "Off"), ("tournament", "March Madness"), ("all", "Every match")],
-        "mls" => &[("none", "Off"), ("cup", "MLS Cup"), ("playoffs", "All playoffs"), ("all", "Every match")],
+        "nba" => &[
+            ("none", "Only selected teams"),
+            ("final", "Selected + NBA Finals"),
+            ("playoffs", "Selected + playoffs"),
+            ("all", "Every match"),
+        ],
+        "wnba" => &[
+            ("none", "Only selected teams"),
+            ("final", "Selected + WNBA Finals"),
+            ("playoffs", "Selected + playoffs"),
+            ("all", "Every match"),
+        ],
+        "mlb" => &[
+            ("none", "Only selected teams"),
+            ("ws", "Selected + World Series"),
+            ("playoffs", "Selected + playoffs"),
+            ("all", "Every match"),
+        ],
+        "nfl" => &[
+            ("none", "Only selected teams"),
+            ("sb", "Selected + Super Bowl"),
+            ("playoffs", "Selected + playoffs"),
+            ("all", "Every match"),
+        ],
+        "cfb" => &[
+            ("none", "Only selected teams"),
+            ("playoff", "Selected + CFP & bowls"),
+            ("bowl", "Selected + bowl games"),
+            ("all", "Every match"),
+        ],
+        "cbb" | "wcbb" => &[
+            ("none", "Only selected teams"),
+            ("tournament", "Selected + March Madness"),
+            ("all", "Every match"),
+        ],
+        "mls" => &[
+            ("none", "Only selected teams"),
+            ("cup", "Selected + MLS Cup"),
+            ("playoffs", "Selected + playoffs"),
+            ("all", "Every match"),
+        ],
         // EPL has no playoffs, so the only league-wide subscription is all of it.
-        "epl" => &[("none", "Off"), ("all", "Every match")],
+        "epl" => &[("none", "Only selected teams"), ("all", "Every match")],
+        // The league IS the World Cup, so "the Final" needs no further naming;
+        // the tiers nest downward from it (semis pull the final along, etc.).
         "wc" => &[
-            ("none", "Off"),
-            ("final", "World Cup Final"),
-            ("semi", "Semifinals +"),
-            ("knockout", "Knockout stage"),
+            ("none", "Only selected teams"),
+            ("final", "Selected + the Final"),
+            ("semi", "Selected + semis & Final"),
+            ("knockout", "Selected + knockout stage"),
             ("all", "Every match"),
         ],
-        // Leaderboard sports subscribe by EVENT KIND, not by team.
-        "pga" | "lpga" => &[("none", "Off"), ("all", "All events"), ("majors", "Majors only")],
+        // Leaderboard sports subscribe by EVENT KIND, not by team — there are no
+        // "selected teams" to add to, so "None" is the honest bottom rung.
+        "pga" | "lpga" => &[("none", "None"), ("all", "All events"), ("majors", "Majors only")],
         "f1" => &[
-            ("none", "Off"),
+            ("none", "None"),
             ("gp", "Grands Prix"),
             ("gp-quali", "GP + Qualifying"),
             ("gp-quali-sprint", "GP + Qualifying + Sprints"),
         ],
-        _ => &[("none", "Off"), ("playoffs", "All playoffs"), ("all", "Every match")],
+        _ => &[
+            ("none", "Only selected teams"),
+            ("playoffs", "Selected + playoffs"),
+            ("all", "Every match"),
+        ],
     };
     opts.iter().map(|(id, label)| champ(id, label)).collect()
 }
@@ -3537,6 +3663,183 @@ mod tests {
         );
     }
 
+    // ---- "Live and Upcoming" (the app section that used to read "Now showing") ----
+
+    /// An NHL game starting `hours` from now, `away` playing at ZZZ.
+    fn scheduled_nhl(id: &str, away: &str, hours: i64) -> Game {
+        use chrono::{Duration as D, Utc};
+        Game {
+            id: id.into(),
+            sport_id: "nhl".into(),
+            away: TeamSide::empty(away),
+            home: TeamSide::empty("ZZZ"),
+            status: GameStatus::Pregame,
+            ordinal: String::new(),
+            clock: String::new(),
+            start_time: (Utc::now() + D::hours(hours)).format("%Y-%m-%dT%H:%MZ").to_string(),
+            end_time: None,
+            leaderboard: None,
+            champ: None,
+            session: None,
+            situation: None,
+            pregame: None,
+        }
+    }
+
+    /// The same matchup, already underway.
+    fn playing_nhl(id: &str, away: &str) -> Game {
+        Game { id: id.into(), status: GameStatus::Active, ordinal: "1st".into(), ..scheduled_nhl(id, away, 0) }
+    }
+
+    /// Store a board under "b1" whose only preference is one favorite team.
+    fn board_with_favorite(state: &AppState, team_key: &str) {
+        let mut cfg = BoardConfig::default();
+        cfg.sports.push(SportConfig {
+            sport_id: "nhl".into(),
+            favorite_team_ids: vec![team_key.into()],
+            ..Default::default()
+        });
+        state.configs.lock().unwrap().insert("b1".into(), cfg);
+    }
+
+    fn now_showing_of(state: &AppState, board_id: &str) -> Vec<GameSummary> {
+        match board_state_msg(state, board_id) {
+            ServerMsg::BoardState { now_showing, .. } => now_showing,
+            _ => panic!("expected BoardState"),
+        }
+    }
+
+    /// The tester opened the app in the afternoon, saw an empty list, and
+    /// assumed her board was broken — tonight's game was already claimed, the
+    /// app just never said so. Claimed-but-unstarted games now ride along in
+    /// the board state, flagged `queued` and carrying a real cached frame.
+    #[test]
+    fn board_state_lists_claimed_upcoming_games() {
+        let state = AppState::new_ephemeral();
+        let live = playing_nhl("live", "CHI");
+        let tonight = scheduled_nhl("tonight", "CHI", 6);
+        let stranger = scheduled_nhl("stranger", "TOR", 6);
+        *state.games.lock().unwrap() = vec![live, tonight, stranger];
+        board_with_favorite(&state, "nhl-chi");
+
+        let now_showing = now_showing_of(&state, "b1");
+        let find = |id: &str| now_showing.iter().find(|s| s.id == id);
+
+        let live = find("live").expect("the live favorite is on the panel");
+        assert!(!live.queued, "a game already rotating is HERE, not coming");
+        assert!(!live.bumped);
+
+        let tonight = find("tonight").expect("tonight's claimed game rides along");
+        assert!(tonight.queued, "…flagged as upcoming");
+        assert_eq!(tonight.status, "upcoming", "the app-facing word for not-yet-started");
+        assert!(!tonight.bumped, "it never competed for a slot, so it lost nothing");
+        assert!(
+            !tonight.detail.is_empty(),
+            "an upcoming card shows WHEN it starts, not a score: {:?}",
+            tonight.detail
+        );
+        assert_eq!((tonight.away_score, tonight.home_score), (0, 0), "no score exists yet");
+
+        // Both cards can render from the WS frame cache — no HTTP fallback.
+        let frames = state.frames.lock().unwrap();
+        for s in [live, tonight] {
+            assert!(!s.frame_id.is_empty(), "{} has a frame id", s.id);
+            assert!(frames.contains_key(&s.frame_id), "frame cached for {}", s.id);
+        }
+
+        assert!(find("stranger").is_none(), "a game no preference claims is on neither list");
+    }
+
+    /// An "Every match" league on a busy night claims the whole slate; the app
+    /// gets the soonest `UPCOMING_CAP` and nothing more. A capped-out game is
+    /// simply ABSENT — flagging it `bumped` would claim it lost a rotation
+    /// slot, which never happened.
+    #[test]
+    fn upcoming_list_is_capped_to_the_soonest_games() {
+        let state = AppState::new_ephemeral();
+        // 16 claimed games, inserted in a deliberately unhelpful order (latest
+        // first) so the cap can only pass by sorting on start time.
+        let games: Vec<Game> = (1..=16)
+            .rev()
+            .map(|h| scheduled_nhl(&format!("g{h:02}"), "CHI", h))
+            .collect();
+        *state.games.lock().unwrap() = games;
+        board_with_favorite(&state, "nhl-chi");
+
+        let now_showing = now_showing_of(&state, "b1");
+        let queued: Vec<&str> = now_showing.iter().filter(|s| s.queued).map(|s| s.id.as_str()).collect();
+        assert_eq!(queued.len(), UPCOMING_CAP, "the cap holds");
+        assert_eq!(
+            queued,
+            (1..=UPCOMING_CAP).map(|h| format!("g{h:02}")).collect::<Vec<_>>(),
+            "soonest first, so the cap keeps the most imminent games"
+        );
+        assert!(
+            now_showing.iter().all(|s| !s.bumped),
+            "capped out is not bumped — nothing here ever held a rotation slot"
+        );
+        assert_eq!(now_showing.len(), UPCOMING_CAP, "nothing is live, so the list is upcoming-only");
+    }
+
+    /// A FINAL nobody watched end satisfies `game_queued` (not board_shows,
+    /// still claimed), so without a pregame guard the "Live and Upcoming"
+    /// section filled with COMPLETED games — sorted to the front, since their
+    /// start times are the oldest — showing final scores under a "scheduled"
+    /// badge. Worst on a virgin board, where every game is claimed.
+    #[test]
+    fn finished_games_never_appear_as_upcoming() {
+        let state = AppState::new_ephemeral();
+        let mut done = live_game("done");
+        done.status = GameStatus::Final;
+        done.away.score = 4;
+        done.home.score = 1;
+        done.start_time = "2020-01-01T00:00Z".into(); // long past: sorts first
+        let mut soon = live_game("soon");
+        soon.status = GameStatus::Pregame;
+        soon.start_time = (chrono::Utc::now() + chrono::Duration::hours(6))
+            .format("%Y-%m-%dT%H:%MZ")
+            .to_string();
+        *state.games.lock().unwrap() = vec![done, soon];
+
+        // A virgin board claims everything (unconfigured -> priority Some(4)).
+        let ServerMsg::BoardState { now_showing, .. } = board_state_msg(&state, "b1") else {
+            panic!("expected BoardState");
+        };
+        assert!(
+            !now_showing.iter().any(|g| g.id == "done"),
+            "a completed game must never be listed as upcoming: {:?}",
+            now_showing.iter().map(|g| (&g.id, &g.status)).collect::<Vec<_>>()
+        );
+        let up: Vec<&GameSummary> = now_showing.iter().filter(|g| g.queued).collect();
+        assert_eq!(up.len(), 1, "only the not-yet-started game is upcoming");
+        assert_eq!(up[0].id, "soon");
+    }
+
+    /// Upcoming games are DISPLAY-only: they exist so the app can say "your
+    /// game is coming". The panel must rotate exactly what it rotated before.
+    #[test]
+    fn upcoming_games_do_not_change_the_board_rotation() {
+        let state = AppState::new_ephemeral();
+        let live = playing_nhl("live", "CHI");
+        *state.games.lock().unwrap() = vec![live.clone()];
+        board_with_favorite(&state, "nhl-chi");
+
+        let frame_ids = |m: &Manifest| m.rotation.iter().map(|r| r.frame_id.clone()).collect::<Vec<_>>();
+        let before = frame_ids(&manifest_for_board(&state, "b1"));
+        assert_eq!(before.len(), 1, "precondition: one live game rotating");
+
+        // Add a night's worth of claimed-but-unstarted games.
+        {
+            let mut games = state.games.lock().unwrap();
+            games.extend((1..=5).map(|h| scheduled_nhl(&format!("later{h}"), "CHI", h)));
+        }
+        assert!(
+            now_showing_of(&state, "b1").iter().any(|s| s.queued),
+            "precondition: the app now sees upcoming games"
+        );
+        assert_eq!(frame_ids(&manifest_for_board(&state, "b1")), before, "the rotation is untouched");
+    }
+
     /// Golf's feed timestamp is a midnight-Eastern DATE boundary, not a tee
     /// time — the exact case that showed a Thursday-morning tournament as
     /// "11:00 PM" the night before on a Central board.
@@ -4312,12 +4615,12 @@ mod tests {
             spoiler_team_ids: vec![],
             name_style: None,
         });
-        // "Conference Finals+" covers the cup final but not an early round,
+        // The "conf" tier covers the cup final but not an early round,
         // and the regular-season game isn't a championship game at all.
         let ids: Vec<String> = candidate_games(&state, &cfg).iter().map(|g| g.id.clone()).collect();
         assert_eq!(ids, ["cup"]);
 
-        // Broaden to "All playoffs" -> the early round comes in too.
+        // Broaden to the "playoffs" tier -> the early round comes in too.
         cfg.sports[0].championship_option_id = Some("playoffs".into());
         let ids: Vec<String> = candidate_games(&state, &cfg).iter().map(|g| g.id.clone()).collect();
         assert_eq!(ids, ["cup", "rd1"]);
@@ -4337,11 +4640,61 @@ mod tests {
         assert!(!champ_option_covers("nhl", "conf", "playoffs"));
         assert!(!champ_option_covers("nhl", "final", "conf"));
         assert!(!champ_option_covers("nhl", "none", "final"));
-        // CFB's options are containment-inverted: "Playoff + Bowls" covers
-        // both tiers, "Bowl Games" only the bowls.
+        // CFB's options are containment-inverted: the "playoff" tier covers
+        // both tiers, "bowl" only the bowls.
         assert!(champ_option_covers("cfb", "playoff", "bowl"));
         assert!(champ_option_covers("cfb", "playoff", "playoff"));
         assert!(!champ_option_covers("cfb", "bowl", "playoff"));
+    }
+
+    /// The tester read the old "Off / All playoffs / Every match" as a master
+    /// switch for the whole league and thought "Off" would blank her teams. It
+    /// is ADDITIVE, so every row has to say so — the floor keeps your teams,
+    /// and each middle tier reads as an addition to them.
+    #[test]
+    fn championship_labels_read_as_additions_not_a_master_switch() {
+        // Trailing entry: an unknown sport falls through to the generic set,
+        // which has to read the same way.
+        for sport in ["nhl", "nba", "wnba", "mlb", "nfl", "cfb", "cbb", "wcbb", "mls", "epl", "wc", "khl"] {
+            let opts = championship_options_for(sport);
+            let none = opts.iter().find(|o| o.id == "none").expect("every league can opt out");
+            assert_eq!(none.label, "Only selected teams", "{sport}: opting out still shows your teams");
+            for o in opts.iter().filter(|o| o.id != "none" && o.id != "all") {
+                assert!(
+                    o.label.starts_with("Selected + "),
+                    "{sport}/{}: {:?} must read as an addition to the teams you picked",
+                    o.id,
+                    o.label
+                );
+            }
+            for o in opts.iter().filter(|o| o.id == "all") {
+                assert_eq!(o.label, "Every match", "{sport}: the blanket option");
+            }
+        }
+
+        // Golf and F1 have no teams to select — you subscribe by event kind, so
+        // "selected teams" would be a lie there.
+        for sport in ["pga", "lpga", "f1"] {
+            let opts = championship_options_for(sport);
+            assert_eq!(opts.iter().find(|o| o.id == "none").unwrap().label, "None", "{sport}");
+            assert!(
+                opts.iter().all(|o| !o.label.to_lowercase().contains("selected")),
+                "{sport}: no teams exist to be 'selected'"
+            );
+        }
+
+        // Boards STORE the option id, so relabeling must never disturb the set
+        // or the order the app renders.
+        let ids: Vec<String> = championship_options_for("nhl").iter().map(|o| o.id.clone()).collect();
+        assert_eq!(ids, ["none", "final", "conf", "playoffs", "all"]);
+
+        // Menu rows are one line on a phone; keep every label short enough to
+        // land there instead of truncating to "Selected + March Madn…".
+        for sport in ["nhl", "nba", "wnba", "mlb", "nfl", "cfb", "cbb", "wcbb", "mls", "epl", "wc", "pga", "lpga", "f1"] {
+            for o in championship_options_for(sport) {
+                assert!(o.label.chars().count() <= 26, "{sport}/{}: {:?} is too long for a menu row", o.id, o.label);
+            }
+        }
     }
 
     #[test]

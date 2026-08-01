@@ -574,7 +574,15 @@ final class BoardViewModel: ObservableObject {
     }
     func addGame(_ gid: String) {
         guard let id = selectedBoardId else { return }
-        mutate(id) { $0.extraGameIds.insert(gid) }
+        mutate(id) {
+            // Adding back a game the user had one-off REMOVED clears the
+            // exclusion rather than creating an extra — that's what the server
+            // does, and mirroring it exactly is what lets the card flip to
+            // "on the scoreboard" on the tap instead of on the next push.
+            if $0.excludedGameIds.remove(gid) == nil {
+                $0.extraGameIds.insert(gid)
+            }
+        }
         client?.addGame(boardId: id, gameId: gid)
     }
     func removeGame(_ gid: String) {
@@ -614,8 +622,48 @@ final class BoardViewModel: ObservableObject {
         }
         client?.removeGame(boardId: id, gameId: g.id)
     }
+    /// Whether the board has CLAIMED this game right now — by preference (it's in
+    /// the board's own live/upcoming list and the rotation cap didn't bump it) or
+    /// by a one-off add. A one-off REMOVAL wins over both: the exclusion is applied
+    /// optimistically, so the card flips to "Add" (and drops its ring) on the tap
+    /// rather than waiting for the server's next board-state push.
     func isShowing(_ id: String) -> Bool {
-        current.nowShowing.contains { $0.id == id && !$0.bumped } || current.extraGameIds.contains(id)
+        if current.excludedGameIds.contains(id) { return false }
+        return current.nowShowing.contains { $0.id == id && !$0.bumped } || current.extraGameIds.contains(id)
+    }
+
+    /// The ring a game's card wears, derived from the game's OWN status plus its
+    /// CURRENT membership — the single source both card call sites use, so the
+    /// carousel and View All can never disagree.
+    ///
+    /// Deliberately ignores `UiGame.queued`: the server computes that flag when it
+    /// answers a Browse, and nothing clears it locally, so a removed game kept its
+    /// dashed ring until the next fetch. Membership comes from `isShowing`, which
+    /// the optimistic add/remove updates keep honest.
+    func highlight(for g: UiGame) -> GameCardHighlight {
+        // A pin overrides the rotation, so it outranks every other state.
+        if current.focusedGameId == g.id { return .pinned }
+        // Claimed either by membership, or — for a game past the board state's
+        // upcoming cap, which never reaches `nowShowing` — by the server's
+        // browse-time `queued` flag. That flag is only stale in one direction
+        // (it can't know about a local removal), so the exclusion check keeps
+        // the "removing drops the ring instantly" property.
+        let claimed = isShowing(g.id)
+            || (g.queued && !current.excludedGameIds.contains(g.id))
+        guard claimed else { return .none }
+        // Solid teal claims "this is on the panel now", which is only true once
+        // the game has started; a claimed-but-unstarted game gets the dashed ring.
+        return Self.notStarted(g) ? .queued : .included
+    }
+
+    /// Has this game NOT started? The two feeds spell it differently — the
+    /// board state relabels these "upcoming" for the Live and Upcoming section,
+    /// while the browse feed passes the raw feed word "pregame" through. Both
+    /// mean the same thing, and treating only one of them as not-started is how
+    /// the same game wore a dashed ring on the dashboard and a solid
+    /// "on the panel now" ring in All Games.
+    static func notStarted(_ g: UiGame) -> Bool {
+        g.status == "upcoming" || g.status == "pregame"
     }
 
     /// Resolve a team's display name from the catalog (team id = "{sport}-{abbrev}"),
@@ -1153,16 +1201,27 @@ final class BoardViewModel: ObservableObject {
         importOutcome = ImportOutcome(boardId: boardId, error: error)
     }
 
-    /// Now-showing for display: the pinned game (if any) sorted to the front.
+    /// The "Live and Upcoming" panel's order. The board's list now carries games
+    /// that haven't started yet as well as the ones rotating right now, so the
+    /// section's own rotation has to read FIRST: pinned game, then live games,
+    /// then upcoming ones, and cap-bumped games trailing at the end.
     var displayedNowShowing: [UiGame] {
         let games = current.nowShowing
         let f = current.focusedGameId
-        // Pinned first, rotation next, cap-bumped games trail at the end.
         func rank(_ g: UiGame) -> Int {
             if g.id == f { return 0 }
-            return g.bumped ? 2 : 1
+            if g.bumped { return 3 }
+            return g.status == "upcoming" ? 2 : 1
         }
-        return games.sorted { rank($0) < rank($1) }
+        // Sort on (rank, arrival index): Swift's sort isn't stable, and without a
+        // tiebreak the server's within-bucket order (which is the actual rotation
+        // order) could come back permuted.
+        return games.enumerated()
+            .sorted { a, b in
+                let ra = rank(a.element), rb = rank(b.element)
+                return ra != rb ? ra < rb : a.offset < b.offset
+            }
+            .map(\.element)
     }
 
     /// Display name for a league id ("nhl" -> "NHL"), from the catalog when loaded.
@@ -1482,11 +1541,19 @@ struct FetchedFrameImage: View {
     }
 }
 
+/// Card emphasis: `.included` (on the scoreboard now — solid teal ring),
+/// `.queued` (the board has claimed it, but it hasn't started — dashed teal
+/// ring + clock badge), or `.pinned` (overriding the rotation — orange ring +
+/// pin badge). Top-level rather than nested in the generic `GameCard` so the
+/// view model can name it: `BoardViewModel.highlight(for:)` is the ONE place
+/// that decides which a game gets.
+enum GameCardHighlight { case none, included, queued, pinned }
+
 /// A game preview: title, a caption line (e.g. why the game is on the board), the
 /// full LED frame, and a footer row of action buttons — all ON the card. The card
 /// is a dark bezel so the black LED panel sits as a distinct, clearly-centered
 /// rectangle inside it; the frame keeps square corners so no pixels are clipped.
-struct GameCard<Footer: View>: View {
+struct GameCard<Footer: View, MenuItems: View>: View {
     let game: UiGame
     let title: String
     let httpBase: String
@@ -1494,14 +1561,15 @@ struct GameCard<Footer: View>: View {
     var refresh: Int = 0
     /// Board id, forwarded to the HTTP render fallback for spoiler scoping.
     var board: String = ""
-    /// Card emphasis: `.included` (on the scoreboard now — solid teal ring),
-    /// `.queued` (your preferences claim it, but it hasn't started — dashed
-    /// teal ring + clock badge), or `.pinned` (overriding the rotation —
-    /// orange ring + pin badge).
-    enum Highlight { case none, included, queued, pinned }
-    var highlight: Highlight = .none
-    /// Action buttons row at the bottom of the card.
+    var highlight: GameCardHighlight = .none
+    /// The card's ONE action: Add or Remove, depending on membership. A card that
+    /// offered a primary button AND a "…" button side by side read as two equal
+    /// choices, and the "…" was never opened.
     @ViewBuilder var footer: Footer
+    /// Everything else the card can do (pin, spoilers, leaderboard depth, share,
+    /// info, ESPN). It hangs off the LED panel instead of a button of its own —
+    /// see `panel`.
+    @ViewBuilder var menu: MenuItems
 
     var body: some View {
         VStack(alignment: .leading, spacing: GameCardMetrics.rowSpacing) {
@@ -1540,7 +1608,7 @@ struct GameCard<Footer: View>: View {
                         .accessibilityLabel(champ)
                 }
             }
-            GameFrame(game: game, httpBase: httpBase, frame: frame, refresh: refresh, board: board)
+            panel
             footer
         }
         .padding(GameCardMetrics.padding)
@@ -1568,6 +1636,36 @@ struct GameCard<Footer: View>: View {
                     )
                 )
         )
+    }
+
+    /// The LED panel — and the card's menu button. The picture of the board is the
+    /// most obviously "this game" thing on the card, so it's what the secondary
+    /// actions hang off; a "…" pill next to the primary button was invisible to a
+    /// first-time user. The corner glyph straddles the panel edge (mostly out in
+    /// the card's own padding) so the affordance is visible without eating LEDs.
+    private var panel: some View {
+        Menu {
+            menu
+        } label: {
+            GameFrame(game: game, httpBase: httpBase, frame: frame, refresh: refresh, board: board)
+                // Unlit pixels are black, not empty — without this the taps that
+                // land on them would fall through to whatever is behind the card.
+                .contentShape(Rectangle())
+                .overlay(alignment: .bottomTrailing) {
+                    Image(systemName: "ellipsis.circle.fill")
+                        .font(.caption)
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, .black.opacity(0.75))
+                        // Half in the card's padding, half on the panel: enough
+                        // of it lands on the black to read as part of the image
+                        // while covering ~2 LEDs of a corner instead of a score.
+                        .offset(x: 6, y: 6)
+                }
+        }
+        .buttonStyle(.plain)
+        // The frame itself is decorative, so VoiceOver would otherwise announce an
+        // unlabeled button. Name the game AND what tapping does.
+        .accessibilityLabel("\(title) options")
     }
 }
 
@@ -1602,7 +1700,7 @@ struct PixelGridOverlay: View {
     }
 }
 
-/// A "Now showing" stand-in (connecting / offline / nothing live) with EXACTLY
+/// A "Live and Upcoming" stand-in (connecting / offline / nothing to show) with EXACTLY
 /// a live GameCard's height, so the section never jumps as the board flaps or
 /// games start. Rather than hard-coding a height (which Dynamic Type would
 /// break), it hides a skeleton of GameCard's three rows — title, LED frame,
@@ -1863,7 +1961,7 @@ struct DashboardView: View {
 
     private var dashboardForm: some View {
         Form {
-            nowShowingSection
+            liveAndUpcomingSection
             controlsSection
             // The "League Preferences" title rides as the FIRST league card's
             // section header, so the header→card gap matches the other
@@ -1913,16 +2011,19 @@ struct DashboardView: View {
         }
     }
 
-    /// The board's rotation as a single snapping carousel (pinned game first,
-    /// others dimmed). "View all" pushes the full per-league browser screen.
-    private var nowShowingSection: some View {
+    /// Everything the board has claimed as a single snapping carousel (pinned game
+    /// first, others dimmed). The board's list carries games that HAVEN'T STARTED
+    /// yet alongside the ones rotating now — hence "Live and Upcoming"; the old
+    /// "Now showing" title made every scheduled game look like a bug. "View all"
+    /// pushes the full per-league browser screen.
+    private var liveAndUpcomingSection: some View {
         Section {
             collapsedCarousel
         } header: {
             // The section's margins are zeroed (full-bleed carousel), so the
             // header re-applies the standard margin itself.
             HStack {
-                Text("Now showing")
+                Text("Live and Upcoming")
                 Spacer()
                 Button("View all") { showAllGamesScreen = true }
                     .font(.subheadline.weight(.semibold))
@@ -1960,8 +2061,9 @@ struct DashboardView: View {
         .buttonStyle(.plain)
     }
 
-    /// The board's current rotation. Each card shows why it's included; the labeled
-    /// buttons below pin it (board shows only that game) or remove a one-off add.
+    /// The board's current rotation plus what it has claimed for later. Each card's
+    /// ring says which it is (solid = on the panel now, dashed = hasn't started);
+    /// its one button adds or removes it, and its panel image holds the rest.
     @ViewBuilder private var collapsedCarousel: some View {
         if !model.online {
             // The server is reachable but this board isn't — explain it inline
@@ -1980,7 +2082,7 @@ struct DashboardView: View {
             .listRowSeparator(.hidden)
         } else if model.nowShowing.isEmpty {
             NowShowingPlaceholderCard {
-                Text("Nothing live right now")
+                Text("Nothing live or upcoming right now")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
             }
@@ -1994,25 +2096,34 @@ struct DashboardView: View {
                     ForEach(model.displayedNowShowing, id: \.id) { game in
                         let pinned = model.focusedGameId == game.id
                         let dimmed = model.focusedGameId != nil && !pinned
-                        GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId], board: model.selectedBoardId ?? "", highlight: pinned ? .pinned : .none) {
-                            HStack(spacing: 8) {
-                                // One primary action owns the width; pin and
-                                // spoilers tuck into the "…" menu.
-                                if game.bumped {
-                                    // Promote: a manual add outranks whatever bumped it.
-                                    cardButton("Add", "plus.circle", tint: .green) {
-                                        withAnimation { model.addGame(game.id) }
-                                    }
-                                } else {
-                                    cardButton("Remove", "minus.circle", tint: .red) {
-                                        withAnimation { model.removeFromRotation(game) }
-                                    }
+                        let showing = model.isShowing(game.id)
+                        GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId], board: model.selectedBoardId ?? "", highlight: model.highlight(for: game)) {
+                            // Exactly ONE button, and it says what it will do.
+                            // A bumped (or already removed) card is off the board,
+                            // so its action is Add — a manual add outranks whatever
+                            // bumped it.
+                            if showing {
+                                cardButton("Remove", "minus.circle", tint: .red) {
+                                    withAnimation { model.removeFromRotation(game) }
                                 }
-                                CardMenu(model: model, game: game, sheets: cardSheets)
+                            } else {
+                                cardButton("Add", "plus.circle", tint: .green) {
+                                    withAnimation { model.addGame(game.id) }
+                                }
                             }
+                        } menu: {
+                            // Same rule as All Games: an upcoming card can't
+                            // be pinned (the server only honors a pin on a
+                            // game the rotation actually holds).
+                            CardMenuItems(
+                                model: model,
+                                game: game,
+                                sheets: cardSheets,
+                                canPin: !BoardViewModel.notStarted(game)
+                            )
                         }
                         // While something else is pinned, cards go monochrome —
-                        // only their Pin button still does anything.
+                        // only their panel menu's Pin still does anything.
                         .saturation(dimmed ? 0 : 1)
                         .opacity(dimmed ? 0.5 : 1)
                     }
@@ -2677,28 +2788,37 @@ struct AllGamesView: View {
         .padding(.bottom, 8)
     }
 
-    /// One game card with its provenance caption and Add / Remove+Pin footer.
-    /// Two-step: a game must be ON the board before it can be pinned; pinning
-    /// pops back to the dashboard to show the result.
+    /// One game card: a single Add/Remove button, with everything else on the
+    /// panel image's menu. Two-step: a game must be ON the board before it can be
+    /// pinned; pinning pops back to the dashboard to show the result.
     private func allGamesCard(_ game: UiGame) -> some View {
         let showing = model.isShowing(game.id)
         let pinned = model.focusedGameId == game.id
-        // Teal ring = on the scoreboard; orange ring + badge = pinned. While a
-        // pin is active everything else grays out, exactly like the carousel.
+        // Ring comes from the model so this card and the dashboard carousel can't
+        // disagree about what "on the scoreboard" looks like. While a pin is
+        // active everything else grays out, exactly like the carousel.
         let dimmed = model.focusedGameId != nil && !pinned
-        return GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId], refresh: refresh, board: model.selectedBoardId ?? "", highlight: pinned ? .pinned : showing ? .included : game.queued ? .queued : .none) {
-            HStack(spacing: 8) {
-                if showing {
-                    AllGamesCardButton(title: "Remove", icon: "minus.circle", tint: .red) {
-                        model.removeFromRotation(game)
-                    }
-                } else {
-                    AllGamesCardButton(title: "Add", icon: "plus.circle", tint: .green) {
-                        model.addGame(game.id)
-                    }
+        return GameCard(game: game, title: model.gameTitle(game), httpBase: model.httpBase, frame: model.frames[game.frameId], refresh: refresh, board: model.selectedBoardId ?? "", highlight: model.highlight(for: game)) {
+            if showing {
+                AllGamesCardButton(title: "Remove", icon: "minus.circle", tint: .red) {
+                    model.removeFromRotation(game)
                 }
-                CardMenu(model: model, game: game, sheets: cardSheets, canPin: showing)
+            } else {
+                AllGamesCardButton(title: "Add", icon: "plus.circle", tint: .green) {
+                    model.addGame(game.id)
+                }
             }
+        } menu: {
+            // Pin overrides the ROTATION, which only contains games the board
+            // is showing now — the server ignores a pin on anything else, so
+            // offering it on an upcoming game would grey out every other card
+            // and change nothing.
+            CardMenuItems(
+                model: model,
+                game: game,
+                sheets: cardSheets,
+                canPin: showing && !BoardViewModel.notStarted(game)
+            )
         }
         .saturation(dimmed ? 0 : 1)
         .opacity(dimmed ? 0.5 : 1)
@@ -2769,7 +2889,7 @@ final class CardSheets: ObservableObject {
 
 extension View {
     /// Attach a screen's card-menu presentations. Every screen that renders a
-    /// `CardMenu` owns one holder and applies this once.
+    /// `CardMenuItems` owns one holder and applies this once.
     func cardSheets(_ sheets: CardSheets) -> some View {
         self
             .sheet(item: Binding(get: { sheets.share }, set: { sheets.share = $0 })) { item in
@@ -2789,10 +2909,11 @@ extension View {
     }
 }
 
-/// The card footer's "…" menu: secondary actions (pin, spoilers) live here so
-/// the primary Add/Remove button keeps most of the width. The hidden Text sets
-/// the same line height as the text capsules, so all footer pills match.
-struct CardMenu: View {
+/// The CONTENTS of a card's action menu: pin, spoilers, leaderboard depth,
+/// share, info, ESPN, and the schedule footnote. Not a button of its own — it's
+/// handed to `GameCard`, which hangs it off the LED panel image, so both screens'
+/// cards offer the identical list from the identical place.
+struct CardMenuItems: View {
     @ObservedObject var model: BoardViewModel
     let game: UiGame
     /// The owning screen's presentation state (see `CardSheets`).
@@ -2809,90 +2930,79 @@ struct CardMenu: View {
         let dayOnly = game.sportId == "pga" || game.sportId == "lpga"
         let starts = game.startTime.flatMap { Self.localTimeLabel($0, dayOnly: dayOnly) }
         let ends = game.endTime.flatMap { Self.localTimeLabel($0, dayOnly: dayOnly) }
-        Menu {
-            if canPin {
-                Button {
-                    withAnimation { pinned ? model.clearFocus() : model.focusGame(game.id) }
-                } label: {
-                    Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
-                }
-            }
+        if canPin {
             Button {
-                withAnimation { model.setGameSpoiler(game.id, hidden: !game.spoiled) }
+                withAnimation { pinned ? model.clearFocus() : model.focusGame(game.id) }
             } label: {
-                Label(
-                    game.spoiled ? "Reveal result" : "Hide spoilers",
-                    systemImage: game.spoiled ? "eye" : "eye.slash"
-                )
+                Label(pinned ? "Unpin" : "Pin", systemImage: pinned ? "pin.slash" : "pin")
             }
-            // Deep leaderboards (F1/golf): the league editor's depth picker,
-            // one tap closer. Same options, same league-wide setting — Top 4
-            // is the static no-scroll layout, deeper depths scroll. Renders
-            // as a submenu with a check on the current choice.
-            if game.scrolls {
-                Picker(selection: Binding(
-                    get: { model.leagueRows(game.sportId) ?? 10 },
-                    set: { model.setLeagueRows(game.sportId, $0 == 10 ? nil : $0) }
-                )) {
-                    Text("Top 4 — no scrolling").tag(UInt32(4))
-                    Text("Top 10").tag(UInt32(10))
-                    Text(game.sportId == "f1" ? "Full field" : "Top 20").tag(UInt32(20))
-                } label: {
-                    Label("Leaderboard Depth", systemImage: "list.number")
-                }
-                .pickerStyle(.menu)
-            }
-            Button {
-                sheets.fetchShareImage(renderURL)
-            } label: {
-                Label("Share image", systemImage: "square.and.arrow.up")
-            }
-            Button {
-                sheets.info = CardSheets.InfoTarget(
-                    id: game.id, title: model.gameTitle(game), url: infoURL
-                )
-            } label: {
-                Label("Info", systemImage: "info.circle")
-            }
-            // The full human-readable game on ESPN — only when the server could
-            // form a page URL (real numeric event id; not demo/golf/F1).
-            if let espn = game.espnUrl, let url = URL(string: espn) {
-                Link(destination: url) {
-                    Label("View on ESPN", systemImage: "safari")
-                }
-            }
-            // Schedule footnote: start/end in the PHONE's zone (the board keeps
-            // its own local clock), greyed and inert — information, not actions.
-            // Omitted entirely when the feed gave no usable timestamps.
-            if starts != nil || ends != nil {
-                Divider()
-                Section {
-                    // Tense matters: "Starts 7:00 PM Sat" for yesterday's game
-                    // reads as NEXT Saturday — "Started" pins it to the past.
-                    if let starts {
-                        Button {} label: {
-                            Label("\(starts.past ? "Started" : "Starts") \(starts.label)", systemImage: "clock")
-                        }
-                        .disabled(true)
-                    }
-                    if let ends {
-                        Button {} label: {
-                            Label("\(ends.past ? "Ended" : "Ends") \(ends.label)", systemImage: "flag.checkered")
-                        }
-                        .disabled(true)
-                    }
-                }
-            }
-        } label: {
-            Text(" ")
-                .font(.caption.weight(.semibold))
-                .overlay(Image(systemName: "ellipsis").font(.caption.weight(.semibold)))
-                .foregroundStyle(.primary)
-                .frame(width: 40)
-                .padding(.vertical, 6)
-                .background(Capsule().fill(.primary.opacity(0.06)))
         }
-        .buttonStyle(.plain)
+        Button {
+            withAnimation { model.setGameSpoiler(game.id, hidden: !game.spoiled) }
+        } label: {
+            Label(
+                game.spoiled ? "Reveal result" : "Hide spoilers",
+                systemImage: game.spoiled ? "eye" : "eye.slash"
+            )
+        }
+        // Deep leaderboards (F1/golf): the league editor's depth picker,
+        // one tap closer. Same options, same league-wide setting — Top 4
+        // is the static no-scroll layout, deeper depths scroll. Renders
+        // as a submenu with a check on the current choice.
+        if game.scrolls {
+            Picker(selection: Binding(
+                get: { model.leagueRows(game.sportId) ?? 10 },
+                set: { model.setLeagueRows(game.sportId, $0 == 10 ? nil : $0) }
+            )) {
+                Text("Top 4 — no scrolling").tag(UInt32(4))
+                Text("Top 10").tag(UInt32(10))
+                Text(game.sportId == "f1" ? "Full field" : "Top 20").tag(UInt32(20))
+            } label: {
+                Label("Leaderboard Depth", systemImage: "list.number")
+            }
+            .pickerStyle(.menu)
+        }
+        Button {
+            sheets.fetchShareImage(renderURL)
+        } label: {
+            Label("Share image", systemImage: "square.and.arrow.up")
+        }
+        Button {
+            sheets.info = CardSheets.InfoTarget(
+                id: game.id, title: model.gameTitle(game), url: infoURL
+            )
+        } label: {
+            Label("Info", systemImage: "info.circle")
+        }
+        // The full human-readable game on ESPN — only when the server could
+        // form a page URL (real numeric event id; not demo/golf/F1).
+        if let espn = game.espnUrl, let url = URL(string: espn) {
+            Link(destination: url) {
+                Label("View on ESPN", systemImage: "safari")
+            }
+        }
+        // Schedule footnote: start/end in the PHONE's zone (the board keeps
+        // its own local clock), greyed and inert — information, not actions.
+        // Omitted entirely when the feed gave no usable timestamps.
+        if starts != nil || ends != nil {
+            Divider()
+            Section {
+                // Tense matters: "Starts 7:00 PM Sat" for yesterday's game
+                // reads as NEXT Saturday — "Started" pins it to the past.
+                if let starts {
+                    Button {} label: {
+                        Label("\(starts.past ? "Started" : "Starts") \(starts.label)", systemImage: "clock")
+                    }
+                    .disabled(true)
+                }
+                if let ends {
+                    Button {} label: {
+                        Label("\(ends.past ? "Ended" : "Ends") \(ends.label)", systemImage: "flag.checkered")
+                    }
+                    .disabled(true)
+                }
+            }
+        }
     }
 
     /// The same /render URL the card's frame displays (same board, so the same
@@ -3344,6 +3454,15 @@ struct LeagueEditorView: View {
     @State private var champ = "none"
     @State private var loaded = false
     @State private var search = ""
+    /// The whole-league option the user just tapped, held until they confirm.
+    /// `champ` deliberately does NOT move yet — the Picker reads it, so writing
+    /// it early would show the choice as made before the user agreed to it, and
+    /// Cancel would then have to undo a visible selection.
+    @State private var pendingWholeLeague: String?
+
+    /// The option id that subscribes to a league's ENTIRE schedule. The server
+    /// spells it "all" for every league that offers it (the "Every match" row).
+    private static let wholeLeagueOptionId = "all"
 
     /// Golf tours and F1 show ranked fields, not team games.
     private var isLeaderboardLeague: Bool {
@@ -3389,7 +3508,22 @@ struct LeagueEditorView: View {
         List {
             if !sport.championshipOptions.isEmpty {
                 Section(optionsTitle) {
-                    Picker("Show", selection: $champ) {
+                    // Routed through a proxy binding so the whole-league option can
+                    // ask first: the getter still reports the COMMITTED choice, so
+                    // the row never shows a selection the user hasn't agreed to.
+                    Picker("Show", selection: Binding(
+                        get: { champ },
+                        set: { picked in
+                            if picked == Self.wholeLeagueOptionId, champ != picked, !isLeaderboardLeague {
+                                pendingWholeLeague = picked
+                            } else {
+                                // Leaderboard leagues run ONE event at a time, so
+                                // their blanket option can't swamp the rotation —
+                                // warning there would just be noise.
+                                champ = picked
+                            }
+                        }
+                    )) {
                         ForEach(sport.championshipOptions, id: \.id) { opt in
                             Text(opt.label).tag(opt.id)
                         }
@@ -3493,6 +3627,22 @@ struct LeagueEditorView: View {
             if model.sportEditChanged(sport.id, teamIds: selection, championshipOptionId: champ) {
                 model.commitSportEdit(sport.id, teamIds: selection, championshipOptionId: champ)
             }
+        }
+        // A whole league is the one option that can swamp the board, and the
+        // picker gives no hint of that until the panel is full of bumped games.
+        // Anchored on the List (not the Section) so a model push can't tear it
+        // down mid-decision.
+        .alert("Show every match?", isPresented: Binding(
+            get: { pendingWholeLeague != nil },
+            set: { if !$0 { pendingWholeLeague = nil } }
+        )) {
+            // Hardcoded rather than read back from `pendingWholeLeague`: the
+            // dismissal clears that state, and the two orderings shouldn't
+            // decide whether the user's Continue actually took.
+            Button("Continue") { champ = Self.wholeLeagueOptionId }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Every match can be a lot of games — on a busy night the scoreboard shows the first 20 and lists the rest as bumped. You can always pick a narrower option.")
         }
     }
 
@@ -3915,18 +4065,29 @@ struct SettingsView: View {
     @State private var settingsInfo: SettingsInfoTopic?
     /// Import tapped with nothing usable on the clipboard.
     @State private var showImportEmptyAlert = false
+    /// The board-screens guide (also reachable from the offline card's ⓘ).
+    @State private var showTroubleshooting = false
     #if DEBUG
     @State private var preset: ServerPreset = .localhost
     @State private var customUrl = ""
 
-    /// The URL the current selection resolves to.
-    private var effectiveUrl: String {
-        (preset.url ?? customUrl).trimmingCharacters(in: .whitespaces)
-    }
-
     /// The URL this sheet started from: the board's own when scoped to one.
     private var startingUrl: String {
         boardId.map { model.serverURL(of: $0) } ?? model.serverUrl
+    }
+
+    /// Point this sheet's target — the pinned board, or the default server for
+    /// new pairings — at `url`. Applied the INSTANT it's chosen: every other row
+    /// on this sheet already works that way, and the toolbar's lone Done button
+    /// has nothing left to commit.
+    private func applyServer(_ url: String) {
+        let trimmed = url.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        if let boardId {
+            model.setBoardServer(boardId, trimmed)
+        } else {
+            model.setServer(trimmed)
+        }
     }
     #endif
 
@@ -3945,6 +4106,7 @@ struct SettingsView: View {
                     spoilerSection
                     transferSection
                     aboutSection
+                    helpSection
                     #if DEBUG
                     firmwareDeveloperSection
                     #endif
@@ -3970,29 +4132,19 @@ struct SettingsView: View {
                     install: t.installable ? { model.updateFirmware() } : nil
                 )
             }
+            // Same anchoring rule as the two sheets above — a Form section is
+            // rebuilt on every model push and would take this with it.
+            .sheet(isPresented: $showTroubleshooting) {
+                TroubleshootingSheet(httpBase: model.httpBase)
+            }
             .toolbar {
-                #if DEBUG
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        if let boardId {
-                            model.setBoardServer(boardId, effectiveUrl)
-                        } else {
-                            model.setServer(effectiveUrl)
-                        }
-                        dismiss()
-                    }
-                    .disabled(effectiveUrl.isEmpty)
-                }
-                #else
-                // Without the server form there is nothing to save or abandon —
-                // every remaining row applies immediately.
+                // ONE button, in every configuration. Every row on this sheet
+                // applies the moment it's touched — including the DEBUG server
+                // picker — so a Cancel/Save pair promised an undo that never
+                // existed and a commit that had already happened.
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
-                #endif
             }
             #if DEBUG
             .onAppear {
@@ -4007,7 +4159,19 @@ struct SettingsView: View {
     #if DEBUG
     private var serverSection: some View {
         Section {
-            Picker("Server", selection: $preset) {
+            Picker("Server", selection: Binding(
+                get: { preset },
+                set: { p in
+                    preset = p
+                    // A preset IS its URL, so picking one is the whole decision —
+                    // switch now. Custom has nothing to switch to until the field
+                    // is submitted, so it only moves the picker.
+                    if let u = p.url {
+                        customUrl = u
+                        applyServer(u)
+                    }
+                }
+            )) {
                 ForEach(ServerPreset.allCases) { p in
                     Text(p.label).tag(p)
                 }
@@ -4019,6 +4183,9 @@ struct SettingsView: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .keyboardType(.URL)
+                    // On submit, not on every keystroke: reconnecting the socket
+                    // for "ws://1", "ws://12", … would be a reconnect storm.
+                    .onSubmit { applyServer(customUrl) }
             } else if let u = preset.url {
                 Text(u).font(.footnote).foregroundStyle(.secondary)
             }
@@ -4026,9 +4193,9 @@ struct SettingsView: View {
             Text("Server")
         } footer: {
             if let boardId {
-                Text("Where “\(model.displayName(boardId))” lives. Changing it points this scoreboard at a different server; new pairings still use the default one.")
+                Text("Where “\(model.displayName(boardId))” lives. Changing it points this scoreboard at a different server right away; new pairings still use the default one. A custom URL applies when you press return.")
             } else {
-                Text("Prod and Demo are the hosted servers. Localhost works in the Simulator; to reach a dev server from a physical phone, pick Custom and use your Mac's LAN IP (e.g. ws://192.168.1.50:7878/ws).")
+                Text("Prod and Demo are the hosted servers. Localhost works in the Simulator; to reach a dev server from a physical phone, pick Custom and use your Mac's LAN IP (e.g. ws://192.168.1.50:7878/ws). Changes apply right away — a custom URL when you press return.")
             }
         }
     }
@@ -4336,6 +4503,22 @@ struct SettingsView: View {
         }
     }
 
+    /// The guide to the board's own screens. It used to open ONLY from the
+    /// offline/connecting card's ⓘ — which exists just when the board is already
+    /// unreachable — so a user with a merely confusing panel had nowhere to look.
+    /// Settings is where people go for help, so it lives here too.
+    private var helpSection: some View {
+        Section {
+            Button {
+                showTroubleshooting = true
+            } label: {
+                Label("Scoreboard troubleshooting", systemImage: "questionmark.circle")
+            }
+        } footer: {
+            Text("What each screen on the scoreboard means, and what to do when it won't connect.")
+        }
+    }
+
     #if DEBUG
     /// DEBUG-only firmware picker: reinstall the running build (the firmware
     /// now accepts a same-version install, so this exercises the OTA path), or
@@ -4430,6 +4613,10 @@ struct SettingsView: View {
             Button("Remove this scoreboard", role: .destructive) {
                 showRemoveConfirm = true
             }
+            // Attached to the BUTTON, never hoisted to the Section or the sheet:
+            // a confirmationDialog presents from the view it modifies, so on a
+            // regular-width layout this one has to point back at the row the user
+            // just tapped instead of appearing out of the middle of the screen.
             .confirmationDialog("Remove this scoreboard?", isPresented: $showRemoveConfirm, titleVisibility: .visible) {
                 Button("Remove", role: .destructive) {
                     if let id = model.selectedBoardId {
