@@ -1714,6 +1714,18 @@ struct TroubleshootingSheet: View {
     }
 
     private static let guides: [Guide] = [
+        // Ordered by likelihood: the healthy-looking states first, then the
+        // connect legs, then first-time setup.
+        Guide(
+            slug: "game",
+            title: "Showing scores as usual",
+            advice: "The panel keeps the latest scores up through brief network drops while it reconnects in the background — so it can look perfectly normal while the app says offline. Give it a minute: it either recovers quietly or switches to a CONNECTING screen."
+        ),
+        Guide(
+            slug: "black",
+            title: "Completely dark",
+            advice: "The board is asleep, turned off, or not getting power. Tap the knob to wake it. If it stays dark, check that it's plugged in and that the power adapter supplies 5V\u{2009}\u{2393}\u{2009}3A — the one from the box. Weaker adapters can't run the panel."
+        ),
         Guide(
             slug: "joining-wifi",
             title: "Joining Wi-Fi",

@@ -901,11 +901,10 @@ async fn get_firmware_notes(
 /// A canned example frame for the app's spoiler-settings rows: the same game
 /// rendered plain ("off"), spoiled-normal, or spoiled-strict, so the choice
 /// shows exactly what the board will do. Variant is off|normal|strict.
-async fn get_sample(
-    axum::extract::Path(variant): axum::extract::Path<String>,
-) -> axum::response::Response {
-    use axum::response::IntoResponse;
-    let variant = variant.strip_suffix(".png").unwrap_or(&variant).to_string();
+/// The fixed demonstration game shared by the spoiler previews (`/sample`)
+/// and the troubleshooting guide's "regular scores" screen (`/guide/game`):
+/// one deterministic, obviously-generic frame, so both stay byte-stable.
+fn sample_game() -> model::Game {
     let team = |abbrev: &str, name: &str, score: u32, p: &str, sec: &str| model::TeamSide {
         abbrev: abbrev.into(),
         name: name.into(),
@@ -916,7 +915,7 @@ async fn get_sample(
         primary: model::hex_to_rgb(p),
         secondary: model::ensure_contrast(model::hex_to_rgb(p), model::hex_to_rgb(sec)),
     };
-    let g = model::Game {
+    model::Game {
         id: "sample".into(),
         sport_id: "nhl".into(),
         away: team("CHI", "BLACKHAWKS", 3, "CF0A2C", "FFD100"),
@@ -938,7 +937,15 @@ async fn get_sample(
             home_players: 3,
         }),
         pregame: None,
-    };
+    }
+}
+
+async fn get_sample(
+    axum::extract::Path(variant): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let variant = variant.strip_suffix(".png").unwrap_or(&variant).to_string();
+    let g = sample_game();
     let spoiler = match variant.as_str() {
         "normal" => Some(SpoilerMode::Normal),
         "strict" => Some(SpoilerMode::Strict),
@@ -992,10 +999,35 @@ fn guide_screen(name: &str) -> Option<Vec<u32>> {
             b.needs_pairing();
             b.tick(GUIDE_TICK_MS);
         }
+        // Regular scores — the healthy state. Shown in the guide because a
+        // board can look EXACTLY like this while the app says offline: the
+        // offline grace holds the last content through brief drops while it
+        // reconnects in the background. Rendered from the same fixed sample
+        // game as the spoiler previews (server pipeline, not board-core —
+        // game frames are the server's to draw).
+        "game" => {
+            let g = sample_game();
+            let (_, rgb565) = render::render_frame(&g, None, None, default_name_style(&g.sport_id));
+            return Some(rgb565_to_frame_u32(&rgb565));
+        }
+        // A dark panel: asleep, powered off, or unpowered. The guide entry's
+        // text does the work; the image anchors "yes, fully black is a state".
+        "black" => return Some(vec![0u32; FRAME_PIXELS]),
         _ => return None,
     }
     // Full brightness (Board::new's default): the app dims nothing.
     Some(b.framebuffer())
+}
+
+/// RGB565-LE frame bytes -> the 0RGB u32 words `board_png` takes.
+fn rgb565_to_frame_u32(rgb565: &[u8]) -> Vec<u32> {
+    rgb565
+        .chunks_exact(2)
+        .map(|c| {
+            let (r, g, b) = scoreboard_protocol::rgb565_to_888(u16::from_le_bytes([c[0], c[1]]));
+            ((r as u32) << 16) | ((g as u32) << 8) | b as u32
+        })
+        .collect()
 }
 
 /// Encode a board-core framebuffer (0RGB u32 words, 64x32) as PNG bytes at 1x.
@@ -4828,7 +4860,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        let names = ["joining-wifi", "finding-server", "setup", "pair-code"];
+        let names = ["joining-wifi", "finding-server", "setup", "pair-code", "game", "black"];
         let mut bodies = Vec::new();
         for name in names {
             let resp = reqwest::get(format!("http://{addr}/guide/{name}.png")).await.unwrap();
