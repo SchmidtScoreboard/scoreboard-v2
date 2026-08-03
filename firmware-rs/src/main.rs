@@ -240,6 +240,11 @@ async fn main(spawner: Spawner) -> ! {
             } else {
                 (creds.server_host.clone(), creds.server_port)
             };
+            // …and its TLS pin, provisioned the same way. `None` = trust the
+            // compiled-in pin(s), which is every board talking to the hosted
+            // server; `Some` is a self-hoster's own certificate and REPLACES
+            // them (see link::Link::open).
+            let server_pin = creds.server_pin;
             println!("[ws] server {server_host}:{server_port}");
 
             let (mut controller, interfaces) =
@@ -287,8 +292,11 @@ async fn main(spawner: Spawner) -> ! {
                 .unwrap(),
             );
             spawner.spawn(
-                device(stack, board, board_id, secret, code, server_host, server_port, flash, fw_unconfirmed)
-                    .unwrap(),
+                device(
+                    stack, board, board_id, secret, code, server_host, server_port, server_pin,
+                    flash, fw_unconfirmed,
+                )
+                .unwrap(),
             );
             // Owns flash in WiFi mode: persists brightness + handles hold-to-reset.
             // (The encoder task itself is up already — spawned above the split.)
@@ -435,6 +443,8 @@ async fn device(
     pair_code: String,
     server_host: String,
     server_port: u16,
+    // The BLE-provisioned server pin, or `None` for the compiled-in default.
+    server_pin: Option<[u8; 32]>,
     flash: &'static ota::SharedFlash,
     fw_unconfirmed: bool,
 ) {
@@ -458,10 +468,24 @@ async fn device(
     // ~9KB on every reconnect (the Railway proxy recycles the socket every
     // 5-15 minutes) would fragment the heap around the long-lived frame cache.
     let mut link_bufs = link::TlsBuffers::new();
-    if link_bufs.bytes() > 0 {
-        println!("[tls] pinned to {}… ({} bytes of buffers)",
-            &config::SERVER_PIN[..8], link_bufs.bytes());
+    // Which key this board will actually accept, on the line right above the
+    // first handshake — the one thing worth knowing when a self-hosted board
+    // won't connect. cfg'd, not `if bytes() > 0`: `config::SERVER_PIN` has no
+    // default and panics during const evaluation when it isn't set, so a
+    // plaintext `--no-default-features` bring-up build must not name it at all.
+    #[cfg(feature = "tls")]
+    {
+        let shown = match &server_pin {
+            Some(p) => format!("{:02x}{:02x}{:02x}{:02x} (provisioned)", p[0], p[1], p[2], p[3]),
+            None => format!("{} (built-in)", &config::SERVER_PIN[..8]),
+        };
+        println!("[tls] pinned to {shown}… ({} bytes of buffers)", link_bufs.bytes());
     }
+    #[cfg(not(feature = "tls"))]
+    println!(
+        "[tls] DISABLED — plaintext bring-up build ({} bytes of buffers)",
+        link_bufs.bytes()
+    );
 
     loop {
         Timer::after(Duration::from_secs(1)).await;
@@ -534,7 +558,7 @@ async fn device(
             let halves = link::Halves::new(&mut sock);
             // TLS 1.3 with the server's public key pinned (src/tls.rs), or a
             // bare passthrough in a `--no-default-features` bring-up build.
-            let mut link = match link::Link::open(&halves, &mut link_bufs, &server_host).await {
+            let mut link = match link::Link::open(&halves, &mut link_bufs, &server_host, server_pin).await {
                 Ok(link) => link,
                 Err(e) => {
                     // A pin mismatch, a forged signature, or a server that
@@ -818,7 +842,7 @@ async fn flash_task(flash: &'static ota::SharedFlash, board: &'static SharedBoar
             Timer::after(Duration::from_millis(1000)).await;
             {
                 let mut f = flash.lock().await;
-                creds::clear(&mut f);
+                creds::clear(&mut *f);
                 identity::clear(&mut f);
                 brightness::clear(&mut f);
             }
@@ -855,7 +879,7 @@ async fn setup_reset_task(board: &'static SharedBoard, flash: &'static ota::Shar
             Timer::after(Duration::from_millis(1000)).await;
             {
                 let mut f = flash.lock().await;
-                creds::clear(&mut f);
+                creds::clear(&mut *f);
                 identity::clear(&mut f);
                 brightness::clear(&mut f);
             }

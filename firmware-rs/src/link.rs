@@ -90,6 +90,9 @@ pub const TLS_PLAIN_BUF: usize = 4096;
 /// and being a board that boots, panics in the connect loop, reboots, and
 /// burns an OTA revert strike every time. `pin_from_hex` asserts length, hex,
 /// and not-all-zero; in const position those asserts fail the build.
+///
+/// They are the DEFAULT, not the only possibility: a board provisioned with a
+/// pin of its own (a self-hoster's) uses that instead — see [`Link::open`].
 #[cfg(feature = "tls")]
 const PIN_CURRENT: [u8; 32] = pin_from_hex(config::SERVER_PIN);
 #[cfg(feature = "tls")]
@@ -332,10 +335,25 @@ impl<'a, 's> Link<'a, 's> {
     ///
     /// `server_name` is sent as SNI so the ClientHello looks like any other —
     /// it plays no part in verification, which is entirely the pin.
+    ///
+    /// # Which pin
+    ///
+    /// `provisioned_pin` is the pin written over BLE alongside the host and
+    /// port (`creds.rs`), and when it is present it is the ONLY pin trusted.
+    /// It does not join the compiled-in pair, it replaces it: someone running
+    /// their own server has pointed this board at their own certificate, and a
+    /// board that also kept trusting the hosted server's key would accept that
+    /// server — or anyone holding its certificate — on a connection its owner
+    /// believes only they can answer. Narrowing to one pin is the whole point.
+    ///
+    /// With no provisioned pin the board is a hosted-server board and uses the
+    /// compiled-in current + successor pair exactly as before, so the staged
+    /// key rotation in docs/cli.md is untouched.
     pub async fn open(
         halves: &'a Halves<'s>,
         bufs: &'a mut TlsBuffers,
         server_name: &str,
+        provisioned_pin: Option<[u8; 32]>,
     ) -> Result<Self, LinkError> {
         let io = SockIo {
             rx: &halves.rx,
@@ -347,7 +365,12 @@ impl<'a, 's> Link<'a, 's> {
         tls.set_flush_policy(FlushPolicy::Relaxed);
 
         let config = TlsConfig::new().with_server_name(server_name);
-        let verifier = PinnedVerifier::new(PIN_CURRENT, PIN_NEXT);
+        // No successor slot for a provisioned pin: rotation for a self-hosted
+        // server is re-provisioning it, not a staged fleet rollout.
+        let verifier = match provisioned_pin {
+            Some(pin) => PinnedVerifier::new(pin, None),
+            None => PinnedVerifier::new(PIN_CURRENT, PIN_NEXT),
+        };
         let mut provider = PinnedProvider::new(HwRng::default(), verifier);
 
         let outcome = tls.open(TlsContext::new(&config, &mut provider)).await;
@@ -443,6 +466,7 @@ impl<'a, 's> Link<'a, 's> {
         halves: &'a Halves<'s>,
         _bufs: &'a mut TlsBuffers,
         _server_name: &str,
+        _provisioned_pin: Option<[u8; 32]>,
     ) -> Result<Self, LinkError> {
         Ok(Self {
             io: SockIo {

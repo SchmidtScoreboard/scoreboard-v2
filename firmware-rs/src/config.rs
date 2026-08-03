@@ -81,10 +81,22 @@ pub const BOARD_ID: &str = "matrixportal-01";
 // A wrong pin fails CLOSED: the board rejects the handshake and retries
 // forever, which is the intended outcome and is covered by the OTA revert
 // watchdog (an unconfirmed image that can't auth within five minutes rolls
-// back). Boards provisioned over BLE to a custom host must be pointed at a
-// server holding one of these keys — the pin is compiled in, not discovered.
+// back).
+//
+// These are the DEFAULT, not the only possible pins. A board can be
+// provisioned with a pin of its own over BLE, exactly as it is provisioned
+// with a host and port (`creds.rs`, record v3), and when it carries one that
+// pin REPLACES the pair below — which is what lets someone run their own
+// server against their own certificate. Boards on the hosted server provision
+// nothing and use these. See docs/cli.md, "Running your own server".
 
-/// Dev server pin — REQUIRED at build time, deliberately with no default.
+/// Dev server pin — the build's DEFAULT pin, REQUIRED at build time and
+/// deliberately without a default of its own.
+///
+/// "Default" means what an unprovisioned board trusts: a board carrying a
+/// BLE-provisioned pin ignores this one entirely (`link::Link::open`). It is
+/// still required, because most boards never provision one and a TLS build
+/// with no pin at all could not talk to anything.
 ///
 /// There is no such thing as a safe placeholder here. A pin that belongs to no
 /// certificate anyone holds still compiles, still passes the "is it set" check,
@@ -93,7 +105,7 @@ pub const BOARD_ID: &str = "matrixportal-01";
 /// instead: run `cargo run -p server --bin gen-tls-cert`, put the printed pin
 /// in `firmware-rs/local.env` as `SCOREBOARD_DEV_TLS_PIN`, and source it
 /// (`scripts/dev-server.sh` does this for you).
-#[cfg(not(feature = "prod"))]
+#[cfg(all(feature = "tls", not(feature = "prod")))]
 pub const SERVER_PIN: &str = match option_env!("SCOREBOARD_DEV_TLS_PIN") {
     Some(p) => p,
     None => panic!(
@@ -104,10 +116,11 @@ pub const SERVER_PIN: &str = match option_env!("SCOREBOARD_DEV_TLS_PIN") {
          (Or build with --no-default-features for a plaintext bring-up image.)"
     ),
 };
-#[cfg(not(feature = "prod"))]
+#[cfg(all(feature = "tls", not(feature = "prod")))]
 pub const SERVER_PIN_NEXT: Option<&str> = option_env!("SCOREBOARD_DEV_TLS_PIN_NEXT");
 
-/// Prod server pin — REQUIRED at build time, deliberately with no default.
+/// Prod server pin — the hosted server's pin, REQUIRED at build time and
+/// deliberately without a default of its own.
 ///
 /// This is the single most dangerous constant in the firmware: it ships to
 /// every board over the air, and a board whose image is already CONFIRMED and
@@ -117,7 +130,7 @@ pub const SERVER_PIN_NEXT: Option<&str> = option_env!("SCOREBOARD_DEV_TLS_PIN_NE
 /// hosted image pinned to a key nobody holds, which is exactly the mistake
 /// this refuses to allow. The release script exports `SCOREBOARD_TLS_PIN` from
 /// the deployed certificate; see docs/cli.md for the rotation procedure.
-#[cfg(feature = "prod")]
+#[cfg(all(feature = "tls", feature = "prod"))]
 pub const SERVER_PIN: &str = match option_env!("SCOREBOARD_TLS_PIN") {
     Some(p) => p,
     None => panic!(
@@ -128,5 +141,5 @@ pub const SERVER_PIN: &str = match option_env!("SCOREBOARD_TLS_PIN") {
          running scripts/release-firmware.sh."
     ),
 };
-#[cfg(feature = "prod")]
+#[cfg(all(feature = "tls", feature = "prod"))]
 pub const SERVER_PIN_NEXT: Option<&str> = option_env!("SCOREBOARD_TLS_PIN_NEXT");

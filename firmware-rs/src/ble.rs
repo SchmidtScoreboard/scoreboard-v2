@@ -3,6 +3,7 @@
 //! written to the credentials characteristic, persist it to flash, then reboot into
 //! WiFi mode. Test from a phone with nRF Connect (or the app) before iOS support.
 
+use crate::config;
 use crate::creds;
 use crate::SharedBoard;
 use alloc::string::String;
@@ -41,6 +42,14 @@ struct Provisioning {
     /// keeps the whole value inside one ATT read at iOS's typical MTU (185).
     #[characteristic(uuid = "21ba0000-5363-6f72-6562-6f6172640005", read, value = [0u8; 180])]
     networks: [u8; 180],
+    /// Server TLS pin: the 64 hex characters `gen-tls-cert` prints (UTF-8,
+    /// optional — write BEFORE the password, like `server`). This is what makes
+    /// self-hosting possible: a board pointed at your own server must trust
+    /// YOUR certificate, and the compiled-in pin is only a default. Absent =
+    /// keep that default. Write-only, and a malformed value is REFUSED at the
+    /// ATT layer rather than stored (see `gatt_loop`).
+    #[characteristic(uuid = "21ba0000-5363-6f72-6562-6f6172640006", write, value = [0u8; 64])]
+    pin: [u8; 64],
 }
 
 pub async fn provision(
@@ -122,9 +131,17 @@ async fn gatt_loop<P: PacketPool>(
     let ssid_h = server.prov.ssid;
     let pass_h = server.prov.password;
     let server_h = server.prov.server;
+    let pin_h = server.prov.pin;
     let mut ssid_v: Option<String> = None;
     let mut pass_v: Option<String> = None;
     let mut server_v: Option<String> = None;
+    let mut pin_v: Option<[u8; creds::PIN_LEN]> = None;
+    // A pin arrived and did not parse. Latched, and it BLOCKS the save below:
+    // saving without it would look like success while the board quietly kept
+    // the compiled-in pin, which for a self-hoster means a board that reboots,
+    // dials their server, and rejects it forever with no clue why. A later
+    // well-formed write clears the latch.
+    let mut pin_bad = false;
     let clean = |b: &[u8]| core::str::from_utf8(b).ok().map(|s| String::from(s.trim_end_matches('\0')));
     loop {
         match conn.next().await {
@@ -134,6 +151,11 @@ async fn gatt_loop<P: PacketPool>(
                 return;
             }
             GattConnectionEvent::Gatt { event } => {
+                // Set when the written value is unusable, so the write is
+                // answered with an ATT error instead of an ACK — the app sees
+                // the failure on the characteristic that caused it, which is
+                // the only place a 64x32 panel could never explain it.
+                let mut refuse = None;
                 if let GattEvent::Write(e) = &event {
                     if e.handle() == ssid_h.handle {
                         ssid_v = clean(e.data());
@@ -144,14 +166,53 @@ async fn gatt_loop<P: PacketPool>(
                     } else if e.handle() == server_h.handle {
                         server_v = clean(e.data());
                         println!("[ble] server received");
+                    } else if e.handle() == pin_h.handle {
+                        match parse_pin(e.data()) {
+                            PinWrite::Pin(p) => {
+                                pin_v = Some(p);
+                                pin_bad = false;
+                                println!("[ble] server pin received ({:02x}{:02x}…)", p[0], p[1]);
+                            }
+                            PinWrite::Cleared => {
+                                pin_v = None;
+                                pin_bad = false;
+                                println!("[ble] server pin cleared — using the built-in pin");
+                            }
+                            PinWrite::Malformed => {
+                                // Never store a broken pin, and never fall back
+                                // to the built-in one behind the user's back.
+                                pin_v = None;
+                                pin_bad = true;
+                                refuse = Some(AttErrorCode::VALUE_NOT_ALLOWED);
+                                println!(
+                                    "[ble] server pin REJECTED ({}B) — expected 64 hex characters \
+                                     from `gen-tls-cert`, not all-zero",
+                                    e.data().len()
+                                );
+                            }
+                        }
                     }
                 }
-                if let Ok(reply) = event.accept() {
+                let reply = match refuse {
+                    Some(code) => event.reject(code),
+                    None => event.accept(),
+                };
+                if let Ok(reply) = reply {
                     reply.send().await;
                 }
                 // Save + reboot once both SSID and password have been written
-                // (the server characteristic is optional and must come first).
+                // (the server and pin characteristics are optional and must
+                // come first).
                 if let (Some(s), Some(p)) = (&ssid_v, &pass_v) {
+                    // A pin was offered and was garbage: refuse the whole save
+                    // rather than silently provision a board that cannot reach
+                    // the server it was just pointed at. The panel stays on
+                    // "WAITING FOR WI-FI" — which is the truth — and rewriting
+                    // the characteristic retries from here.
+                    if pin_bad {
+                        println!("[ble] creds NOT saved — the server pin was malformed; rewrite it");
+                        continue;
+                    }
                     // "host:port" -> (host, port); malformed/absent = default.
                     let (host, port) = server_v
                         .as_deref()
@@ -160,8 +221,53 @@ async fn gatt_loop<P: PacketPool>(
                             Some((String::from(h), pt.parse::<u16>().ok()?))
                         })
                         .unwrap_or((String::new(), 0));
-                    if !s.is_empty() && creds::save(&mut *flash.lock().await, s, p, &host, port) {
-                        println!("[ble] saved creds for '{}' (server '{}') — rebooting", s, host);
+                    // A PIN AND A HOST ARE INSEPARABLE. The built-in pin belongs
+                    // to the built-in server and to nothing else, so every
+                    // mismatched pairing below is a board that dials one server
+                    // while trusting another's key — a handshake that can never
+                    // succeed, on a board that looks like it provisioned fine.
+                    // Cheap to catch here, and the only exit otherwise is
+                    // hold-to-reset by someone who has no idea why.
+                    //
+                    // This also covers a client that writes the characteristics
+                    // in the wrong ORDER: the password triggers this save, so a
+                    // pin written after it never arrives, and that lands here as
+                    // "custom host, no pin" rather than silently saving a record
+                    // missing the pin. (The app chains its writes correctly;
+                    // third-party GATT clients following the docs may not.)
+                    let custom_host = !host.is_empty()
+                        && (host != config::SERVER_HOST || port != config::SERVER_PORT);
+                    if pin_v.is_some() && host.is_empty() {
+                        println!(
+                            "[ble] creds NOT saved — a server pin was given with no server \
+                             address; write the address too (or omit the pin to use the default)"
+                        );
+                        continue;
+                    }
+                    if custom_host && pin_v.is_none() {
+                        println!(
+                            "[ble] creds NOT saved — server '{host}' is not the built-in one and \
+                             no pin was given; that board could never complete a TLS handshake. \
+                             Write the pin characteristic BEFORE the password."
+                        );
+                        continue;
+                    }
+                    if !s.is_empty()
+                        && creds::save(
+                            &mut *flash.lock().await,
+                            s,
+                            p,
+                            &host,
+                            port,
+                            pin_v.as_ref(),
+                        )
+                    {
+                        println!(
+                            "[ble] saved creds for '{}' (server '{}', {} pin) — rebooting",
+                            s,
+                            host,
+                            if pin_v.is_some() { "provisioned" } else { "built-in" }
+                        );
                         // Show "WI-FI SAVED" for a beat before the reboot wipes
                         // the panel — otherwise the confirmation is never seen.
                         board.lock().await.set_setup_phase(SetupPhase::Saved);
@@ -186,6 +292,40 @@ async fn gatt_loop<P: PacketPool>(
             }
             _ => {}
         }
+    }
+}
+
+/// What a write to the pin characteristic meant.
+enum PinWrite {
+    /// 64 hex characters that decode to a usable pin.
+    Pin([u8; creds::PIN_LEN]),
+    /// Empty: no pin, keep the firmware's compiled-in default. Exactly what an
+    /// empty `server` value means — and what an app that writes every
+    /// characteristic unconditionally sends for a hosted board, which must not
+    /// be mistaken for a broken pin.
+    Cleared,
+    /// Anything else. Refused, never stored.
+    Malformed,
+}
+
+/// Read the pin characteristic's value.
+///
+/// Tolerant about the wrapper — the value is zero-padded to its fixed size on
+/// the wire, and a pasted string arrives with whatever whitespace came along —
+/// and strict about the content: exactly 64 hex digits, never the all-zero
+/// digest. `creds::pin_from_hex_str` holds a provisioned pin to the same rules
+/// `tls::pin_from_hex` holds the compiled-in ones to, minus the const assert.
+fn parse_pin(raw: &[u8]) -> PinWrite {
+    let Ok(s) = core::str::from_utf8(raw) else {
+        return PinWrite::Malformed;
+    };
+    let s = s.trim_matches(|c: char| c == '\0' || c.is_ascii_whitespace());
+    if s.is_empty() {
+        return PinWrite::Cleared;
+    }
+    match creds::pin_from_hex_str(s) {
+        Some(pin) => PinWrite::Pin(pin),
+        None => PinWrite::Malformed,
     }
 }
 

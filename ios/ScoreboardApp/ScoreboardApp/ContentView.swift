@@ -194,10 +194,11 @@ final class BoardViewModel: ObservableObject {
     /// re-pairing a board the app already knows — the sheet just sat there.
     @Published private(set) var pairedTick = 0
 
-    // A RELEASE build has no server picker (it's #if DEBUG), so whatever this
-    // default is, that's where a shipped app lives forever — defaulting to
-    // loopback meant a customer could never reach a server or pair a board.
-    // Dev builds still start on localhost, where the picker exists to move them.
+    // This default is where a shipped app lives until someone deliberately
+    // moves it — defaulting to loopback meant a customer could never reach a
+    // server or pair a board. A release build CAN now be repointed (the
+    // self-hosting section in Settings), but nobody should have to touch it to
+    // use the hosted server. Dev builds still start on localhost.
     #if DEBUG
     @Published var serverUrl = UserDefaults.standard.string(forKey: "serverUrl") ?? "ws://127.0.0.1:7878/ws"
     #else
@@ -259,6 +260,37 @@ final class BoardViewModel: ObservableObject {
     func serverURL(of boardId: String?) -> String {
         guard let boardId else { return serverUrl }
         return boardServers[boardId] ?? serverUrl
+    }
+
+    /// ws URL -> that server's 64-hex TLS pin, for the self-hosting route.
+    ///
+    /// The PHONE never needs this: it reaches a server over `wss://` and a real
+    /// WebPKI certificate. The BOARD does — it pins the server's SPKI hash, and
+    /// a self-hosted server's key is not the one compiled into the firmware, so
+    /// the pin has to be provisioned over BLE alongside the host and port.
+    /// Keyed by server URL so a phone that sets up boards against two different
+    /// servers keeps both pins. **No entry means the hosted server**: the
+    /// firmware's built-in pin already matches it and BLE setup writes nothing.
+    private var serverPins: [String: String] = {
+        (UserDefaults.standard.dictionary(forKey: "serverPins") as? [String: String]) ?? [:]
+    }()
+    /// The stored pin for a server, or nil when it's a server the board's
+    /// built-in pin already covers.
+    func serverPin(of url: String) -> String? {
+        serverPins[url.trimmingCharacters(in: .whitespacesAndNewlines)]
+    }
+    /// Remember (or forget) a server's pin. Anything that isn't 64 hex
+    /// characters is stored as *nothing* rather than as itself — a half-typed
+    /// pin on disk would later be written to a board and brick its link.
+    func setServerPin(_ url: String, _ pin: String?) {
+        let key = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return }
+        if let pin, let normalized = BluetoothProvisioner.normalizedPin(pin) {
+            serverPins[key] = normalized
+        } else {
+            serverPins.removeValue(forKey: key)
+        }
+        UserDefaults.standard.set(serverPins, forKey: "serverPins")
     }
 
     /// boardId -> user-visible name. The name is authoritative server-side, but
@@ -1287,6 +1319,12 @@ struct SetupView: View {
         model.connectedServers.contains(pairServer.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
+    /// True when this pairing targets a server the user runs themselves — the
+    /// one case that needs an address and a TLS pin provisioned onto the board.
+    private var selfHosting: Bool {
+        !pairServer.isEmpty && ServerPreset.matching(pairServer).isSelfHosted
+    }
+
     var body: some View {
         VStack(spacing: 20) {
             Spacer()
@@ -1296,7 +1334,9 @@ struct SetupView: View {
             Text("Add your scoreboard")
                 .font(.title2).bold()
 
-            // Customers never repoint the server; only dev builds get the picker.
+            // A dev shortcut for hopping between fixtures. The shipped route to
+            // the same setting is the "Use my own server" button below, which
+            // is where the address and pin fields live.
             #if DEBUG
             // Which server this board will live on — different boards can use
             // different servers (dev board on the Mac, living room on prod).
@@ -1305,7 +1345,7 @@ struct SetupView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 Picker("Server", selection: $serverPreset) {
-                    ForEach(ServerPreset.allCases) { p in
+                    ForEach(ServerPreset.selectable) { p in
                         Text(p.label).tag(p)
                     }
                 }
@@ -1317,7 +1357,7 @@ struct SetupView: View {
                     }
                 }
             }
-            if serverPreset == .custom {
+            if serverPreset.isSelfHosted {
                 TextField("ws://host:7878/ws", text: $pairServer)
                     .textFieldStyle(.roundedBorder)
                     .autocorrectionDisabled()
@@ -1386,21 +1426,37 @@ struct SetupView: View {
                 Text(serverReachable ? "Connected to server" : "Connecting…")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            // Customers pair against the production server the app ships
-            // with; only dev builds get to repoint it.
-            #if DEBUG
+            // Two supported routes: the hosted server (nothing to configure) or
+            // a server you run yourself. The second one needs an address and a
+            // TLS pin, so it needs a door in RELEASE builds too — without this
+            // a self-hoster's board can never be pointed at their own server.
             Button {
                 showServerSettings = true
             } label: {
-                Label("Server settings", systemImage: "gear").font(.caption)
+                Label(selfHosting ? "Using my own server" : "Use my own server",
+                      systemImage: "server.rack")
+                    .font(.caption)
             }
             .padding(.top, 2)
-            #endif
+            if selfHosting {
+                Text(pairServer)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .padding(.horizontal, 24)
+            }
             Spacer()
         }
         .padding()
         .sheet(isPresented: $showBluetoothSetup) {
-            BluetoothSetupView(server: pairServer)
+            BluetoothSetupView(
+                server: pairServer,
+                serverPin: model.serverPin(of: pairServer) ?? "",
+                // A pin typed during setup is worth keeping: the second board
+                // on the same self-hosted server shouldn't ask for it again.
+                rememberPin: { model.setServerPin(pairServer, $0) }
+            )
         }
         .onAppear {
             if pairServer.isEmpty {
@@ -1410,6 +1466,13 @@ struct SetupView: View {
             model.prepareServer(pairServer)
         }
         .sheet(isPresented: $showServerSettings) {
+            // The sheet edits the DEFAULT server; this screen's own copy has to
+            // follow it back, or a board would be provisioned toward whatever
+            // was chosen before the sheet was opened.
+            pairServer = model.serverUrl
+            serverPreset = ServerPreset.matching(model.serverUrl)
+            model.prepareServer(pairServer)
+        } content: {
             SettingsView(model: model)
         }
     }
@@ -3264,6 +3327,14 @@ struct ConnectingSplash: View {
     let serverUrl: String
     let openSettings: () -> Void
 
+    private var offersServerSettings: Bool {
+        #if DEBUG
+        return true
+        #else
+        return ServerPreset.matching(serverUrl).isSelfHosted
+        #endif
+    }
+
     var body: some View {
         VStack(spacing: 14) {
             Spacer()
@@ -3282,15 +3353,16 @@ struct ConnectingSplash: View {
                 .foregroundStyle(.secondary)
             ProgressView()
                 .padding(.top, 4)
-            // A customer stuck on this screen has a network problem, not a
-            // server-address problem — the picker (and this shortcut to it)
-            // is a dev-build tool. Remove-this-scoreboard stays reachable
-            // through the toolbar gear's Settings sheet.
-            #if DEBUG
-            Button("Server Settings", action: openSettings)
-                .buttonStyle(.bordered)
-                .padding(.top, 8)
-            #endif
+            // A customer on the HOSTED server who is stuck here has a network
+            // problem, not a server-address problem, and offering them a server
+            // picker only invites them to break a working setup. A self-hoster
+            // stuck here very likely does have an address problem — their own
+            // — and this is the only screen they can reach to fix it.
+            if offersServerSettings {
+                Button("Server settings", action: openSettings)
+                    .buttonStyle(.bordered)
+                    .padding(.top, 8)
+            }
             Spacer()
         }
     }
@@ -3703,12 +3775,18 @@ final class BluetoothProvisioner: NSObject, ObservableObject {
     /// Whether the connected board exposes the server characteristic (older
     /// firmware, or a stale iOS GATT cache of it, won't).
     var canSetServer: Bool { serverChar != nil }
+    /// Whether the connected board will accept a TLS pin. Firmware from before
+    /// the pin was provisionable only trusts the pin compiled into it, which
+    /// makes self-hosting impossible on that board — the setup sheet has to say
+    /// so rather than send credentials that produce a link that can't handshake.
+    var canSetPin: Bool { pinChar != nil }
 
     private let serviceUUID   = CBUUID(string: "21BA0000-5363-6F72-6562-6F6172640001")
     private let ssidUUID      = CBUUID(string: "21BA0000-5363-6F72-6562-6F6172640002")
     private let passUUID      = CBUUID(string: "21BA0000-5363-6F72-6562-6F6172640003")
     private let serverUUID    = CBUUID(string: "21BA0000-5363-6F72-6562-6F6172640004")
     private let networksUUID  = CBUUID(string: "21BA0000-5363-6F72-6562-6F6172640005")
+    private let pinUUID       = CBUUID(string: "21BA0000-5363-6F72-6562-6F6172640006")
     private let deviceName    = "Scoreboard Setup"
 
     private var central: CBCentralManager?
@@ -3717,8 +3795,10 @@ final class BluetoothProvisioner: NSObject, ObservableObject {
     private var passChar: CBCharacteristic?
     private var serverChar: CBCharacteristic?
     private var networksChar: CBCharacteristic?
-    private var ssidToSend: Data?
-    private var passwordToSend: Data?
+    private var pinChar: CBCharacteristic?
+    /// The remaining writes of a send, in order, each fired on the previous
+    /// ack. The password is always last (it is the firmware's save trigger).
+    private var pendingWrites: [(char: CBCharacteristic, data: Data)] = []
     private var sentPassword = false
 
     func start() {
@@ -3734,10 +3814,17 @@ final class BluetoothProvisioner: NSObject, ObservableObject {
         central?.stopScan()
         if let board { central?.cancelPeripheralConnection(board) }
         board = nil
+        forgetCharacteristics()
+    }
+
+    /// Drop everything tied to a peripheral we're no longer talking to.
+    private func forgetCharacteristics() {
         ssidChar = nil
         passChar = nil
         serverChar = nil
         networksChar = nil
+        pinChar = nil
+        pendingWrites = []
         networks = []
     }
 
@@ -3746,11 +3833,19 @@ final class BluetoothProvisioner: NSObject, ObservableObject {
         start()
     }
 
-    /// Write server (optional) -> SSID -> password, each on the previous ack.
-    /// The password write is the firmware's save trigger, so it must be last;
-    /// the board saves + reboots, which we observe as a disconnect = success.
-    func send(ssid: String, password: String, server: String) {
-        guard status == .ready, let board, let ssidChar else {
+    /// Write pin (optional) -> server (optional) -> SSID -> password, each on
+    /// the previous ack. The password write is the firmware's save trigger, so
+    /// it must be last: everything the board should persist has to be sitting
+    /// in its RAM before that write lands. The board then saves + reboots,
+    /// which we observe as a disconnect = success.
+    ///
+    /// `pin` is the self-hosting case only — 64 hex characters identifying the
+    /// server's TLS key. Empty means "hosted server", where writing nothing
+    /// leaves the board on the pin compiled into its firmware.
+    func send(ssid: String, password: String, server: String, pin: String = "") {
+        // The peripheral itself is used by `writeNext`, not here — but a send
+        // with no board attached still has to fail loudly rather than queue.
+        guard status == .ready, board != nil, let ssidChar, let passChar else {
             status = .failed("Not connected to a board yet")
             return
         }
@@ -3762,18 +3857,92 @@ final class BluetoothProvisioner: NSObject, ObservableObject {
             status = .failed("Password is too long")
             return
         }
-        ssidToSend = ssidData
-        passwordToSend = passData
-        sentPassword = false
-        status = .sending
-        // "host:port" for the board (it speaks plain ws over TCP). Old firmware
-        // without the characteristic just gets ssid+pass and keeps its default.
+
+        var queue: [(char: CBCharacteristic, data: Data)] = []
+        // The pin is checked here as well as in the field: a board given a
+        // malformed pin can never complete a handshake, and the only way back
+        // is a physical factory reset.
+        if !pin.isEmpty {
+            guard let normalized = Self.normalizedPin(pin), let pinData = normalized.data(using: .utf8) else {
+                status = .failed("That server pin isn't 64 hex characters")
+                return
+            }
+            guard let pinChar else {
+                status = .failed("This board's firmware can't be given a server pin")
+                return
+            }
+            queue.append((pinChar, pinData))
+        }
+        // "host:port" for the board (it dials the raw TCP port and speaks TLS
+        // against the pinned key). Old firmware without the characteristic just
+        // gets ssid+pass and keeps its default.
         let hostPort = Self.hostPort(fromWs: server)
         if let serverChar, !hostPort.isEmpty, let data = hostPort.data(using: .utf8), data.count <= 96 {
-            board.writeValue(data, for: serverChar, type: .withResponse)
-        } else {
-            board.writeValue(ssidData, for: ssidChar, type: .withResponse)
+            queue.append((serverChar, data))
         }
+        queue.append((ssidChar, ssidData))
+        queue.append((passChar, passData))
+
+        pendingWrites = queue
+        sentPassword = false
+        status = .sending
+        writeNext()
+    }
+
+    /// Fire the next queued write; the ack drives the one after it.
+    private func writeNext() {
+        guard let board, !pendingWrites.isEmpty else { return }
+        let step = pendingWrites.removeFirst()
+        board.writeValue(step.data, for: step.char, type: .withResponse)
+    }
+
+    /// The bare pin candidate inside whatever the user pasted — NOT validated.
+    ///
+    /// `gen-tls-cert` prints the pin on a labelled line, and it also ends up in
+    /// config files and shell exports, so the clipboard arrives carrying any of
+    /// "pin: <hex>", "SERVER_PIN=<hex>", quotes, stray spaces, a trailing
+    /// newline, or upper case. None of that is part of the pin: hex contains no
+    /// ':' or '=', so everything through the last one is a label.
+    static func pinCandidate(_ raw: String) -> String {
+        var s = raw
+        if let sep = s.lastIndex(where: { $0 == ":" || $0 == "=" }) {
+            s = String(s[s.index(after: sep)...])
+        }
+        s.removeAll { $0.isWhitespace || $0 == "\"" || $0 == "'" }
+        return s.lowercased()
+    }
+
+    /// The canonical lowercase 64-hex pin, or nil if the input isn't one.
+    ///
+    /// Deliberately the same three rules the firmware applies to the write
+    /// (`creds::pin_from_hex_str`): 64 hex digits, nothing else, and never the
+    /// all-zero digest. Anything this accepts and the board doesn't is a
+    /// provisioning that fails on the far side, where there's no text field to
+    /// put the complaint in.
+    static func normalizedPin(_ raw: String) -> String? {
+        let candidate = pinCandidate(raw)
+        // Explicit alphabet rather than `isHexDigit`, which also accepts
+        // full-width Unicode digits that the firmware's parser would not.
+        guard candidate.count == 64,
+              candidate.allSatisfy({ "0123456789abcdef".contains($0) }),
+              candidate.contains(where: { $0 != "0" }) else { return nil }
+        return candidate
+    }
+
+    /// Why a non-empty pin field is unusable, in words for the person typing —
+    /// or nil when it's a good pin (or empty, which each screen phrases in its
+    /// own way). One implementation so the Settings field and the Bluetooth
+    /// field can never disagree about what a pin is.
+    static func pinComplaint(_ raw: String) -> String? {
+        let candidate = pinCandidate(raw)
+        if candidate.isEmpty || normalizedPin(raw) != nil { return nil }
+        if !candidate.allSatisfy({ "0123456789abcdef".contains($0) }) {
+            return "A pin is hexadecimal — digits and the letters a–f only."
+        }
+        if candidate.count != 64 {
+            return "A pin is exactly 64 characters; this one has \(candidate.count)."
+        }
+        return "That's the all-zero placeholder, not a key — use the pin your server printed."
     }
 
     /// ws://host:port/ws -> "host:port" (default port 7878 when unspecified).
@@ -3841,11 +4010,7 @@ extension BluetoothProvisioner: CBCentralManagerDelegate {
             // a DIFFERENT board, and issuing reads/writes against another
             // peripheral's characteristic objects is undefined.
             board = nil
-            ssidChar = nil
-            passChar = nil
-            serverChar = nil
-            networksChar = nil
-            networks = []
+            forgetCharacteristics()
             beginScan()
         }
     }
@@ -3858,7 +4023,7 @@ extension BluetoothProvisioner: CBPeripheralDelegate {
             status = .failed("This board isn't in setup mode")
             return
         }
-        peripheral.discoverCharacteristics([ssidUUID, passUUID, serverUUID, networksUUID], for: service)
+        peripheral.discoverCharacteristics([ssidUUID, passUUID, serverUUID, networksUUID, pinUUID], for: service)
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
@@ -3868,6 +4033,7 @@ extension BluetoothProvisioner: CBPeripheralDelegate {
             if ch.uuid == passUUID { passChar = ch }
             if ch.uuid == serverUUID { serverChar = ch }
             if ch.uuid == networksUUID { networksChar = ch }
+            if ch.uuid == pinUUID { pinChar = ch }
         }
         // The networks list is optional (old firmware lacks it) — kick off the
         // read but don't gate readiness on it.
@@ -3887,21 +4053,21 @@ extension BluetoothProvisioner: CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
-        if let error { status = .failed(error.localizedDescription); return }
-        if characteristic.uuid == serverUUID {
-            // Server acknowledged → send the SSID.
-            if let ssidChar, let ssidData = ssidToSend {
-                peripheral.writeValue(ssidData, for: ssidChar, type: .withResponse)
-            }
-        } else if characteristic.uuid == ssidUUID {
-            // SSID acknowledged → send the password (the save trigger).
-            if let passChar, let passData = passwordToSend {
-                peripheral.writeValue(passData, for: passChar, type: .withResponse)
-            }
-        } else if characteristic.uuid == passUUID {
+        if let error {
+            // Stop the chain: a board that rejected its pin must not go on to
+            // receive the password, which is what makes it save and reboot.
+            pendingWrites = []
+            status = .failed(error.localizedDescription)
+            return
+        }
+        if characteristic.uuid == passUUID {
+            // The save trigger landed — the board is writing flash and rebooting.
+            pendingWrites = []
             sentPassword = true
             status = .success
+            return
         }
+        writeNext()
     }
 }
 
@@ -3915,9 +4081,33 @@ struct BluetoothSetupView: View {
     /// board) must respect an explicit "Other…" choice instead of clobbering it.
     @State private var autoSelected = false
     @FocusState private var ssidFocused: Bool
+    @FocusState private var pinFocused: Bool
     @State private var password = ""
     /// ws URL of the server this board should connect to (written over BLE).
     var server: String = ""
+    /// The self-hosted server's TLS pin, if one is already stored for `server`.
+    /// Seeds the field so a second board doesn't have to be told again.
+    var serverPin: String = ""
+    /// Called with the pin actually sent, so the app can remember it.
+    var rememberPin: ((String) -> Void)? = nil
+
+    /// The pin as typed (may be a raw paste — normalized before it's used).
+    @State private var pin = ""
+    /// Suppresses the "this is required" complaint until the user has been in
+    /// the field or tried to send. An empty box shouldn't open in red.
+    @State private var pinTouched = false
+
+    /// Whether this setup needs a pin at all: only when the board is being
+    /// pointed at a server other than the hosted one, whose key the firmware's
+    /// built-in pin already matches.
+    private var needsPin: Bool {
+        !server.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && ServerPreset.matching(server).isSelfHosted
+    }
+
+    /// The board-facing address this sheet will write — the same single address
+    /// the phone uses for a self-hosted server.
+    private var boardAddress: String { BluetoothProvisioner.hostPort(fromWs: server) }
 
     var body: some View {
         NavigationStack {
@@ -3951,9 +4141,14 @@ struct BluetoothSetupView: View {
                     Text("Use a 2.4 GHz network — the board's radio is 2.4 GHz only. Credentials are sent straight to the board over Bluetooth, not to any server.")
                 }
 
+                if needsPin { serverPinSection }
+
                 Section {
                     Button {
-                        ble.send(ssid: effectiveSsid, password: password, server: server)
+                        pinTouched = true
+                        let toSend = needsPin ? (BluetoothProvisioner.normalizedPin(pin) ?? "") : ""
+                        if !toSend.isEmpty { rememberPin?(toSend) }
+                        ble.send(ssid: effectiveSsid, password: password, server: server, pin: toSend)
                     } label: {
                         HStack {
                             Spacer()
@@ -3975,7 +4170,10 @@ struct BluetoothSetupView: View {
                     Button("Close") { dismiss() }
                 }
             }
-            .onAppear { ble.start() }
+            .onAppear {
+                ble.start()
+                if pin.isEmpty { pin = serverPin }
+            }
             .onDisappear { ble.stop() }
             .onChange(of: ble.networks) { _, list in
                 guard !list.isEmpty else { return }
@@ -3999,6 +4197,51 @@ struct BluetoothSetupView: View {
         }
     }
 
+    /// Your own server's address + key. Shown only for the self-hosting route.
+    private var serverPinSection: some View {
+        Section {
+            HStack {
+                Text("Board connects to")
+                Spacer()
+                Text(boardAddress.isEmpty ? "—" : boardAddress)
+                    .font(.footnote.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+            TextField("64 hex characters", text: $pin)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                // ASCII only: a pin is hex, and the emoji/dictation keyboards
+                // can only contribute characters that fail validation.
+                .keyboardType(.asciiCapable)
+                .font(.footnote.monospaced())
+                .focused($pinFocused)
+                .onChange(of: pinFocused) { _, focused in if !focused { pinTouched = true } }
+            if let problem = pinProblem {
+                Label(problem, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .font(.footnote)
+            }
+            if ble.status == .ready, !ble.canSetPin {
+                Label("This board's firmware only trusts the built-in server key, so it can't be pointed at your own server. Update the board's firmware first.", systemImage: "xmark.octagon.fill")
+                    .foregroundStyle(.red)
+                    .font(.footnote)
+            }
+        } header: {
+            Text("Your server's key")
+        } footer: {
+            Text("Your server prints this pin when you set it up — it's the 64-character line from `cargo run -p server --bin gen-tls-cert`. The board refuses to talk to any server whose key doesn't match, so check it before sending: a wrong pin leaves the board unable to connect, and the only way back is holding the knob to factory reset it.")
+        }
+    }
+
+    /// Inline complaint about the pin field, or nil when it's fine (or when the
+    /// user hasn't engaged with it yet).
+    private var pinProblem: String? {
+        if BluetoothProvisioner.pinCandidate(pin).isEmpty {
+            return pinTouched ? "Enter the pin your server printed." : nil
+        }
+        return BluetoothProvisioner.pinComplaint(pin)
+    }
+
     /// The SSID that will actually be sent: the picked scan-list entry, or the
     /// typed one for "Other…" / boards that don't report a scan list.
     private var effectiveSsid: String {
@@ -4007,7 +4250,12 @@ struct BluetoothSetupView: View {
     }
 
     private var canSend: Bool {
-        ble.status == .ready && !effectiveSsid.isEmpty
+        guard ble.status == .ready, !effectiveSsid.isEmpty else { return false }
+        // Self-hosting: refuse to send at all until the pin is a real one AND
+        // this board can be told it. Either way the board would come back up
+        // unable to complete a handshake, and recovering means a factory reset.
+        if needsPin { return ble.canSetPin && BluetoothProvisioner.normalizedPin(pin) != nil }
+        return true
     }
 
     private var successBinding: Binding<Bool> {
@@ -4043,17 +4291,34 @@ struct BluetoothSetupView: View {
     }
 }
 
-/// The selectable servers. Prod/Demo/Localhost have fixed URLs; Custom is free-text.
+/// The selectable servers. Prod/Demo/Localhost have fixed URLs; Custom is the
+/// self-hosting route (free-text address plus the server's own TLS pin).
 private enum ServerPreset: String, CaseIterable, Identifiable {
     case prod, demo, localhost, custom
     var id: String { rawValue }
 
+    /// What a user may PICK, which is not the same as what `matching` may
+    /// return. Self-hosting is a supported route, so Custom ships; Demo and
+    /// Localhost are development fixtures and stay out of release builds.
+    /// `allCases` deliberately keeps all four so a stored Demo/Localhost URL
+    /// still resolves to its preset (and its `boardHostPort`) in any build.
+    static var selectable: [ServerPreset] {
+        #if DEBUG
+        return allCases
+        #else
+        return [.prod, .custom]
+        #endif
+    }
+
+    /// True for the one preset that means "a server I run myself".
+    var isSelfHosted: Bool { self == .custom }
+
     var label: String {
         switch self {
-        case .prod: return "Prod"
+        case .prod: return "Hosted server"
         case .demo: return "Demo"
         case .localhost: return "Localhost"
-        case .custom: return "Custom"
+        case .custom: return "My own server"
         }
     }
 
@@ -4087,6 +4352,12 @@ private enum ServerPreset: String, CaseIterable, Identifiable {
     /// (`live-production-118c.up.railway.app:7878` just hangs). Provisioning a
     /// board toward an edge URL points it at a dead endpoint — that regression
     /// already happened once and is what `migrateLegacyServerUrls` heals.
+    ///
+    /// Custom returns nil on purpose: a self-hosted server has exactly ONE
+    /// address, so the board's endpoint is derived from the URL the phone uses
+    /// (see `BluetoothProvisioner.hostPort(fromWs:)`) instead of being pinned
+    /// to a second, different one. The split above exists only because the
+    /// hosted deployment sits behind an edge the board can't speak to.
     var boardHostPort: String? {
         switch self {
         case .prod: return "hayabusa.proxy.rlwy.net:47958"
@@ -4130,9 +4401,13 @@ struct SettingsView: View {
     @State private var showImportEmptyAlert = false
     /// The board-screens guide (also reachable from the offline card's ⓘ).
     @State private var showTroubleshooting = false
-    #if DEBUG
-    @State private var preset: ServerPreset = .localhost
+    /// Which server this sheet's target uses. Corrected from the stored URL in
+    /// `onAppear`; the initial value only has to be one the picker can show.
+    @State private var preset: ServerPreset = .prod
     @State private var customUrl = ""
+    /// The self-hosted server's TLS pin, as typed. Not applied to anything
+    /// live — it's what BLE setup will hand the NEXT board provisioned.
+    @State private var customPin = ""
 
     /// The URL this sheet started from: the board's own when scoped to one.
     private var startingUrl: String {
@@ -4152,15 +4427,28 @@ struct SettingsView: View {
             model.setServer(trimmed)
         }
     }
-    #endif
+
+    /// Store (or clear) the pin for whatever server this sheet is pointing at.
+    /// Only ever called for the self-hosting route; the hosted server keeps no
+    /// pin, which is what tells BLE setup to leave the board's built-in one be.
+    private func applyPin() {
+        // Board-scoped sheets don't show the field: they can repoint where the
+        // PHONE looks for one board, which says nothing about which key that
+        // board was flashed to trust. Writing here would file a pin against a
+        // server it may not belong to — and that pin is what a future board
+        // gets over BLE.
+        guard boardId == nil else { return }
+        let url = customUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !url.isEmpty else { return }
+        model.setServerPin(url, customPin)
+    }
 
     var body: some View {
         NavigationStack {
             Form {
-                // Customers never repoint the server; only dev builds get the picker.
-                #if DEBUG
+                // Self-hosting is a supported way to run this thing, so the
+                // server section ships in release builds too — see its footer.
                 serverSection
-                #endif
                 // This sheet also opens from the connecting splash and the
                 // pairing screen, where no board may be selected — the
                 // board-scoped sections would just be empty rows there.
@@ -4202,24 +4490,27 @@ struct SettingsView: View {
             }
             .toolbar {
                 // ONE button, in every configuration. Every row on this sheet
-                // applies the moment it's touched — including the DEBUG server
+                // applies the moment it's touched — including the server
                 // picker — so a Cancel/Save pair promised an undo that never
                 // existed and a commit that had already happened.
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
             }
-            #if DEBUG
             .onAppear {
                 let url = startingUrl
                 preset = ServerPreset.matching(url)
                 customUrl = url
+                customPin = model.serverPin(of: url) ?? ""
             }
-            #endif
         }
     }
 
-    #if DEBUG
+    /// Which server this app talks to: the one we host, or one you run.
+    ///
+    /// Shipped in release builds because self-hosting is a supported route —
+    /// but framed as that, not as a debug switch. Demo and Localhost are
+    /// development fixtures and stay behind `ServerPreset.selectable`.
     private var serverSection: some View {
         Section {
             Picker("Server", selection: Binding(
@@ -4232,37 +4523,83 @@ struct SettingsView: View {
                     if let u = p.url {
                         customUrl = u
                         applyServer(u)
+                    } else {
+                        customPin = model.serverPin(of: customUrl) ?? ""
                     }
                 }
             )) {
-                ForEach(ServerPreset.allCases) { p in
+                ForEach(ServerPreset.selectable) { p in
                     Text(p.label).tag(p)
                 }
             }
             .pickerStyle(.menu)
 
-            if preset == .custom {
-                TextField("ws://host:port/ws", text: $customUrl)
+            if preset.isSelfHosted {
+                TextField("wss://scoreboard.example.com/ws", text: $customUrl)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .keyboardType(.URL)
                     // On submit, not on every keystroke: reconnecting the socket
                     // for "ws://1", "ws://12", … would be a reconnect storm.
-                    .onSubmit { applyServer(customUrl) }
+                    // The pin is re-filed too, so a typed pin follows the
+                    // address it was typed for instead of staying on the old one.
+                    .onSubmit { applyServer(customUrl); applyPin() }
+                // The pin travels to a board over Bluetooth during setup, so
+                // it's only meaningful on the sheet that configures the server
+                // NEW boards get. Repointing one existing board can't change
+                // the pin already written to its flash.
+                if boardId == nil {
+                    TextField("Server pin (64 hex characters)", text: $customPin)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.asciiCapable)
+                        .font(.footnote.monospaced())
+                        // As typed, not on return: this one costs a UserDefaults
+                        // write rather than a reconnect, and `setServerPin`
+                        // stores only a complete 64-hex pin (anything shorter
+                        // clears it), so a half-typed value can never stick.
+                        // Needing a return keypress to save it is exactly how a
+                        // board ends up provisioned with no pin at all.
+                        .onChange(of: customPin) { _, _ in applyPin() }
+                    if let problem = pinProblem {
+                        Label(problem, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                            .font(.footnote)
+                    }
+                }
             } else if let u = preset.url {
                 Text(u).font(.footnote).foregroundStyle(.secondary)
             }
         } header: {
             Text("Server")
         } footer: {
-            if let boardId {
-                Text("Where “\(model.displayName(boardId))” lives. Changing it points this scoreboard at a different server right away; new pairings still use the default one. A custom URL applies when you press return.")
-            } else {
-                Text("Prod and Demo are the hosted servers. Localhost works in the Simulator; to reach a dev server from a physical phone, pick Custom and use your Mac's LAN IP (e.g. ws://192.168.1.50:7878/ws). Changes apply right away — a custom URL when you press return.")
-            }
+            serverFooter
         }
     }
-    #endif
+
+    /// Same validation as the Bluetooth sheet's field, so a pin that's wrong
+    /// gets caught wherever it's typed rather than on the way to a board.
+    /// Silent on an empty field: this sheet can legitimately be left without a
+    /// pin (it's the Bluetooth sheet that refuses to send without one).
+    private var pinProblem: String? { BluetoothProvisioner.pinComplaint(customPin) }
+
+    @ViewBuilder private var serverFooter: some View {
+        if let boardId {
+            Text("Where “\(model.displayName(boardId))” lives. Changing it points this scoreboard at a different server right away; new pairings still use the default one. An address applies when you press return.")
+        } else if preset.isSelfHosted {
+            #if DEBUG
+            Text("Your board and this app both use this address; the board dials its host and port directly. The pin is the 64-character key your server printed on setup (`gen-tls-cert`) — it's handed to a board during Bluetooth setup, and the board trusts no other key. The address applies when you press return; the pin saves as you type. From a physical phone, a dev server needs your Mac's LAN IP.")
+            #else
+            Text("Your board and this app both use this address; the board dials its host and port directly. The pin is the 64-character key your server printed on setup (`gen-tls-cert`) — it's handed to a board during Bluetooth setup, and the board trusts no other key. The address applies when you press return; the pin saves as you type.")
+            #endif
+        } else {
+            #if DEBUG
+            Text("Pick “My own server” to run your own — you'll need its address and the TLS pin it printed on first run. Localhost works in the Simulator; from a physical phone use your Mac's LAN IP. Changes apply right away.")
+            #else
+            Text("The hosted server needs no setup. Pick “My own server” only if you run the scoreboard server yourself — you'll need its address and the TLS pin it printed on first run.")
+            #endif
+        }
+    }
 
     /// Board-level settings: off behavior, sleep duration, and rotation pace.
     /// The pickers get little info buttons — what "off" and "sleep" actually

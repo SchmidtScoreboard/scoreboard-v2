@@ -1,10 +1,11 @@
-# Host-side tests for `../src/tls.rs`.
+# Host-side tests for `../src/tls.rs` and `../src/creds.rs`.
 #
 # The firmware is a no_std xtensa binary, so `cargo test` can never run inside
-# it. This crate compiles THE SAME SOURCE FILE for the host (`#[path]`, no
-# copy, no drift) and exercises it against certificates minted by the same
-# rcgen the server uses — so a change to the pin rules, the DER walk, or the
-# signature check fails here rather than on a board.
+# it. This crate compiles THE SAME SOURCE FILES for the host (`#[path]`, no
+# copy, no drift) and exercises them against certificates minted by the same
+# rcgen the server uses — so a change to the pin rules, the DER walk, the
+# signature check, or the flash credential record fails here rather than on a
+# board.
 #
 # Deliberately its own `[workspace]`: firmware-rs is a standalone xtensa
 # workspace (see ../Cargo.toml) and this is a host crate.
@@ -27,6 +28,9 @@ path = "src/lib.rs"
 embedded-tls = { version = "0.19.0", default-features = false }
 ed25519-dalek = { version = "2", default-features = false, features = ["hazmat"] }
 sha2 = { version = "0.10", default-features = false }
+# What src/creds.rs needs: the `Storage` trait its load/save/clear are generic
+# over, so the tests can drive them against a fake flash instead of a board.
+embedded-storage = "0.3.1"
 
 [dev-dependencies]
 # The server mints its certificate with rcgen + PKCS_ED25519 (see

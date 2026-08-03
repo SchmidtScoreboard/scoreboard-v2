@@ -274,6 +274,10 @@ PEMs into Railway as `TLS_CERT_PEM` / `TLS_KEY_PEM` (both services), and the pin
 into the firmware. The key is stored nowhere else — there is no recovery, and
 losing it means minting a new identity, which is a firmware rotation.
 
+That last step is the *hosted* server's route. Running your own means the pin
+goes into the board over BLE instead of into the build — see
+[Running your own server](#running-your-own-server).
+
 Default SANs are `hayabusa.proxy.rlwy.net localhost 127.0.0.1`, and validity is
 10 years. Both are conveniences for `curl`/`openssl`: the board authenticates by
 pin, and cannot read dates or names anyway.
@@ -307,6 +311,83 @@ Never skip step 2's soak: swapping the server certificate before the fleet
 carries the successor pin locks out every board that has not updated, and they
 cannot be recovered over the network — the connection they would recover over is
 the one that just broke.
+
+This staged dance is for the **hosted** fleet, whose pins arrive in firmware.
+A self-hosted board carries one provisioned pin and rotates by being
+re-provisioned — see below.
+
+## Running your own server
+
+Two supported routes to a working board: run this server yourself, or pay once
+for access to the hosted one. The firmware is the same either way. The hosted
+server's pin is compiled in as the **default**; self-hosting **replaces** it
+with yours, over the same BLE provisioning that already carries the Wi-Fi
+credentials and the server address.
+
+**1. Run the server.** Anywhere the board can reach — a box on your LAN, a VPS,
+a container host. `PORT` is the port the board will dial and `STATE_DIR` decides
+where `scoreboard.db` and the catalog cache land; step 2 adds the TLS pair.
+
+```sh
+cargo run -p server --fetch-catalog     # once, so teams have names and colors
+PORT=7878 STATE_DIR=~/scoreboard cargo run -p server --release
+```
+
+**2. Mint a certificate, once.** By hand, and kept forever — not per deploy,
+and never at boot. The board authenticates by pin, so a fresh certificate every
+deploy would change the pin every deploy and lock out your own board.
+
+```sh
+cargo run -p server --bin gen-tls-cert -- board.lan
+```
+
+It prints a PEM certificate, a PEM private key, and a 64-hex-character **pin**.
+Give the server the two PEMs as `TLS_CERT_PEM` / `TLS_KEY_PEM`. The pin is the
+part you keep — it is public, so a note on your phone is fine. Lost it?
+Re-derive it from the certificate (`gen-tls-cert --pin cert.pem`) or read it off
+the server's startup log (`board pin 51f5f6…`).
+
+**3. Provision the board with all three facts together.** In the app's setup
+flow: the Wi-Fi network, the server as `host:port`, and the pin. They travel
+over BLE in one go and land in one flash record, then the board reboots and
+dials your server. Leave the pin blank and the board keeps the built-in
+default, which is the hosted server.
+
+A provisioned pin is the **only** pin that board trusts. It does not join the
+built-in one, it replaces it — so a board pointed at your server cannot be
+talked into accepting the hosted server's key, or anyone else's who holds a
+copy of that certificate.
+
+Four things worth knowing before you type a pin:
+
+- **It has to be exact**: 64 hex characters, no `0x`, no spaces. Anything else
+  is refused at the BLE layer — the write fails and *nothing* is saved. That is
+  deliberate: a board that accepted a broken pin would save, reboot, and never
+  connect again, with no clue on the panel as to why.
+- **A wrong-but-well-formed pin fails closed, forever.** The board rejects the
+  handshake, retries, and sits on FINDING SERVER. There is no plaintext
+  fallback, and no remote fix — the connection you would fix it over is the one
+  that is broken. `[tls] pinned to …` on the serial console names the pin the
+  board is actually using, and whether it came from provisioning or the build.
+- **Hold-to-reset is the way out.** Holding the knob wipes the whole record —
+  Wi-Fi, server, pin, and the board's identity — and returns it to BLE setup,
+  where you can enter the right pin. It needs no server, which is exactly why
+  it is the recovery path for a wrong pin.
+- **Rotating your own key is re-provisioning.** Swap the certificate, then
+  hold-to-reset and set the board up again with the new pin. (Reissuing a
+  certificate for the *same* key keeps the pin: the pin is over the key, not
+  the certificate.)
+
+Provisioning is plain GATT if you would rather not use the app — service
+`21ba0000-5363-6f72-6562-6f6172640001`, all writes, with the password written
+**last** because it is what triggers the save and reboot:
+
+| Characteristic | Value |
+|---|---|
+| `…0002` | Wi-Fi SSID |
+| `…0004` | server `host:port` (optional) |
+| `…0006` | server TLS pin, 64 hex characters (optional) |
+| `…0003` | Wi-Fi password — **write this last** |
 
 ## Recipes
 
