@@ -424,7 +424,7 @@ impl SlotWriter<'_> {
 /// — a failed update must be a non-event.
 ///
 /// Runs in the device task with the websocket already dropped: it borrows the
-/// same rx/tx socket buffers (like `fetch_timezone`). The panel is BLANKED for
+/// same rx/tx socket buffers (like `the timezone lookup (since removed)`). The panel is BLANKED for
 /// the whole download (`set_updating(Some(0))` — a black panel can't strobe as
 /// each flash write stalls the render task), and download progress is shown in
 /// the app instead, observed server-side from the bytes it streams to the

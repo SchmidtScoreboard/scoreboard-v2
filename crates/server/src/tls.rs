@@ -316,6 +316,93 @@ mod tests {
         assert_eq!(spki_sha256_hex(&first).unwrap(), spki_sha256_hex(&second).unwrap());
     }
 
+    /// THE TEN-YEAR QUESTION: does an EXPIRED certificate still serve?
+    ///
+    /// The board cannot evaluate notBefore/notAfter (no RTC, no NTP), so expiry
+    /// is invisible to it. The remaining risk is entirely server-side: if
+    /// rustls refused to present a certificate past its notAfter, the whole
+    /// fleet would fail on a date rather than for a reason. This mints a
+    /// certificate that expired years ago, serves it, and completes a real
+    /// handshake — proving the calendar cannot ambush us.
+    #[tokio::test]
+    async fn an_expired_certificate_still_completes_a_handshake() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio_rustls::TlsAcceptor;
+
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let mut params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
+        params.not_before = rcgen::date_time_ymd(2001, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2002, 1, 1); // long dead
+        let cert = params.self_signed(&key).unwrap();
+        let loaded = from_pem(&cert.pem(), &key.serialize_pem()).expect("expired cert still loads");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let acceptor = TlsAcceptor::from(loaded.config);
+        tokio::spawn(async move {
+            if let Ok((sock, _)) = listener.accept().await {
+                if let Ok(mut tls) = acceptor.accept(sock).await {
+                    let _ = tls.write_all(b"alive").await;
+                }
+            }
+        });
+
+        // A client that pins the key and — like the board — ignores dates.
+        let mut root = tokio_rustls::rustls::RootCertStore::empty();
+        let _ = root.add(cert.der().clone());
+        let cfg = tokio_rustls::rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(AcceptAnyCert))
+            .with_no_client_auth();
+        let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(cfg));
+        let sock = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut tls = connector
+            .connect("localhost".try_into().unwrap(), sock)
+            .await
+            .expect("an expired certificate must still serve — the board cannot check dates");
+        let mut buf = [0u8; 5];
+        tls.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"alive");
+    }
+
+    /// Date-blind verifier standing in for the board's (which pins instead).
+    #[derive(Debug)]
+    struct AcceptAnyCert;
+    impl tokio_rustls::rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
+        fn verify_server_cert(
+            &self,
+            _e: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+            _i: &[tokio_rustls::rustls::pki_types::CertificateDer<'_>],
+            _s: &tokio_rustls::rustls::pki_types::ServerName<'_>,
+            _o: &[u8],
+            _n: tokio_rustls::rustls::pki_types::UnixTime,
+        ) -> Result<tokio_rustls::rustls::client::danger::ServerCertVerified, tokio_rustls::rustls::Error>
+        {
+            Ok(tokio_rustls::rustls::client::danger::ServerCertVerified::assertion())
+        }
+        fn verify_tls12_signature(
+            &self,
+            _m: &[u8],
+            _c: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+            _d: &tokio_rustls::rustls::DigitallySignedStruct,
+        ) -> Result<tokio_rustls::rustls::client::danger::HandshakeSignatureValid, tokio_rustls::rustls::Error>
+        {
+            Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+        fn verify_tls13_signature(
+            &self,
+            _m: &[u8],
+            _c: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
+            _d: &tokio_rustls::rustls::DigitallySignedStruct,
+        ) -> Result<tokio_rustls::rustls::client::danger::HandshakeSignatureValid, tokio_rustls::rustls::Error>
+        {
+            Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
+        }
+        fn supported_verify_schemes(&self) -> Vec<tokio_rustls::rustls::SignatureScheme> {
+            vec![tokio_rustls::rustls::SignatureScheme::ED25519]
+        }
+    }
+
     /// A different key is a different pin — the pin actually identifies the key.
     #[test]
     fn a_new_key_is_a_new_pin() {

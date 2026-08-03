@@ -194,7 +194,16 @@ final class BoardViewModel: ObservableObject {
     /// re-pairing a board the app already knows — the sheet just sat there.
     @Published private(set) var pairedTick = 0
 
+    // A RELEASE build has no server picker (it's #if DEBUG), so whatever this
+    // default is, that's where a shipped app lives forever — defaulting to
+    // loopback meant a customer could never reach a server or pair a board.
+    // Dev builds still start on localhost, where the picker exists to move them.
+    #if DEBUG
     @Published var serverUrl = UserDefaults.standard.string(forKey: "serverUrl") ?? "ws://127.0.0.1:7878/ws"
+    #else
+    @Published var serverUrl = UserDefaults.standard.string(forKey: "serverUrl")
+        ?? "wss://live-production-118c.up.railway.app/ws"
+    #endif
 
     private static let boardsKey = "pairedBoardIds"
 
@@ -222,6 +231,15 @@ final class BoardViewModel: ObservableObject {
     var extraGameIds: Set<String> { current.extraGameIds }
 
     /// HTTP(S) base for the /render endpoint — the SELECTED board's server.
+    ///
+    /// Every image and link the app builds (`/render`, `/guide`, `/sample`,
+    /// `/game`, `/firmware/notes`) hangs off this one value, so the scheme has
+    /// to survive the hop: wss -> **https**, ws -> http. Match the full `://`
+    /// and test wss first. A substring rewrite of "ws" -> "http" silently turns
+    /// `wss://` into `https` only by luck of ordering, and the sloppier version
+    /// of it turns `wss://host` into `httpss://host` or, worse, downgrades the
+    /// TLS URL to plaintext `http://` — which would leave the whole image path
+    /// unencrypted while the socket looked fine.
     var httpBase: String {
         var u = serverURL(of: selectedBoardId)
         if u.hasSuffix("/ws") { u = String(u.dropLast(3)) }
@@ -474,6 +492,15 @@ final class BoardViewModel: ObservableObject {
         isPairing = false
         pairError = nil
         pairedTick += 1
+        // The board renders no clock of its own — the server draws the idle
+        // clock and every start time, so it needs to know which zone the board
+        // lives in. The board used to discover that by calling a geolocation
+        // service in cleartext at boot; that call is gone, and Railway's TCP
+        // proxy hides the board's real IP so the server can't infer it either.
+        // The phone is the honest source: it's in the same house as the board,
+        // and it already knows exactly where it is. No geolocation, no third
+        // party, no guessing.
+        clientFor(boardId)?.setTimezone(boardId: boardId, tz: TimeZone.current.identifier)
         client?.requestCatalog()
     }
 
@@ -3750,8 +3777,15 @@ final class BluetoothProvisioner: NSObject, ObservableObject {
     }
 
     /// ws://host:port/ws -> "host:port" (default port 7878 when unspecified).
+    ///
+    /// For a known preset the answer is NOT derived from the phone's URL: the
+    /// phone talks to the hosted servers over the HTTPS edge, and the board has
+    /// to be sent the raw TCP proxy it can complete a pinned-key TLS handshake
+    /// against. Stripping the scheme off `wss://…up.railway.app/ws` would write
+    /// `…up.railway.app:7878` to the board, which answers nothing.
     static func hostPort(fromWs url: String) -> String {
         var u = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let pinned = ServerPreset.matching(u).boardHostPort { return pinned }
         for p in ["ws://", "wss://", "http://", "https://"] where u.hasPrefix(p) {
             u = String(u.dropFirst(p.count))
         }
@@ -4023,12 +4057,41 @@ private enum ServerPreset: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Fixed WebSocket URL, or nil for Custom.
+    /// Fixed WebSocket URL for THE PHONE, or nil for Custom.
+    ///
+    /// The hosted servers are reached over Railway's HTTPS edge, which
+    /// terminates TLS with a real WebPKI certificate and forwards to the same
+    /// container port the TCP proxy does. The phone has a full TLS stack and a
+    /// trust store, so it has no reason to ride the plaintext path the board
+    /// uses — see `boardHostPort` for why the board still does.
     var url: String? {
         switch self {
-        case .prod: return "ws://hayabusa.proxy.rlwy.net:47958/ws"
-        case .demo: return "ws://tokaido.proxy.rlwy.net:33343/ws"
+        case .prod: return "wss://live-production-118c.up.railway.app/ws"
+        case .demo: return "wss://dummy-production-2e6f.up.railway.app/ws"
+        // Loopback in the Simulator, deliberately plaintext: there is no
+        // certificate to serve for 127.0.0.1 and the traffic never leaves the
+        // machine. Everything off-device is wss:// above.
         case .localhost: return "ws://127.0.0.1:7878/ws"
+        case .custom: return nil
+        }
+    }
+
+    /// The address to hand THE BOARD over BLE — always the raw TCP endpoint,
+    /// never the HTTPS edge, and nil for Custom (derive it from the URL).
+    ///
+    /// The phone and the board reach the same server at different addresses,
+    /// and this is the one asymmetry in the system that bites. The board speaks
+    /// TLS 1.3 against a *pinned Ed25519 server key* over Railway's raw TCP
+    /// proxy; the edge hostname terminates TLS itself with a WebPKI cert the
+    /// board would reject, and its container port isn't even reachable there
+    /// (`live-production-118c.up.railway.app:7878` just hangs). Provisioning a
+    /// board toward an edge URL points it at a dead endpoint — that regression
+    /// already happened once and is what `migrateLegacyServerUrls` heals.
+    var boardHostPort: String? {
+        switch self {
+        case .prod: return "hayabusa.proxy.rlwy.net:47958"
+        case .demo: return "tokaido.proxy.rlwy.net:33343"
+        case .localhost: return "127.0.0.1:7878"
         case .custom: return nil
         }
     }

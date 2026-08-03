@@ -23,9 +23,15 @@
 	<!-- Scoreboard servers speak plain ws/http (the board has no TLS stack), and
 	     users can point a board at any host — LAN IPs, Railway TCP proxies, etc.
 	     ATS would silently block every /render image fetch to a non-local name. -->
+	<!-- The blanket plaintext exemption is gone: the board speaks TLS as of
+	     firmware 2026.7.21 and the app now talks wss:// + https:// to Railway's
+	     edge, so nothing in a shipping build loads over cleartext. What remains
+	     is local networking, which ATS treats separately — that keeps the
+	     Simulator's ws://127.0.0.1 and a LAN dev server working without
+	     re-opening arbitrary plaintext to the whole internet. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<key>NSAllowsArbitraryLoads</key>
+		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
 	<key>NSBluetoothAlwaysUsageDescription</key>

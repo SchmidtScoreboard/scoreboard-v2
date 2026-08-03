@@ -16,11 +16,19 @@ use tokio::sync::mpsc;
 type WsSender = SplitSink<WebSocket, Message>;
 type WsReceiver = SplitStream<WebSocket>;
 
-pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+/// `conn` is stamped on every request by the sniffing listener (see serve.rs).
+/// It is optional because a test can call this router without one; nothing
+/// depends on it beyond logging.
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    conn: Option<axum::extract::Extension<crate::serve::Conn>>,
+) -> Response {
+    let peer = conn.map(|c| c.0.peer);
+    ws.on_upgrade(move |socket| handle_socket(socket, state, peer))
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState) {
+async fn handle_socket(socket: WebSocket, state: AppState, peer: Option<std::net::SocketAddr>) {
     let (mut sender, mut receiver) = socket.split();
 
     // Random per-connection challenge the client must sign with its Ed25519 key.
@@ -61,12 +69,18 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         .await;
 
     match role {
-        Role::Device => device_loop(sender, receiver, state, pubkey).await,
+        Role::Device => device_loop(sender, receiver, state, pubkey, peer).await,
         Role::Controller => controller_loop(sender, receiver, state, pubkey).await,
     }
 }
 
-async fn device_loop(sender: WsSender, mut receiver: WsReceiver, state: AppState, board_id: String) {
+async fn device_loop(
+    sender: WsSender,
+    mut receiver: WsReceiver,
+    state: AppState,
+    board_id: String,
+    peer: Option<std::net::SocketAddr>,
+) {
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
     state.devices.lock().unwrap().insert(board_id.clone(), tx.clone());
     // A board nobody is paired with shows its pair code unprompted — on a
@@ -85,6 +99,9 @@ async fn device_loop(sender: WsSender, mut receiver: WsReceiver, state: AppState
     // wait for the next games refresh to learn it).
     push_board_state(&state, &board_id);
     tracing::info!("device '{board_id}' connected");
+    // What the socket says about where this board is — and, on Railway, why
+    // that is nothing. See `note_device_peer`.
+    crate::note_device_peer(&board_id, peer);
 
     let mut sink = sender;
     let forward = tokio::spawn(async move {

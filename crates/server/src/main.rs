@@ -716,29 +716,80 @@ async fn main() {
         .route("/ws", get(ws::ws_handler))
         .with_state(state);
 
-    // Bind all interfaces so a real board on the LAN (or Railway's proxy) can reach
-    // us; includes localhost, so the simulator/app on 127.0.0.1 still work. Railway
-    // injects $PORT; locally we default to 7878.
-    let port = std::env::var("PORT").unwrap_or_else(|_| "7878".into());
-    let addr = format!("0.0.0.0:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-
-    // ONE port, both transports. Boards in the field speak plain ws:// and
-    // Railway's HTTPS edge forwards plaintext HTTP here for the app, so the
-    // port can never become TLS-only; the listener sniffs each connection
-    // instead (see serve.rs). A missing certificate degrades to plaintext
-    // rather than crash-looping the service.
+    // A missing certificate degrades to plaintext rather than crash-looping the
+    // service.
     let tls = tls::from_env();
     match &tls {
         Some(t) => tracing::info!(
-            "scoreboard server on {addr} — plaintext + TLS 1.3 (board pin {}, \
-             max TLS record {} bytes on the wire)",
+            "TLS 1.3 available (board pin {}, max TLS record {} bytes on the wire)",
             t.pin,
             tls::MAX_RECORD_WIRE
         ),
-        None => tracing::info!("scoreboard server on {addr} — plaintext only"),
+        None => tracing::info!("no certificate configured — plaintext only"),
     }
-    serve::serve(listener, app, tls.map(|t| t.config), Default::default()).await;
+    let tls = tls.map(|t| t.config);
+
+    // Bind all interfaces so a real board on the LAN (or Railway's proxy) can
+    // reach us; includes localhost, so the simulator/app on 127.0.0.1 still work.
+    //
+    // Railway reaches this container twice, and the two paths want OPPOSITE
+    // policies (see serve.rs):
+    //
+    //   PORT                         the HTTPS edge's target port. Railway
+    //                                terminates TLS out there and forwards
+    //                                PLAINTEXT here, so this port must stay open.
+    //   RAILWAY_TCP_APPLICATION_PORT the raw TCP proxy's target port. Bytes
+    //                                arrive untouched from the public internet;
+    //                                this is the board's port and it can demand
+    //                                TLS.
+    //
+    // Both default to 7878 and today production has them EQUAL, which collapses
+    // the two into one port that cannot enforce anything (rejecting plaintext
+    // there would reject the app). That case is handled honestly — one listener,
+    // PortRole::Shared — rather than faked. Splitting them is a Railway config
+    // change, not a code change: point the domain at one port (`railway domain
+    // --port`, or the edit icon beside the domain) and the TCP proxy at the
+    // other, then set both variables to match.
+    let edge_port = env_port("PORT", 7878);
+    let raw_port = env_port("RAILWAY_TCP_APPLICATION_PORT", edge_port);
+
+    if edge_port == raw_port {
+        let addr = format!("0.0.0.0:{edge_port}");
+        let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+        tracing::info!(
+            "scoreboard server on {addr} — ONE port for both the HTTPS edge and the raw \
+             TCP proxy, so plaintext cannot be refused there (PORT and \
+             RAILWAY_TCP_APPLICATION_PORT are both {edge_port}); plaintext websocket \
+             upgrades that did not come through the edge will be logged"
+        );
+        serve::serve(listener, app, tls, Default::default(), serve::PortRole::Shared).await;
+        return;
+    }
+
+    let edge_addr = format!("0.0.0.0:{edge_port}");
+    let raw_addr = format!("0.0.0.0:{raw_port}");
+    let edge = tokio::net::TcpListener::bind(&edge_addr).await.unwrap();
+    let raw = tokio::net::TcpListener::bind(&raw_addr).await.unwrap();
+    tracing::info!(
+        "scoreboard server on {edge_addr} (HTTPS edge, full plaintext router) and \
+         {raw_addr} (raw TCP proxy: TLS required except the signed OTA image route)"
+    );
+    tokio::join!(
+        serve::serve(edge, app.clone(), tls.clone(), Default::default(), serve::PortRole::Edge),
+        serve::serve(raw, app, tls, Default::default(), serve::PortRole::Raw),
+    );
+}
+
+/// A port from the environment, falling back to `default` when unset or not a
+/// number. A typo in a Railway variable must not take the service down.
+fn env_port(name: &str, default: u16) -> u16 {
+    match std::env::var(name) {
+        Ok(v) => v.parse().unwrap_or_else(|_| {
+            tracing::warn!("{name}='{v}' is not a port number — using {default}");
+            default
+        }),
+        Err(_) => default,
+    }
 }
 
 async fn get_catalog(State(s): State<AppState>) -> Json<Catalog> {
@@ -1404,11 +1455,50 @@ pub(crate) fn rfc3339_utc(t: chrono::DateTime<chrono::Utc>) -> String {
     t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-/// The board's configured IANA timezone, parsed. `None` (unset or unparseable)
-/// falls back to the server's local zone at each format site, so a local dev
-/// server keeps rendering sensible times without any configuration.
+/// The board's configured IANA timezone, parsed, else the server-wide
+/// `DEFAULT_TIMEZONE`. `None` (nothing set, or unparseable) falls back to the
+/// server's local zone at each format site, so a local dev server keeps
+/// rendering sensible times without any configuration.
 pub(crate) fn board_tz(cfg: &BoardConfig) -> Option<chrono_tz::Tz> {
-    cfg.timezone.as_deref().and_then(|s| s.parse().ok())
+    cfg.timezone
+        .as_deref()
+        .and_then(|s| s.parse().ok())
+        .or_else(default_tz)
+}
+
+/// The zone a board with nothing configured renders in, from `DEFAULT_TIMEZONE`
+/// (an IANA name like "America/Chicago").
+///
+/// This exists because the board stopped guessing. Boards used to IP-geolocate
+/// themselves at boot over cleartext HTTP to a third party and report the
+/// answer up as `ClientMsg::DeviceTimezone`; that call is gone from the
+/// firmware, and the server cannot geolocate on its behalf — behind Railway's
+/// TCP proxy the peer address is the PROXY (see [`classify_peer`]). Without
+/// this, a board nobody has set a zone for would render in the server's local
+/// zone, which on Railway is UTC.
+///
+/// A CONFIGURED default, deliberately, not a guess: an owner-set value is a
+/// fact, and a wrong timezone is worse than an unset one. Read once — the
+/// environment cannot change under a running process, and this is called from
+/// every render.
+fn default_tz() -> Option<chrono_tz::Tz> {
+    static DEFAULT_TZ: std::sync::OnceLock<Option<chrono_tz::Tz>> = std::sync::OnceLock::new();
+    *DEFAULT_TZ.get_or_init(|| {
+        let raw = std::env::var("DEFAULT_TIMEZONE").ok()?;
+        let parsed = parse_iana_tz(&raw);
+        match parsed {
+            Some(tz) => tracing::info!("boards with no configured zone render in {tz}"),
+            None => tracing::warn!("DEFAULT_TIMEZONE='{raw}' is not an IANA zone name — ignored"),
+        }
+        parsed
+    })
+}
+
+/// An IANA zone name ("America/Chicago") if it names a real zone. The one place
+/// a zone string becomes a zone, so "unparseable is ignored" means the same
+/// thing everywhere.
+fn parse_iana_tz(raw: &str) -> Option<chrono_tz::Tz> {
+    raw.parse().ok()
 }
 
 /// The resolved team-name display style for `sport_id` on this board: the
@@ -2064,11 +2154,17 @@ pub fn handle_device_brightness(state: &AppState, board_id: &str, level: u8) {
     push_board_state(state, board_id);
 }
 
-/// The board reported its self-discovered IANA timezone (IP-geolocated at
-/// boot) — adopt it for this board's clock and start-time labels. The zone
-/// tracks where the BOARD lives, needs no phone, and self-corrects on the
-/// next boot after a move; DST is automatic because the NAME is stored and
-/// the tz database supplies the offset. Unparseable names are ignored.
+/// A board reported an IANA timezone — adopt it for this board's clock and
+/// start-time labels. DST is automatic because the NAME is stored and the tz
+/// database supplies the offset. Unparseable names are ignored.
+///
+/// LEGACY. Boards used to IP-geolocate themselves at boot with a cleartext GET
+/// to a third party and report the answer here. That call is gone from the
+/// firmware — it was the last unencrypted third-party request the board made —
+/// so current boards never send this. It is kept because boards on older
+/// firmware still do, and honouring them costs nothing. A current board's zone
+/// comes from the app ([`Command::SetTimezone`]) or, failing that, from
+/// `DEFAULT_TIMEZONE` ([`default_tz`]).
 pub fn handle_device_timezone(state: &AppState, board_id: &str, tz: &str) {
     if tz.parse::<chrono_tz::Tz>().is_err() {
         tracing::warn!("board '{board_id}' reported unparseable timezone '{tz}' — ignored");
@@ -2084,6 +2180,90 @@ pub fn handle_device_timezone(state: &AppState, board_id: &str, tz: &str) {
     state.persist_config(board_id, &cfg);
     push_board(state, board_id);
     push_board_state(state, board_id);
+}
+
+/// What a connection's socket peer address is worth, as an answer to "where is
+/// this board?".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PeerOrigin {
+    /// A globally-routable unicast address: this really is the far end's own
+    /// public IP, and geolocating it would describe where the board lives.
+    Public,
+    /// RFC1918, CGNAT (100.64/10), loopback, link-local, or otherwise
+    /// non-global: an infrastructure hop or a LAN, NOT the board's location.
+    /// Railway's TCP proxy lands here.
+    Infrastructure,
+}
+
+/// Classify a socket peer address.
+///
+/// The board's own public IP is the one input a server-side geolocation would
+/// need, and behind a Layer-4 proxy it is simply not present in the connection:
+/// the proxy dials us from its own address and there is no `X-Forwarded-For` to
+/// consult, because there is no HTTP layer to put it in. `Infrastructure` is
+/// therefore a statement about what we CANNOT know, and the only correct
+/// response to it is to change nothing.
+pub(crate) fn classify_peer(ip: std::net::IpAddr) -> PeerOrigin {
+    use std::net::IpAddr;
+    let global = match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                // Carrier-grade NAT, 100.64.0.0/10 — what container platforms
+                // (Railway included) hand their internal networks. `std` has no
+                // stable predicate for it.
+                || (o[0] == 100 && (64..128).contains(&o[1]))
+                // 0.0.0.0/8 and 240.0.0.0/4 (reserved).
+                || o[0] == 0
+                || o[0] >= 240)
+        }
+        IpAddr::V6(v6) => {
+            let seg = v6.segments();
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                // Unique-local fc00::/7 and link-local fe80::/10.
+                || (seg[0] & 0xfe00) == 0xfc00
+                || (seg[0] & 0xffc0) == 0xfe80)
+        }
+    };
+    if global { PeerOrigin::Public } else { PeerOrigin::Infrastructure }
+}
+
+/// Say, once per device connection, what the socket actually reports about
+/// where this board is — and what that means for its timezone.
+///
+/// This is a diagnostic, not a mechanism: it never changes a board's zone.
+/// Server-side geolocation was the obvious replacement for the firmware's old
+/// cleartext lookup, and it does not work on this topology — Railway's raw TCP
+/// proxy is a Layer-4 relay, so the address we accept the board's connection
+/// from is the proxy's, inside Railway's network. Rather than assert that from
+/// documentation alone, the server prints what it sees on every board connect,
+/// so `railway logs` settles it.
+pub fn note_device_peer(board_id: &str, peer: Option<std::net::SocketAddr>) {
+    match peer {
+        Some(addr) => match classify_peer(addr.ip()) {
+            PeerOrigin::Infrastructure => tracing::info!(
+                "board '{board_id}' connected from {addr} — NOT a public address, so this is \
+                 an infrastructure hop (Railway's TCP proxy) or a LAN, not the board. No \
+                 timezone can be inferred from it; keeping the configured zone."
+            ),
+            PeerOrigin::Public => tracing::info!(
+                "board '{board_id}' connected from public address {} — this deployment is \
+                 reached directly, without a Layer-4 proxy in front of it",
+                addr.ip()
+            ),
+        },
+        // The listener stamps every connection it accepts, so this means the
+        // socket did not come from `serve::serve` at all (a test harness).
+        None => tracing::debug!("board '{board_id}' connected with no connection info"),
+    }
 }
 
 /// The board reported its running firmware version (once, after auth). Record
@@ -4424,9 +4604,10 @@ mod tests {
         assert_ne!(first.epoch, second.epoch, "each showing mints its own epoch");
     }
 
-    /// The board reports its own IP-geolocated zone: valid names are adopted
-    /// and persisted, junk is ignored, and re-reports of the same zone are
-    /// no-ops (the firmware re-sends after every reconnect).
+    /// A board still reporting a zone (firmware 2026.7.21 and earlier) is
+    /// honoured: valid names are adopted and persisted, junk is ignored, and
+    /// re-reports of the same zone are no-ops (old firmware re-sends after
+    /// every reconnect).
     #[test]
     fn device_reported_timezone_is_adopted_with_validation() {
         let state = AppState::new_ephemeral();
@@ -4442,6 +4623,63 @@ mod tests {
 
         handle_device_timezone(&state, "b1", "Asia/Tokyo");
         assert_eq!(state.config_for("b1").timezone.as_deref(), Some("Asia/Tokyo"));
+    }
+
+    /// The single question behind "can the server geolocate the board itself?".
+    ///
+    /// It cannot, on this deployment: Railway's raw TCP proxy is a Layer-4
+    /// relay, so the address the board's connection arrives from belongs to
+    /// Railway's internal network, and a Layer-4 stream carries no
+    /// `X-Forwarded-For` to correct it with. Every shape that means "not the
+    /// board's own address" must classify as `Infrastructure`, because that is
+    /// the answer that makes the server keep the configured zone instead of
+    /// inventing one.
+    #[test]
+    fn only_a_globally_routable_peer_could_locate_a_board() {
+        use std::net::IpAddr;
+        let c = |s: &str| classify_peer(s.parse::<IpAddr>().unwrap());
+
+        // What a proxied/containerized deployment actually reports.
+        assert_eq!(c("10.0.0.7"), PeerOrigin::Infrastructure, "RFC1918 /8");
+        assert_eq!(c("172.17.0.2"), PeerOrigin::Infrastructure, "docker bridge");
+        assert_eq!(c("192.168.1.44"), PeerOrigin::Infrastructure, "home LAN");
+        assert_eq!(c("100.64.3.9"), PeerOrigin::Infrastructure, "carrier-grade NAT");
+        assert_eq!(c("127.0.0.1"), PeerOrigin::Infrastructure, "loopback");
+        assert_eq!(c("169.254.1.1"), PeerOrigin::Infrastructure, "link-local");
+        assert_eq!(c("0.0.0.0"), PeerOrigin::Infrastructure);
+        assert_eq!(c("::1"), PeerOrigin::Infrastructure, "v6 loopback");
+        assert_eq!(c("fd00::1"), PeerOrigin::Infrastructure, "v6 unique-local");
+        assert_eq!(c("fe80::1"), PeerOrigin::Infrastructure, "v6 link-local");
+
+        // A real public address — only reachable when nothing proxies us.
+        assert_eq!(c("8.8.8.8"), PeerOrigin::Public);
+        assert_eq!(c("203.0.113.9"), PeerOrigin::Infrastructure, "TEST-NET-3 is documentation");
+        assert_eq!(c("2606:4700::1111"), PeerOrigin::Public);
+    }
+
+    /// A board with no zone of its own falls back to the server-wide
+    /// `DEFAULT_TIMEZONE`, and a configured board always outranks it. This is
+    /// what keeps a brand-new board off UTC now that the firmware no longer
+    /// geolocates itself — a value the owner SET, never a guess.
+    #[test]
+    fn configured_zone_outranks_the_server_default() {
+        assert_eq!(parse_iana_tz("America/Denver"), Some(chrono_tz::America::Denver));
+        assert_eq!(parse_iana_tz("Not/AZone"), None, "junk names never become a zone");
+        assert_eq!(parse_iana_tz(""), None);
+
+        // The board's own zone wins over any default.
+        let cfg = BoardConfig { timezone: Some("Asia/Tokyo".into()), ..Default::default() };
+        assert_eq!(board_tz(&cfg), Some(chrono_tz::Asia::Tokyo));
+
+        // With DEFAULT_TIMEZONE unset (the test process never sets it), an
+        // unconfigured board is still None — every format site then uses the
+        // server's local zone, exactly as before this existed.
+        assert_eq!(std::env::var("DEFAULT_TIMEZONE").ok(), None, "test env is clean");
+        assert_eq!(board_tz(&BoardConfig::default()), None);
+
+        // An unparseable stored zone is ignored rather than fatal.
+        let junk = BoardConfig { timezone: Some("Not/AZone".into()), ..Default::default() };
+        assert_eq!(board_tz(&junk), None);
     }
 
     /// The idle clock renders in the BOARD's timezone: two boards in different
