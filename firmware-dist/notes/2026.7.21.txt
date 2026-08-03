@@ -1,0 +1,2 @@
+- The scoreboard now talks to the server over an encrypted connection, and checks it is really talking to the right server before sending anything.
+- Nothing to set up: it happens automatically after this update.
