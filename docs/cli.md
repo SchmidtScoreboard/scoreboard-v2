@@ -21,7 +21,9 @@ release binary directly — flags are identical).
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PORT` | `7878` | HTTP/websocket listen port. Railway injects `8080` for its HTTP edge, which is why both prod services pin an explicit `PORT=7878` to match their TCP proxies (the boards' plain-`ws://` path). |
+| `PORT` | `7878` | HTTP/websocket listen port. Railway injects `8080` for its HTTP edge, which is why both prod services pin an explicit `PORT=7878` to match their TCP proxies (the boards' `ws://`/`wss://` path). Serves plaintext and TLS on the same port — see [TLS on the board link](#tls-on-the-board-link). |
+| `TLS_CERT_PEM` | unset | PEM certificate for the board link. Unset = plaintext only. Minted by hand with `gen-tls-cert`; never generated at boot. |
+| `TLS_KEY_PEM` | unset | PEM private key matching `TLS_CERT_PEM`. Secret. Both variables must be set together; anything else logs an error and degrades to plaintext rather than crash-looping. |
 | `DEMO` | unset | Any value = demo mode (same as `--demo`). |
 | `POLL_SECS` | `180` | ESPN poll interval. Polling skips entirely while nothing is connected. |
 | `STATE_DIR` | `.` | Where `scoreboard.db` (pairings, board configs) and the catalog cache live. |
@@ -190,6 +192,122 @@ Commit `firmware-dist/` afterwards (and `fw_pubkey.rs` if the key changed) —
 the Dockerfile ships it inside the server image — then deploy. Boards see the
 update on their next `BoardState`.
 
+## TLS on the board link
+
+The board talks to exactly **one** server, so it authenticates that server by
+**pinning its public key** rather than validating a PKI chain. That drops two
+things an ESP32-S3 cannot afford: a CA bundle in flash, and a wall clock. The
+board has no RTC and no NTP, so it could never check `notAfter` — PKI
+validation would be theatre. A pin is checkable with a SHA-256 and nothing else.
+
+Plaintext is **not** removed. Port 7878 keeps serving it, because boards in the
+field speak plain `ws://` and Railway's HTTPS edge terminates the app's TLS and
+forwards *plaintext* HTTP to this same port. The listener sniffs the first byte
+of every connection instead: `0x16` (the TLS handshake ContentType) gets wrapped
+in rustls, anything else goes down the old plaintext path untouched. The peek is
+a real `MSG_PEEK`, so neither hyper nor rustls can tell the byte was inspected.
+
+OTA firmware downloads deliberately **stay plain HTTP**. Images are Ed25519
+signed and verified on-device with a downgrade guard, so transport adds
+nothing: an on-path attacker can stall a download or replay the version already
+running, but cannot inject an image. Keeping them plain also avoids running a
+TLS record layer *during* the download — the tightest memory moment on the
+board, and the one path where a failed allocation aborts rather than returning
+an error.
+
+Note what this does **not** claim: the TLS read/write buffers (9,344 B) live
+outside the connect loop and stay resident across the download, so they are
+part of that peak. They are deliberately allocated once rather than per
+reconnect — re-minting them every time the Railway proxy recycles a socket
+would fragment the heap far more than it would save. Watch `free_heap_bytes` on
+the DEBUG INFO screen after an update; that is the empirical check.
+
+### The numbers the firmware must match
+
+| | |
+|---|---|
+| Protocol | **TLS 1.3 only.** The `tls12` feature is not compiled in. |
+| Certificate key | **Ed25519.** The only type rustls signs with, embedded-tls verifies (its `ed25519` feature), *and* the firmware already links (ed25519-dalek, for OTA) — so the handshake costs the board no new crypto code. P-384 is the only alternative both ends support and would drag the whole `p384` crate onto the device; embedded-tls has no P-256 *certificate* support. |
+| Key exchange | ECDHE P-256 — embedded-tls's only named group. |
+| **Pin value** | **Lowercase hex SHA-256 of the certificate's DER-encoded `SubjectPublicKeyInfo`.** 64 hex characters. |
+| `max_fragment_size` | **4096.** rustls counts the 5-byte record header inside this number, so: plaintext ≤ **4091** B/record, record body (ciphertext) ≤ **4108** B, whole record on the wire ≤ **4113** B. Size the board's receive buffer against 4108 (embedded-tls reads the 5-byte header into its own stack buffer). |
+
+"SubjectPublicKeyInfo" means the whole SPKI `SEQUENCE` — `AlgorithmIdentifier`
+plus the `BIT STRING` — exactly as those bytes appear inside the certificate.
+**Not** the raw 32-byte Ed25519 point, and **not** the whole certificate. For
+Ed25519 the SPKI is always 44 bytes: the fixed prefix
+`30 2a 30 05 06 03 2b 65 70 03 21 00` followed by the 32-byte key.
+
+This is the same value as HPKP / `curl --pinnedpubkey`, so it cross-checks
+against stock tooling (needs an OpenSSL that knows Ed25519 — macOS's LibreSSL
+does not):
+
+```
+openssl x509 -in cert.pem -pubkey -noout \
+  | openssl pkey -pubin -outform der | openssl dgst -sha256
+```
+
+### Both halves of the check are load-bearing
+
+`verify_certificate` (pin match) establishes **identity** — this is the key we
+expect. `verify_signature` (the TLS 1.3 CertificateVerify check) establishes
+**possession** — the peer actually holds the matching private key. A certificate
+is public: anyone on-path can copy the server's and replay it, so a pin check
+with `verify_signature` stubbed to `Ok(())` is defeated outright. Both must be
+genuinely implemented. `crates/server/src/serve.rs` has the same verifier pair
+written against rustls, as the reference for the firmware's `TlsVerifier`.
+
+### Minting the certificate
+
+Run once, by hand, by the owner — **not** at boot. A certificate minted per
+deploy would change the pin on every deploy and lock out every board in the
+field.
+
+```
+cargo run -p server --bin gen-tls-cert                      # default SANs
+cargo run -p server --bin gen-tls-cert -- board.example.com # or your own
+cargo run -p server --bin gen-tls-cert -- --pin cert.pem    # pin of an existing cert
+```
+
+It prints the PEM certificate, the PEM private key, and the pin. Paste the two
+PEMs into Railway as `TLS_CERT_PEM` / `TLS_KEY_PEM` (both services), and the pin
+into the firmware. The key is stored nowhere else — there is no recovery, and
+losing it means minting a new identity, which is a firmware rotation.
+
+Default SANs are `hayabusa.proxy.rlwy.net localhost 127.0.0.1`, and validity is
+10 years. Both are conveniences for `curl`/`openssl`: the board authenticates by
+pin, and cannot read dates or names anyway.
+
+The server logs the pin of whatever it loaded at startup —
+
+```
+scoreboard server on 0.0.0.0:7878 — plaintext + TLS 1.3 (board pin 51f5f6…, max TLS record 4113 bytes on the wire)
+```
+
+— so "does the deployed certificate match what shipped in firmware?" is one
+`railway logs` away.
+
+### Rotating the key
+
+The firmware carries **two** pins (current + successor) from day one, so a
+rotation is a staged rollout rather than a cliff. Each step is safe on its own,
+and boards keep working throughout:
+
+1. `cargo run -p server --bin gen-tls-cert` — mint the successor identity. Keep
+   the PEMs somewhere safe; do **not** deploy them yet.
+2. Add its pin to the firmware as the **second** pin, leaving the current one
+   first. Ship that firmware and wait for the fleet to take it — a board that
+   has not updated yet still trusts the pin the server is presenting.
+3. Swap `TLS_CERT_PEM` / `TLS_KEY_PEM` on Railway to the successor and redeploy.
+   Confirm the pin in the startup log is the successor's. Every updated board
+   accepts it via its second pin.
+4. Next release, drop the retired pin and promote the successor to first.
+
+Never skip step 2's soak: swapping the server certificate before the fleet
+carries the successor pin locks out every board that has not updated, and they
+cannot be recovered over the network — the connection they would recover over is
+the one that just broke.
+
 ## Recipes
 
 **A card renders wrong on the board.**
@@ -207,4 +325,11 @@ or diff the three `frame-*.png` files from a dump.
 
 **What is prod actually serving for this game?**
 `curl 'http://hayabusa.proxy.rlwy.net:47958/game/<id>?board=<board-id>'` —
-the exact JSON the app's Info sheet shows, spoiler rules included.
+the exact JSON the app's Info sheet shows, spoiler rules included. Still plain
+`http://`: the port serves both, and the sniff routes this to the same handler
+a board's TLS connection would reach.
+
+**Does the deployed certificate match what shipped in firmware?**
+Read the pin off the startup log (`railway logs | grep 'board pin'`) and
+compare it to the firmware's. To re-derive it from a PEM you have on disk:
+`cargo run -p server --bin gen-tls-cert -- --pin cert.pem`.

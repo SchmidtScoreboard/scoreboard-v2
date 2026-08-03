@@ -12,6 +12,16 @@ default-run = "server"
 name = "sign-firmware"
 path = "src/bin/sign-firmware.rs"
 
+# One-shot, run by hand by the owner: mint the long-lived self-signed cert the
+# boards pin. It shares src/tls.rs with the server via `#[path]` (this crate has
+# no lib target), so the pin it prints is computed by the exact same code the
+# server logs at boot. `test = false` keeps that shared module's unit tests from
+# running twice — they belong to the `server` test binary.
+[[bin]]
+name = "gen-tls-cert"
+path = "src/bin/gen-tls-cert.rs"
+test = false
+
 [dependencies]
 ratatui = "0.29"
 crossterm = "0.28"
@@ -35,6 +45,23 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # The /guide routes drive a real board-core Board to render the device's own
 # screens (promoted from dev-dependencies, where the wire tests already used it).
 board-core = { path = "../board-core" }
+
+# --- TLS for the board link (docs/cli.md "TLS on the board link") ---
+# TLS 1.3 ONLY (no `tls12` feature) and the pure-Rust `ring` provider rather
+# than the default aws-lc-rs: ring is already in this workspace's tree and
+# needs no C toolchain in the Docker build. The board's client (embedded-tls)
+# is TLS 1.3 only anyway.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging"] }
+rustls-pemfile = "2"
+# The listener sniffs the first byte and hands the socket to hyper itself, so
+# it needs the same auto (h1+h2) builder axum::serve wraps.
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto", "service", "http1", "http2"] }
+# Certificate minting (gen-tls-cert) and SubjectPublicKeyInfo extraction (the
+# pin). rcgen on `ring` for the same no-C-toolchain reason as rustls.
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+x509-parser = "0.18"
 
 [dev-dependencies]
 tokio-tungstenite = "0.21"

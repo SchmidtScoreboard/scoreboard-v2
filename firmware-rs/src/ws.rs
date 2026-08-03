@@ -20,6 +20,10 @@ pub async fn handshake<S: Read + Write>(sock: &mut S, host: &str) -> Result<(), 
           Sec-WebSocket-Version: 13\r\n\r\n",
     );
     sock.write_all(&req).await.map_err(|_| ())?;
+    // MUST flush before reading the response. Over TLS `write_all` only fills
+    // the record buffer — without this the request never leaves the board and
+    // both ends sit waiting for the other. Over a plain socket it's a no-op.
+    sock.flush().await.map_err(|_| ())?;
 
     // Read one byte at a time up to the end of headers so we never consume into
     // the first WebSocket frame (the server sends Hello right after the 101).
@@ -191,5 +195,9 @@ async fn write_frame<S: Write>(sock: &mut S, opcode: u8, data: &[u8]) -> Result<
     for (i, b) in data.iter().enumerate() {
         frame.push(b ^ mask[i % 4]);
     }
-    sock.write_all(&frame).await.map_err(|_| ())
+    sock.write_all(&frame).await.map_err(|_| ())?;
+    // One websocket frame, one flush: the TLS record layer buffers writes and
+    // only emits a record when told to, so a frame left unflushed is a frame
+    // the server never sees. No-op on a plain socket.
+    sock.flush().await.map_err(|_| ())
 }

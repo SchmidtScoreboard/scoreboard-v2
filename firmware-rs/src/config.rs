@@ -55,3 +55,78 @@ pub const SERVER_PORT: u16 = 47958;
 /// Vestigial: the board's identity is its Ed25519 pubkey (`identity.rs`), not
 /// this name.
 pub const BOARD_ID: &str = "matrixportal-01";
+
+// ---------------------------------------------------------------------------
+// TLS pins
+// ---------------------------------------------------------------------------
+//
+// The board talks to exactly ONE server, so it pins that server's public key
+// rather than validating a certificate chain — see `src/tls.rs` for why (no
+// CA bundle to ship, and no wall clock to check expiry with).
+//
+//     pin = lowercase hex SHA-256 of the certificate's DER SubjectPublicKeyInfo
+//
+// A public key is not a secret, so these live in a tracked file exactly like
+// the prod hostname does. Re-derive one for a certificate you already have:
+//
+//     cargo run -p server --bin gen-tls-cert -- --pin path/to/cert.pem
+//
+// `SERVER_PIN_NEXT` is the staged successor, and exists so a key rotation is a
+// rollout rather than a cliff: ship firmware that trusts current + successor,
+// swap the server's key, then ship firmware that trusts only the new one. Set
+// it to `None` when no rotation is in flight. It must never be an all-zero
+// digest — `tls::pin_from_hex` refuses that at compile time so a "disabled"
+// pin can't turn into a wildcard.
+//
+// A wrong pin fails CLOSED: the board rejects the handshake and retries
+// forever, which is the intended outcome and is covered by the OTA revert
+// watchdog (an unconfirmed image that can't auth within five minutes rolls
+// back). Boards provisioned over BLE to a custom host must be pointed at a
+// server holding one of these keys — the pin is compiled in, not discovered.
+
+/// Dev server pin — REQUIRED at build time, deliberately with no default.
+///
+/// There is no such thing as a safe placeholder here. A pin that belongs to no
+/// certificate anyone holds still compiles, still passes the "is it set" check,
+/// and produces a board that fails every handshake forever. The failure is
+/// silent at build time and expensive at run time, so the build refuses
+/// instead: run `cargo run -p server --bin gen-tls-cert`, put the printed pin
+/// in `firmware-rs/local.env` as `SCOREBOARD_DEV_TLS_PIN`, and source it
+/// (`scripts/dev-server.sh` does this for you).
+#[cfg(not(feature = "prod"))]
+pub const SERVER_PIN: &str = match option_env!("SCOREBOARD_DEV_TLS_PIN") {
+    Some(p) => p,
+    None => panic!(
+        "SCOREBOARD_DEV_TLS_PIN is not set. A dev TLS build needs the pin of YOUR dev \
+         server's certificate — there is no safe default. Generate one with \
+         `cargo run -p server --bin gen-tls-cert`, add it to firmware-rs/local.env, and \
+         `set -a; source firmware-rs/local.env; set +a` before building. \
+         (Or build with --no-default-features for a plaintext bring-up image.)"
+    ),
+};
+#[cfg(not(feature = "prod"))]
+pub const SERVER_PIN_NEXT: Option<&str> = option_env!("SCOREBOARD_DEV_TLS_PIN_NEXT");
+
+/// Prod server pin — REQUIRED at build time, deliberately with no default.
+///
+/// This is the single most dangerous constant in the firmware: it ships to
+/// every board over the air, and a board whose image is already CONFIRMED and
+/// whose pin does not match the live certificate cannot be recovered remotely
+/// — the update offer travels over the very connection that no longer opens.
+/// A default value would let `scripts/release-firmware.sh` mint and sign a
+/// hosted image pinned to a key nobody holds, which is exactly the mistake
+/// this refuses to allow. The release script exports `SCOREBOARD_TLS_PIN` from
+/// the deployed certificate; see docs/cli.md for the rotation procedure.
+#[cfg(feature = "prod")]
+pub const SERVER_PIN: &str = match option_env!("SCOREBOARD_TLS_PIN") {
+    Some(p) => p,
+    None => panic!(
+        "SCOREBOARD_TLS_PIN is not set. A prod TLS build must pin the certificate the \
+         LIVE server is actually serving — there is no safe default, and a wrong pin \
+         bricks the fleet's link. Export the pin of the deployed cert (re-derive it any \
+         time with `cargo run -p server --bin gen-tls-cert -- --pin cert.pem`) before \
+         running scripts/release-firmware.sh."
+    ),
+};
+#[cfg(feature = "prod")]
+pub const SERVER_PIN_NEXT: Option<&str> = option_env!("SCOREBOARD_TLS_PIN_NEXT");

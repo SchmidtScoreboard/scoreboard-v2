@@ -6,8 +6,10 @@ mod bdf;
 mod espn;
 mod model;
 mod render;
+mod serve;
 mod team_names;
 mod teams;
+mod tls;
 mod tui;
 mod ws;
 
@@ -720,8 +722,23 @@ async fn main() {
     let port = std::env::var("PORT").unwrap_or_else(|_| "7878".into());
     let addr = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    tracing::info!("scoreboard server on {addr}");
-    axum::serve(listener, app).await.unwrap();
+
+    // ONE port, both transports. Boards in the field speak plain ws:// and
+    // Railway's HTTPS edge forwards plaintext HTTP here for the app, so the
+    // port can never become TLS-only; the listener sniffs each connection
+    // instead (see serve.rs). A missing certificate degrades to plaintext
+    // rather than crash-looping the service.
+    let tls = tls::from_env();
+    match &tls {
+        Some(t) => tracing::info!(
+            "scoreboard server on {addr} — plaintext + TLS 1.3 (board pin {}, \
+             max TLS record {} bytes on the wire)",
+            t.pin,
+            tls::MAX_RECORD_WIRE
+        ),
+        None => tracing::info!("scoreboard server on {addr} — plaintext only"),
+    }
+    serve::serve(listener, app, tls.map(|t| t.config), Default::default()).await;
 }
 
 async fn get_catalog(State(s): State<AppState>) -> Json<Catalog> {

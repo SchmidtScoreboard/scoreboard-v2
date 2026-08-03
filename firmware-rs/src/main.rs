@@ -49,8 +49,11 @@ mod config;
 mod creds;
 mod fw_pubkey;
 mod identity;
+mod link;
 mod ota;
 mod seesaw;
+#[cfg(feature = "tls")]
+mod tls;
 mod ws;
 
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -456,6 +459,15 @@ async fn device(
     // websocket (a Railway redeploy CAN move the server), so a stale entry
     // costs exactly one failed pass before fresh DNS takes over.
     let mut cached_ip: Option<core::net::Ipv4Addr> = None;
+    // TLS record + plaintext staging buffers, minted ONCE. embedded-tls never
+    // allocates; it works out of buffers the caller hands it, and re-taking
+    // ~9KB on every reconnect (the Railway proxy recycles the socket every
+    // 5-15 minutes) would fragment the heap around the long-lived frame cache.
+    let mut link_bufs = link::TlsBuffers::new();
+    if link_bufs.bytes() > 0 {
+        println!("[tls] pinned to {}… ({} bytes of buffers)",
+            &config::SERVER_PIN[..8], link_bufs.bytes());
+    }
 
     loop {
         Timer::after(Duration::from_secs(1)).await;
@@ -529,133 +541,186 @@ async fn device(
             continue;
         }
         let host = format!("{server_host}:{server_port}");
-        if ws::handshake(&mut sock, &host).await.is_err() {
-            // TCP came up but the endpoint isn't (or is no longer) our
-            // server — a recycled IP can accept connections yet fail here,
-            // so this must invalidate the cache too or we'd loop on it.
-            println!("[ws] handshake failed; retry");
-            cached_ip = None;
-            Timer::after(Duration::from_secs(2)).await;
-            continue;
-        }
-        println!("[ws] connected");
-        board.lock().await.set_online(true);
-        // Parse state lives OUTSIDE the select so a read cancelled by an outbox
-        // message resumes mid-frame instead of desyncing the stream.
-        let mut reader = ws::FrameReader::new();
         // Set when the server orders a firmware update: the ws loop ends and the
         // download takes over this task's socket buffers (see below).
         let mut pending_update: Option<ota::UpdateJob> = None;
-
-        loop {
-            // Full-duplex on one socket: wait on the next server frame OR an
-            // outgoing board message.
-            use embassy_futures::select::{select, Either};
-            let event = select(reader.read(&mut sock, &mut frame), OUTBOX.receive()).await;
-            let read = match event {
-                Either::Second(msg) => {
-                    let _ = ws::write_text(&mut sock, &serde_json::to_vec(&msg).unwrap()).await;
-                    continue;
+        // Everything that borrows the socket lives inside this block. The OTA
+        // download below reuses this task's rx/tx buffers, so the link — and
+        // the reader/writer halves it was built on — must be gone before
+        // `sock` is.
+        let established = 'session: {
+            let halves = link::Halves::new(&mut sock);
+            // TLS 1.3 with the server's public key pinned (src/tls.rs), or a
+            // bare passthrough in a `--no-default-features` bring-up build.
+            let mut link = match link::Link::open(&halves, &mut link_bufs, &server_host).await {
+                Ok(link) => link,
+                Err(e) => {
+                    // A pin mismatch, a forged signature, or a server that
+                    // never proved possession at all. There is NO fallback to
+                    // plaintext: 7878 still answers plain ws://, so falling
+                    // back would hand any on-path attacker a downgrade for the
+                    // price of breaking one handshake. This is simply a failed
+                    // pass, and the retry below is the same one a refused TCP
+                    // connection gets.
+                    println!("[tls] {}; retry", e.as_str());
+                    break 'session false;
                 }
-                Either::First(r) => r,
             };
-            match read {
-                Ok((ws::OP_TEXT, n)) => match serde_json::from_slice::<ServerMsg>(&frame[..n]) {
-                    Ok(ServerMsg::Hello { challenge }) => {
-                        let auth = ClientMsg::Auth {
-                            role: Role::Device,
-                            pubkey: board_id.clone(),
-                            sig: sign_hex(&secret, challenge.as_bytes()),
-                        };
-                        let _ = ws::write_text(&mut sock, &serde_json::to_vec(&auth).unwrap()).await;
-                        // Register the pairing code on every connect so the
-                        // app's code entry always resolves to this board.
-                        let setup = ClientMsg::EnterSetup { code: pair_code.clone() };
-                        let _ = ws::write_text(&mut sock, &serde_json::to_vec(&setup).unwrap()).await;
-                        // Report the discovered timezone (idempotent server-side)
-                        // so the clock + start times render board-local.
-                        if let Some(tz) = &timezone {
-                            let msg = ClientMsg::DeviceTimezone { tz: tz.clone() };
-                            let _ = ws::write_text(&mut sock, &serde_json::to_vec(&msg).unwrap()).await;
+            if ws::handshake(&mut link, &host).await.is_err() {
+                // The transport came up but the endpoint isn't (or is no
+                // longer) our server — a recycled IP can accept connections
+                // yet fail here, so this must invalidate the cache too or
+                // we'd loop on it.
+                println!("[ws] handshake failed; retry");
+                break 'session false;
+            }
+            println!("[ws] connected");
+            board.lock().await.set_online(true);
+            // Parse state lives OUTSIDE the read call so a frame that arrives in
+            // pieces resumes mid-frame instead of desyncing the stream.
+            let mut reader = ws::FrameReader::new();
+
+            loop {
+                // Full-duplex on one socket, but the outbox may only interrupt us
+                // HERE — where nothing is half-read.
+                //
+                // `link.idle()` means no decrypted bytes are stranded above the
+                // socket, and `wait_readable` consumes nothing, so dropping either
+                // future loses nothing. Racing the read itself (which is what this
+                // loop used to do) would strand a partial TLS record: embedded-tls
+                // accumulates the 5-byte record header in a stack local, so a
+                // cancelled read misframes everything after it. See link.rs.
+                if link.idle() {
+                    use embassy_futures::select::{select, Either};
+                    // The 30s cap is not belt-and-braces, it is load-bearing:
+                    // `wait_read_ready` parks until bytes ARRIVE, and a socket
+                    // the peer has closed never delivers any — smoltcp reports
+                    // "not readable", never "dead" — so without this the loop
+                    // would wait on a corpse forever and the board would sit
+                    // ONLINE showing stale scores. The old code noticed because
+                    // it was inside a `read`, which does return an error. 30s
+                    // rests on the same fact as the 25s socket timeout above: a
+                    // healthy link is never silent for 20s, because the server
+                    // pings and the board pongs.
+                    let event = with_timeout(
+                        Duration::from_secs(30),
+                        select(halves.wait_readable(), OUTBOX.receive()),
+                    )
+                    .await;
+                    match event {
+                        Err(_) => {
+                            println!("[ws] silent for 30s; reconnecting");
+                            board.lock().await.set_online(false);
+                            break;
                         }
-                        // Report the running firmware version — the server
-                        // echoes it into BoardState and offers the hosted
-                        // image when we're behind.
-                        let ver = ClientMsg::DeviceVersion {
-                            version: String::from(env!("CARGO_PKG_VERSION")),
-                        };
-                        let _ = ws::write_text(&mut sock, &serde_json::to_vec(&ver).unwrap()).await;
-                        println!("[ws] authed (pair code {pair_code})");
-                    }
-                    Ok(ServerMsg::AuthOk) => {
-                        // Only OUR server can complete the signed auth, so the
-                        // IP cache is written here — not after the handshake,
-                        // which any generic websocket listener passes. A
-                        // recycled IP that 101s but never auths would
-                        // otherwise trap every future pass on the stale
-                        // address with DNS never re-queried.
-                        cached_ip = Some(ip);
-                        // First contact with the server: if this boot is a fresh
-                        // OTA image, this is the proof it works — persist Valid
-                        // so the revert watchdog stands down.
-                        if fw_unconfirmed {
-                            ota::confirm_running_image(flash).await;
-                        }
-                    }
-                    Ok(ServerMsg::SetupDone) => {
-                        // Paired: leave the pairing screen if it's up.
-                        board.lock().await.setup_done();
-                    }
-                    Ok(ServerMsg::NeedsPairing) => {
-                        // Nobody is paired with this board: show the code
-                        // unprompted (sticky until paired or dismissed).
-                        board.lock().await.needs_pairing();
-                    }
-                    Ok(ServerMsg::Manifest(m)) => {
-                        let need = board.lock().await.on_manifest(m);
-                        if let Some(req) = need {
-                            let _ = ws::write_text(&mut sock, &serde_json::to_vec(&req).unwrap()).await;
+                        Ok(Either::First(())) => {}
+                        Ok(Either::Second(msg)) => {
+                            let _ =
+                                ws::write_text(&mut link, &serde_json::to_vec(&msg).unwrap()).await;
+                            continue;
                         }
                     }
-                    Ok(ServerMsg::UpdateAvailable { version }) => {
-                        // Arms (Some) or clears (None) the menu's UPDATE row.
-                        // Selecting an armed row queues RequestUpdate in
-                        // board-core's outbox, which drains through OUTBOX to
-                        // this socket like any other board message — and the
-                        // channel outlives a disconnect, so a tap made offline
-                        // sends on the next connect instead of vanishing.
-                        board.lock().await.set_update_available(version);
+                }
+                match reader.read(&mut link, &mut frame).await {
+                    Ok((ws::OP_TEXT, n)) => match serde_json::from_slice::<ServerMsg>(&frame[..n]) {
+                        Ok(ServerMsg::Hello { challenge }) => {
+                            let auth = ClientMsg::Auth {
+                                role: Role::Device,
+                                pubkey: board_id.clone(),
+                                sig: sign_hex(&secret, challenge.as_bytes()),
+                            };
+                            let _ = ws::write_text(&mut link, &serde_json::to_vec(&auth).unwrap()).await;
+                            // Register the pairing code on every connect so the
+                            // app's code entry always resolves to this board.
+                            let setup = ClientMsg::EnterSetup { code: pair_code.clone() };
+                            let _ = ws::write_text(&mut link, &serde_json::to_vec(&setup).unwrap()).await;
+                            // Report the discovered timezone (idempotent server-side)
+                            // so the clock + start times render board-local.
+                            if let Some(tz) = &timezone {
+                                let msg = ClientMsg::DeviceTimezone { tz: tz.clone() };
+                                let _ = ws::write_text(&mut link, &serde_json::to_vec(&msg).unwrap()).await;
+                            }
+                            // Report the running firmware version — the server
+                            // echoes it into BoardState and offers the hosted
+                            // image when we're behind.
+                            let ver = ClientMsg::DeviceVersion {
+                                version: String::from(env!("CARGO_PKG_VERSION")),
+                            };
+                            let _ = ws::write_text(&mut link, &serde_json::to_vec(&ver).unwrap()).await;
+                            println!("[ws] authed (pair code {pair_code})");
+                        }
+                        Ok(ServerMsg::AuthOk) => {
+                            // Only OUR server can complete the signed auth, so the
+                            // IP cache is written here — not after the handshake,
+                            // which any generic websocket listener passes. A
+                            // recycled IP that 101s but never auths would
+                            // otherwise trap every future pass on the stale
+                            // address with DNS never re-queried.
+                            cached_ip = Some(ip);
+                            // First contact with the server: if this boot is a fresh
+                            // OTA image, this is the proof it works — persist Valid
+                            // so the revert watchdog stands down.
+                            if fw_unconfirmed {
+                                ota::confirm_running_image(flash).await;
+                            }
+                        }
+                        Ok(ServerMsg::SetupDone) => {
+                            // Paired: leave the pairing screen if it's up.
+                            board.lock().await.setup_done();
+                        }
+                        Ok(ServerMsg::NeedsPairing) => {
+                            // Nobody is paired with this board: show the code
+                            // unprompted (sticky until paired or dismissed).
+                            board.lock().await.needs_pairing();
+                        }
+                        Ok(ServerMsg::Manifest(m)) => {
+                            let need = board.lock().await.on_manifest(m);
+                            if let Some(req) = need {
+                                let _ = ws::write_text(&mut link, &serde_json::to_vec(&req).unwrap()).await;
+                            }
+                        }
+                        Ok(ServerMsg::UpdateAvailable { version }) => {
+                            // Arms (Some) or clears (None) the menu's UPDATE row.
+                            // Selecting an armed row queues RequestUpdate in
+                            // board-core's outbox, which drains through OUTBOX to
+                            // this socket like any other board message — and the
+                            // channel outlives a disconnect, so a tap made offline
+                            // sends on the next connect instead of vanishing.
+                            board.lock().await.set_update_available(version);
+                        }
+                        Ok(ServerMsg::UpdateFirmware { version, size, sha256, sig, path, channel }) => {
+                            // Leave the ws loop: the download reuses this task's
+                            // socket buffers (the connection can't survive that,
+                            // and the server's keepalive stops anyway). No progress
+                            // is reported anywhere — the app shows a spinner, and
+                            // the whole download runs well under a minute.
+                            println!("[ota] server offers {version} ({channel}) at {path} ({size} bytes)");
+                            pending_update = Some(ota::UpdateJob { version, size, sha256, sig, path, channel });
+                            break;
+                        }
+                        _ => {}
+                    },
+                    Ok((ws::OP_BINARY, n)) => {
+                        if let Some((id, px)) = decode_frame(&frame[..n]) {
+                            board.lock().await.on_frame(id, px.to_vec());
+                        }
                     }
-                    Ok(ServerMsg::UpdateFirmware { version, size, sha256, sig, path, channel }) => {
-                        // Leave the ws loop: the download reuses this task's
-                        // socket buffers (the connection can't survive that,
-                        // and the server's keepalive stops anyway). No progress
-                        // is reported anywhere — the app shows a spinner, and
-                        // the whole download runs well under a minute.
-                        println!("[ota] server offers {version} ({channel}) at {path} ({size} bytes)");
-                        pending_update = Some(ota::UpdateJob { version, size, sha256, sig, path, channel });
+                    Ok((ws::OP_PING, n)) => {
+                        // Answered here (not inside the reader): this write happens
+                        // after the read returned, so it can't be cancelled
+                        // mid-frame.
+                        let _ = ws::write_pong(&mut link, &frame[..n]).await;
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        println!("[ws] disconnected; reconnecting");
+                        board.lock().await.set_online(false);
                         break;
                     }
-                    _ => {}
-                },
-                Ok((ws::OP_BINARY, n)) => {
-                    if let Some((id, px)) = decode_frame(&frame[..n]) {
-                        board.lock().await.on_frame(id, px.to_vec());
-                    }
-                }
-                Ok((ws::OP_PING, n)) => {
-                    // Answered here (not inside the reader): these writes are
-                    // post-select, so they can't be cancelled mid-frame.
-                    let _ = ws::write_pong(&mut sock, &frame[..n]).await;
-                }
-                Ok(_) => {}
-                Err(_) => {
-                    println!("[ws] disconnected; reconnecting");
-                    board.lock().await.set_online(false);
-                    break;
                 }
             }
-        }
+            true
+        };
 
         // The websocket is done. If the server ordered an update, run the
         // download HERE, exactly like fetch_timezone: this task owns the
@@ -665,6 +730,17 @@ async fn device(
         // trivial (see the StackResources comment — the pool's failure mode
         // is a panic).
         drop(sock);
+        if !established {
+            // Never came up: a TLS or websocket handshake failure means this
+            // address didn't produce a working link, so re-resolve next pass
+            // and back off exactly as a refused connection does. This is the
+            // whole "no fallback" story — a board that can't authenticate the
+            // server just keeps trying, and if the reason is a broken OTA
+            // image, `ota::revert_watchdog` rolls it back after five minutes.
+            cached_ip = None;
+            Timer::after(Duration::from_secs(2)).await;
+            continue;
+        }
         if let Some(job) = pending_update.take() {
             board.lock().await.set_online(false);
             match ota::download_and_install(

@@ -110,6 +110,33 @@ else
     echo "==> $PUBKEY_RS already matches (pubkey $PUBKEY)"
 fi
 
+# The TLS pin must be the one the LIVE server is serving. A release built
+# without it would either fail to compile (config.rs refuses a default) or, if
+# someone "helpfully" restored a default, ship a signed image pinned to a key
+# nobody holds — every board that took it would fail every handshake, and a
+# board whose image is already confirmed cannot be fixed over the air. Check
+# here too so the failure is a clear sentence rather than a const-eval panic
+# forty lines into a cargo build.
+if [[ "$FEATURES" == *prod* ]] && [[ -z "${SCOREBOARD_TLS_PIN:-}" ]]; then
+    cat >&2 <<'ERR'
+!!! SCOREBOARD_TLS_PIN is not set.
+
+A prod release pins the certificate the live server serves. Shipping the wrong
+pin breaks the link for every board that installs it, and boards whose image is
+already confirmed CANNOT be recovered over the air (the update offer travels
+over the connection that just stopped working).
+
+Re-derive the pin from the deployed certificate and export it:
+
+    cargo run -p server --bin gen-tls-cert -- --pin /path/to/deployed-cert.pem
+    export SCOREBOARD_TLS_PIN=<the printed hex>
+
+Rotating keys? Ship SCOREBOARD_TLS_PIN_NEXT to the fleet FIRST, let it soak,
+and only then swap the server certificate. See docs/cli.md.
+ERR
+    exit 1
+fi
+
 echo "==> building firmware (features: ${FEATURES:-<none>})"
 # Subshell: export-esp.sh mutates PATH/env for the xtensa toolchain, and the
 # host cargo invocation below must not inherit that.
