@@ -605,7 +605,18 @@ pub enum Role {
 #[serde(tag = "t")]
 pub enum ClientMsg {
     Auth { role: Role, pubkey: String, sig: String },
-    NeedFrames { ids: Vec<FrameId> },
+    NeedFrames {
+        ids: Vec<FrameId>,
+        /// Frame payload codecs THIS CLIENT can decode ([`FRAME_CODEC_RAW`],
+        /// [`FRAME_CODEC_PAL_RLE`], ...). The sender advertises its own
+        /// decoder, so the answer never depends on guessing a firmware
+        /// version — a board that just OTA'd is described by the request it
+        /// sends, not by what the server last heard about it. Absent or empty
+        /// (old firmware, the app) means RAW ONLY; the server may always
+        /// answer with raw regardless of what's listed here.
+        #[serde(default)]
+        codecs: Vec<u8>,
+    },
     DeviceStatus { current_frame_id: Option<FrameId> },
     Subscribe { board_ids: Vec<String> },
     Command { req_id: u64, board_id: String, cmd: Command },
@@ -788,13 +799,16 @@ pub fn version_newer(candidate: &str, current: &str) -> bool {
 
 // ---- binary frame framing ----
 // A frame is sent as a binary websocket message:
-//   [ 64 bytes ASCII hex frame_id ][ RGB565-LE pixels ]
+//   [ 64 bytes ASCII hex frame_id ][ payload ]
+// The payload is produced by [`encode_frame_payload`] and is self-describing:
+// its first byte names the codec, so the framing below never has to know
+// whether the pixels are raw or compressed.
 pub const FRAME_ID_HEX_LEN: usize = 64;
 
-pub fn encode_frame(id: &str, rgb565_le: &[u8]) -> Vec<u8> {
-    let mut v = Vec::with_capacity(FRAME_ID_HEX_LEN + rgb565_le.len());
+pub fn encode_frame(id: &str, payload: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(FRAME_ID_HEX_LEN + payload.len());
     v.extend_from_slice(id.as_bytes());
-    v.extend_from_slice(rgb565_le);
+    v.extend_from_slice(payload);
     v
 }
 
@@ -804,6 +818,235 @@ pub fn decode_frame(buf: &[u8]) -> Option<(FrameId, &[u8])> {
     }
     let id = core::str::from_utf8(&buf[..FRAME_ID_HEX_LEN]).ok()?.to_string();
     Some((id, &buf[FRAME_ID_HEX_LEN..]))
+}
+
+// ---- frame payload codecs ----
+//
+// A 64x32 frame is 4096 bytes raw, and the device caches up to 20 of them —
+// ~80KB of a 160KB heap that the WiFi radio shares. Rendered frames are flat
+// synthetic graphics (3-8 distinct colors each), so a 16-color palette at one
+// index per pixel plus run-length coding shrinks them ~5x. Crucially the
+// DECODER needs no sliding window and no scratch buffer: just the palette and
+// the output. That is why this beats deflate here, which compresses better but
+// wants a 32KB inflate dictionary — more heap than the frames it saves.
+
+/// Uncompressed payload: the RGB565-LE pixels verbatim after the codec byte.
+/// Bytes per pixel row (64 px * 2 B). Load-bearing beyond geometry: it is the
+/// modulus that separates a legacy bare-pixel payload from a self-describing one.
+pub const FRAME_ROW_BYTES: usize = FRAME_WIDTH * 2;
+
+/// Is this binary-frame payload from a PRE-CODEC server — i.e. bare RGB565
+/// pixels with no leading codec byte?
+///
+/// Servers that predate the codec send exactly `height * FRAME_ROW_BYTES`
+/// bytes, always a whole number of rows. `encode_frame_payload` guarantees it
+/// never emits that length (raw payloads are `1 + height * FRAME_ROW_BYTES`,
+/// and compressed candidates landing on a row multiple are skipped), so the
+/// length alone is a reliable discriminator.
+///
+/// This exists because a board can outlive the server that taught it the
+/// codec: firmware dists ship inside the server image and the downgrade guard
+/// refuses older versions, so rolling the server back leaves updated boards
+/// talking to a server that only speaks bare pixels. Without this check the
+/// board reads the first PIXEL byte as a codec — a zero byte decodes as RAW
+/// and silently shifts every pixel by one, which is worse than an error.
+pub fn frame_payload_is_legacy_raw(payload: &[u8]) -> bool {
+    !payload.is_empty() && payload.len() % FRAME_ROW_BYTES == 0
+}
+
+pub const FRAME_CODEC_RAW: u8 = 0;
+/// 16-color palette + run-length coded indices (see [`encode_frame_payload`]).
+pub const FRAME_CODEC_PAL_RLE: u8 = 1;
+
+/// Palette entries a [`FRAME_CODEC_PAL_RLE`] payload may carry.
+pub const MAX_PALETTE_COLORS: usize = 16;
+
+/// Largest frame either codec will produce or accept, in bytes: 64 wide by 256
+/// rows tall. Frames are variable height — a 20-row leaderboard renders 128
+/// rows and scrolls — so this is generous headroom over anything the renderer
+/// makes, while still bounding what a corrupt or hostile payload can make a
+/// 160KB-heap device allocate.
+pub const MAX_FRAME_BYTES: usize = FRAME_WIDTH * 256 * 2;
+
+/// Encode pixels into a self-describing payload: `[codec u8][data...]`.
+///
+/// `accepted` lists the codecs the RECIPIENT can decode (see
+/// [`ClientMsg::NeedFrames`]); every accepted codec is tried and the SMALLEST
+/// result wins. [`FRAME_CODEC_RAW`] is always in play and always the fallback,
+/// so an empty `accepted` (old firmware, the app) yields raw.
+///
+/// # `FRAME_CODEC_PAL_RLE` layout
+///
+/// ```text
+/// [0]                      codec byte = FRAME_CODEC_PAL_RLE
+/// [1]                      color_count, 1..=16
+/// [2 .. 2+2*color_count]   palette: color_count * u16 little-endian RGB565
+/// [2+2*color_count ..]     RLE pairs: [run_len u8, 1..=255][palette_index u8]
+/// ```
+///
+/// There is no length field: the decoder derives the pixel count by summing
+/// run lengths, and refuses anything summing past [`MAX_FRAME_BYTES`]. Runs
+/// longer than 255 pixels are split across consecutive pairs.
+///
+/// The encoder falls back to raw when the frame has more than
+/// [`MAX_PALETTE_COLORS`] distinct colors, when it is not a whole number of
+/// pixels or is larger than [`MAX_FRAME_BYTES`], and — the case that matters —
+/// whenever the encoded form would not be strictly smaller than the raw
+/// payload. Alternating single-pixel runs EXPAND under RLE; that must never go
+/// on the wire.
+pub fn encode_frame_payload(rgb565_le: &[u8], accepted: &[u8]) -> Vec<u8> {
+    // The payload raw would produce; nothing bigger than this may ship.
+    let raw_len = rgb565_le.len() + 1;
+    let mut best: Option<Vec<u8>> = None;
+
+    for &codec in accepted {
+        let candidate = match codec {
+            FRAME_CODEC_PAL_RLE => encode_pal_rle(rgb565_le),
+            // RAW is the fallback below; unknown codecs are simply not spoken.
+            _ => None,
+        };
+        let Some(candidate) = candidate else { continue };
+        if candidate.len() >= raw_len {
+            continue; // never ship an expansion (or a wash)
+        }
+        // A payload whose length is a whole number of pixel rows is
+        // INDISTINGUISHABLE from what a pre-codec server sends (bare pixels,
+        // always height * FRAME_ROW_BYTES). Skip those lengths so the receiver
+        // can tell the two apart by length alone — see `frame_payload_is_legacy_raw`.
+        // Costs compression on ~1/128 of frames; buys rollback safety.
+        if candidate.len() % FRAME_ROW_BYTES == 0 {
+            continue;
+        }
+        let better = match &best {
+            Some(b) => candidate.len() < b.len(),
+            None => true,
+        };
+        if better {
+            best = Some(candidate);
+        }
+    }
+
+    best.unwrap_or_else(|| {
+        let mut v = Vec::with_capacity(raw_len);
+        v.push(FRAME_CODEC_RAW);
+        v.extend_from_slice(rgb565_le);
+        v
+    })
+}
+
+/// Inverse of [`encode_frame_payload`]. `None` on malformed input, an unknown
+/// codec, or a length mismatch (a truncated palette, a dangling half-pair, a
+/// run pointing outside the palette, or a total exceeding
+/// [`MAX_FRAME_BYTES`]).
+pub fn decode_frame_payload(payload: &[u8]) -> Option<Vec<u8>> {
+    let (&codec, rest) = payload.split_first()?;
+    match codec {
+        FRAME_CODEC_RAW => Some(rest.to_vec()),
+        FRAME_CODEC_PAL_RLE => decode_pal_rle(rest),
+        _ => None,
+    }
+}
+
+/// Build a palette+RLE payload, or `None` when this frame can't use the codec.
+fn encode_pal_rle(rgb565_le: &[u8]) -> Option<Vec<u8>> {
+    // Whole pixels only, non-empty, and no bigger than the decoder accepts —
+    // otherwise the round trip wouldn't hold.
+    if rgb565_le.is_empty()
+        || !rgb565_le.chunks_exact(2).remainder().is_empty()
+        || rgb565_le.len() > MAX_FRAME_BYTES
+    {
+        return None;
+    }
+
+    let mut palette: Vec<u16> = Vec::new();
+    let mut body: Vec<u8> = Vec::new();
+    let mut run_index: u8 = 0;
+    let mut run_len: u8 = 0;
+
+    for px in rgb565_le.chunks_exact(2) {
+        let color = u16::from_le_bytes([px[0], px[1]]);
+        let index = match palette.iter().position(|&c| c == color) {
+            Some(i) => i as u8,
+            None => {
+                if palette.len() == MAX_PALETTE_COLORS {
+                    return None; // too many colors for a 4bpp palette
+                }
+                palette.push(color);
+                (palette.len() - 1) as u8
+            }
+        };
+
+        if run_len > 0 && index == run_index && run_len < 255 {
+            run_len += 1;
+        } else {
+            if run_len > 0 {
+                body.push(run_len);
+                body.push(run_index);
+            }
+            run_index = index;
+            run_len = 1;
+        }
+
+        // Already lost to raw and it can only get worse — stop paying for it.
+        if body.len() > rgb565_le.len() {
+            return None;
+        }
+    }
+    if run_len > 0 {
+        body.push(run_len);
+        body.push(run_index);
+    }
+
+    let mut out = Vec::with_capacity(2 + palette.len() * 2 + body.len());
+    out.push(FRAME_CODEC_PAL_RLE);
+    out.push(palette.len() as u8);
+    for color in &palette {
+        out.extend_from_slice(&color.to_le_bytes());
+    }
+    out.extend_from_slice(&body);
+    Some(out)
+}
+
+/// Decode the bytes AFTER the [`FRAME_CODEC_PAL_RLE`] codec byte.
+fn decode_pal_rle(body: &[u8]) -> Option<Vec<u8>> {
+    let (&count, rest) = body.split_first()?;
+    let count = count as usize;
+    if count == 0 || count > MAX_PALETTE_COLORS {
+        return None;
+    }
+    if rest.len() < count * 2 {
+        return None; // truncated palette
+    }
+    let (palette_bytes, runs) = rest.split_at(count * 2);
+    if runs.is_empty() || !runs.chunks_exact(2).remainder().is_empty() {
+        return None; // no runs at all, or a dangling half-pair
+    }
+
+    // Validate and total the runs BEFORE allocating: on a 160KB heap a corrupt
+    // payload must not be able to ask for an unbounded buffer.
+    let mut total: usize = 0;
+    for pair in runs.chunks_exact(2) {
+        let (len, index) = (pair[0] as usize, pair[1] as usize);
+        if len == 0 || index >= count {
+            return None;
+        }
+        total += len * 2;
+        if total > MAX_FRAME_BYTES {
+            return None;
+        }
+    }
+
+    let palette: Vec<u16> =
+        palette_bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+
+    let mut out = Vec::with_capacity(total);
+    for pair in runs.chunks_exact(2) {
+        let color = palette[pair[1] as usize].to_le_bytes();
+        for _ in 0..pair[0] {
+            out.extend_from_slice(&color);
+        }
+    }
+    Some(out)
 }
 
 // ---- Ed25519 identity (shared by server, app-core, firmware) ----
@@ -1091,6 +1334,364 @@ mod name_style_tests {
             serde_json::from_str::<Command>(&serde_json::to_string(&revert).unwrap()).unwrap(),
             Command::SetLeagueNameStyle { style: None, .. }
         ));
+    }
+}
+
+#[cfg(test)]
+mod frame_codec_tests {
+    use super::*;
+
+    const BLACK: u16 = 0x0000;
+    const WHITE: u16 = 0xFFFF;
+    const RED: u16 = 0xF800;
+    const GREEN: u16 = 0x07E0;
+    const BLUE: u16 = 0x001F;
+    const YELLOW: u16 = 0xFFE0;
+
+    const PAL: &[u8] = &[FRAME_CODEC_PAL_RLE];
+
+    /// Pixels -> RGB565-LE bytes.
+    fn bytes(px: &[u16]) -> Vec<u8> {
+        px.iter().flat_map(|c| c.to_le_bytes()).collect()
+    }
+
+    /// A frame shaped like what the renderer actually produces: mostly black,
+    /// a handful of flat colors, plus a band of text-like per-pixel detail so
+    /// this isn't just a few giant runs.
+    fn realistic_frame() -> Vec<u8> {
+        let mut px = vec![BLACK; FRAME_PIXELS];
+        for y in 0..FRAME_HEIGHT {
+            for x in 0..FRAME_WIDTH {
+                let c = if y < 2 {
+                    RED // away team's color rule
+                } else if y >= FRAME_HEIGHT - 2 {
+                    BLUE // home team's color rule
+                } else if (6..14).contains(&y) && (4..28).contains(&x) {
+                    WHITE // away score block
+                } else if (6..14).contains(&y) && (36..60).contains(&x) {
+                    YELLOW // home score block
+                } else if (18..24).contains(&y) {
+                    // text-like: short, irregular runs from a cheap hash
+                    let h = (x * 7 + y * 13) % 5;
+                    if h == 0 {
+                        WHITE
+                    } else if h == 1 {
+                        GREEN
+                    } else {
+                        BLACK
+                    }
+                } else {
+                    BLACK
+                };
+                px[y * FRAME_WIDTH + x] = c;
+            }
+        }
+        bytes(&px)
+    }
+
+    /// Every encode is reversible, and never larger than raw.
+    fn assert_round_trip(pixels: &[u8], accepted: &[u8]) -> Vec<u8> {
+        let payload = encode_frame_payload(pixels, accepted);
+        assert_eq!(
+            decode_frame_payload(&payload).as_deref(),
+            Some(pixels),
+            "round trip failed for codec {}",
+            payload[0]
+        );
+        assert!(
+            payload.len() <= pixels.len() + 1,
+            "payload {} exceeded raw {}",
+            payload.len(),
+            pixels.len() + 1
+        );
+        payload
+    }
+
+    #[test]
+    fn realistic_frame_round_trips_and_shrinks() {
+        let px = realistic_frame();
+        assert_eq!(px.len(), FRAME_BYTES);
+
+        let payload = assert_round_trip(&px, PAL);
+        assert_eq!(payload[0], FRAME_CODEC_PAL_RLE, "flat graphics must compress");
+        assert_eq!(payload[1] as usize, 6, "black/white/red/green/blue/yellow");
+        assert!(
+            payload.len() * 2 < FRAME_BYTES,
+            "expected a real win, got {} bytes",
+            payload.len()
+        );
+
+        // The same pixels with no negotiated codec stay raw.
+        let raw = assert_round_trip(&px, &[]);
+        assert_eq!(raw[0], FRAME_CODEC_RAW);
+        assert_eq!(raw.len(), FRAME_BYTES + 1);
+    }
+
+    #[test]
+    fn single_color_frame_is_tiny() {
+        let px = bytes(&[BLACK; FRAME_PIXELS]);
+        let payload = assert_round_trip(&px, PAL);
+        assert_eq!(payload[0], FRAME_CODEC_PAL_RLE);
+        assert_eq!(payload[1], 1, "one palette entry");
+        // 2048 pixels = 8 full 255-runs + a 8-pixel remainder = 9 pairs.
+        assert_eq!(payload.len(), 2 + 2 + 9 * 2);
+        assert_eq!(&payload[..4], &[FRAME_CODEC_PAL_RLE, 1, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn sixteen_colors_compress_seventeen_falls_back() {
+        // 16 colors, each in one long block.
+        let mut px: Vec<u16> = Vec::new();
+        for i in 0..16u16 {
+            px.resize(px.len() + FRAME_PIXELS / 16, i * 0x1111);
+        }
+        let payload = assert_round_trip(&bytes(&px), PAL);
+        assert_eq!(payload[0], FRAME_CODEC_PAL_RLE);
+        assert_eq!(payload[1], 16, "a full palette is still legal");
+
+        // One more distinct color and the palette can't hold it.
+        let mut px17 = px.clone();
+        px17.truncate(FRAME_PIXELS - 64);
+        px17.resize(FRAME_PIXELS, 0xABCD);
+        let payload = assert_round_trip(&bytes(&px17), PAL);
+        assert_eq!(payload[0], FRAME_CODEC_RAW, "17 colors must fall back to raw");
+        assert_eq!(payload.len(), FRAME_BYTES + 1);
+    }
+
+    /// The pathological case: alternating pixels turn every run into 2 bytes
+    /// for 2 bytes of pixels, so RLE EXPANDS. Shipping that would make the
+    /// compression a regression on the worst frame instead of the average one.
+    #[test]
+    fn alternating_pixels_never_expand() {
+        let px: Vec<u16> =
+            (0..FRAME_PIXELS).map(|i| if i % 2 == 0 { BLACK } else { WHITE }).collect();
+        let payload = assert_round_trip(&bytes(&px), PAL);
+        assert_eq!(payload[0], FRAME_CODEC_RAW);
+        assert_eq!(payload.len(), FRAME_BYTES + 1, "exactly raw, not one byte more");
+
+        // One pixel per run is exactly the break-even point (a 2-byte pair per
+        // 2-byte pixel), which the palette header then pushes over. Two-pixel
+        // runs are the first size that pays, and it must take that win.
+        let px2: Vec<u16> =
+            (0..FRAME_PIXELS).map(|i| if (i / 2) % 2 == 0 { BLACK } else { WHITE }).collect();
+        let payload = assert_round_trip(&bytes(&px2), PAL);
+        assert_eq!(payload[0], FRAME_CODEC_PAL_RLE);
+        assert_eq!(payload.len(), 2 + 4 + (FRAME_PIXELS / 2) * 2);
+    }
+
+    #[test]
+    fn runs_longer_than_255_split() {
+        // 300 red then 300 blue: 255+45 and 255+45.
+        let mut px = vec![RED; 300];
+        px.resize(600, BLUE);
+        let payload = assert_round_trip(&bytes(&px), PAL);
+        assert_eq!(
+            payload,
+            vec![
+                FRAME_CODEC_PAL_RLE,
+                2,
+                0x00,
+                0xF8, // RED  LE
+                0x1F,
+                0x00, // BLUE LE
+                255,
+                0,
+                45,
+                0,
+                255,
+                1,
+                45,
+                1,
+            ]
+        );
+
+        // And a run exactly 255 long doesn't sprout an empty second pair.
+        let px = bytes(&[GREEN; 255]);
+        let payload = assert_round_trip(&px, PAL);
+        assert_eq!(payload.len(), 2 + 2 + 2);
+        assert_eq!(payload[4], 255);
+    }
+
+    /// Frames are variable height — a deep leaderboard renders tall and
+    /// scrolls. The codec must not assume 64x32 anywhere.
+    #[test]
+    fn tall_scrolling_frame_round_trips() {
+        let height = 128; // a 20-row leaderboard
+        let mut px = vec![BLACK; FRAME_WIDTH * height];
+        for y in 0..height {
+            for x in 0..FRAME_WIDTH {
+                if x < 3 {
+                    px[y * FRAME_WIDTH + x] = if y % 6 < 3 { GREEN } else { RED };
+                } else if (2..10).contains(&(y % 6)) && (8..40).contains(&x) {
+                    px[y * FRAME_WIDTH + x] = WHITE;
+                }
+            }
+        }
+        let px = bytes(&px);
+        assert_eq!(px.len(), FRAME_BYTES * 4);
+        let payload = assert_round_trip(&px, PAL);
+        assert_eq!(payload[0], FRAME_CODEC_PAL_RLE);
+        assert!(payload.len() < px.len() / 2);
+    }
+
+    #[test]
+    fn empty_input_is_raw_and_round_trips() {
+        let payload = assert_round_trip(&[], PAL);
+        assert_eq!(payload, vec![FRAME_CODEC_RAW]);
+        assert_eq!(decode_frame_payload(&payload), Some(Vec::new()));
+    }
+
+    #[test]
+    fn odd_length_input_is_raw() {
+        // Not a whole number of pixels: raw carries it verbatim.
+        let px = vec![0xABu8; 4095];
+        let payload = assert_round_trip(&px, PAL);
+        assert_eq!(payload[0], FRAME_CODEC_RAW);
+    }
+
+    #[test]
+    fn no_accepted_codecs_always_yields_raw() {
+        for px in [realistic_frame(), bytes(&[BLACK; 64]), Vec::new(), vec![1u8, 2, 3]] {
+            let payload = assert_round_trip(&px, &[]);
+            assert_eq!(payload[0], FRAME_CODEC_RAW);
+            assert_eq!(payload.len(), px.len() + 1);
+        }
+        // An unknown codec id is not a licence to invent one either.
+        let px = realistic_frame();
+        assert_eq!(encode_frame_payload(&px, &[7, 200])[0], FRAME_CODEC_RAW);
+        // RAW listed explicitly is fine, and still raw.
+        assert_eq!(encode_frame_payload(&px, &[FRAME_CODEC_RAW])[0], FRAME_CODEC_RAW);
+        // Unknown codecs alongside a known one don't disturb the pick.
+        assert_eq!(
+            encode_frame_payload(&px, &[9, FRAME_CODEC_PAL_RLE, 3])[0],
+            FRAME_CODEC_PAL_RLE
+        );
+    }
+
+    #[test]
+    fn malformed_payloads_are_rejected() {
+        assert_eq!(decode_frame_payload(&[]), None, "empty payload");
+        assert_eq!(decode_frame_payload(&[2]), None, "unknown codec byte");
+        assert_eq!(decode_frame_payload(&[255, 1, 2, 3]), None, "unknown codec byte");
+        assert_eq!(decode_frame_payload(&[FRAME_CODEC_PAL_RLE]), None, "no color count");
+        assert_eq!(decode_frame_payload(&[FRAME_CODEC_PAL_RLE, 0]), None, "zero colors");
+        assert_eq!(
+            decode_frame_payload(&[FRAME_CODEC_PAL_RLE, 17, 0, 0]),
+            None,
+            "palette larger than 16"
+        );
+        assert_eq!(
+            decode_frame_payload(&[FRAME_CODEC_PAL_RLE, 2, 0, 0, 0xFF]),
+            None,
+            "truncated palette"
+        );
+        assert_eq!(
+            decode_frame_payload(&[FRAME_CODEC_PAL_RLE, 1, 0, 0]),
+            None,
+            "palette but no runs"
+        );
+        assert_eq!(
+            decode_frame_payload(&[FRAME_CODEC_PAL_RLE, 1, 0, 0, 4]),
+            None,
+            "dangling half-pair"
+        );
+        assert_eq!(
+            decode_frame_payload(&[FRAME_CODEC_PAL_RLE, 1, 0, 0, 0, 0]),
+            None,
+            "zero-length run"
+        );
+        assert_eq!(
+            decode_frame_payload(&[FRAME_CODEC_PAL_RLE, 1, 0, 0, 4, 1]),
+            None,
+            "run indexes past the palette"
+        );
+
+        // Truncating a real payload mid-palette or mid-pair is caught too.
+        let good = encode_frame_payload(&realistic_frame(), PAL);
+        assert_eq!(good[0], FRAME_CODEC_PAL_RLE);
+        assert_eq!(decode_frame_payload(&good[..5]), None, "cut inside the palette");
+        assert_eq!(decode_frame_payload(&good[..good.len() - 1]), None, "cut mid-pair");
+    }
+
+    /// A tiny payload can claim an enormous frame — 2 bytes of runs per 510
+    /// bytes of output. On a 160KB heap that has to be refused, not allocated.
+    #[test]
+    fn oversized_run_totals_are_refused() {
+        let mut bomb = vec![FRAME_CODEC_PAL_RLE, 1, 0xFF, 0xFF];
+        for _ in 0..200 {
+            bomb.extend_from_slice(&[255, 0]); // 200 * 255 px = 102,000 bytes
+        }
+        assert!(bomb.len() < 512, "the payload itself is small: {}", bomb.len());
+        assert_eq!(decode_frame_payload(&bomb), None);
+
+        // Exactly at the cap is fine; one pixel past it is not.
+        let runs = MAX_FRAME_BYTES / 2; // pixels
+        let mut at_cap = vec![FRAME_CODEC_PAL_RLE, 1, 0x00, 0x00];
+        let mut left = runs;
+        while left > 0 {
+            let n = left.min(255);
+            at_cap.extend_from_slice(&[n as u8, 0]);
+            left -= n;
+        }
+        let decoded = decode_frame_payload(&at_cap).expect("a cap-sized frame decodes");
+        assert_eq!(decoded.len(), MAX_FRAME_BYTES);
+
+        let mut over = at_cap.clone();
+        over.extend_from_slice(&[1, 0]);
+        assert_eq!(decode_frame_payload(&over), None, "one pixel past the cap");
+    }
+
+    /// Frames bigger than the decoder's cap never get compressed, so encode
+    /// and decode can't disagree about what is acceptable.
+    #[test]
+    fn frames_past_the_cap_stay_raw() {
+        let px = bytes(&vec![BLUE; MAX_FRAME_BYTES]); // 2x the cap in bytes
+        assert!(px.len() > MAX_FRAME_BYTES);
+        let payload = assert_round_trip(&px, PAL);
+        assert_eq!(payload[0], FRAME_CODEC_RAW);
+    }
+
+    /// The binary websocket framing is unchanged in shape: the payload just
+    /// carries a codec byte now.
+    #[test]
+    fn wire_framing_carries_the_payload_unchanged() {
+        let px = realistic_frame();
+        let id = frame_id(&px);
+        let payload = encode_frame_payload(&px, PAL);
+        let msg = encode_frame(&id, &payload);
+
+        let (got_id, got_payload) = decode_frame(&msg).expect("framing decodes");
+        assert_eq!(got_id, id);
+        assert_eq!(got_payload, &payload[..]);
+        // The id is still the hash of the PIXELS, not of the payload.
+        assert_eq!(frame_id(&decode_frame_payload(got_payload).unwrap()), id);
+    }
+
+    #[test]
+    fn need_frames_negotiates_codecs() {
+        let msg = ClientMsg::NeedFrames {
+            ids: vec!["abc".into()],
+            codecs: vec![FRAME_CODEC_RAW, FRAME_CODEC_PAL_RLE],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        match serde_json::from_str::<ClientMsg>(&json).unwrap() {
+            ClientMsg::NeedFrames { ids, codecs } => {
+                assert_eq!(ids, vec!["abc".to_string()]);
+                assert_eq!(codecs, vec![FRAME_CODEC_RAW, FRAME_CODEC_PAL_RLE]);
+            }
+            other => panic!("expected NeedFrames, got {other:?}"),
+        }
+
+        // Old firmware / the app: no `codecs` field at all means RAW ONLY.
+        let old: ClientMsg =
+            serde_json::from_str("{\"t\":\"NeedFrames\",\"ids\":[\"abc\"]}").unwrap();
+        match old {
+            ClientMsg::NeedFrames { codecs, .. } => {
+                assert!(codecs.is_empty());
+                assert_eq!(encode_frame_payload(&realistic_frame(), &codecs)[0], FRAME_CODEC_RAW);
+            }
+            other => panic!("expected NeedFrames, got {other:?}"),
+        }
     }
 }
 

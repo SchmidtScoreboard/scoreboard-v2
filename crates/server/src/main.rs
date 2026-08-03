@@ -2316,6 +2316,12 @@ pub fn push_board_state(state: &AppState, board_id: &str) {
     let state_msg = board_state_msg(state, board_id);
     // Binary frames for the now-showing games, pushed right after the state so the
     // app renders them in place — the same content-addressed mechanism the board uses.
+    //
+    // DELIBERATELY RAW, and staying that way: the compression the DEVICE path
+    // negotiates (`ClientMsg::NeedFrames { codecs }`) exists to buy heap back on
+    // a 160KB microcontroller. A phone has memory to spare, app-core carries no
+    // decoder, and controllers never advertise a codec — so this must keep
+    // sending bare pixels with no codec byte. Don't "unify" the two paths.
     let frame_msgs: Vec<Message> = {
         let cache = state.frames.lock().unwrap();
         match &state_msg {
@@ -3018,12 +3024,18 @@ mod tests {
         b.set_online(true);
         b.tick(0);
         b.on_manifest(m.clone());
-        // Feed every frame the manifest references, exactly as NeedFrames would.
+        // Feed every frame the manifest references, exactly as NeedFrames
+        // would: the payload the server builds for the codecs a real board
+        // advertises, not the raw cache entry. Compression rides this path too
+        // — a tall leaderboard has to survive encode, wire, decode, and still
+        // scroll.
         {
             let frames = state.frames.lock().unwrap();
             for e in &m.rotation {
                 let (_, px) = frames.get(&e.frame_id).cloned().unwrap();
-                b.on_frame(e.frame_id.clone(), px);
+                let payload = encode_frame_payload(&px, board_core::SUPPORTED_FRAME_CODECS);
+                assert!(payload.len() < px.len(), "a rendered frame should compress");
+                b.on_frame(e.frame_id.clone(), payload);
             }
         }
         // Walk to the scrolling entry: advance happens at each entry's dwell.
@@ -3779,6 +3791,71 @@ mod tests {
             "capped out is not bumped — nothing here ever held a rotation slot"
         );
         assert_eq!(now_showing.len(), UPCOMING_CAP, "nothing is live, so the list is upcoming-only");
+    }
+
+    /// The tallest frame the server can render must FIT the firmware's ws
+    /// receive buffer, including the 64-byte frame id and the codec prefix.
+    /// The buffer used to be exactly the pre-codec size (16448 = 64 + 128*128),
+    /// so adding one codec byte made a 20-row leaderboard unreceivable: the
+    /// reader rejects an oversized frame, which tears down the socket and
+    /// reconnect-loops the board. Only boards that had just OTA'd would break.
+    #[test]
+    fn frame_wire_size_fits_the_firmware_buffer() {
+        // Must track firmware-rs/src/main.rs's `frame` buffer.
+        const FIRMWARE_WS_FRAME_BUF: usize = 16_512;
+        // A 20-row leaderboard renders 128 rows of 64px RGB565.
+        assert_eq!(render::LEADERBOARD_MAX_ROWS, 20, "the 128-row figure below assumes this");
+        let payload_bytes = 128 * scoreboard_protocol::FRAME_ROW_BYTES;
+        let wire = scoreboard_protocol::FRAME_ID_HEX_LEN + 1 /* codec */ + payload_bytes;
+        assert!(
+            wire <= FIRMWARE_WS_FRAME_BUF,
+            "tallest frame is {wire} B on the wire, firmware buffer is {FIRMWARE_WS_FRAME_BUF} B \
+             — raise the firmware buffer or lower LEADERBOARD_MAX_ROWS"
+        );
+    }
+
+    /// A pre-codec server sends bare pixels — always a whole number of rows.
+    /// `encode_frame_payload` must never produce that length, or a board that
+    /// outlived its server (a rollback) cannot tell the two apart and decodes
+    /// a zero first pixel byte as "RAW", shifting every pixel by one.
+    #[test]
+    fn encoded_payloads_are_never_mistakable_for_legacy_frames() {
+        use scoreboard_protocol::{encode_frame_payload, frame_payload_is_legacy_raw};
+        let codecs = [scoreboard_protocol::FRAME_CODEC_RAW, scoreboard_protocol::FRAME_CODEC_PAL_RLE];
+        // Sweep real rendered frames plus adversarial synthetic ones.
+        let mut cases: Vec<Vec<u8>> = Vec::new();
+        let g = sample_game();
+        cases.push(render::render_frame(&g, None, None, default_name_style(&g.sport_id)).1);
+        for h in [1usize, 2, 32, 64, 128] {
+            for pattern in 0..4u16 {
+                let px: Vec<u8> = (0..h * 64)
+                    .flat_map(|i| {
+                        let v: u16 = match pattern {
+                            0 => 0,
+                            1 => (i % 2) as u16 * 0xFFFF,
+                            2 => (i % 17) as u16 * 0x0801,
+                            _ => (i as u16).wrapping_mul(2654),
+                        };
+                        v.to_le_bytes()
+                    })
+                    .collect();
+                cases.push(px);
+            }
+        }
+        for px in cases {
+            let payload = encode_frame_payload(&px, &codecs);
+            assert!(
+                !frame_payload_is_legacy_raw(&payload),
+                "payload of {} B is a whole number of rows — indistinguishable from a \
+                 pre-codec server's bare pixels",
+                payload.len()
+            );
+            assert_eq!(
+                scoreboard_protocol::decode_frame_payload(&payload).as_deref(),
+                Some(&px[..]),
+                "round trip"
+            );
+        }
     }
 
     /// A FINAL nobody watched end satisfies `game_queued` (not board_shows,

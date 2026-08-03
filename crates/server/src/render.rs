@@ -670,8 +670,11 @@ fn render_leaderboard(g: &Game, tz: Option<chrono_tz::Tz>) -> (FrameId, Vec<u8>)
 }
 
 /// Default and maximum leaderboard depth (rows) on the board. The max is
-/// pinned by the firmware's 16448-byte frame buffer: 20 rows = a 128px-tall
-/// frame = exactly 128*128 payload bytes.
+/// pinned by the firmware's ws frame buffer (16512 bytes): a 20-row
+/// leaderboard is 128px tall = 16384 payload bytes, plus the 64-byte frame id
+/// and the 1-byte codec prefix = 16449 on the wire. `frame_wire_size_fits_the_firmware_buffer`
+/// asserts the whole sum — the buffer used to fit the pre-codec format to the
+/// byte, and adding the codec prefix put it one over.
 pub const LEADERBOARD_DEFAULT_ROWS: usize = 10;
 pub const LEADERBOARD_MAX_ROWS: usize = 20;
 

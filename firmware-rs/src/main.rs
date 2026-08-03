@@ -437,9 +437,12 @@ async fn device(
 ) {
     let mut rx = alloc::vec![0u8; 2048];
     let mut tx = alloc::vec![0u8; 2048];
-    // Sized for tall scrolling leaderboard frames (64-byte id + 128 bytes/row;
-    // 16448 fits frames up to 128px — SCROLL_MAX_ROWS needs 68px).
-    let mut frame = alloc::vec![0u8; 16448];
+    // Sized for tall scrolling leaderboard frames: 64-byte id + 1 codec byte +
+    // 128 bytes/row. A 20-row leaderboard renders 128px = 16384 payload bytes,
+    // so the wire frame is 16449 — the old 16448 fit the pre-codec format
+    // EXACTLY, and the codec byte pushed it one over, which the reader rejects
+    // as oversized and turns into a reconnect loop. 16512 restores slack.
+    let mut frame = alloc::vec![0u8; 16512];
     // This board's IANA timezone, IP-geolocated once Wi-Fi is up and reported
     // to the server after every auth. No phone involved: the zone tracks where
     // the BOARD lives, and a move self-corrects on the next boot. A few

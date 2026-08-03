@@ -557,8 +557,13 @@ async fn run_client(
                                 }
                             }
                             Some(Ok(Message::Binary(b))) => {
-                                if let Some((id, px)) = decode_frame(&b) {
-                                    board.lock().unwrap().on_frame(id, px.to_vec());
+                                // The payload is self-describing (`[codec][data]`,
+                                // usually palette+RLE) and goes to board-core
+                                // untouched — exactly what the firmware does.
+                                // Decoding is board-core's, once per frame change,
+                                // so the sim exercises the real device path.
+                                if let Some((id, payload)) = decode_frame(&b) {
+                                    board.lock().unwrap().on_frame(id, payload.to_vec());
                                 }
                             }
                             Some(Ok(_)) => {}

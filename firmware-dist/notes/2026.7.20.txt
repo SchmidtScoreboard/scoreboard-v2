@@ -1,0 +1,2 @@
+- Scoreboard frames are now compressed, cutting the board's memory use for cached screens by about 75% and making updates over the network noticeably lighter.
+- Groundwork for encrypted communication between the scoreboard and the server.

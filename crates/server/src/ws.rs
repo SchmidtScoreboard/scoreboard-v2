@@ -106,7 +106,7 @@ async fn device_loop(sender: WsSender, mut receiver: WsReceiver, state: AppState
     while let Some(Ok(msg)) = receiver.next().await {
         if let Message::Text(t) = msg {
             match serde_json::from_str::<ClientMsg>(&t) {
-                Ok(ClientMsg::NeedFrames { ids }) => {
+                Ok(ClientMsg::NeedFrames { ids, codecs }) => {
                     let mut out = Vec::new();
                     {
                         let frames = state.frames.lock().unwrap();
@@ -117,7 +117,26 @@ async fn device_loop(sender: WsSender, mut receiver: WsReceiver, state: AppState
                         }
                     }
                     for (fid, px) in out {
-                        let _ = tx.send(Message::Binary(encode_frame(&fid, &px)));
+                        // Compression is PER-SEND against the codecs THIS request
+                        // advertised — the cache stays raw and the id stays the
+                        // sha256 of the uncompressed pixels, so the same frame has
+                        // the same id however it travelled.
+                        //
+                        // No codecs at all is an old board (the field is
+                        // `#[serde(default)]`, so pre-codec firmware deserializes
+                        // to an empty vec). It gets the bare pixels, byte-for-byte
+                        // what it got before this existed: it has never seen a
+                        // leading codec byte and would read one as a pixel,
+                        // shifting the whole frame. Every payload a board that DID
+                        // advertise receives is self-describing — codec byte first,
+                        // RAW included — so there's nothing to negotiate and no
+                        // firmware version to gate on.
+                        let payload = if codecs.is_empty() {
+                            px
+                        } else {
+                            encode_frame_payload(&px, &codecs)
+                        };
+                        let _ = tx.send(Message::Binary(encode_frame(&fid, &payload)));
                     }
                 }
                 Ok(ClientMsg::EnterSetup { code }) => {
@@ -792,6 +811,44 @@ mod tests {
                 _ => return None,
             }
         }
+    }
+
+    /// Read the next BINARY message (the one thing `recv` skips) and split it
+    /// the way the firmware does: id, then payload.
+    async fn recv_frame(ws: &mut Client) -> Option<(FrameId, Vec<u8>)> {
+        loop {
+            match tokio::time::timeout(Duration::from_secs(2), ws.next()).await {
+                Ok(Some(Ok(TMessage::Binary(b)))) => {
+                    let (id, payload) = decode_frame(&b)?;
+                    return Some((id, payload.to_vec()));
+                }
+                Ok(Some(Ok(_))) => continue, // skip manifests / pings
+                _ => return None,
+            }
+        }
+    }
+
+    /// Auth as a device and take one real rendered frame off its own manifest:
+    /// (client, frame id, the RAW pixels the server has cached for it).
+    async fn device_with_a_rendered_frame(
+        url: &str,
+        state: &AppState,
+        secret: &[u8; 32],
+    ) -> (Client, FrameId, Vec<u8>) {
+        let (mut dev, _board_id) = auth(url, Role::Device, secret).await;
+        let m = match recv_until(&mut dev, |m| matches!(m, ServerMsg::Manifest(_))).await {
+            Some(ServerMsg::Manifest(m)) => m,
+            other => panic!("a connecting device gets its manifest, got {other:?}"),
+        };
+        let fid = m.rotation.first().expect("the mock slate fills a rotation").frame_id.clone();
+        let px = state
+            .frames
+            .lock()
+            .unwrap()
+            .get(&fid)
+            .map(|(_, p)| p.clone())
+            .expect("the manifest's frames are cached");
+        (dev, fid, px)
     }
 
     /// Read until a message of the expected variant arrives (skipping manifests etc.).
@@ -1573,6 +1630,65 @@ mod tests {
         let _ = state;
     }
 
+
+    /// The same frame, asked for two ways on one socket: an old board (no
+    /// `codecs` field in its JSON) gets the pixels byte-for-byte as it always
+    /// did, and a codec-advertising board gets a self-describing compressed
+    /// payload that decodes back to those exact pixels. The frame ID is the
+    /// same string either way — it's the sha256 of the UNCOMPRESSED pixels, so
+    /// a board that fetched raw yesterday and compressed today still finds its
+    /// cache hit.
+    #[tokio::test]
+    async fn need_frames_serves_one_id_raw_or_compressed() {
+        let (url, state) = spawn_server().await;
+        let (mut dev, fid, px) = device_with_a_rendered_frame(&url, &state, &[9u8; 32]).await;
+
+        // Pre-codec firmware: the literal JSON it sends, with no `codecs` key.
+        dev.send(TMessage::Text(format!(r#"{{"t":"NeedFrames","ids":["{fid}"]}}"#)))
+            .await
+            .unwrap();
+        let (raw_id, raw_payload) = recv_frame(&mut dev).await.expect("the frame comes back");
+        assert_eq!(raw_id, fid);
+        assert_eq!(raw_payload, px, "an old board gets the pixels, no codec byte, as before");
+
+        // New firmware: same id, now advertising what it can decode.
+        send(&mut dev, &ClientMsg::NeedFrames {
+            ids: vec![fid.clone()],
+            codecs: vec![FRAME_CODEC_RAW, FRAME_CODEC_PAL_RLE],
+        })
+        .await;
+        let (comp_id, payload) = recv_frame(&mut dev).await.expect("the frame comes back");
+        assert_eq!(comp_id, fid, "compression must not move the content address");
+        assert_eq!(payload[0], FRAME_CODEC_PAL_RLE, "a rendered frame palettizes");
+        let decoded = decode_frame_payload(&payload).expect("payload decodes");
+        assert_eq!(decoded, px, "lossless: the board reconstructs the exact pixels");
+        assert_eq!(frame_id(&decoded), fid, "the id is the sha256 of the DECODED pixels");
+        // A real rendered frame (flat graphics, a handful of colors), not a
+        // synthetic best case. Measured ~4.7x; 2x is the floor worth shipping.
+        assert!(
+            payload.len() * 2 < px.len(),
+            "compressed payload should be meaningfully smaller: {} vs {} raw bytes",
+            payload.len(),
+            px.len(),
+        );
+    }
+
+    /// The server sends only what the request advertised. A board that lists
+    /// RAW alone gets RAW — self-describing (codec byte first), because that
+    /// board asked in the new language and can read the byte.
+    #[tokio::test]
+    async fn need_frames_honors_the_advertised_codec_list() {
+        let (url, state) = spawn_server().await;
+        let (mut dev, fid, px) = device_with_a_rendered_frame(&url, &state, &[11u8; 32]).await;
+
+        send(&mut dev, &ClientMsg::NeedFrames { ids: vec![fid.clone()], codecs: vec![FRAME_CODEC_RAW] })
+            .await;
+        let (id, payload) = recv_frame(&mut dev).await.expect("the frame comes back");
+        assert_eq!(id, fid);
+        assert_eq!(payload[0], FRAME_CODEC_RAW, "never a codec the client didn't claim");
+        assert_eq!(payload.len(), px.len() + 1, "raw payload is the codec byte + pixels");
+        assert_eq!(decode_frame_payload(&payload).expect("payload decodes"), px);
+    }
 
     /// Every DeviceVersion report is answered with UpdateAvailable at the
     /// DEVICE: Some(dist version) when the channel offers something newer,

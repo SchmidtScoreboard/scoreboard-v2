@@ -29,8 +29,31 @@ use embedded_graphics::{
     text::{Alignment, Baseline, Text, TextStyleBuilder},
 };
 use scoreboard_protocol::{
-    rgb565_to_888, ClientMsg, FrameId, Manifest, FRAME_HEIGHT, FRAME_PIXELS, FRAME_WIDTH,
+    decode_frame_payload, frame_payload_is_legacy_raw, rgb565_to_888, ClientMsg, FrameId, Manifest, FRAME_CODEC_PAL_RLE,
+    FRAME_CODEC_RAW, FRAME_HEIGHT, FRAME_PIXELS, FRAME_WIDTH,
 };
+
+/// Frame payload codecs this board can DECODE, advertised on every
+/// `NeedFrames` (see `on_manifest`). The firmware needs no source change to
+/// benefit: it forwards whatever board-core hands it. Listing RAW keeps the
+/// old wire shape available — the server picks whichever is smaller.
+pub const SUPPORTED_FRAME_CODECS: &[u8] = &[FRAME_CODEC_RAW, FRAME_CODEC_PAL_RLE];
+
+/// Hard ceiling on the frame cache, in bytes of stored (compressed) payload.
+///
+/// The arithmetic: the ESP32-S3 has a 163,840-byte heap SHARED with the WiFi
+/// radio, and TLS wants ~20KB of it. A rotation is up to 20 frames; raw they
+/// are 64x32 RGB565 = 4096 B each = ~80KB, half the heap and by far the
+/// biggest allocation on the device. Palette+RLE brings a real rendered frame
+/// (3-8 distinct colors) to ~872 B, so 20 of them land near 17KB. 24KB is that
+/// plus slack. (Measured against a real server: a 20-frame demo rotation —
+/// 17 panel-height frames plus three 68-row scrolling leaderboards, 95,744 B
+/// of raw pixels — arrives as 20,146 B of payload and fits with room over.)
+///
+/// The bound exists because entry COUNT stopped being a bound the moment
+/// entries became variable-size: 20 incompressible frames would still be 80KB
+/// and TLS would have nowhere to live. Enforced in `enforce_cache_budget`.
+const CACHE_BUDGET_BYTES: usize = 24 * 1024;
 
 const DOUBLE_WINDOW_MS: u64 = 400;
 const BOOT_TIME_MS: u64 = 1500;
@@ -150,7 +173,23 @@ const MENU_SELECT_BLUE: Rgb888 = Rgb888::new(0x22, 0x44, 0xBB);
 const MENU_SELECT_RED: Rgb888 = Rgb888::new(0xBB, 0x22, 0x11);
 
 pub struct Board {
+    /// id -> the payload EXACTLY as it came off the wire: `[codec][data]`,
+    /// self-describing, usually compressed. Storing it compressed IS the
+    /// memory win — see `CACHE_BUDGET_BYTES`.
     cache: BTreeMap<FrameId, Vec<u8>>,
+    /// The one decoded frame: the pixels currently on the panel. Refreshed
+    /// only when the DISPLAYED id changes (rotation advance, manifest swap, a
+    /// late arrival of the frame we're waiting on) — never from `framebuffer`,
+    /// which runs ~30x/second. Scrolling a tall frame moves a window over
+    /// these same pixels and does not re-decode.
+    decoded: Option<(FrameId, Vec<u8>)>,
+    /// Ids in order of last display, least-recently-shown first. Only used to
+    /// pick eviction victims (see `enforce_cache_budget`); pruned to the cache
+    /// so it can't outgrow it.
+    shown_order: Vec<FrameId>,
+    /// Lifetime count of payload decodes. Cheap (4 bytes) and the honest way
+    /// to assert "once per frame change, never per render" in tests.
+    decodes: u32,
     manifest: Option<Manifest>,
     last_good: Option<FrameId>, // last frame actually shown (smooth manifest swaps)
     idx: usize,
@@ -222,6 +261,9 @@ impl Board {
     pub fn new() -> Self {
         Self {
             cache: BTreeMap::new(),
+            decoded: None,
+            shown_order: Vec::new(),
+            decodes: 0,
             manifest: None,
             last_good: None,
             idx: 0,
@@ -509,15 +551,181 @@ impl Board {
             k
         };
         self.cache.retain(|id, _| keep.contains(id));
+        // The keep-set retain is a CONTENT rule (what the rotation still
+        // references); the byte budget is a MEMORY rule. Both run, in that
+        // order — see `enforce_cache_budget`.
+        self.enforce_cache_budget();
+        // The displayed id can have changed twice over here (idx reset, frames
+        // evicted). Decode now, off the render path.
+        self.refresh_decoded();
         if missing.is_empty() {
             None
         } else {
-            Some(ClientMsg::NeedFrames { ids: missing })
+            // Advertise what we can decode. This is why the FIRMWARE needs no
+            // source change for compression: the request it forwards already
+            // says so. Self-describing beats gating on a version — a board
+            // that just OTA'd is described by the message it sends.
+            Some(ClientMsg::NeedFrames { ids: missing, codecs: SUPPORTED_FRAME_CODECS.to_vec() })
         }
     }
 
-    pub fn on_frame(&mut self, id: FrameId, rgb565_le: Vec<u8>) {
-        self.cache.insert(id, rgb565_le);
+    /// A frame off the wire. `payload` is stored EXACTLY as received: it is
+    /// self-describing (`[codec][data]`), so the cache holds the compressed
+    /// form and only the one frame on screen is ever expanded to pixels.
+    pub fn on_frame(&mut self, id: FrameId, payload: Vec<u8>) {
+        // A payload that can't fit the budget alone is refused at the door:
+        // admitting it would evict every other frame on its way to being
+        // evicted itself. The protocol's ceiling (`MAX_FRAME_BYTES`, a 256-row
+        // frame) is above the budget, so this is reachable — by a hostile
+        // payload or an uncompressible tall frame, never by rendered content.
+        if payload.len() > CACHE_BUDGET_BYTES {
+            return;
+        }
+        self.cache.insert(id, payload);
+        self.enforce_cache_budget();
+        // This may be the frame the panel has been waiting on (a fresh
+        // manifest whose ids hadn't downloaded yet) — decode it here, once,
+        // not on the next render.
+        self.refresh_decoded();
+    }
+
+    /// How many payload decodes have run since boot. Test/diagnostic hook: the
+    /// invariant is one per frame CHANGE, never one per render.
+    pub fn frame_decodes(&self) -> u32 {
+        self.decodes
+    }
+
+    /// Bytes of frame payload currently cached (what `CACHE_BUDGET_BYTES` caps).
+    pub fn cache_bytes(&self) -> usize {
+        self.cache.values().map(|v| v.len()).sum()
+    }
+
+    /// The frame id `screen_running` would put on the panel right now: the
+    /// current rotation entry if it's cached, else the last frame we actually
+    /// showed (which is what keeps content up across a manifest swap).
+    /// Borrowed, not cloned — this is on the per-tick path and frame ids are
+    /// 64-char heap strings.
+    fn displayed_frame_id(&self) -> Option<&FrameId> {
+        let m = self.manifest.as_ref()?;
+        if !m.display_on || m.rotation.is_empty() {
+            return None;
+        }
+        let entry = &m.rotation[self.idx.min(m.rotation.len() - 1)];
+        if self.cache.contains_key(&entry.frame_id) {
+            return Some(&entry.frame_id);
+        }
+        self.last_good.as_ref().filter(|id| self.cache.contains_key(*id))
+    }
+
+    /// Bring the decoded scratch in line with the displayed frame id. A no-op
+    /// (one id comparison, no allocation) when nothing changed, which is the
+    /// case on the overwhelming majority of calls — this runs from `tick`,
+    /// `on_frame` and `on_manifest`, i.e. ~30x/second, and must stay cheap.
+    ///
+    /// An undecodable payload is dropped from the cache rather than retried
+    /// forever: the next manifest lists it as missing and the server re-sends.
+    /// The scratch is left alone in that case, so the panel HOLDS the last
+    /// good content instead of blanking — and nothing here can panic, because
+    /// a panic on this device is a reboot.
+    fn refresh_decoded(&mut self) {
+        loop {
+            // Nothing is allocated until the frame actually CHANGES: the
+            // early return below is what every dwelling and scrolling tick
+            // takes.
+            let id = match self.displayed_frame_id() {
+                None => return,
+                Some(id) if self.decoded.as_ref().is_some_and(|(cur, _)| cur == id) => return,
+                Some(id) => id.clone(),
+            };
+            let Some(payload) = self.cache.get(&id) else { return };
+            // A server that predates the codec sends bare pixels with no
+            // leading codec byte — and a board can outlive the server that
+            // taught it the codec (a rollback, since firmware dists ship
+            // inside the server image and the downgrade guard pins boards
+            // forward). Length tells them apart: only a legacy payload is a
+            // whole number of pixel rows.
+            let decoded = if frame_payload_is_legacy_raw(payload) {
+                Some(payload.clone())
+            } else {
+                decode_frame_payload(payload)
+            };
+            match decoded {
+                Some(px) => {
+                    self.decodes = self.decodes.wrapping_add(1);
+                    self.decoded = Some((id.clone(), px));
+                    self.touch_shown(&id);
+                    return;
+                }
+                None => {
+                    // Corrupt / unknown codec / truncated: forget it and let
+                    // the loop fall back to whatever else is showable.
+                    self.cache.remove(&id);
+                    if self.last_good.as_ref() == Some(&id) {
+                        self.last_good = None;
+                    }
+                    self.shown_order.retain(|s| s != &id);
+                }
+            }
+        }
+    }
+
+    /// Mark `id` as the most recently shown frame (eviction recency).
+    fn touch_shown(&mut self, id: &FrameId) {
+        self.shown_order.retain(|s| s != id);
+        self.shown_order.push(id.clone());
+        // Ids that left the cache can't be evicted again; don't pay to
+        // remember them (each id is a 64-char hex string).
+        let cache = &self.cache;
+        self.shown_order.retain(|s| cache.contains_key(s));
+    }
+
+    /// Hold the cache under `CACHE_BUDGET_BYTES`. Entry count bounds nothing
+    /// once entries are variable-size, and the freed heap is what TLS moves
+    /// into — so this is a hard byte cap, enforced after the keep-set retain.
+    ///
+    /// Victims in order: frames the current rotation no longer references,
+    /// then the least recently SHOWN. Frames that arrived but haven't been
+    /// displayed yet rank as freshest on purpose — the rotation is about to
+    /// reach them, and evicting them first would re-request the same frames
+    /// forever. The frame ON SCREEN is never a victim: dropping it would blank
+    /// the panel to save bytes.
+    fn enforce_cache_budget(&mut self) {
+        let mut total = self.cache_bytes();
+        if total <= CACHE_BUDGET_BYTES {
+            return;
+        }
+        let on_screen = self.decoded.as_ref().map(|(id, _)| id.clone());
+        let keep: Vec<FrameId> = self
+            .manifest
+            .as_ref()
+            .map(|m| m.rotation.iter().map(|r| r.frame_id.clone()).collect())
+            .unwrap_or_default();
+
+        // (referenced, recency) ascending = worst first. Never-shown frames
+        // sort last within their tier (usize::MAX).
+        let mut victims: Vec<(bool, usize, FrameId)> = self
+            .cache
+            .keys()
+            .filter(|id| on_screen.as_ref() != Some(*id))
+            .map(|id| {
+                let rank = self.shown_order.iter().position(|s| s == id).unwrap_or(usize::MAX);
+                (keep.contains(id), rank, id.clone())
+            })
+            .collect();
+        victims.sort_by_key(|(referenced, recency, _)| (*referenced, *recency));
+
+        for (_, _, id) in victims {
+            if total <= CACHE_BUDGET_BYTES {
+                break;
+            }
+            if let Some(v) = self.cache.remove(&id) {
+                total -= v.len();
+                if self.last_good.as_ref() == Some(&id) {
+                    self.last_good = None;
+                }
+                self.shown_order.retain(|s| s != &id);
+            }
+        }
     }
 
     // ---- raw encoder button from the host (seesaw / sim control) ----
@@ -710,6 +918,11 @@ impl Board {
                     self.last_good = Some(id);
                 }
             }
+            // The rotation may have just advanced. Decode the new frame HERE,
+            // once — `framebuffer` runs at the panel's refresh rate and must
+            // never decode. Same id (the usual case, including every render of
+            // a scrolling frame): one comparison and out.
+            self.refresh_decoded();
         }
     }
 
@@ -780,6 +993,9 @@ impl Board {
     fn enter_setup(&mut self) {
         self.manifest = None;
         self.cache.clear();
+        self.decoded = None;
+        self.shown_order.clear();
+        self.last_good = None;
         self.syncing_since = None;
         self.sticky_pairing = false;
         // Fresh provisioning always starts from the top of the handshake.
@@ -1014,9 +1230,7 @@ impl Board {
         if !m.display_on || m.rotation.is_empty() {
             return true; // deliberate blank — black IS the content
         }
-        let entry = &m.rotation[self.idx.min(m.rotation.len() - 1)];
-        self.cache.contains_key(&entry.frame_id)
-            || self.last_good.as_ref().is_some_and(|id| self.cache.contains_key(id))
+        self.displayed_frame_id().is_some()
     }
 
     fn screen_running(&self) -> Vec<u32> {
@@ -1026,11 +1240,13 @@ impl Board {
             return buf;
         }
         let entry = &m.rotation[self.idx.min(m.rotation.len() - 1)];
-        let px = self
-            .cache
-            .get(&entry.frame_id)
-            .or_else(|| self.last_good.as_ref().and_then(|id| self.cache.get(id)));
-        let Some(px) = px else {
+        // Pixels come from the decoded scratch, NEVER from the cache: the
+        // cache holds compressed payloads and this function runs at the
+        // panel's refresh rate. The scratch is kept current by `tick` /
+        // `on_frame` / `on_manifest`; if it's stale-but-present (an
+        // undecodable payload just arrived) showing the last good frame is
+        // exactly the right degradation.
+        let Some((_, px)) = self.decoded.as_ref() else {
             return buf;
         };
         // Frames taller than the panel scroll: show a 32px window whose offset
@@ -1667,6 +1883,23 @@ fn overlay_brightness_bar(buf: &mut [u32], brightness: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scoreboard_protocol::encode_frame_payload;
+
+    /// Wrap pixels the way the wire does: frames reach `on_frame` as
+    /// self-describing `[codec][data]` payloads, picked smallest-first from
+    /// what the board advertised. Tests that only care about pixels go through
+    /// here so they exercise the same path the server produces.
+    fn payload(px: &[u8]) -> Vec<u8> {
+        encode_frame_payload(px, SUPPORTED_FRAME_CODECS)
+    }
+
+    /// The same pixels with compression refused — what an old server (or an
+    /// incompressible frame) puts on the wire.
+    fn raw_payload(px: &[u8]) -> Vec<u8> {
+        let p = encode_frame_payload(px, &[]);
+        assert_eq!(p[0], FRAME_CODEC_RAW);
+        p
+    }
 
     /// DELIBERATE behavior change (twice over): double-press once toggled the
     /// pairing screen, then became a reserved no-op — now it TOGGLES the
@@ -1884,24 +2117,24 @@ mod tests {
         b.set_online(true);
         b.tick(0);
         b.on_manifest(mk(&["a", "b", "c"]));
-        b.on_frame("a".into(), solid(255, 0, 0));
-        b.on_frame("b".into(), solid(0, 255, 0));
-        b.on_frame("c".into(), solid(0, 0, 255));
+        b.on_frame("a".into(), payload(&solid(255, 0, 0)));
+        b.on_frame("b".into(), payload(&solid(0, 255, 0)));
+        b.on_frame("c".into(), payload(&solid(0, 0, 255)));
         b.tick(1200); // dwell elapsed -> slot 1
         assert_eq!(b.framebuffer()[0], 0x00FF00, "should have advanced to slot 1");
 
         // Same-length refresh with new frame ids: slot and dwell timer kept.
         b.on_manifest(mk(&["d", "e", "f"]));
-        b.on_frame("d".into(), solid(255, 0, 0));
-        b.on_frame("e".into(), solid(255, 255, 255));
-        b.on_frame("f".into(), solid(0, 0, 255));
+        b.on_frame("d".into(), payload(&solid(255, 0, 0)));
+        b.on_frame("e".into(), payload(&solid(255, 255, 255)));
+        b.on_frame("f".into(), payload(&solid(0, 0, 255)));
         b.tick(1300); // dwell NOT elapsed since the slot-1 advance
         assert_eq!(b.framebuffer()[0], 0xFFFFFF, "slot 1 kept across a same-shape refresh");
 
         // Different length: genuinely new rotation, restart at the top.
         b.on_manifest(mk(&["g", "h"]));
-        b.on_frame("g".into(), solid(0, 255, 0));
-        b.on_frame("h".into(), solid(0, 0, 255));
+        b.on_frame("g".into(), payload(&solid(0, 255, 0)));
+        b.on_frame("h".into(), payload(&solid(0, 0, 255)));
         b.tick(1400);
         assert_eq!(b.framebuffer()[0], 0x00FF00, "new-shape rotation restarts at slot 0");
     }
@@ -1938,7 +2171,7 @@ mod tests {
             epoch: 0,
             brightness: 100,
         });
-        b.on_frame("tall".into(), px);
+        b.on_frame("tall".into(), payload(&px));
         // Recover the row index from the red channel (>>3 strips the 565
         // round-trip's replicated low bits).
         let top_row = |b: &Board| ((b.framebuffer()[0] >> 16 & 0xFF) >> 3) as usize;
@@ -2038,7 +2271,7 @@ mod tests {
         b.set_online(true);
         b.tick(0);
         b.on_manifest(mk(7));
-        b.on_frame("n1".into(), vec![0u8; scoreboard_protocol::FRAME_BYTES]);
+        b.on_frame("n1".into(), payload(&[0u8; scoreboard_protocol::FRAME_BYTES]));
         let lit = |b: &Board| {
             let f = b.framebuffer();
             (27..30).map(|y| (5..59).filter(|&x| f[y * FRAME_WIDTH + x] != 0).count()).max().unwrap()
@@ -2050,14 +2283,14 @@ mod tests {
         assert!((25..=29).contains(&half), "half the notice, about half the bar: {half}");
         // Same-epoch re-push mid-notice: the anchor (and the fill) hold.
         b.on_manifest(mk(7));
-        b.on_frame("n1".into(), vec![0u8; scoreboard_protocol::FRAME_BYTES]);
+        b.on_frame("n1".into(), payload(&[0u8; scoreboard_protocol::FRAME_BYTES]));
         b.tick(2100);
         assert!(lit(&b) >= half, "same-epoch re-push must not restart the fill");
         b.tick(4000);
         assert_eq!(lit(&b), 54, "lands exactly full");
         // A NEW notice (new epoch) starts from empty again.
         b.on_manifest(mk(8));
-        b.on_frame("n1".into(), vec![0u8; scoreboard_protocol::FRAME_BYTES]);
+        b.on_frame("n1".into(), payload(&[0u8; scoreboard_protocol::FRAME_BYTES]));
         b.tick(4100);
         assert!(lit(&b) <= 2, "a new epoch re-anchors the bar");
     }
@@ -2623,7 +2856,7 @@ mod tests {
             epoch: 0,
             brightness: 100,
         });
-        b.on_frame("a".into(), solid(255, 0, 0));
+        b.on_frame("a".into(), payload(&solid(255, 0, 0)));
         b.tick(1000);
         let content = b.framebuffer();
         assert_eq!(content[0], 0xFF0000, "content frame up while online");
@@ -2702,21 +2935,21 @@ mod tests {
         b.set_online(true);
         b.tick(0);
         b.on_manifest(mk(&["a", "b"], 0));
-        b.on_frame("a".into(), solid(255, 0, 0));
-        b.on_frame("b".into(), solid(0, 255, 0));
+        b.on_frame("a".into(), payload(&solid(255, 0, 0)));
+        b.on_frame("b".into(), payload(&solid(0, 255, 0)));
         b.tick(1500); // past the first dwell -> slot 1 (green)
         assert_eq!(b.framebuffer()[0], 0x00FF00, "advanced to slot 1");
 
         // Same length, same epoch: slot kept (the score-tick refresh case).
         b.on_manifest(mk(&["c", "d"], 0));
-        b.on_frame("c".into(), solid(0, 0, 255));
-        b.on_frame("d".into(), solid(255, 255, 255));
+        b.on_frame("c".into(), payload(&solid(0, 0, 255)));
+        b.on_frame("d".into(), payload(&solid(255, 255, 255)));
         assert_eq!(b.framebuffer()[0], 0xFFFFFF, "same epoch: slot 1 kept");
 
         // Same length, NEW epoch: a different program — restart at slot 0.
         b.on_manifest(mk(&["e", "f"], 7));
-        b.on_frame("e".into(), solid(255, 255, 0));
-        b.on_frame("f".into(), solid(0, 255, 255));
+        b.on_frame("e".into(), payload(&solid(255, 255, 0)));
+        b.on_frame("f".into(), payload(&solid(0, 255, 255)));
         assert_eq!(b.framebuffer()[0], 0xFFFF00, "new epoch: restarted at slot 0");
     }
 
@@ -2761,7 +2994,7 @@ mod tests {
             epoch: 0,
             brightness: 100,
         });
-        b.on_frame("a".into(), solid(255, 0, 0));
+        b.on_frame("a".into(), payload(&solid(255, 0, 0)));
         b.tick(100);
         let running = b.framebuffer();
         assert_eq!(running[0], 0xFF0000, "content up before the update");
@@ -2885,7 +3118,7 @@ mod tests {
         // Back online: the server says the display is ON, so the panel lights up.
         b.set_online(true);
         b.on_manifest(mk(true));
-        b.on_frame("a".into(), solid(255, 0, 0));
+        b.on_frame("a".into(), payload(&solid(255, 0, 0)));
         assert_eq!(b.mode(), Mode::Running, "the manifest reasserts server ownership");
         b.tick(600);
         assert_eq!(b.framebuffer()[0], 0xFF0000, "content is back on the panel");
@@ -2979,7 +3212,7 @@ mod tests {
         b.set_online(true);
         b.tick(0);
         b.on_manifest(manifest());
-        b.on_frame("a".into(), solid(255, 0, 0));
+        b.on_frame("a".into(), payload(&solid(255, 0, 0)));
         b.tick(1000);
         let content = b.framebuffer();
 
@@ -3094,7 +3327,7 @@ mod tests {
             brightness: 100,
         });
         let px = scoreboard_protocol::rgb888_to_565(255, 0, 0).to_le_bytes();
-        b.on_frame("a".into(), (0..FRAME_PIXELS).flat_map(|_| px).collect());
+        b.on_frame("a".into(), payload(&(0..FRAME_PIXELS).flat_map(|_| px).collect::<Vec<u8>>()));
         b.tick(100);
         b.encoder(-1);
         let with_bar = b.framebuffer();
@@ -3218,6 +3451,224 @@ mod tests {
         b.button_down(100);
         dump("hold_erase_warmup", 1600, &mut b);
         dump("hold_erase_phase", 6000, &mut b);
+    }
+
+    // ---- frame compression: the cache holds payloads, the panel holds pixels ----
+
+    /// A running rotation over `ids`.
+    fn rotation(ids: &[&str], dwell_ms: u32, scroll: bool) -> Manifest {
+        use scoreboard_protocol::RotationEntry;
+        Manifest {
+            countdown_ms: None,
+            rotation: ids
+                .iter()
+                .map(|i| RotationEntry { frame_id: (*i).into(), dwell_ms, scroll })
+                .collect(),
+            display_on: true,
+            off_state: Default::default(),
+            epoch: 0,
+            brightness: 100,
+        }
+    }
+
+    /// Pixels shaped like the ones the server actually renders: flat 4-row
+    /// bands in four colors. Real frames carry 3-8 distinct colors, which is
+    /// the whole reason palette+RLE beats a general-purpose compressor here.
+    fn flat_frame(rows: usize, tint: u8) -> Vec<u8> {
+        let c = |r: u8, g: u8, b: u8| scoreboard_protocol::rgb888_to_565(r, g, b).to_le_bytes();
+        let bands = [c(0, 0, 0), c(255, 255, 255), c(0x33, 0xAA, 0xFF), c(tint, 0x22, 0x11)];
+        (0..rows)
+            .flat_map(|y| {
+                let band = bands[(y / 4) % bands.len()];
+                core::iter::repeat_n(band, FRAME_WIDTH).flatten().collect::<Vec<u8>>()
+            })
+            .collect()
+    }
+
+    fn running_board() -> Board {
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.tick(0);
+        b
+    }
+
+    /// The codec is invisible from the panel's side: the same pixels, sent
+    /// compressed or raw, light the same LEDs. What changes is the heap — the
+    /// cache keeps the compressed form.
+    #[test]
+    fn a_compressed_frame_renders_exactly_like_the_raw_one() {
+        let px = flat_frame(FRAME_HEIGHT, 0xBB);
+        let compressed = payload(&px);
+        let raw = raw_payload(&px);
+        assert_eq!(compressed[0], FRAME_CODEC_PAL_RLE, "flat graphics must take the palette");
+        assert!(
+            compressed.len() * 4 < raw.len(),
+            "compression is the point: {} vs {} bytes",
+            compressed.len(),
+            raw.len()
+        );
+
+        let show = |p: Vec<u8>| {
+            let mut b = running_board();
+            b.on_manifest(rotation(&["a"], 10_000, false));
+            b.on_frame("a".into(), p);
+            b.tick(100);
+            (b.framebuffer(), b.cache_bytes())
+        };
+        let (from_compressed, cached) = show(compressed.clone());
+        let (from_raw, raw_cached) = show(raw);
+        assert_eq!(from_compressed, from_raw, "pixel-identical either way");
+        assert!(from_compressed.iter().any(|&p| p != 0), "and something is actually lit");
+        assert_eq!(cached, compressed.len(), "the cache stores the payload as received");
+        assert!(
+            cached < raw_cached / 4,
+            "the memory win is real: {cached} B cached vs {raw_cached} B raw"
+        );
+    }
+
+    /// The invariant that makes compression affordable on a 240MHz device:
+    /// `framebuffer()` runs ~30x/second and NEVER decodes. A decode happens
+    /// once when the displayed frame id changes — not per render, and not per
+    /// step of a scroll, which walks a window over already-decoded pixels.
+    #[test]
+    fn frames_decode_once_per_change_never_per_render() {
+        let mut b = running_board();
+        b.on_manifest(rotation(&["a", "b"], 10_000, true));
+        b.on_frame("a".into(), payload(&flat_frame(64, 0x99))); // tall: scrolls
+        b.on_frame("b".into(), payload(&flat_frame(FRAME_HEIGHT, 0x11)));
+        b.tick(10);
+        assert_eq!(b.frame_decodes(), 1, "one decode puts the first frame up");
+
+        let mut tops = alloc::collections::BTreeSet::new();
+        for t in (10..10_000).step_by(50) {
+            b.tick(t);
+            tops.insert(b.framebuffer()[0]);
+        }
+        assert!(tops.len() > 1, "the scroll window really did move");
+        assert_eq!(b.frame_decodes(), 1, "~200 renders across a full scroll: still one decode");
+
+        b.tick(10_050); // dwell elapsed -> slot 1
+        assert_eq!(b.frame_decodes(), 2, "exactly one more decode for the new frame");
+        for t in (10_100..12_000).step_by(50) {
+            b.tick(t);
+            b.framebuffer();
+        }
+        assert_eq!(b.frame_decodes(), 2, "and none for dwelling on it");
+    }
+
+    /// Entry count stopped bounding anything once entries became variable-size,
+    /// so the cache is capped in BYTES. Under pressure it drops frames the
+    /// rotation no longer references first, then the least recently shown — and
+    /// never the frame lit on the panel.
+    #[test]
+    fn the_cache_is_bounded_in_bytes_and_never_drops_the_on_screen_frame() {
+        let ids: Vec<String> = (0..10).map(|i| format!("f{i}")).collect();
+        let refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+        let mut b = running_board();
+        // A long dwell: the panel stays on f0 for the whole test.
+        b.on_manifest(rotation(&refs, 600_000, false));
+        // RAW payloads — the worst case the budget exists for. Ten of them is
+        // ~41KB, a quarter of the device's entire heap.
+        b.on_frame("f0".into(), raw_payload(&flat_frame(FRAME_HEIGHT, 0x10)));
+        b.tick(10);
+        let on_screen = b.framebuffer();
+        assert!(on_screen.iter().any(|&p| p != 0));
+        // A frame this rotation doesn't reference (a straggler from the
+        // previous manifest): first in line to go.
+        b.on_frame("stale".into(), raw_payload(&flat_frame(FRAME_HEIGHT, 0x20)));
+        for (i, id) in refs.iter().enumerate().skip(1) {
+            b.on_frame((*id).into(), raw_payload(&flat_frame(FRAME_HEIGHT, (i * 16) as u8)));
+            b.tick(20 + i as u64);
+        }
+
+        assert!(
+            b.cache_bytes() <= CACHE_BUDGET_BYTES,
+            "over budget: {} B > {} B",
+            b.cache_bytes(),
+            CACHE_BUDGET_BYTES
+        );
+        assert!(b.cache_bytes() > CACHE_BUDGET_BYTES / 2, "the budget is spent, not hoarded");
+        assert!(!b.cache.contains_key("stale"), "unreferenced frames go first");
+        assert!(b.cache.contains_key("f0"), "the frame on the panel is never a victim");
+        assert_eq!(b.framebuffer(), on_screen, "…and the panel never blinked");
+
+        // Compressed frames are what actually ships: a whole rotation fits.
+        let mut b = running_board();
+        b.on_manifest(rotation(&refs, 600_000, false));
+        for (i, id) in refs.iter().enumerate() {
+            b.on_frame((*id).into(), payload(&flat_frame(FRAME_HEIGHT, (i * 16) as u8)));
+        }
+        b.tick(10);
+        assert_eq!(b.cache.len(), refs.len(), "ten compressed frames fit with room to spare");
+        assert!(b.cache_bytes() < CACHE_BUDGET_BYTES / 4);
+
+        // A payload too big to ever fit is refused instead of being allowed to
+        // evict the whole cache on its way to being evicted itself.
+        let before = b.cache.len();
+        b.on_frame("whale".into(), vec![0u8; CACHE_BUDGET_BYTES + 1]);
+        assert!(!b.cache.contains_key("whale"), "an unfittable payload is not cached");
+        assert_eq!(b.cache.len(), before, "and it took nothing down with it");
+    }
+
+    /// A corrupt payload must not panic — a panic on the device is a reboot —
+    /// and must not blank the panel either. The board keeps showing the last
+    /// frame it decoded, forgets the bad one, and re-requests it on the next
+    /// manifest.
+    #[test]
+    fn an_undecodable_payload_holds_the_previous_content() {
+        let mut b = running_board();
+        b.on_manifest(rotation(&["a"], 10_000, false));
+        b.on_frame("a".into(), payload(&flat_frame(FRAME_HEIGHT, 0xCC)));
+        b.tick(10);
+        let good = b.framebuffer();
+        assert!(good.iter().any(|&p| p != 0));
+
+        // Unknown codec (a future encoder we don't speak).
+        b.on_manifest(rotation(&["b"], 10_000, false));
+        b.on_frame("b".into(), vec![0xEE, 1, 2, 3]);
+        b.tick(20);
+        assert_eq!(b.framebuffer(), good, "unknown codec: previous content held");
+
+        // Truncated mid-palette.
+        let mut truncated = payload(&flat_frame(FRAME_HEIGHT, 0x44));
+        truncated.truncate(6);
+        b.on_frame("b".into(), truncated);
+        b.tick(30);
+        assert_eq!(b.framebuffer(), good, "truncated payload: previous content held");
+
+        // Empty payload (not even a codec byte).
+        b.on_frame("b".into(), Vec::new());
+        b.tick(40);
+        assert_eq!(b.framebuffer(), good, "empty payload: previous content held");
+
+        match b.on_manifest(rotation(&["b"], 10_000, false)) {
+            Some(ClientMsg::NeedFrames { ids, .. }) => {
+                assert_eq!(ids, vec![String::from("b")], "the bad frame is asked for again");
+            }
+            other => panic!("expected a re-request, got {other:?}"),
+        }
+    }
+
+    /// The negotiation the firmware forwards without knowing about it: the
+    /// board says which codecs it can DECODE, so a board that just OTA'd is
+    /// described by the request it sends rather than by a version guess.
+    #[test]
+    fn need_frames_advertises_the_codecs_this_board_decodes() {
+        let mut b = running_board();
+        match b.on_manifest(rotation(&["a"], 10_000, false)) {
+            Some(ClientMsg::NeedFrames { ids, codecs }) => {
+                assert_eq!(ids, vec![String::from("a")]);
+                assert!(codecs.contains(&FRAME_CODEC_RAW), "raw stays on the table");
+                assert!(codecs.contains(&FRAME_CODEC_PAL_RLE), "and the one that saves the heap");
+            }
+            other => panic!("expected NeedFrames, got {other:?}"),
+        }
+        b.on_frame("a".into(), payload(&flat_frame(FRAME_HEIGHT, 0x30)));
+        assert!(
+            b.on_manifest(rotation(&["a"], 10_000, false)).is_none(),
+            "nothing missing, nothing asked for"
+        );
     }
 }
 
