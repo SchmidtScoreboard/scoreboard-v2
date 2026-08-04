@@ -10,12 +10,11 @@ release binary directly — flags are identical).
 | Invocation | What it does |
 |---|---|
 | `server` | The real thing: polls ESPN, renders frames, serves boards + apps over one websocket endpoint. |
-| `server --demo` | Same server, synthetic slate — 21 generated games exercising every feature (situations, leaderboards, spoilers, scrolling). Never contacts ESPN. The Railway `dummy` service is exactly this (it sets `DEMO=1`). |
 | `server tui` | Interactive pipeline debugger — see below. |
 | `server tui --feed <id> --dump` | Headless one-shot capture of a feed — see below. |
 | `server team-names` | Headless name-fitting report: every team, in every name style its league offers, measured in the board's own fonts against the team row, plus an OVERFLOW section for anything that still doesn't fit after shortening. Fetches live catalogs (golf/F1 names come from the leaderboard feeds), prints, exits. The "notify me for correction" tool — run it after touching shortening rules. |
 | `server --preview` | Renders a fixed set of sample games to 8×-scaled PNGs in `/tmp/sb_preview` and exits. Quick eyeball of layout changes without any network. |
-| `server --fetch-catalog` | Fetches the full team catalog from ESPN and caches it to disk, then exits. Run this once so `--demo` has real team names/colors to draw from. |
+| `server --fetch-catalog` | Fetches the full team catalog from ESPN and caches it to disk, then exits. Run this once so the demo slate has real team names/colors to draw from. |
 
 ## Environment variables
 
@@ -24,7 +23,6 @@ release binary directly — flags are identical).
 | `PORT` | `7878` | HTTP/websocket listen port. Railway injects `8080` for its HTTP edge, which is why both prod services pin an explicit `PORT=7878` to match their TCP proxies (the boards' `ws://`/`wss://` path). Serves plaintext and TLS on the same port — see [TLS on the board link](#tls-on-the-board-link). |
 | `TLS_CERT_PEM` | unset | PEM certificate for the board link. Unset = plaintext only. Minted by hand with `gen-tls-cert`; never generated at boot. |
 | `TLS_KEY_PEM` | unset | PEM private key matching `TLS_CERT_PEM`. Secret. Both variables must be set together; anything else logs an error and degrades to plaintext rather than crash-looping. |
-| `DEMO` | unset | Any value = demo mode (same as `--demo`). |
 | `POLL_SECS` | `180` | ESPN poll interval. Polling skips entirely while nothing is connected. |
 | `STATE_DIR` | `.` | Where `scoreboard.db` (pairings, board configs) and the catalog cache live. |
 | `FIRMWARE_DIR` | `./firmware-dist` | Where the OTA release channels live (`{stable,beta,dev}/firmware.{bin,json}`). Loaded once at startup and integrity-checked: a missing channel is quietly off, a *broken* one refuses to start (a board must never download an image that won't verify). The Dockerfile ships `firmware-dist/` inside the server image and points here at `/firmware-dist`. |
@@ -41,6 +39,12 @@ All curl-able; the app uses the same ones.
   Omitting `board` serves the raw data. Unknown id → plain-text 404.
 - `GET /sample/{off|normal|strict}.png` — the fixed sample game rendered at
   each spoiler level (drives the app's spoiler-settings preview rows).
+- `GET /demo/games` — the synthetic slate as JSON. The whole demo set, on the
+  same poll cadence as live data; this is how you learn the `demo-*` ids
+  without pairing a board. Not board-scoped (synthetic games carry no spoiler
+  risk), and `no-store` because the slate advances.
+- `GET /demo/render/{id}.png` — one demo game's 64x32 frame. Unknown id gets a
+  visible `NO GAME` frame rather than a 404, same as `/render`.
 - `GET /guide/{joining-wifi|finding-server|setup|pair-code}.png` — the board's
   firmware-local screens (connect progress on either leg, BLE setup, the
   pairing screen with a fake `000000` code), rendered by the same board-core

@@ -131,6 +131,9 @@ pub struct UiBoardConfig {
     pub timezone: Option<String>,
     /// Firmware release channel this board follows (`set_fw_channel`).
     pub fw_channel: UiFwChannel,
+    /// Serve this board a synthetic slate instead of live games. Only the
+    /// GAMES change — every other setting on the board is untouched.
+    pub demo_data: bool,
 }
 #[derive(uniffi::Record, Clone)]
 pub struct UiGame {
@@ -619,6 +622,13 @@ impl ScoreboardClient {
         let _ = self.tx.send(Out::Command(board_id, Command::SetSpoilerAll { on }));
     }
 
+    /// Serve this board synthetic demo games instead of live ones. Persisted
+    /// server-side and per-board, so it survives a restart and can be cleared
+    /// from any paired phone even while the board is offline.
+    pub fn set_demo_data(&self, board_id: String, on: bool) {
+        let _ = self.tx.send(Out::Command(board_id, Command::SetDemoData { on }));
+    }
+
     /// Spoiler-protect a whole league.
     pub fn set_league_spoiler(&self, board_id: String, sport_id: String, on: bool) {
         let _ = self.tx.send(Out::Command(board_id, Command::SetLeagueSpoiler { sport_id, on }));
@@ -833,7 +843,7 @@ mod wss_tests {
     fn connects_over_wss_and_browses() {
         let (tx, rx) = mpsc::channel();
         let url = std::env::var("SB_TEST_URL")
-            .unwrap_or_else(|_| "ws://tokaido.proxy.rlwy.net:33343/ws".into());
+            .unwrap_or_else(|_| "wss://live-production-118c.up.railway.app/ws".into());
         let client = ScoreboardClient::new(url, vec![], None);
         client.set_listener(Box::new(Probe { tx: std::sync::Mutex::new(tx) }));
         client.connect();
@@ -934,6 +944,7 @@ fn to_ui_board_config(c: BoardConfig) -> UiBoardConfig {
             FwChannel::Beta => UiFwChannel::Beta,
             FwChannel::Dev => UiFwChannel::Dev,
         },
+        demo_data: c.demo_data,
     }
 }
 

@@ -638,6 +638,13 @@ public protocol ScoreboardClientProtocol: AnyObject {
 
     func setBrightness(boardId: String, level: UInt8)
 
+    /**
+     * Serve this board synthetic demo games instead of live ones. Persisted
+     * server-side and per-board, so it survives a restart and can be cleared
+     * from any paired phone even while the board is offline.
+     */
+    func setDemoData(boardId: String, on: Bool)
+
     func setDwell(boardId: String, secs: UInt32)
 
     /**
@@ -990,6 +997,18 @@ open class ScoreboardClient:
     }
     }
 
+    /**
+     * Serve this board synthetic demo games instead of live ones. Persisted
+     * server-side and per-board, so it survives a restart and can be cleared
+     * from any paired phone even while the board is offline.
+     */
+    open func setDemoData(boardId: String, on: Bool) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_set_demo_data(self.uniffiClonePointer(),
+                                                                 FfiConverterString.lower(boardId),
+                                                                 FfiConverterBool.lower(on), $0)
+    }
+    }
+
     open func setDwell(boardId: String, secs: UInt32) { try! rustCall {
         uniffi_app_core_fn_method_scoreboardclient_set_dwell(self.uniffiClonePointer(),
                                                              FfiConverterString.lower(boardId),
@@ -1274,6 +1293,11 @@ public struct UiBoardConfig {
      * Firmware release channel this board follows (`set_fw_channel`).
      */
     public var fwChannel: UiFwChannel
+    /**
+     * Serve this board a synthetic slate instead of live games. Only the
+     * GAMES change — every other setting on the board is untouched.
+     */
+    public var demoData: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1304,7 +1328,11 @@ public struct UiBoardConfig {
                     */ timezone: String?,
                 /**
                     * Firmware release channel this board follows (`set_fw_channel`).
-                    */ fwChannel: UiFwChannel)
+                    */ fwChannel: UiFwChannel,
+                /**
+                    * Serve this board a synthetic slate instead of live games. Only the
+                    * GAMES change — every other setting on the board is untouched.
+                    */ demoData: Bool)
     {
         self.sports = sports
         self.brightness = brightness
@@ -1323,6 +1351,7 @@ public struct UiBoardConfig {
         self.revealedGameIds = revealedGameIds
         self.timezone = timezone
         self.fwChannel = fwChannel
+        self.demoData = demoData
     }
 }
 
@@ -1379,6 +1408,9 @@ extension UiBoardConfig: Equatable, Hashable {
         if lhs.fwChannel != rhs.fwChannel {
             return false
         }
+        if lhs.demoData != rhs.demoData {
+            return false
+        }
         return true
     }
 
@@ -1400,6 +1432,7 @@ extension UiBoardConfig: Equatable, Hashable {
         hasher.combine(revealedGameIds)
         hasher.combine(timezone)
         hasher.combine(fwChannel)
+        hasher.combine(demoData)
     }
 }
 
@@ -1426,7 +1459,8 @@ public struct FfiConverterTypeUiBoardConfig: FfiConverterRustBuffer {
                 spoilerGameIds: FfiConverterSequenceString.read(from: &buf),
                 revealedGameIds: FfiConverterSequenceString.read(from: &buf),
                 timezone: FfiConverterOptionString.read(from: &buf),
-                fwChannel: FfiConverterTypeUiFwChannel.read(from: &buf)
+                fwChannel: FfiConverterTypeUiFwChannel.read(from: &buf),
+                demoData: FfiConverterBool.read(from: &buf)
             )
     }
 
@@ -1448,6 +1482,7 @@ public struct FfiConverterTypeUiBoardConfig: FfiConverterRustBuffer {
         FfiConverterSequenceString.write(value.revealedGameIds, into: &buf)
         FfiConverterOptionString.write(value.timezone, into: &buf)
         FfiConverterTypeUiFwChannel.write(value.fwChannel, into: &buf)
+        FfiConverterBool.write(value.demoData, into: &buf)
     }
 }
 
@@ -3231,6 +3266,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_brightness() != 13017 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_scoreboardclient_set_demo_data() != 38827 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_dwell() != 21881 {

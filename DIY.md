@@ -123,7 +123,6 @@ Configuration, all optional:
 | `DEFAULT_TIMEZONE` | server local | Fallback zone for rendering clocks and start times. The app sets each board's zone when you pair, so this is a backstop. |
 | `POLL_SECS` | `180` | ESPN poll interval. Polling pauses entirely while nothing is connected. |
 | `FIRMWARE_DIR` | `./firmware-dist` | Where OTA release channels live, if you host your own updates. |
-| `DEMO` | unset | Synthetic slate of 21 games — every feature, no network. Great for checking a build. |
 
 For hot-reload while hacking, `scripts/dev-server.sh` mints a dev certificate on
 first run, exports it, and prints the pin to paste into `firmware-rs/local.env`.
@@ -253,7 +252,8 @@ Part 5. (Requires OpenSSL 3; macOS ships LibreSSL, which can't read Ed25519 —
 too fast for your panel. Lower `Rate::from_mhz(10)` in `firmware-rs/src/main.rs`.
 
 **Board connects, no games** — normal out of season, or nothing matches your
-preferences yet. Add a favorite team in the app, or run the server with `DEMO=1`
+preferences yet. Add a favorite team in the app, or turn on **Demo games** in
+the app's scoreboard settings
 to confirm the whole pipeline end to end.
 
 ---

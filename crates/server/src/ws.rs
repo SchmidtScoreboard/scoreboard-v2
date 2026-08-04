@@ -352,8 +352,7 @@ async fn controller_loop(
                     // Only a board-scoped browse can say what's coming to THAT
                     // panel; an unscoped one leaves `queued` false throughout.
                     let prefs = board_id.as_deref().map(|_| crate::board_prefs(&cfg));
-                    let games: Vec<GameSummary> = {
-                        let g = state.games.lock().unwrap();
+                    let games: Vec<GameSummary> = crate::with_slate(&state, Some(&cfg), |g| {
                         g.iter()
                             .filter(|g| crate::browse_shows_now(&state, g))
                             .map(|g| {
@@ -366,7 +365,7 @@ async fn controller_loop(
                                 s
                             })
                             .collect()
-                    };
+                    });
                     let _ = out.send(Message::Text(
                         serde_json::to_string(&ServerMsg::Games { games }).unwrap(),
                     ));
@@ -563,6 +562,10 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
     // (`UpdateAvailable`, feeding its settings menu) may change with the
     // channel, so it gets re-pushed alongside the app's BoardState below.
     let mut fw_channel_switched = false;
+    // Set on SetDemoData, so the panel says out loud what just happened —
+    // fake scores appearing with no announcement is how a board ends up
+    // looking broken rather than looking toggled.
+    let mut demo_toggled: Option<bool> = None;
     let updated = {
         let mut configs = state.configs.lock().unwrap();
         let cfg = configs.entry(board_id.to_string()).or_default();
@@ -679,6 +682,14 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
             }
             Command::SetSpoilerMode { mode } => cfg.spoiler_mode = mode,
             Command::SetSpoilerAll { on } => cfg.spoiler_all = on,
+            Command::SetDemoData { on } => {
+                cfg.demo_data = on;
+                // A pin points at a game in the slate we just left, and
+                // `chosen_games` would quietly fall through to the rotation
+                // rather than say why. Drop it explicitly.
+                cfg.focused_game_id = None;
+                demo_toggled = Some(on);
+            }
             Command::SetLeagueSpoiler { sport_id, on } => {
                 if let Some(s) = cfg.sports.iter_mut().find(|s| s.sport_id == sport_id) {
                     s.spoiler = on;
@@ -742,6 +753,18 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
     };
     if let Some(on) = power_toggle {
         crate::handle_app_power(state, board_id, on);
+    }
+    if let Some(on) = demo_toggled {
+        crate::set_notice(
+            state,
+            board_id,
+            &[
+                ("DEMO DATA", true, crate::NOTICE_WHITE),
+                (if on { "ON" } else { "OFF" }, false, crate::NOTICE_GREY),
+            ],
+            crate::SPLASH_SECS,
+            false,
+        );
     }
     push_board(state, board_id);
     push_board_state(state, board_id);

@@ -4,7 +4,7 @@
     {
       "name": "demo-server",
       "runtimeExecutable": "cargo",
-      "runtimeArgs": ["watch", "-w", "crates", "-x", "run -p server -- --demo"],
+      "runtimeArgs": ["watch", "-w", "crates", "-x", "run -p server"],
       "port": 7878
     },
     {

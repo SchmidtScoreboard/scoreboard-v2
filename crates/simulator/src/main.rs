@@ -202,7 +202,8 @@ fn main() -> eframe::Result<()> {
 const SERVER_PRESETS: &[(&str, &str)] = &[
     ("Localhost", "ws://127.0.0.1:7878/ws"),
     ("Prod", "ws://hayabusa.proxy.rlwy.net:47958/ws"),
-    ("Demo", "ws://tokaido.proxy.rlwy.net:33343/ws"),
+    // The demo deployment is gone: demo data is a per-board toggle on the live
+    // server now, so there is no separate URL to preset.
 ];
 
 fn server_preset_label(url: &str) -> Option<&'static str> {

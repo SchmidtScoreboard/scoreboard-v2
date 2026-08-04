@@ -125,6 +125,7 @@ struct BoardInfo {
     var leagueNameStyle: [String: UiNameStyle] = [:] // sportId -> name-style override (absent = league default)
     var strictSpoilers = false                   // spoiled games: strict vs normal display
     var spoilerAll = false                       // protect every game on this board
+    var demoData = false                         // synthetic slate instead of live games
     var leagueSpoiler: [String: Bool] = [:]      // sportId -> league-wide protection
     var teamSpoilers: [String: Set<String>] = [:] // sportId -> protected team ids
     var spoilerGameIds: Set<String> = []          // one-off hides
@@ -1117,6 +1118,7 @@ final class BoardViewModel: ObservableObject {
             $0.leagueNameStyle = nameStyle
             $0.strictSpoilers = c.strictSpoilers
             $0.spoilerAll = c.spoilerAll
+            $0.demoData = c.demoData
             $0.leagueSpoiler = lspoil
             $0.teamSpoilers = tspoil
             $0.spoilerGameIds = Set(c.spoilerGameIds)
@@ -1187,6 +1189,11 @@ final class BoardViewModel: ObservableObject {
         guard let id = selectedBoardId else { return }
         mutate(id) { $0.spoilerAll = on }
         client?.setSpoilerAll(boardId: id, on: on)
+    }
+    func setDemoData(_ on: Bool) {
+        guard let id = selectedBoardId else { return }
+        mutate(id) { $0.demoData = on }
+        client?.setDemoData(boardId: id, on: on)
     }
     func setLeagueSpoiler(_ sportId: String, _ on: Bool) {
         guard let id = selectedBoardId else { return }
@@ -2520,7 +2527,7 @@ struct DashboardView: View {
 
 /// Settings rows that have an explainer card behind an ⓘ button.
 enum SettingsInfoTopic: String, Identifiable {
-    case whenOff, sleep, dwell, spoilers
+    case whenOff, sleep, dwell, spoilers, demoData
     var id: String { rawValue }
 
     var icon: String {
@@ -2529,6 +2536,7 @@ enum SettingsInfoTopic: String, Identifiable {
         case .sleep: "moon.zzz.fill"
         case .dwell: "timer"
         case .spoilers: "eye.slash"
+        case .demoData: "theatermasks"
         }
     }
 
@@ -2538,6 +2546,7 @@ enum SettingsInfoTopic: String, Identifiable {
         case .sleep: "Sleep duration"
         case .dwell: "Time per event"
         case .spoilers: "Spoilers"
+        case .demoData: "Demo games"
         }
     }
 
@@ -2571,6 +2580,14 @@ enum SettingsInfoTopic: String, Identifiable {
             scoreboard shows (the switch in this section). The board shows \
             the matchup and progress; scores stay off the panel and the app \
             until revealed.
+            """
+        case .demoData:
+            """
+            Fills this scoreboard with a made-up slate of games — every sport             and every layout at once — so you can see what it does out of             season or before your teams are playing. The scores are NOT real.
+
+            It stays on until you turn it off; it will not time out on its             own. Nothing else about the scoreboard changes, and your favorites             and settings are waiting when you switch back.
+
+            The setting lives on the server, so you can turn it off from any             paired phone even if the scoreboard is unplugged.
             """
         }
     }
@@ -4291,17 +4308,22 @@ struct BluetoothSetupView: View {
     }
 }
 
-/// The selectable servers. Prod/Demo/Localhost have fixed URLs; Custom is the
+/// The selectable servers. Prod/Localhost have fixed URLs; Custom is the
 /// self-hosting route (free-text address plus the server's own TLS pin).
+///
+/// There used to be a `demo` preset pointing at a second deployment that ran
+/// nothing but synthetic games. Demo data is a per-board toggle on the ONE
+/// server now (`setDemoData`), so the separate server — and the case — is gone.
+/// `migrateLegacyServerUrls` repoints anyone still stored against it.
 private enum ServerPreset: String, CaseIterable, Identifiable {
-    case prod, demo, localhost, custom
+    case prod, localhost, custom
     var id: String { rawValue }
 
     /// What a user may PICK, which is not the same as what `matching` may
-    /// return. Self-hosting is a supported route, so Custom ships; Demo and
-    /// Localhost are development fixtures and stay out of release builds.
-    /// `allCases` deliberately keeps all four so a stored Demo/Localhost URL
-    /// still resolves to its preset (and its `boardHostPort`) in any build.
+    /// return. Self-hosting is a supported route, so Custom ships; Localhost is
+    /// a development fixture and stays out of release builds.
+    /// `allCases` deliberately keeps all three so a stored Localhost URL still
+    /// resolves to its preset (and its `boardHostPort`) in any build.
     static var selectable: [ServerPreset] {
         #if DEBUG
         return allCases
@@ -4316,7 +4338,6 @@ private enum ServerPreset: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .prod: return "Hosted server"
-        case .demo: return "Demo"
         case .localhost: return "Localhost"
         case .custom: return "My own server"
         }
@@ -4332,7 +4353,6 @@ private enum ServerPreset: String, CaseIterable, Identifiable {
     var url: String? {
         switch self {
         case .prod: return "wss://live-production-118c.up.railway.app/ws"
-        case .demo: return "wss://dummy-production-2e6f.up.railway.app/ws"
         // Loopback in the Simulator, deliberately plaintext: there is no
         // certificate to serve for 127.0.0.1 and the traffic never leaves the
         // machine. Everything off-device is wss:// above.
@@ -4361,7 +4381,6 @@ private enum ServerPreset: String, CaseIterable, Identifiable {
     var boardHostPort: String? {
         switch self {
         case .prod: return "hayabusa.proxy.rlwy.net:47958"
-        case .demo: return "tokaido.proxy.rlwy.net:33343"
         case .localhost: return "127.0.0.1:7878"
         case .custom: return nil
         }
@@ -4455,6 +4474,7 @@ struct SettingsView: View {
                 if model.selectedBoardId != nil {
                     settingsSection
                     spoilerSection
+                    demoSection
                     transferSection
                     aboutSection
                     helpSection
@@ -4668,6 +4688,32 @@ struct SettingsView: View {
         }
         .buttonStyle(.borderless)
         .accessibilityLabel("About this setting")
+    }
+
+    /// The demo slate. Named "Demo games", never bare "Demo" — the server
+    /// picker already has an unrelated "Demo" preset, and two things called the
+    /// same thing on one screen is how someone flips the wrong one.
+    private var demoSection: some View {
+        Section {
+            Toggle("Demo games", isOn: Binding(
+                get: { model.current.demoData },
+                set: { model.setDemoData($0) }
+            ))
+        } header: {
+            HStack {
+                Text("Demo games")
+                Spacer()
+                infoButton(.demoData)
+            }
+        } footer: {
+            if model.current.demoData {
+                Label(
+                    "Showing made-up games. Real scores are hidden until you turn this off.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .foregroundStyle(.orange)
+            }
+        }
     }
 
     /// Spoiler settings, drawn with the receipts: the two display modes show

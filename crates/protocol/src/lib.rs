@@ -400,6 +400,16 @@ pub struct BoardConfig {
     /// `PortableSettings` — see the note there.
     #[serde(default)]
     pub fw_channel: FwChannel,
+    /// Serve this board the synthetic slate instead of live games — the whole
+    /// demo set, on the same poll cadence. Everything else about the board
+    /// (favorites, dwell, name styles, off state, timezone, spoilers) is
+    /// untouched: the toggle swaps the GAMES, not the settings.
+    ///
+    /// `#[serde(default)]` is load-bearing, not decoration: `load_configs`
+    /// drops a row whose JSON fails to parse WITHOUT logging, so a field with
+    /// no default would silently factory-reset every stored board on deploy.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub demo_data: bool,
 }
 
 fn default_sleep_hours() -> u32 {
@@ -427,6 +437,11 @@ pub const PORTABLE_SETTINGS_VERSION: u32 = 1;
 /// importing a friend's settings must never enroll a board in beta/dev
 /// firmware — release-channel membership is a per-board decision, not a
 /// portable preference.
+///
+/// `demo_data` is excluded for the same shape of reason, more sharply:
+/// importing settings must never put a real scoreboard into demo mode. Fake
+/// scores on a panel someone trusts is exactly the failure the honest
+/// empty-slate rule in `poll_loop` exists to prevent.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct PortableSettings {
     /// Format marker + version. Named `scoreboard_settings` so an exported blob
@@ -518,6 +533,7 @@ impl Default for BoardConfig {
             revealed_game_ids: Vec::new(),
             timezone: None,
             fw_channel: FwChannel::default(),
+            demo_data: false,
         }
     }
 }
@@ -562,6 +578,8 @@ pub enum Command {
     SetSpoilerMode { mode: SpoilerMode },
     /// Spoiler-protect every game on the board.
     SetSpoilerAll { on: bool },
+    /// Swap this board between live games and the synthetic demo slate.
+    SetDemoData { on: bool },
     /// Spoiler-protect a whole league.
     SetLeagueSpoiler { sport_id: String, on: bool },
     /// Spoiler-protect one team's games.
@@ -1133,6 +1151,48 @@ mod fw_channel_tests {
     fn config_missing_channel_defaults_to_stable() {
         let cfg: BoardConfig = serde_json::from_str("{\"brightness\":80,\"power\":true,\"sports\":[]}").unwrap();
         assert_eq!(cfg.fw_channel, FwChannel::Stable);
+    }
+
+    /// The guard against a silent config wipe. `load_configs` drops a row whose
+    /// JSON fails to parse WITHOUT logging, so a `demo_data` with no serde
+    /// default would make every board stored before this field shipped fail to
+    /// parse — and each one would come back as a factory-fresh default, losing
+    /// its name, favorites, brightness and timezone. Deploy-time data loss with
+    /// no error message.
+    #[test]
+    fn config_missing_demo_data_defaults_to_false() {
+        let cfg: BoardConfig =
+            serde_json::from_str("{\"brightness\":80,\"power\":true,\"sports\":[]}").unwrap();
+        assert!(!cfg.demo_data, "a board stored before demo_data existed must load as live");
+    }
+
+    /// A board that never touches the toggle must serialize byte-identically to
+    /// before the field existed, so rolling the server back is clean.
+    #[test]
+    fn demo_data_off_is_not_written_to_disk() {
+        let json = serde_json::to_string(&BoardConfig::default()).unwrap();
+        assert!(!json.contains("demo"), "demo_data leaked into a default config: {json}");
+    }
+
+    /// Importing settings must never put a real scoreboard into demo mode.
+    #[test]
+    fn portable_settings_do_not_move_demo_data() {
+        let source = BoardConfig { demo_data: true, brightness: 40, ..Default::default() };
+        let json = serde_json::to_string(&PortableSettings::from(&source)).unwrap();
+        assert!(!json.contains("demo"), "demo_data leaked into the export: {json}");
+
+        let mut target = BoardConfig::default();
+        let parsed: PortableSettings = serde_json::from_str(&json).unwrap();
+        parsed.apply_to(&mut target);
+        assert_eq!(target.brightness, 40, "durable prefs DO transfer");
+        assert!(!target.demo_data, "a real board must not be flipped into demo by an import");
+
+        // And the reverse: importing onto a demo board must not silently kick it
+        // back to live data either.
+        let mut demo_board = BoardConfig { demo_data: true, ..Default::default() };
+        let live_blob = serde_json::to_string(&PortableSettings::from(&BoardConfig::default())).unwrap();
+        serde_json::from_str::<PortableSettings>(&live_blob).unwrap().apply_to(&mut demo_board);
+        assert!(demo_board.demo_data, "an import must not clear demo mode either");
     }
 
     /// fw_channel is durable config but deliberately NOT portable: exporting a

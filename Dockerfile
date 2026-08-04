@@ -22,7 +22,7 @@ COPY --from=build /app/firmware-dist /firmware-dist
 ENV FIRMWARE_DIR=/firmware-dist
 # Railway injects $PORT and mounts a volume here; set STATE_DIR=/data in the service
 # so pairings/configs survive redeploys. The dummy service overrides the start
-# command to `server --demo`; the live service uses the default below.
+# Demo data is a per-board toggle in the app now, not a deployment mode.
 RUN mkdir -p /data
 ENV STATE_DIR=/data
 EXPOSE 7878

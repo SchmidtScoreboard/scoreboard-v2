@@ -469,6 +469,11 @@ RustBuffer uniffi_app_core_fn_method_scoreboardclient_secret_key_hex(void*_Nonnu
 void uniffi_app_core_fn_method_scoreboardclient_set_brightness(void*_Nonnull ptr, RustBuffer board_id, uint8_t level, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_DEMO_DATA
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_DEMO_DATA
+void uniffi_app_core_fn_method_scoreboardclient_set_demo_data(void*_Nonnull ptr, RustBuffer board_id, int8_t on, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_DWELL
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_DWELL
 void uniffi_app_core_fn_method_scoreboardclient_set_dwell(void*_Nonnull ptr, RustBuffer board_id, uint32_t secs, RustCallStatus *_Nonnull out_status
@@ -983,6 +988,12 @@ uint16_t uniffi_app_core_checksum_method_scoreboardclient_secret_key_hex(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_BRIGHTNESS
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_BRIGHTNESS
 uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_brightness(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_DEMO_DATA
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_DEMO_DATA
+uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_demo_data(void
     
 );
 #endif

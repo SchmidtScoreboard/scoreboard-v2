@@ -87,6 +87,13 @@ const PAIR_CODE_TTL: Duration = Duration::from_secs(10 * 60);
 pub struct AppState {
     pub catalog: Arc<Catalog>,
     pub games: Arc<Mutex<Vec<Game>>>,
+    /// The synthetic slate that boards with `demo_data` read, regenerated every
+    /// poll alongside the live one. Seeded at tick 0 so `/demo/*` and a board
+    /// that flips the toggle before the first poll are never blank.
+    pub demo: Arc<Mutex<Vec<Game>>>,
+    /// Owns the demo generator's clocks, so the fake slate advances on its own
+    /// schedule rather than restarting on every read.
+    pub demo_source: Arc<espn::DemoSource>,
     /// Rendered frames by content id, stamped with the eviction generation they
     /// were minted in (so `evict_stale_frames` never drops a frame between its
     /// render and its manifest registration — that write pair isn't atomic).
@@ -333,6 +340,8 @@ impl AppState {
         };
         sanitize_configs(&catalog, &mut configs);
         AppState {
+            demo: Arc::new(Mutex::new(espn::demo_games(0, 0))),
+            demo_source: Arc::new(espn::DemoSource::new()),
             catalog: Arc::new(catalog),
             // Empty until the first real fetch — boards show their no-games
             // behavior rather than fake placeholder games.
@@ -638,14 +647,11 @@ async fn main() {
         return;
     }
 
-    // `--demo` flag or DEMO env (the dummy Railway service just sets DEMO=1).
-    let demo = std::env::args().any(|a| a == "--demo") || std::env::var("DEMO").is_ok();
-    let source: Arc<dyn SportsDataSource> = if demo {
-        tracing::info!("DEMO MODE: serving synthetic live games");
-        Arc::new(espn::DemoSource::new())
-    } else {
-        Arc::new(espn::EspnSource::new())
-    };
+    // Demo data is a PER-BOARD setting now (`BoardConfig::demo_data`), served
+    // from a second slate this same process keeps beside the live one. There is
+    // no process-wide demo mode and no separate demo deployment: one server,
+    // one catalog, and a toggle in the app.
+    let source: Arc<dyn SportsDataSource> = Arc::new(espn::EspnSource::new());
     // Team rosters come from the data source's /teams endpoint — the FULL league
     // roster, independent of which games are live. Live mode caches the last good
     // catalog to disk; demo mode (whose source never fetches) reads that same
@@ -702,6 +708,8 @@ async fn main() {
         .route("/render/:id", get(get_render))
         .route("/game/:id", get(get_game))
         .route("/sample/:variant", get(get_sample))
+        .route("/demo/games", get(get_demo_games))
+        .route("/demo/render/:id", get(get_demo_render))
         // The app's troubleshooting-sheet images: real board screens rendered
         // server-side by board-core, so they can never drift from the device.
         .route("/guide/:name", get(get_guide))
@@ -1008,6 +1016,57 @@ fn sample_game() -> model::Game {
     }
 }
 
+/// GET /demo/games — the synthetic slate as JSON. The discovery route: it is
+/// how you learn the demo ids without owning a board. Deliberately NOT
+/// board-scoped — synthetic games carry no spoiler risk, and accepting `?board=`
+/// would imply a scoping guarantee this handler does not provide.
+///
+/// `no-store`, unlike the day-cached `/guide`: the slate advances with the poll
+/// loop, so the bytes are not stable.
+async fn get_demo_games(State(s): State<AppState>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let games = s.demo.lock().unwrap().clone();
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        serde_json::to_string_pretty(&games).unwrap_or_else(|_| "[]".into()),
+    )
+        .into_response()
+}
+
+/// GET /demo/render/{id} — one demo game's 64x32 frame as a PNG, so the slate
+/// can be eyeballed without pairing a board. Unknown id gets the same VISIBLE
+/// "NO GAME" frame `get_render` uses rather than a 404, for the same reason:
+/// the app's image-failure state is a black rectangle, indistinguishable from a
+/// black frame.
+async fn get_demo_render(
+    axum::extract::Path(id): axum::extract::Path<String>,
+    State(s): State<AppState>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let id = id.strip_suffix(".png").unwrap_or(&id);
+    let px = s.demo.lock().unwrap().iter().find(|g| g.id == id).map(|g| {
+        render::render_frame(g, None, None, default_name_style(&g.sport_id)).1
+    });
+    let rgb565 = px.unwrap_or_else(|| {
+        render::render_notice(
+            &[("NO GAME", true, render::YELLOW_PUB), (id, false, render::GREY_PUB)],
+            None,
+        )
+        .1
+    });
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "image/png"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        render_png(&rgb565),
+    )
+        .into_response()
+}
+
 async fn get_sample(
     axum::extract::Path(variant): axum::extract::Path<String>,
 ) -> axum::response::Response {
@@ -1156,8 +1215,7 @@ async fn get_render(
     // protected game's card image would leak the score around the sanitized
     // summaries and frames.
     let cfg = q.get("board").map(|b| s.config_for(b));
-    let px = {
-        let games = s.games.lock().unwrap();
+    let px = with_slate(&s, cfg.as_ref(), |games| {
         games.iter().find(|g| g.id == id).map(|g| {
             let spoiler = cfg.as_ref().and_then(|c| spoiler_for(c, g));
             let tz = cfg.as_ref().and_then(board_tz);
@@ -1167,7 +1225,7 @@ async fn get_render(
                 .unwrap_or_else(|| default_name_style(&g.sport_id));
             render::render_frame(g, spoiler, tz, style).1
         })
-    };
+    });
     tracing::info!(
         "render {id} board={} -> {}",
         q.get("board").map(String::as_str).unwrap_or("-"),
@@ -1204,7 +1262,7 @@ async fn get_game(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     let cfg = q.get("board").map(|b| s.config_for(b));
-    let game = s.games.lock().unwrap().iter().find(|g| g.id == id).cloned();
+    let game = with_slate(&s, cfg.as_ref(), |games| games.iter().find(|g| g.id == id).cloned());
     let Some(game) = game else {
         tracing::info!("game {id} board={} -> UNKNOWN GAME", q.get("board").map(String::as_str).unwrap_or("-"));
         return (axum::http::StatusCode::NOT_FOUND, format!("no game '{id}'")).into_response();
@@ -1394,12 +1452,33 @@ const FINAL_LINGER: Duration = Duration::from_secs(30 * 60);
 /// at the earliest moment the game could have ended, that transition is already
 /// expired and the game is dropped, while a normal 3-minute gap still lingers
 /// its ~27 remaining minutes.
+/// THE demo/real branch — the only place in the server that reads `demo_data`.
+/// Everything downstream of it (priority, rotation, spoilers, frames, manifests,
+/// both push paths) is slate-agnostic, which is the point: one decision, not a
+/// conditional threaded through twenty call sites.
+///
+/// Closure form rather than returning the slate, because every caller holds the
+/// lock while iterating and a guard can't be returned across two mutexes.
+/// Deadlock-checked: the closures call `board_shows` (locks `finished`) and
+/// pure helpers — none of them re-lock `games` or `demo`.
+pub(crate) fn with_slate<R>(state: &AppState, cfg: Option<&BoardConfig>, f: impl FnOnce(&[Game]) -> R) -> R {
+    if cfg.is_some_and(|c| c.demo_data) {
+        f(&state.demo.lock().unwrap())
+    } else {
+        f(&state.games.lock().unwrap())
+    }
+}
+
 pub(crate) fn record_finished_transitions(state: &AppState, incoming: &[Game], prev_poll: Instant) {
+    // Both slates: `state.finished` is one id-keyed map serving both, so a
+    // scan that saw only the live slate would let each poll evict the other's
+    // stamps. `incoming` is likewise the union (see `poll_loop`).
     let was_live: HashSet<String> = state
         .games
         .lock()
         .unwrap()
         .iter()
+        .chain(state.demo.lock().unwrap().iter())
         .filter(|g| is_live(g))
         .map(|g| g.id.clone())
         .collect();
@@ -1776,7 +1855,10 @@ pub(crate) fn game_queued(state: &AppState, cfg: &BoardConfig, prefs: &Prefs, g:
 /// Unconfigured boards sample the slate without reporting bumps — nothing there
 /// was chosen, so nothing was "lost".
 fn candidates_with_bumped(state: &AppState, cfg: &BoardConfig) -> (Vec<Game>, Vec<Game>) {
-    let games = state.games.lock().unwrap();
+    with_slate(state, Some(cfg), |games| candidates_in(state, cfg, games))
+}
+
+fn candidates_in(state: &AppState, cfg: &BoardConfig, games: &[Game]) -> (Vec<Game>, Vec<Game>) {
     let Prefs { favs, unconfigured } = board_prefs(cfg);
 
     let mut seen: HashSet<String> = HashSet::new();
@@ -1813,9 +1895,11 @@ fn candidate_games(state: &AppState, cfg: &BoardConfig) -> Vec<Game> {
 fn chosen_games(state: &AppState, cfg: &BoardConfig) -> Vec<Game> {
     // Focus override: show ONLY this game while it's still live.
     if let Some(fid) = &cfg.focused_game_id {
-        let games = state.games.lock().unwrap();
-        if let Some(g) = games.iter().find(|g| &g.id == fid && board_shows(state, g)) {
-            return vec![g.clone()];
+        let hit = with_slate(state, Some(cfg), |games| {
+            games.iter().find(|g| &g.id == fid && board_shows(state, g)).cloned()
+        });
+        if let Some(g) = hit {
+            return vec![g];
         }
     }
     candidate_games(state, cfg)
@@ -2428,7 +2512,17 @@ pub(crate) fn unix_now() -> u64 {
 /// left the slate — ids are per-event, so without this the persisted lists
 /// grow forever.
 pub fn prune_spoiler_lists(state: &AppState) {
-    let ids: HashSet<String> = state.games.lock().unwrap().iter().map(|g| g.id.clone()).collect();
+    // Union of both slates. Scoped to the live one, this would strip a demo
+    // board's per-game spoiler hides on the very next tick and the hide would
+    // silently un-stick.
+    let ids: HashSet<String> = state
+        .games
+        .lock()
+        .unwrap()
+        .iter()
+        .chain(state.demo.lock().unwrap().iter())
+        .map(|g| g.id.clone())
+        .collect();
     let stale: Vec<(String, BoardConfig)> = {
         let configs = state.configs.lock().unwrap();
         configs
@@ -2589,8 +2683,7 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
         // DISPLAY-ONLY: `chosen_games` / `manifest_for_board` never see this
         // list, so the board's rotation is byte-for-byte what it was.
         let prefs = board_prefs(&cfg);
-        let mut upcoming: Vec<Game> = {
-            let games = state.games.lock().unwrap();
+        let mut upcoming: Vec<Game> = with_slate(state, Some(&cfg), |games| {
             // `game_queued` already requires `!board_shows`, so nothing here can
             // collide with the shown/bumped entries above; the id set only guards
             // against a duplicate arriving twice in one slate.
@@ -2612,7 +2705,7 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
                 .filter(|g| seen.insert(g.id.clone()))
                 .cloned()
                 .collect()
-        };
+        });
         // Soonest first, so the cap below keeps the most imminent games. A start
         // time we couldn't parse sorts last — we can't claim it's imminent.
         upcoming.sort_by_key(|g| {
@@ -2709,10 +2802,23 @@ async fn poll_loop(state: AppState, source: Arc<dyn SportsDataSource>) {
             tracing::warn!("no games from source; showing empty slate");
         }
         let n = games.len();
+        // The synthetic slate, refreshed on the same cadence and through the
+        // same ingestion filter. Always generated: it costs no network and
+        // microseconds of CPU, and a board that toggles mid-window (or a hit on
+        // /demo/games) must never find it empty.
+        let mut demo = state.demo_source.fetch().await;
+        demo.retain(|g| ingest_keeps(g, now));
+        // `state.finished` is ONE id-keyed map shared by both slates, so the
+        // transition scan has to see both — otherwise each poll's retain would
+        // evict the other slate's stamps. Ids can't collide: ESPN ids are all
+        // digits, demo ids are `demo-*`.
+        let mut both = games.clone();
+        both.extend(demo.iter().cloned());
         // Stamp any live -> Final transitions before the old slate disappears,
         // dated to the slate they're measured against (not to now).
-        record_finished_transitions(&state, &games, prev_poll.unwrap_or(fetched_at));
+        record_finished_transitions(&state, &both, prev_poll.unwrap_or(fetched_at));
         prev_poll = Some(fetched_at);
+        *state.demo.lock().unwrap() = demo;
         *state.games.lock().unwrap() = games;
         let board_ids: Vec<String> = state.devices.lock().unwrap().keys().cloned().collect();
         for bid in &board_ids {
@@ -4868,13 +4974,84 @@ mod tests {
     }
 
     #[test]
+    /// The headline requirement: the toggle swaps the GAMES and nothing else.
+    #[test]
+    fn demo_board_keeps_every_other_setting() {
+        let state = AppState::new_ephemeral();
+        let before = BoardConfig {
+            brightness: 33,
+            dwell_secs: 12,
+            name: Some("Den".into()),
+            timezone: Some("America/Chicago".into()),
+            spoiler_all: true,
+            off_state: OffState::Blank,
+            ..Default::default()
+        };
+        state.configs.lock().unwrap().insert("b".into(), before.clone());
+        crate::ws::apply_command(&state, "b", Command::SetDemoData { on: true });
+        let after = state.config_for("b");
+        assert!(after.demo_data, "the toggle took");
+        assert_eq!(after.brightness, before.brightness);
+        assert_eq!(after.dwell_secs, before.dwell_secs);
+        assert_eq!(after.name, before.name);
+        assert_eq!(after.timezone, before.timezone);
+        assert_eq!(after.spoiler_all, before.spoiler_all);
+        assert_eq!(after.off_state, before.off_state);
+        assert_eq!(after.sports, before.sports);
+    }
+
+    /// A demo board reads the synthetic slate; a normal board is unaffected by
+    /// the demo slate existing at all.
+    #[test]
+    fn demo_board_sees_the_synthetic_slate() {
+        let state = AppState::new_ephemeral();
+        *state.demo.lock().unwrap() = espn::demo_games(0, 0);
+        let live_ids = with_slate(&state, Some(&BoardConfig::default()), |g| {
+            g.iter().map(|g| g.id.clone()).collect::<Vec<_>>()
+        });
+        let demo_ids = with_slate(&state, Some(&BoardConfig { demo_data: true, ..Default::default() }), |g| {
+            g.iter().map(|g| g.id.clone()).collect::<Vec<_>>()
+        });
+        assert!(!demo_ids.is_empty(), "the demo slate is populated");
+        assert!(demo_ids.iter().all(|id| id.starts_with("demo-")), "{demo_ids:?}");
+        assert!(live_ids.iter().all(|id| !id.starts_with("demo-")), "{live_ids:?}");
+        // And no config at all means live, which is what the unscoped HTTP
+        // routes rely on.
+        let unscoped = with_slate(&state, None, |g| g.len());
+        assert_eq!(unscoped, live_ids.len());
+    }
+
+    /// Regression: the id set was built from the live slate only, so a demo
+    /// board's per-game spoiler hide was stripped on the next 30s tick and the
+    /// hide silently un-stuck.
+    #[test]
+    fn prune_spoiler_lists_keeps_demo_ids() {
+        let state = AppState::new_ephemeral();
+        *state.demo.lock().unwrap() = espn::demo_games(0, 0);
+        let demo_id = state.demo.lock().unwrap()[0].id.clone();
+        state.configs.lock().unwrap().insert(
+            "b".into(),
+            BoardConfig {
+                demo_data: true,
+                spoiler_game_ids: vec![demo_id.clone()],
+                ..Default::default()
+            },
+        );
+        prune_spoiler_lists(&state);
+        assert!(
+            state.config_for("b").spoiler_game_ids.contains(&demo_id),
+            "a demo game's spoiler hide must survive the prune"
+        );
+    }
+
+    #[test]
     fn sqlite_round_trip() {
         // Persist a config + pairing, then reload a fresh AppState from the same DB.
         let path = std::env::temp_dir().join(format!("sb-test-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         {
             let state = AppState::new_inner(Some(open_db(&path).unwrap()), mock_catalog());
-            let cfg = BoardConfig { brightness: 42, power: false, ..Default::default() };
+            let cfg = BoardConfig { brightness: 42, power: false, demo_data: true, ..Default::default() };
             state.persist_config("board-x", &cfg);
             state.persist_pairing("board-x", "ctrl-1");
         }
@@ -4883,6 +5060,7 @@ mod tests {
             let cfg = state.config_for("board-x");
             assert_eq!(cfg.brightness, 42);
             assert!(!cfg.power);
+            assert!(cfg.demo_data, "demo mode must survive a restart");
             assert!(state.is_allowed("board-x", "ctrl-1"));
             assert!(!state.is_allowed("board-x", "ctrl-2"));
         }
@@ -5457,6 +5635,47 @@ mod tests {
     /// percent-decoding is in the loop (a "..%2F" segment reaches the handler
     /// as "../"), and so registering the static "notes" segment alongside the
     /// two :capture /firmware routes is proven conflict-free (a matchit
+    /// The demo routes: JSON discovery + a PNG per game, both serving the
+    /// synthetic slate regardless of any board config, and both surviving an
+    /// id nobody has.
+    #[tokio::test]
+    async fn demo_routes_serve_the_synthetic_slate() {
+        let state = AppState::new_ephemeral();
+        *state.demo.lock().unwrap() = espn::demo_games(0, 0);
+        let known = state.demo.lock().unwrap()[0].id.clone();
+        let app = Router::new()
+            .route("/demo/games", get(get_demo_games))
+            .route("/demo/render/:id", get(get_demo_render))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let resp = reqwest::get(format!("http://{addr}/demo/games")).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.headers().get(reqwest::header::CACHE_CONTROL).unwrap(), "no-store");
+        // `Game` is serialize-only, so assert against the wire JSON directly.
+        let games: Vec<serde_json::Value> = resp.json().await.unwrap();
+        assert!(!games.is_empty(), "the slate must not be empty");
+        assert!(
+            games.iter().all(|g| g["id"].as_str().is_some_and(|id| id.starts_with("demo-"))),
+            "every id is a demo id"
+        );
+
+        // A real demo game renders a PNG.
+        let resp = reqwest::get(format!("http://{addr}/demo/render/{known}.png")).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.headers().get(reqwest::header::CONTENT_TYPE).unwrap(), "image/png");
+        let png = resp.bytes().await.unwrap();
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "actually a PNG");
+
+        // An unknown id gets a VISIBLE frame, not a 404 — a 404 renders as a
+        // black rectangle in the app, indistinguishable from a black frame.
+        let resp = reqwest::get(format!("http://{addr}/demo/render/nope")).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.headers().get(reqwest::header::CONTENT_TYPE).unwrap(), "image/png");
+    }
+
     /// conflict would panic at Router build).
     #[tokio::test]
     async fn firmware_notes_route_serves_and_rejects_traversal() {

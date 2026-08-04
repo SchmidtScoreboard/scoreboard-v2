@@ -30,7 +30,12 @@ struct ScoreboardAppApp: App {
     static func migrateLegacyServerUrls() {
         let legacyToCurrent = [
             "ws://hayabusa.proxy.rlwy.net:47958/ws": "wss://live-production-118c.up.railway.app/ws",
-            "ws://tokaido.proxy.rlwy.net:33343/ws": "wss://dummy-production-2e6f.up.railway.app/ws",
+            // The demo deployment is gone — demo data is a per-board toggle on
+            // the live server now. Both of its addresses land on live so an
+            // install stored against it keeps working instead of dialing a
+            // server that no longer exists.
+            "ws://tokaido.proxy.rlwy.net:33343/ws": "wss://live-production-118c.up.railway.app/ws",
+            "wss://dummy-production-2e6f.up.railway.app/ws": "wss://live-production-118c.up.railway.app/ws",
         ]
         let defaults = UserDefaults.standard
 

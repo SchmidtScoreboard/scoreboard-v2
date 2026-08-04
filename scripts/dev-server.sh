@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Hot-reload the server: rebuild + restart on any source change (via cargo-watch).
-# Pass flags through, e.g.:  scripts/dev-server.sh --demo
+# Pass flags through, e.g.:  scripts/dev-server.sh --fetch-catalog
 # One-time install:  cargo install cargo-watch
 set -euo pipefail
 cd "$(dirname "$0")/.."
