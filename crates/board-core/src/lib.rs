@@ -1346,7 +1346,7 @@ impl Board {
         center_text(&mut c, time, 13, &FONT_6X10, Rgb888::WHITE);
         center_text(&mut c, meridiem, 24, &FONT_4X6, Rgb888::new(0x88, 0x88, 0x88));
         if offline {
-            draw_wifi_off(&mut c, 53, 25, Rgb888::new(0xFF, 0x55, 0x33));
+            draw_wifi_off(&mut c, 51, 20);
         }
         c.into_u32()
     }
@@ -1855,56 +1855,79 @@ fn draw_panel_node(c: &mut Canvas) {
 
 /// Middle connect-screen node: the classic dot-plus-arcs Wi-Fi mark, tinted
 /// green once the link is up.
-/// The "no network" mark: a struck-through signal cone, top-left at (x, y),
-/// 9x5. Separate from `draw_wifi_node`, which is pinned to the panel's center.
+/// The Wi-Fi glyph's pixels, relative to its top-left. 8x8.
 ///
-/// A SOLID cone rather than the usual nested arcs. At this size the arcs are
-/// 1px strokes and a 45-degree strike cuts each one into unreadable fragments;
-/// a solid shape survives being crossed. The strike also gets a 1px black
-/// gutter, so it reads as something drawn OVER the symbol rather than as more
-/// lit pixels belonging to it.
-fn draw_wifi_off(c: &mut Canvas, x: i32, y: i32, color: Rgb888) {
-    // Solid cone: each row a horizontal run, narrowing to the tip.
-    for (dy, from, to) in [(0i32, 1i32, 7i32), (1, 2, 6), (2, 3, 5), (3, 4, 4)] {
-        for dx in from..=to {
-            Pixel(Point::new(x + dx, y + dy), color).draw(c).ok();
-        }
-    }
-    let strike = [(8, 0), (7, 1), (6, 2), (5, 3), (4, 4)];
-    for &(dx, dy) in &strike {
-        for d in [-1i32, 1] {
-            Pixel(Point::new(x + dx + d, y + dy), Rgb888::BLACK).draw(c).ok();
-        }
-    }
-    for &(dx, dy) in &strike {
+/// The connect screen's mark. 2px-thick arcs and a 2x2 dot: 1px strokes read
+/// spindly on a panel this coarse. The offline badge uses `WIFI_GLYPH_LG`
+/// instead — see there for why it can't share this one.
+#[rustfmt::skip]
+const WIFI_GLYPH: [(i32, i32); 32] = [
+    // outer arc
+            (2, 0), (3, 0), (4, 0), (5, 0),
+    (1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1),
+    (0, 2), (1, 2),                 (6, 2), (7, 2),
+    (0, 3),                                 (7, 3),
+    // inner arc
+            (2, 3), (3, 3), (4, 3), (5, 3),
+    (1, 4), (2, 4), (3, 4), (4, 4), (5, 4), (6, 4),
+    (1, 5),                         (6, 5),
+    // dot
+                    (3, 6), (4, 6),
+                    (3, 7), (4, 7),
+];
+
+fn draw_wifi_glyph(c: &mut Canvas, x: i32, y: i32, color: Rgb888) {
+    for &(dx, dy) in &WIFI_GLYPH {
         Pixel(Point::new(x + dx, y + dy), color).draw(c).ok();
     }
 }
 
-fn draw_wifi_node(c: &mut Canvas, color: Rgb888) {
-    // Even-width mark, mirror-symmetric about the panel's center line
-    // (x = 31.5): a 2x2 dot astride it, and two 2px-THICK arcs built up from
-    // that base — 1px strokes read spindly next to the chunky dot. Each arc
-    // is two vertically adjacent pixels per column, stepping down at the
-    // ends; grown upward (to y=11) so the single-row gaps between dot, inner
-    // arc, and outer arc survive the thickening.
-    #[rustfmt::skip]
-    let px = [
-        // outer arc: 8 wide, 2px stroke
-        (30, 11), (31, 11), (32, 11), (33, 11),
-        (29, 12), (30, 12), (31, 12), (32, 12), (33, 12), (34, 12),
-        (28, 13), (29, 13), (34, 13), (35, 13),
-        (28, 14), (35, 14),
-        // inner arc: 6 wide, 2px stroke
-        (30, 14), (31, 14), (32, 14), (33, 14),
-        (29, 15), (30, 15), (31, 15), (32, 15), (33, 15), (34, 15),
-        (29, 16), (34, 16),
-        // 2x2 dot
-        (31, 17), (32, 17), (31, 18), (32, 18),
-    ];
-    for &(x, y) in &px {
-        Pixel(Point::new(x, y), color).draw(c).ok();
+/// The offline badge's Wi-Fi mark, 11x10 — deliberately BIGGER than
+/// `WIFI_GLYPH`, which the connect screen uses.
+///
+/// A mark that has to survive a strike through it needs more room than one
+/// that doesn't. At the connect screen's 8x8 the bar removes most of an arc
+/// per row and the symbol stops being recognizable; at 11 wide the arcs still
+/// read on both sides of the bar.
+#[rustfmt::skip]
+const WIFI_GLYPH_LG: [(i32, i32); 37] = [
+    (3, 0), (4, 0), (5, 0), (6, 0), (7, 0),
+    (1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1), (7, 1), (8, 1), (9, 1),
+    (0, 2), (1, 2), (9, 2), (10, 2),
+    (0, 3), (10, 3),
+    (4, 5), (5, 5), (6, 5),
+    (2, 6), (3, 6), (4, 6), (5, 6), (6, 6), (7, 6), (8, 6),
+    (2, 7), (3, 7), (7, 7), (8, 7),
+    (4, 9), (5, 9), (6, 9),
+];
+
+/// The "no network" mark: a grey Wi-Fi symbol with a red bar struck through
+/// it, top-left at (x, y). 11x10.
+///
+/// TWO COLORS on purpose, and it is what finally made this legible. A
+/// single-color strike has to be separated from the arcs by black gutters, and
+/// at this size the gutters eat the arcs — every one-color attempt fragmented
+/// the symbol into scattered pixels. Hue does that separating for free: the
+/// grey stays a Wi-Fi mark, and the red is unmistakably drawn across it.
+///
+/// The bar is 2px because a single-pixel 45-degree diagonal is only
+/// CORNER-connected on a pixel grid — it renders as a row of dots, not a line.
+fn draw_wifi_off(c: &mut Canvas, x: i32, y: i32) {
+    let grey = Rgb888::new(0xB4, 0xBA, 0xC4);
+    for &(dx, dy) in WIFI_GLYPH_LG.iter() {
+        Pixel(Point::new(x + dx, y + dy), grey).draw(c).ok();
     }
+    let red = Rgb888::new(0xFF, 0x3B, 0x30);
+    for i in 0..10i32 {
+        Pixel(Point::new(x + i, y + i), red).draw(c).ok();
+        Pixel(Point::new(x + i + 1, y + i), red).draw(c).ok();
+    }
+}
+
+fn draw_wifi_node(c: &mut Canvas, color: Rgb888) {
+    // Centered on the panel's x = 31.5 (the glyph is even-width), at the
+    // connect screen's established y.
+    draw_wifi_glyph(c, 28, 11, color);
 }
 
 /// Right connect-screen node: a tiny server rack — outline, a shelf line, and
