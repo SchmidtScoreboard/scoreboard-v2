@@ -356,18 +356,50 @@ fn draw_team_box(c: &mut Canvas, sport_id: &str, team: &TeamSide, style: NameSty
     // recognizable abbrev. The overflow is still reported (deduped here, and
     // exhaustively by `server team-names`) so a long name can be given a
     // curated short form rather than silently dropping to its abbrev.
-    let styled = team_display(team, style);
-    let display = if text_width(&styled, lay.big) > avail && style != NameStyle::Abbrev {
-        warn_overflow(sport_id, style, &styled, text_width(&styled, lay.big), avail);
-        let abbrev = team.abbrev.to_ascii_uppercase();
-        // Even the abbrev can (rarely) be wide; clip guards that edge.
-        if text_width(&abbrev, lay.big) <= avail { abbrev } else { styled }
-    } else {
-        styled
-    };
+    // The style already accounts for BOTH teams (see `pair_style`), so no
+    // per-team fallback happens here — that is what made one row show an
+    // abbreviation next to the other's full name. `draw_text_clip` still
+    // guards the rare case where even an abbreviation is too wide.
+    let _ = sport_id;
+    let display = team_display(team, style);
     // Clip the name against the right text — records are wider than scores.
     draw_text_clip(c, &display, name_x, by, max_right, lay.big, team.secondary);
     draw_text(c, right_text, right_x, by, lay.big, team.secondary);
+}
+
+/// Pixels available for a team's NAME on one row — the same arithmetic
+/// `draw_team_box` uses, factored out so the fit decision and the drawing can
+/// never disagree about how much room there is.
+fn name_avail(lay: &Layout, accent_w: u32, right_text: &str) -> i32 {
+    let right_x = SCORE_RIGHT - text_width(right_text, lay.big);
+    let name_x = accent_w as i32 + 3;
+    (right_x - 2) - name_x
+}
+
+/// The style BOTH teams will be drawn with.
+///
+/// Resolved once for the pair, because the fallback is a property of the
+/// matchup rather than of one team: deciding per team produced lines like
+/// "CHI @ CARDINALS", where one name happened to fit and the other didn't.
+/// If EITHER team overflows under the requested style, both drop to their
+/// abbreviations together, so the row always compares like with like.
+fn pair_style(sport_id: &str, away: &TeamSide, home: &TeamSide, style: NameStyle, lay: &Layout, avail: i32) -> NameStyle {
+    if style == NameStyle::Abbrev {
+        return style;
+    }
+    for team in [away, home] {
+        let styled = team_display(team, style);
+        let w = text_width(&styled, lay.big);
+        if w > avail {
+            warn_overflow(sport_id, style, &styled, w, avail);
+            // Only worth switching if the abbreviation actually helps.
+            let abbrev = team_display(team, NameStyle::Abbrev);
+            if text_width(&abbrev, lay.big) <= avail {
+                return NameStyle::Abbrev;
+            }
+        }
+    }
+    style
 }
 
 /// Deduped overflow warning (per league / style / display string), so a team
@@ -491,6 +523,7 @@ fn render_spoiled(g: &Game, mode: SpoilerMode, style: NameStyle) -> (FrameId, Ve
     // but the score slots stay empty and no situation layout is drawn.
     let mut c = Canvas::new();
     let lay = layout_for(&g.sport_id);
+    let style = pair_style(&g.sport_id, &g.away, &g.home, style, &lay, name_avail(&lay, ACCENT_W, ""));
     draw_team_box(&mut c, &g.sport_id, &g.away, style, 0, &lay, ACCENT_W, "");
     draw_team_box(&mut c, &g.sport_id, &g.home, style, box_h(&lay), &lay, ACCENT_W, "");
     let strip_top = 2 * box_h(&lay);
@@ -522,6 +555,21 @@ pub fn render_game(g: &Game, tz: Option<chrono_tz::Tz>, style: NameStyle) -> (Fr
         ),
         _ => (g.away.score.to_string(), g.home.score.to_string()),
     };
+    // Bound the fit by the WIDER right text and the WIDER accent stripe, so
+    // the shared decision holds for whichever row is tighter.
+    let widest_right = if text_width(&home_right, lay.big) > text_width(&away_right, lay.big) {
+        &home_right
+    } else {
+        &away_right
+    };
+    let style = pair_style(
+        &g.sport_id,
+        &g.away,
+        &g.home,
+        style,
+        &lay,
+        name_avail(&lay, away_accent.max(home_accent), widest_right),
+    );
     draw_team_box(&mut c, &g.sport_id, &g.away, style, 0, &lay, away_accent, &away_right);
     draw_team_box(&mut c, &g.sport_id, &g.home, style, box_h(&lay), &lay, home_accent, &home_right);
 
@@ -869,6 +917,74 @@ pub fn render_clock(hour24: u32, minute: u32) -> (FrameId, Vec<u8>) {
 #[cfg(test)]
 mod kern_tests {
     use super::*;
+
+    /// Both rows must use the SAME name style. Deciding per team produced
+    /// lines like "CHI @ CARDINALS" — one name happened to fit, the other
+    /// didn't, and the row compared an abbreviation against a mascot.
+    #[test]
+    fn a_matchup_never_mixes_abbreviation_with_full_name() {
+        let lay = layout_for("nfl");
+        let avail = name_avail(&lay, ACCENT_W, "24");
+        let side = |name: &str, abbrev: &str| TeamSide {
+            abbrev: abbrev.into(),
+            name: name.into(),
+            location: name.into(),
+            score: 0,
+            primary: Rgb888::new(0, 0, 0),
+            secondary: Rgb888::WHITE,
+        };
+        // One short name that fits, one long one that cannot.
+        let short = side("BEARS", "CHI");
+        let long = side("CARDINALSCARDINALS", "ARI");
+        assert!(text_width("BEARS", lay.big) <= avail, "precondition: the short name fits");
+        assert!(
+            text_width("CARDINALSCARDINALS", lay.big) > avail,
+            "precondition: the long name does not"
+        );
+
+        // Whichever side is long, the PAIR drops to abbreviations together.
+        for (a, h) in [(&short, &long), (&long, &short)] {
+            let chosen = pair_style("nfl", a, h, NameStyle::Name, &lay, avail);
+            assert_eq!(
+                chosen,
+                NameStyle::Abbrev,
+                "one team overflowing must move BOTH to abbreviations"
+            );
+        }
+
+        // And when both fit, neither is needlessly abbreviated.
+        assert_eq!(
+            pair_style("nfl", &short, &short, NameStyle::Name, &lay, avail),
+            NameStyle::Name
+        );
+    }
+
+    /// Accented names must RENDER, not leave a hole. The BDF loader used to
+    /// discard every glyph above ASCII while parsing fonts that ship ~900 and
+    /// ~1400 of them, so a golfer named Høgard came out as "H GARD" — the
+    /// renderer drew a blank where the lookup failed. Golf and F1 fields are
+    /// full of these.
+    #[test]
+    fn accented_names_render_instead_of_leaving_a_gap() {
+        for big in [false, true] {
+            let font = if big { crate::bdf::font_5x8() } else { crate::bdf::font_4x6() };
+            for ch in "ØÉÑÜÅÖÇÍÁÈ".chars() {
+                assert!(
+                    font.glyph(ch).is_some(),
+                    "{ch:?} has no glyph in the {} font",
+                    if big { "5x8" } else { "4x6" }
+                );
+            }
+            // And the drawn result differs from the same string with the
+            // accented letter dropped — i.e. real ink, not a silent skip.
+            let draw = |t: &str| {
+                let mut c = Canvas::new();
+                draw_text(&mut c, t, 0, 6, big, Rgb888::WHITE);
+                c.to_rgb565()
+            };
+            assert_ne!(draw("HØGARD"), draw("HGARD"), "the accented glyph drew nothing (big={big})");
+        }
+    }
 
     /// The team-game status line (period/clock) must be horizontally centered in the
     /// bottom strip — it used to be left-aligned at NAME_X.
