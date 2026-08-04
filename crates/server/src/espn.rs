@@ -437,13 +437,21 @@ fn golf_major_label(sport_id: &str, event_name: &str) -> Option<&'static str> {
 fn parse_golf(sport_id: &str, ev: LeaderEvent) -> Option<Game> {
     let comp = pick_leader_comp(ev.competitions)?;
     let status = map_status(&comp.status.type_.name).unwrap_or(GameStatus::Pregame);
-    // Top 4 by current position (ties allowed), name = last name, score = "+5"/"E".
+    // The whole field by current position (ties allowed), name = last name,
+    // score = "+5"/"E". This used to cut at position 4 — a leftover from when
+    // the board only ever drew four static rows — which silently capped every
+    // deep-field setting: the `take` below could never reach 20 because the
+    // filter had already thrown the rest away. It also made the row count
+    // JUMP AROUND, because position is a RANK and ties share one: four
+    // players at positions 1,2,3,3 gave four rows, while a five-way tie for
+    // third gave seven, with nothing changed in the app.
     let mut ranked: Vec<(i64, LeaderRow)> = comp
         .competitors
         .into_iter()
         .filter_map(|c| {
             let pos = c.status.as_ref()?.position.as_ref()?.id;
-            if pos <= 0 || pos > 4 {
+            // pos <= 0 is "not started / withdrawn", which stays filtered.
+            if pos <= 0 {
                 return None;
             }
             let name = golfer_last_name(&c.athlete.as_ref()?.display_name);
