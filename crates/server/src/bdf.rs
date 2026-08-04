@@ -54,7 +54,12 @@ fn parse(src: &str) -> BdfFont {
                 break;
             }
         }
-        if (0..128).contains(&encoding) {
+        // ASCII-only was a false economy: these fonts already ship ~900 and
+        // ~1400 glyphs including Latin-1, so the cap silently threw away the
+        // accents real names are full of. A golfer named Høgard rendered as
+        // "H GARD" — the glyph was in the file, discarded at load, and the
+        // renderer left a blank where it could not find it.
+        if encoding >= 0 {
             if let Some(ch) = char::from_u32(encoding as u32) {
                 glyphs.insert(ch, Glyph { w: bbx.0, h: bbx.1, xoff: bbx.2, yoff: bbx.3, rows });
             }
