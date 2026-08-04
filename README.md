@@ -128,3 +128,9 @@ server, flashing, and setup.
 4. Hardware bring-up (ESP32-S3 + panel) and firmware that reuses `board-core`.
 5. Android app (Kotlin UI over the shared core).
 6. Deploy the server to Railway.
+
+## License
+
+[PolyForm Noncommercial 1.0.0](LICENSE) — build one for yourself, your family,
+or your friends; modify it; publish your changes. Commercial use is reserved.
+Source available, not OSI open source. Commercial interest? Ask.
