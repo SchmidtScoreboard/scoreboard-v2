@@ -1,0 +1,281 @@
+# Build your own scoreboard
+
+This walks the whole path: parts on a desk → a panel showing live scores, running
+against **your own server**. Nothing here depends on the hosted service.
+
+There are two ways to run a scoreboard:
+
+1. **Your own server** — anywhere: a cloud box, a Raspberry Pi, or your laptop.
+   This guide. You own the data, the keys, and the uptime.
+2. **The hosted server** — a one-time fee, no server to run. You still build the
+   hardware and flash it; you just skip [Part 2](#part-2--run-a-server).
+
+Everything below is the same for both except Part 2 and one field during setup.
+
+---
+
+## What you'll need
+
+**Hardware** (~$70–90):
+
+| Part | Notes |
+|---|---|
+| Adafruit **MatrixPortal S3** | The ESP32-S3 board that drives the panel. Plugs straight into the panel's IDC header. |
+| **64×32 RGB LED matrix**, HUB75 | Any pitch — P3 (~19cm wide) is a good desk size, P4/P5 are larger. |
+| **5V 3A USB-C power supply** | See [Power](#power) — this one matters more than it looks. |
+| Adafruit **rotary encoder** (seesaw, I²C `0x36`) | Optional but recommended: brightness, sleep, and the on-device settings menu. STEMMA QT cable to the MatrixPortal. |
+| USB-C **data** cable | For flashing. Many cheap cables are charge-only and will waste an hour of your life. |
+
+**Software:** a Mac or Linux box with [Rust](https://rustup.rs), and Xcode if you
+want the iOS app (an Android app doesn't exist yet).
+
+### Power
+
+The panel is the load, not the microcontroller. Measured across real rendered
+frames, the worst case is about **1.3A** — but LED matrices draw in spikes, and
+Wi-Fi transmit bursts land on top. **5V 3A** is the right supply.
+
+Don't reach for "5V 4A" adapters: **3A is the maximum the USB-C spec allows at
+5V**, so anything above it is out of spec. 3A gives better than 2× headroom over
+the worst frame this thing renders.
+
+---
+
+## Part 1 — Toolchain
+
+The ESP32-S3 is an Xtensa chip, which needs Espressif's Rust fork. One time:
+
+```sh
+cargo install espup espflash
+espup install
+```
+
+`espup` writes `~/export-esp.sh`. **It does not persist between shells** — source
+it in any terminal where you build firmware, or add it to your shell profile:
+
+```sh
+. ~/export-esp.sh
+```
+
+Then clone and check the host side builds:
+
+```sh
+git clone <your-fork-url> scoreboard && cd scoreboard
+cargo test -p server
+```
+
+---
+
+## Part 2 — Run a server
+
+*(Skip this if you bought hosted access.)*
+
+The server polls ESPN, renders every 64×32 frame, and pushes them to boards. The
+board is a dumb display — all the intelligence lives here.
+
+### 2.1 Fetch the team catalog (once)
+
+```sh
+cargo run -p server -- --fetch-catalog
+```
+
+Names, abbreviations, and team colors, cached to disk.
+
+### 2.2 Mint a TLS certificate (once)
+
+Boards require TLS and authenticate the server by **pinning its public key** —
+no certificate authority involved, so nothing to renew and no Let's Encrypt
+dance:
+
+```sh
+cargo run -p server --bin gen-tls-cert -- yourserver.example localhost 127.0.0.1
+```
+
+It prints three things: a **certificate**, a **private key**, and a **pin** (64
+hex characters). Save all three.
+
+> **Keep the private key safe and backed up.** It's the only thing your boards
+> will trust. Losing it means re-provisioning every board by hand.
+
+Hostnames are advisory — the board authenticates by pin, not by name — but
+listing them makes `curl` and `openssl s_client` usable against your server.
+
+**You never have to rotate this certificate on a schedule.** The board has no
+clock, so it cannot evaluate expiry, and it pins the key rather than trusting a
+CA. Expiry is a non-event (there's a test in the suite asserting exactly that).
+Rotate only if the private key is compromised.
+
+### 2.3 Run it
+
+```sh
+export TLS_CERT_PEM="$(cat cert.pem)"
+export TLS_KEY_PEM="$(cat key.pem)"
+cargo run -p server --release
+```
+
+Configuration, all optional:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PORT` | `7878` | Listen port. |
+| `TLS_CERT_PEM` / `TLS_KEY_PEM` | unset | The PEMs from 2.2. **Unset = plaintext only, and no board will connect.** |
+| `STATE_DIR` | `.` | Where `scoreboard.db` (pairings, board configs) and the catalog cache live. |
+| `DEFAULT_TIMEZONE` | server local | Fallback zone for rendering clocks and start times. The app sets each board's zone when you pair, so this is a backstop. |
+| `POLL_SECS` | `180` | ESPN poll interval. Polling pauses entirely while nothing is connected. |
+| `FIRMWARE_DIR` | `./firmware-dist` | Where OTA release channels live, if you host your own updates. |
+| `DEMO` | unset | Synthetic slate of 21 games — every feature, no network. Great for checking a build. |
+
+For hot-reload while hacking, `scripts/dev-server.sh` mints a dev certificate on
+first run, exports it, and prints the pin to paste into `firmware-rs/local.env`.
+
+### 2.4 Reachable from your board
+
+Your board needs to reach the server over TCP on `PORT`. On a home LAN that's
+just your machine's address. If you host it publicly, a **raw TCP path** is what
+you want — the board speaks its own TLS, so an HTTPS-terminating proxy is the
+wrong shape. On Railway that means a **TCP proxy**, not the HTTP domain.
+
+---
+
+## Part 3 — Flash the firmware
+
+Assemble first: MatrixPortal onto the panel's IDC header, power to the panel's
+screw terminals, encoder on STEMMA QT if you have one.
+
+Point the build at your server. Create `firmware-rs/local.env` (gitignored):
+
+```sh
+SCOREBOARD_DEV_HOST=192.168.1.50
+SCOREBOARD_DEV_TLS_PIN=<the 64-hex pin from step 2.2>
+```
+
+Then, with the board plugged in over USB-C:
+
+```sh
+set -a; source firmware-rs/local.env; set +a
+bash scripts/flash.sh
+```
+
+**Tap RESET when it finishes** — this board parks in its bootloader after
+flashing and won't start on its own. If flashing can't get in at all, hold BOOT,
+tap RESET, and re-run.
+
+The build **fails on purpose** if `SCOREBOARD_DEV_TLS_PIN` isn't set. There's no
+safe default: a wrong pin produces a board that can never connect, so the error
+comes at compile time rather than in your living room.
+
+Watch it boot:
+
+```sh
+. ~/export-esp.sh && espflash monitor
+```
+
+You should see the version, then `SETUP` on the panel — it has no Wi-Fi yet.
+
+---
+
+## Part 4 — The app
+
+```sh
+bash ios/build-core.sh          # Rust core → Swift bindings
+open ios/ScoreboardApp/ScoreboardApp.xcodeproj
+```
+
+Build to your iPhone or the Simulator. (BLE setup needs a **real device** —
+the Simulator has no Bluetooth radio.)
+
+---
+
+## Part 5 — Set up the board
+
+1. In the app, **Add Scoreboard**.
+2. Choose **"Use my own server"** and enter:
+   - **Address** — `host:port`, e.g. `192.168.1.50:7878`
+   - **Pin** — the 64 hex characters from step 2.2
+3. Pick your Wi-Fi network and enter the password.
+4. The app sends everything over Bluetooth; the board saves it and reboots.
+5. The panel shows a **6-digit pairing code**. Type it into the app.
+
+Done — live scores.
+
+> Setup **refuses** a mismatched address and pin (a custom address with no pin,
+> or a pin with no address). Either would produce a board that dials one server
+> while trusting another's key: a handshake that can never succeed, on a board
+> that looked like it set up fine.
+
+---
+
+## Using the board
+
+- **Turn the knob** — brightness.
+- **Tap** — sleep / wake.
+- **Double-tap** — settings menu: version and updates, pairing code, diagnostics
+  (Wi-Fi signal, IP, uptime, free memory), and factory reset.
+- **Hold ~10 seconds** — factory reset from any state, including a board that
+  can't connect. Wi-Fi, server, pin, and the board's identity are all erased and
+  it returns to Bluetooth setup.
+
+That last one is your way out of any mistake in Part 5. It needs no server and no
+app, which is exactly why it's there.
+
+---
+
+## Troubleshooting
+
+**Panel dark** — power. Check the adapter is 5V 3A and the panel's own power
+leads are connected; the MatrixPortal being lit doesn't mean the panel is fed.
+
+**`JOINING WI-FI` forever** — wrong password, or 5GHz-only. The ESP32-S3 is
+**2.4GHz only**; if your router merges both bands under one name, some setups
+need a separate 2.4GHz SSID.
+
+**`FINDING SERVER` forever** — Wi-Fi is fine, the server isn't reachable.
+Check it's running, that the address you provisioned is right, and that nothing
+firewalls the port. From another machine:
+
+```sh
+openssl s_client -connect YOUR_HOST:7878 -tls1_3
+```
+
+You should see `Protocol: TLSv1.3` and an `ed25519` peer signature. If that
+works but the board still can't connect, the **pin** is likely wrong — verify:
+
+```sh
+cargo run -p server --bin gen-tls-cert -- --pin cert.pem
+```
+
+If it doesn't match what you provisioned, hold the knob 10 seconds and redo
+Part 5. (Requires OpenSSL 3; macOS ships LibreSSL, which can't read Ed25519 —
+`brew install openssl@3`.)
+
+**Ghosting — faint glow on pixels that should be black** — the panel clock is
+too fast for your panel. Lower `Rate::from_mhz(10)` in `firmware-rs/src/main.rs`.
+
+**Board connects, no games** — normal out of season, or nothing matches your
+preferences yet. Add a favorite team in the app, or run the server with `DEMO=1`
+to confirm the whole pipeline end to end.
+
+---
+
+## Developing without hardware
+
+```sh
+cargo run -p simulator
+```
+
+A desktop window rendering the same `board-core` the firmware runs — same
+screens, same menu, same gestures. Mouse wheel is the knob, and there's a hold
+button for the reset gesture. `--server`, `--board`, `--tz`, and `--headless`
+flags are there too. Most display work never needs a physical board.
+
+---
+
+## Where to go next
+
+- **[docs/cli.md](docs/cli.md)** — every server flag, route, and env var; the
+  `server tui` pipeline debugger for when a card renders wrong.
+- **[docs/data-sources.md](docs/data-sources.md)** — which ESPN feeds power what.
+- **Hosting your own OTA updates** — `scripts/release-firmware.sh` builds, signs
+  (Ed25519), and publishes to a channel your boards can pull from. Images are
+  signature-verified on-device with a downgrade guard, so a bad or hostile image
+  can't install; a broken update reverts itself after five minutes.

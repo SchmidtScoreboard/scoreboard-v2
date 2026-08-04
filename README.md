@@ -105,15 +105,20 @@ cargo run -p server -- tui --feed pga --dump
 # or open ios/ScoreboardApp/ScoreboardApp.xcodeproj to run from Xcode
 ```
 
-## Hardware (in design)
+## Hardware
 
-Target: an **ESP32-S3** driving a **64×32 HUB75** RGB panel in a 3D-printed case.
+An **Adafruit MatrixPortal S3** driving a **64×32 HUB75** RGB panel, with an
+Adafruit seesaw **rotary encoder** for on-device control (brightness, sleep, and
+a settings menu with diagnostics and updates). Powered over USB-C at **5V 3A**.
 
-- BLE provisioning instead of the old WiFi-hotspot dance; a code shown on the
-  matrix authenticates pairing.
-- Under consideration: a **built-in AC power supply** (IEC inlet + hard power
-  switch) rather than USB-C, and a **rotary encoder + button** for on-device
-  control (brightness, setup, menus).
+- **BLE provisioning** — no WiFi-hotspot dance. Wi-Fi credentials go phone →
+  Bluetooth → flash and never touch the network.
+- **Signed OTA updates** over Ed25519 with A/B slots and automatic revert, so a
+  bad image can't brick a board.
+- **TLS to the server**, with the server's public key pinned on the device.
+
+**[DIY.md](DIY.md) walks the whole build**: parts, toolchain, running your own
+server, flashing, and setup.
 
 ## Roadmap
 
