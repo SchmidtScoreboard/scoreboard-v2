@@ -65,7 +65,28 @@ fn parse(src: &str) -> BdfFont {
             }
         }
     }
+    thin_punctuation(&mut glyphs);
     BdfFont { glyphs }
+}
+
+/// The 5x8 colon ships with TWO-pixel-wide dots while every digit stroke beside
+/// it is one pixel, so "7:00 PM" reads as though only the colon were bold — and
+/// anywhere the font is drawn at 2x it becomes a 4px slab. (The 4x6 colon is
+/// already 1px, which is why this only ever showed up in 5x8 contexts: the
+/// clock and the taller start-time labels.)
+///
+/// Keep the leftmost pixel of each horizontal run: `b & !(b >> 1)` clears any
+/// pixel whose left neighbor is lit, which thins a 2px dot to 1px and leaves an
+/// already-1px dot untouched. Applied to both fonts so the rule is the same one
+/// everywhere, and a no-op on the font that never needed it.
+fn thin_punctuation(glyphs: &mut HashMap<char, Glyph>) {
+    for ch in [':', ';'] {
+        if let Some(g) = glyphs.get_mut(&ch) {
+            for b in g.rows.iter_mut() {
+                *b &= !(*b >> 1);
+            }
+        }
+    }
 }
 
 static FONT_4X6: OnceLock<BdfFont> = OnceLock::new();
