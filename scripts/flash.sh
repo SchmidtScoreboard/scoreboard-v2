@@ -6,9 +6,10 @@
 # no longer exists.)
 #
 # Frees the serial port first (a running monitor locks it -> connect errors),
-# then builds and uploads. NOTE: this native-USB S3 does NOT auto-boot after
-# flashing, so TAP RESET when it finishes. If it can't enter the bootloader to
-# flash, hold BOOT + tap RESET on the board, then re-run this.
+# then builds and uploads. espflash defaults to `--after hard-reset`, so the
+# board normally reboots into the new image on its own; if the panel stays dark,
+# tap RESET (most likely after you had to enter the bootloader by hand). If it
+# can't enter the bootloader to flash at all, hold BOOT + tap RESET, then re-run.
 set -euo pipefail
 cd "$(dirname "$0")/../firmware-rs"
 
@@ -43,5 +44,5 @@ espflash flash -p "$PORT" \
 
 echo
 echo "=============================================================="
-echo "  Flash complete -> now TAP THE RESET button to boot it."
+echo "  Flash complete -> it should reboot itself; tap RESET if the panel stays dark."
 echo "=============================================================="

@@ -141,7 +141,7 @@ power-play display) and `demo` (the generated demo slate — no network).
 | `scripts/dev-server.sh` | Local demo server under cargo-watch (rebuild on save). |
 | `scripts/server.sh` | Local server against real ESPN. |
 | `scripts/simulator.sh` | The desktop board simulator. |
-| `scripts/flash.sh [port]` | Build + flash `firmware-rs` over USB (sources `export-esp.sh`; **tap RESET after** — this board parks in the bootloader post-flash). |
+| `scripts/flash.sh [port]` | Build + flash `firmware-rs` over USB (sources `export-esp.sh`). espflash hard-resets after flashing, so it normally reboots itself; tap RESET only if the panel stays dark. |
 | `scripts/release-firmware.sh [stable\|beta\|dev]` | Build + sign an OTA release into `firmware-dist/<channel>/` — see below. |
 | `scripts/logs.sh` | Tail the local server log. |
 

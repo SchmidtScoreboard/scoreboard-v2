@@ -156,9 +156,10 @@ set -a; source firmware-rs/local.env; set +a
 bash scripts/flash.sh
 ```
 
-**Tap RESET when it finishes** — this board parks in its bootloader after
-flashing and won't start on its own. If flashing can't get in at all, hold BOOT,
-tap RESET, and re-run.
+It reboots into the new image on its own (`espflash` hard-resets after
+flashing). If the panel stays dark, tap **RESET** — most likely if you had to
+enter the bootloader by hand. And if flashing can't connect at all, hold
+**BOOT**, tap **RESET**, then re-run.
 
 The build **fails on purpose** if `SCOREBOARD_DEV_TLS_PIN` isn't set. There's no
 safe default: a wrong pin produces a board that can never connect, so the error
