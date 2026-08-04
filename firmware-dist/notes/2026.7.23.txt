@@ -1,0 +1,3 @@
+- The clock keeps running when the scoreboard loses its connection. It used to freeze on the last minute it received, then switch to a "connecting" screen until the network came back.
+- A small red crossed-out Wi-Fi symbol appears in the corner while the connection is down, so you can tell scores have stopped updating. The time itself is still correct.
+- The scoreboard learns the time from the server and keeps it on its own after that, including through an outage.

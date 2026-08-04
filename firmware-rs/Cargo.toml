@@ -7,7 +7,7 @@ name = "firmware-rs"
 # CalVer "YYYY.M.P" — this IS the firmware version: the board reports
 # env!("CARGO_PKG_VERSION") to the server, and scripts/release-firmware.sh
 # stamps it into firmware-dist/firmware.json. Bump it for every OTA release.
-version = "2026.7.22"
+version = "2026.7.23"
 edition = "2021"
 default-run = "firmware-rs"
 
