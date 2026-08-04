@@ -226,6 +226,15 @@ pub struct RotationEntry {
 pub struct Manifest {
     pub rotation: Vec<RotationEntry>,
     pub display_on: bool,
+    /// Draw the clock ON THE DEVICE rather than blitting the rotation.
+    ///
+    /// The rotation still carries a server-rendered clock frame: firmware that
+    /// predates local clocks ignores this flag and blits that frame as it
+    /// always has, and a board that hasn't been told the time yet falls back to
+    /// it. An explicit flag rather than sniffing the rotation's shape, because
+    /// "one frame with a 60s dwell" is not a contract.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub local_clock: bool,
     pub off_state: OffState,
     pub brightness: u8, // 10..=100, applied device-side (one value: knob and app share it)
     /// Program identity. The board keeps its rotation slot across same-length
@@ -795,6 +804,19 @@ pub enum ClientMsg {
 pub enum ServerMsg {
     Hello { challenge: String },
     AuthOk,
+    /// The board's local wall clock, as milliseconds since the Unix epoch with
+    /// the board's timezone offset ALREADY APPLIED. The board has no RTC and no
+    /// tz database, so it gets an answer, not the inputs to compute one — and
+    /// DST transitions arrive as an ordinary update rather than needing rules
+    /// on device.
+    ///
+    /// This SETS the time; it does not drive the display. The board anchors it
+    /// to its own monotonic clock and advances it itself, so the panel keeps
+    /// ticking with the network unplugged.
+    ///
+    /// Safe to send to old firmware: an unknown variant fails to deserialize
+    /// and is dropped by the catch-all arm in the message loop.
+    Time { local_epoch_ms: u64 },
     Manifest(Manifest),
     Catalog(Catalog),
     // struct variant (NOT a newtype) — internally-tagged enums can't serialize a

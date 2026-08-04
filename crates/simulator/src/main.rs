@@ -531,6 +531,11 @@ async fn run_client(
                                                     .await;
                                             }
                                         }
+                                        // Without this the simulator never
+                                        // exercises the local clock path.
+                                        ServerMsg::Time { local_epoch_ms } => {
+                                            board.lock().unwrap().set_time(local_epoch_ms);
+                                        }
                                         ServerMsg::Manifest(m) => {
                                             let need = board.lock().unwrap().on_manifest(m);
                                             if let Some(n) = need {

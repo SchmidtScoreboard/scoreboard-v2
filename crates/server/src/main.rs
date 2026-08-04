@@ -1624,6 +1624,20 @@ pub(crate) fn rfc3339_utc(t: chrono::DateTime<chrono::Utc>) -> String {
 /// `DEFAULT_TIMEZONE`. `None` (nothing set, or unparseable) falls back to the
 /// server's local zone at each format site, so a local dev server keeps
 /// rendering sensible times without any configuration.
+/// The board's wall clock as ms since the Unix epoch with its zone offset
+/// ALREADY APPLIED. The board has no tz database and no DST rules, so it is
+/// sent an answer rather than the inputs — and a DST transition reaches it as
+/// an ordinary re-anchor on the next tick.
+pub(crate) fn board_local_epoch_ms(cfg: &BoardConfig) -> u64 {
+    use chrono::Offset;
+    let now = chrono::Utc::now();
+    let offset_secs = match board_tz(cfg) {
+        Some(tz) => now.with_timezone(&tz).offset().fix().local_minus_utc() as i64,
+        None => chrono::Local::now().offset().fix().local_minus_utc() as i64,
+    };
+    (now.timestamp_millis() + offset_secs * 1000).max(0) as u64
+}
+
 pub(crate) fn board_tz(cfg: &BoardConfig) -> Option<chrono_tz::Tz> {
     cfg.timezone
         .as_deref()
@@ -2028,6 +2042,8 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
                 rotation.push(RotationEntry { frame_id: id, dwell_ms, scroll: scrolls });
             }
             return Manifest {
+                // Games / notice path: never a device-drawn clock.
+                local_clock: false,
                 rotation,
                 display_on: true,
                 off_state: cfg.off_state,
@@ -2067,6 +2083,8 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
                     scroll: false,
                 }];
                 return Manifest {
+                    // Games / notice path: never a device-drawn clock.
+                    local_clock: false,
                     rotation,
                     display_on: true,
                     off_state: cfg.off_state,
@@ -2094,6 +2112,9 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
     })
     .collect();
     Manifest {
+        // Only the idle path can be a local clock, and only when it drew
+        // something. The rendered frame still ships alongside it.
+        local_clock: !rotation.is_empty() && offmode::is_local_clock(cfg.off_mode_id()),
         display_on: !rotation.is_empty(),
         // DERIVED, not copied. `OffState` is a closed enum with no serde
         // default on the wire, and firmware drops an unparseable message
@@ -2109,6 +2130,17 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
 
 /// Send the board its current manifest — skipped when identical to the last one
 /// sent, so periodic refreshes don't reset the rotation position mid-dwell.
+/// Re-anchor a board's wall clock. Cheap and idempotent, so it rides along
+/// with the periodic tick: the board only needs an occasional correction —
+/// it advances the clock itself between these — and a DST change lands as an
+/// ordinary re-anchor rather than needing rules on a device with no tz data.
+pub fn push_time(state: &AppState, board_id: &str) {
+    let Some(tx) = state.devices.lock().unwrap().get(board_id).cloned() else { return };
+    let cfg = state.config_for(board_id);
+    let msg = ServerMsg::Time { local_epoch_ms: board_local_epoch_ms(&cfg) };
+    let _ = tx.send(Message::Text(serde_json::to_string(&msg).unwrap()));
+}
+
 pub fn push_board(state: &AppState, board_id: &str) {
     let manifest = manifest_for_board(state, board_id);
     let json = serde_json::to_string(&ServerMsg::Manifest(manifest)).unwrap();
@@ -2625,6 +2657,13 @@ pub fn prune_spoiler_lists(state: &AppState) {
 }
 
 pub fn tick_once(state: &AppState) {
+    // Re-anchor every connected board's clock. The board runs its own clock
+    // between these; this only corrects drift and carries DST over.
+    let connected: Vec<String> = state.devices.lock().unwrap().keys().cloned().collect();
+    for bid in &connected {
+        push_time(state, bid);
+    }
+
     // Wake-timer check covers ALL configured boards (a board can be offline when
     // its timer lapses; the config should still flip so the app shows it awake).
     let lapsed: Vec<String> = state

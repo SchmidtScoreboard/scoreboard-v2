@@ -68,6 +68,14 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer: Option<std::net
         .send(Message::Text(serde_json::to_string(&ServerMsg::AuthOk).unwrap()))
         .await;
 
+    // Before anything else a board sees: it has no RTC, so until this arrives
+    // it cannot draw a clock and falls back to the server-rendered frame.
+    if matches!(role, Role::Device) {
+        let cfg = state.config_for(&pubkey);
+        let msg = ServerMsg::Time { local_epoch_ms: crate::board_local_epoch_ms(&cfg) };
+        let _ = sender.send(Message::Text(serde_json::to_string(&msg).unwrap())).await;
+    }
+
     match role {
         Role::Device => device_loop(sender, receiver, state, pubkey, peer).await,
         Role::Controller => controller_loop(sender, receiver, state, pubkey).await,
@@ -573,6 +581,7 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
     // fake scores appearing with no announcement is how a board ends up
     // looking broken rather than looking toggled.
     let mut demo_toggled: Option<bool> = None;
+    let mut tz_changed = false;
     let updated = {
         let mut configs = state.configs.lock().unwrap();
         let cfg = configs.entry(board_id.to_string()).or_default();
@@ -767,6 +776,10 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
             Command::SetTimezone { tz } => {
                 if tz.parse::<chrono_tz::Tz>().is_ok() {
                     cfg.timezone = Some(tz);
+                    // The board's clock is anchored in LOCAL ms, so a zone
+                    // change must re-anchor it or the panel keeps showing the
+                    // old zone until the next tick.
+                    tz_changed = true;
                 }
             }
             // Firmware release channel. The push_board_state below re-runs the
@@ -805,6 +818,9 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
             crate::SPLASH_SECS,
             false,
         );
+    }
+    if tz_changed {
+        crate::push_time(state, board_id);
     }
     push_board(state, board_id);
     push_board_state(state, board_id);

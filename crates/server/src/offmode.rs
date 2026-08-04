@@ -35,6 +35,15 @@ pub struct OffFrame {
     pub dwell_ms: u32,
 }
 
+/// True when this mode is the CLOCK, which the board draws itself once it has
+/// been told the time. The server still renders and ships the frame — old
+/// firmware blits it, and so does a board that hasn't received a `Time` yet —
+/// but a board that can draw it locally keeps ticking through an outage
+/// instead of freezing on a picture of a minute that has passed.
+pub fn is_local_clock(id: &str) -> bool {
+    id != "blank"
+}
+
 /// Everything a mode is allowed to depend on. Add fields here rather than
 /// reaching into `AppState` — it is what keeps modes renderable from the
 /// preview route, which has no board and no config.

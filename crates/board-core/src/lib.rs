@@ -114,6 +114,17 @@ pub enum SetupPhase {
     Saved,
 }
 
+/// A wall-clock reading anchored to the device's monotonic clock. Advancing it
+/// locally is what keeps the idle clock ticking with the network unplugged —
+/// and keeps every animation on the device clock, never on the network.
+#[derive(Clone, Copy, Debug)]
+struct WallClock {
+    /// Board-local ms since the Unix epoch (server already applied the offset).
+    local_epoch_ms: u64,
+    /// The value of `Board::clock` when that reading was taken.
+    anchor_ms: u64,
+}
+
 /// Host-reported facts for the DEBUG INFO diagnostics screen. Everything is
 /// optional: the screen matters MOST when the board is offline and half-broken,
 /// so each row renders "--" for what the host can't know rather than hiding.
@@ -208,6 +219,12 @@ pub struct Board {
     local_brightness: u8, // encoder-controlled, 10..=100
     online: bool,         // is the websocket currently connected
     offline_since: Option<u64>, // last loss of CONTACT (starts the offline grace window)
+    /// The board has no RTC, so this is the ONLY way it knows the time: the
+    /// local ms-since-epoch the server last reported, plus the monotonic ms
+    /// elapsed since. `None` until the first `ServerMsg::Time` — and a board
+    /// that has never reached a server has no manifest either, so it is on the
+    /// connect screen and never asks.
+    wall: Option<WallClock>,
     wifi_up: bool,        // host-reported Wi-Fi link/DHCP state (connect screen)
     setup_phase: SetupPhase, // which BLE-provisioning stage the setup screen shows
     brightness_changed_at: Option<u64>, // transient brightness-bar overlay window
@@ -279,6 +296,7 @@ impl Board {
             local_brightness: 100,
             online: false,
             offline_since: None,
+            wall: None,
             wifi_up: false,
             setup_phase: SetupPhase::WaitingBluetooth,
             brightness_changed_at: None,
@@ -782,6 +800,22 @@ impl Board {
         self.pending_single = Some(now_ms);
     }
 
+    /// Anchor the board's wall clock. Called on every `ServerMsg::Time`; the
+    /// board advances it from here with its own monotonic clock.
+    pub fn set_time(&mut self, local_epoch_ms: u64) {
+        self.wall = Some(WallClock { local_epoch_ms, anchor_ms: self.clock });
+    }
+
+    /// Board-local hour (0-23) and minute, or `None` if the board has never
+    /// been told the time. Advanced by the DEVICE clock — a re-anchor from the
+    /// server corrects drift and DST, it does not drive the display.
+    fn local_hm(&self) -> Option<(u32, u32)> {
+        let w = self.wall?;
+        let ms = w.local_epoch_ms.saturating_add(self.clock.saturating_sub(w.anchor_ms));
+        let day_ms = ms % 86_400_000;
+        Some(((day_ms / 3_600_000) as u32, (day_ms % 3_600_000 / 60_000) as u32))
+    }
+
     pub fn tick(&mut self, now_ms: u64) {
         self.clock = now_ms;
         // The brightness bar shows for ~2s after the last encoder turn.
@@ -1163,6 +1197,25 @@ impl Board {
             // Deliberate darkness.
             Mode::Asleep => return vec![0u32; FRAME_PIXELS],
             Mode::Running => {
+                // The idle clock is OURS the moment we know the time, checked
+                // before the online/holding ladder below. A server-rendered
+                // clock frame cannot tick: it froze on a dropped link, and 45
+                // seconds later the panel lit up with CONNECTING on whatever
+                // shelf it sits on, all night.
+                if let (Some(m), Some((h, mi))) = (self.manifest.as_ref(), self.local_hm()) {
+                    if m.local_clock && m.display_on {
+                        // Same grace as the connect screen: a deploy blip must
+                        // not flash a red slash any more than it flashes
+                        // CONNECTING.
+                        let stale = !self.online
+                            && self
+                                .offline_since
+                                .is_some_and(|t| self.clock.saturating_sub(t) >= OFFLINE_GRACE_MS);
+                        let mut buf = self.screen_clock(h, mi, stale);
+                        scale_buf(&mut buf, self.local_brightness);
+                        return buf;
+                    }
+                }
                 // A dropped websocket often re-establishes within a second or
                 // two; swapping screens instantly makes every blip flash
                 // "CONNECTING / FINDING SERVER". While there's content to show,
@@ -1270,6 +1323,32 @@ impl Board {
         // would square the dim (50% knob × 50% manifest = 25%).
         blit_frame_window(&mut buf, px, row0);
         buf
+    }
+
+    /// The idle clock, drawn on the DEVICE. Laid out to match the server's
+    /// `render_clock` — big time, small grey meridiem — so the panel does not
+    /// visibly change at the moment it stops being server-drawn.
+    ///
+    /// `offline` adds a red struck-through Wi-Fi mark. The time is still
+    /// correct when that shows: it is the SCORES that have stopped, and saying
+    /// so is the difference between a board that looks broken and one that
+    /// tells you what it knows.
+    fn screen_clock(&self, hour24: u32, minute: u32, offline: bool) -> Vec<u32> {
+        let mut c = Canvas::new();
+        let (h12, meridiem) = match hour24 % 24 {
+            0 => (12, "AM"),
+            h if h < 12 => (h, "AM"),
+            12 => (12, "PM"),
+            h => (h - 12, "PM"),
+        };
+        let mut buf = [0u8; 5];
+        let time = fmt_hhmm(&mut buf, h12, minute);
+        center_text(&mut c, time, 13, &FONT_6X10, Rgb888::WHITE);
+        center_text(&mut c, meridiem, 24, &FONT_4X6, Rgb888::new(0x88, 0x88, 0x88));
+        if offline {
+            draw_wifi_off(&mut c, 53, 25, Rgb888::new(0xFF, 0x55, 0x33));
+        }
+        c.into_u32()
     }
 
     fn screen_boot(&self) -> Vec<u32> {
@@ -1675,6 +1754,25 @@ impl DrawTarget for Canvas {
     }
 }
 
+/// "H:MM" into a caller-owned buffer — board-core is no_std, so there is no
+/// `format!` here. Hour is 1-12, minute 0-59.
+fn fmt_hhmm(buf: &mut [u8; 5], hour: u32, minute: u32) -> &str {
+    let mut n = 0;
+    if hour >= 10 {
+        buf[n] = b'0' + (hour / 10) as u8;
+        n += 1;
+    }
+    buf[n] = b'0' + (hour % 10) as u8;
+    n += 1;
+    buf[n] = b':';
+    n += 1;
+    buf[n] = b'0' + (minute / 10) as u8;
+    n += 1;
+    buf[n] = b'0' + (minute % 10) as u8;
+    n += 1;
+    core::str::from_utf8(&buf[..n]).unwrap_or("--:--")
+}
+
 fn center_text<'a>(c: &mut Canvas, s: &str, y_center: i32, font: &'a MonoFont<'a>, color: Rgb888) {
     center_text_at(c, s, FRAME_WIDTH as i32 / 2, y_center, font, color);
 }
@@ -1757,6 +1855,32 @@ fn draw_panel_node(c: &mut Canvas) {
 
 /// Middle connect-screen node: the classic dot-plus-arcs Wi-Fi mark, tinted
 /// green once the link is up.
+/// The "no network" mark: a struck-through signal cone, top-left at (x, y),
+/// 9x5. Separate from `draw_wifi_node`, which is pinned to the panel's center.
+///
+/// A SOLID cone rather than the usual nested arcs. At this size the arcs are
+/// 1px strokes and a 45-degree strike cuts each one into unreadable fragments;
+/// a solid shape survives being crossed. The strike also gets a 1px black
+/// gutter, so it reads as something drawn OVER the symbol rather than as more
+/// lit pixels belonging to it.
+fn draw_wifi_off(c: &mut Canvas, x: i32, y: i32, color: Rgb888) {
+    // Solid cone: each row a horizontal run, narrowing to the tip.
+    for (dy, from, to) in [(0i32, 1i32, 7i32), (1, 2, 6), (2, 3, 5), (3, 4, 4)] {
+        for dx in from..=to {
+            Pixel(Point::new(x + dx, y + dy), color).draw(c).ok();
+        }
+    }
+    let strike = [(8, 0), (7, 1), (6, 2), (5, 3), (4, 4)];
+    for &(dx, dy) in &strike {
+        for d in [-1i32, 1] {
+            Pixel(Point::new(x + dx + d, y + dy), Rgb888::BLACK).draw(c).ok();
+        }
+    }
+    for &(dx, dy) in &strike {
+        Pixel(Point::new(x + dx, y + dy), color).draw(c).ok();
+    }
+}
+
 fn draw_wifi_node(c: &mut Canvas, color: Rgb888) {
     // Even-width mark, mirror-symmetric about the panel's center line
     // (x = 31.5): a 2x2 dot astride it, and two 2px-THICK arcs built up from
@@ -2022,6 +2146,7 @@ mod tests {
             rotation: Vec::new(),
             display_on: true,
             off_state: Default::default(),
+            local_clock: false,
             epoch: 0,
             brightness: bright,
         };
@@ -2073,6 +2198,7 @@ mod tests {
             rotation: Vec::new(),
             display_on: true,
             off_state: Default::default(),
+            local_clock: false,
             epoch: 0,
             brightness: bright,
         };
@@ -2104,6 +2230,7 @@ mod tests {
                 .collect(),
             display_on: true,
             off_state: Default::default(),
+            local_clock: false,
             epoch: 0,
             brightness: 100,
         };
@@ -2168,6 +2295,7 @@ mod tests {
             }],
             display_on: true,
             off_state: Default::default(),
+            local_clock: false,
             epoch: 0,
             brightness: 100,
         });
@@ -2193,6 +2321,7 @@ mod tests {
             rotation: vec![RotationEntry { frame_id: "tall".into(), dwell_ms: 10_000, scroll: false }],
             display_on: true,
             off_state: Default::default(),
+            local_clock: false,
             epoch: 0,
             brightness: 100,
         });
@@ -2262,6 +2391,7 @@ mod tests {
             }],
             display_on: true,
             off_state: Default::default(),
+            local_clock: false,
             brightness: 100,
             epoch,
             countdown_ms: Some(4000),
@@ -2853,6 +2983,7 @@ mod tests {
             rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 1000, scroll: false }],
             display_on: true,
             off_state: Default::default(),
+            local_clock: false,
             epoch: 0,
             brightness: 100,
         });
@@ -2894,6 +3025,7 @@ mod tests {
             rotation: vec![],
             display_on: false,
             off_state: Default::default(),
+            local_clock: false,
             epoch: 0,
             brightness: 100,
         });
@@ -2927,6 +3059,7 @@ mod tests {
                 .collect(),
             display_on: true,
             off_state: Default::default(),
+            local_clock: false,
             epoch,
             brightness: 100,
         };
@@ -2954,6 +3087,95 @@ mod tests {
     }
 
     /// With nothing cached (fresh boot) there is no content to hold, so going
+    fn clock_manifest() -> Manifest {
+        Manifest {
+            countdown_ms: None,
+            rotation: Vec::new(),
+            display_on: true,
+            local_clock: true,
+            off_state: Default::default(),
+            epoch: 0,
+            brightness: 100,
+        }
+    }
+
+    /// The whole point: the clock keeps time with the server gone. A
+    /// server-rendered clock froze on whatever minute it died at.
+    #[test]
+    fn the_clock_keeps_ticking_with_the_link_down() {
+        let mut b = running_board();
+        b.on_manifest(clock_manifest());
+        b.set_time(10 * 3_600_000 + 42 * 60_000); // 10:42 local
+        let at_1042 = b.framebuffer();
+        b.set_online(false);
+        // Ten minutes later, still offline, never re-anchored.
+        b.tick(10 * 60_000);
+        assert_ne!(b.framebuffer(), at_1042, "the panel must have advanced to 10:52");
+        // And it is a CLOCK, not the connect screen.
+        let mut connect = Board::new();
+        connect.mode = Mode::Running;
+        connect.tick(10 * 60_000);
+        assert_ne!(b.framebuffer(), connect.framebuffer(), "must not fall back to CONNECTING");
+    }
+
+    /// The regression this feature exists to kill: an idle clock used to light
+    /// up with CONNECTING 45 seconds into any outage, all night.
+    #[test]
+    fn an_idle_clock_never_becomes_the_connect_screen() {
+        let mut b = running_board();
+        b.on_manifest(clock_manifest());
+        b.set_time(3_600_000);
+        b.set_online(false);
+        let mut connect = Board::new();
+        connect.mode = Mode::Running;
+        for t in [1_000u64, OFFLINE_GRACE_MS + 1, 6 * 3_600_000] {
+            b.tick(t);
+            connect.tick(t);
+            assert_ne!(b.framebuffer(), connect.framebuffer(), "still a clock at t={t}");
+        }
+    }
+
+    /// The badge is the honest part: the TIME is still right, the SCORES have
+    /// stopped. It waits out the same grace window as the connect screen so a
+    /// deploy blip doesn't flash a red slash.
+    #[test]
+    fn the_offline_badge_waits_for_the_grace_window() {
+        let mut b = running_board();
+        b.on_manifest(clock_manifest());
+        b.set_time(3_600_000);
+        let online = b.framebuffer();
+        b.set_online(false);
+        b.tick(OFFLINE_GRACE_MS - 1);
+        assert_eq!(b.framebuffer(), online, "no badge during the grace window");
+        b.tick(OFFLINE_GRACE_MS + 1);
+        assert_ne!(b.framebuffer(), online, "badge once the outage is real");
+    }
+
+    /// A board that has never been told the time cannot draw a clock. It must
+    /// fall through to the server's rendered frame, not to a blank panel or a
+    /// wrong time — which is also what old firmware does with this manifest.
+    #[test]
+    fn without_a_time_anchor_the_server_frame_is_used() {
+        let mut b = running_board();
+        b.on_manifest(clock_manifest());
+        // No set_time call.
+        let mut reference = running_board();
+        reference.on_manifest(Manifest { local_clock: false, ..clock_manifest() });
+        assert_eq!(b.framebuffer(), reference.framebuffer(), "falls back to the server path");
+    }
+
+    /// Power intent still wins: a board the user turned OFF stays dark even
+    /// though it now knows the time.
+    #[test]
+    fn a_powered_off_board_stays_dark_with_a_local_clock() {
+        let mut b = running_board();
+        b.on_manifest(Manifest { display_on: false, ..clock_manifest() });
+        b.set_time(3_600_000);
+        b.set_online(false);
+        b.tick(OFFLINE_GRACE_MS + 1);
+        assert!(b.framebuffer().iter().all(|&p| p == 0), "off means off");
+    }
+
     /// offline shows the connect screen immediately — no blank grace window.
     #[test]
     fn offline_without_content_shows_connect_immediately() {
@@ -2991,6 +3213,7 @@ mod tests {
             rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 1000, scroll: false }],
             display_on: true,
             off_state: Default::default(),
+            local_clock: false,
             epoch: 0,
             brightness: 100,
         });
@@ -3104,6 +3327,7 @@ mod tests {
             },
             display_on: on,
             off_state: Default::default(),
+            local_clock: false,
             epoch: 0,
             brightness: 100,
         };
@@ -3198,6 +3422,7 @@ mod tests {
             rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 1000, scroll: false }],
             display_on: true,
             off_state: Default::default(),
+            local_clock: false,
             epoch: 0,
             brightness: 100,
         };
@@ -3323,6 +3548,7 @@ mod tests {
             rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 10_000, scroll: false }],
             display_on: true,
             off_state: Default::default(),
+            local_clock: false,
             epoch: 0,
             brightness: 100,
         });
@@ -3385,6 +3611,22 @@ mod tests {
                 b.set_wifi(wifi);
                 dump(name, t, &mut b);
             }
+        }
+
+        // The device-drawn idle clock, online and after the link is gone.
+        for (offline, name) in [(false, "clock_online"), (true, "clock_offline")] {
+            let mut b = running_board();
+            b.on_manifest(clock_manifest());
+            b.set_time(22 * 3_600_000 + 9 * 60_000); // 10:09 PM
+            // `dump` ticks to `t`, and `tick` assigns the clock ABSOLUTELY —
+            // so the outage has to be timed through that argument, not before it.
+            let t = if offline {
+                b.set_online(false);
+                OFFLINE_GRACE_MS + 1
+            } else {
+                0
+            };
+            dump(name, t, &mut b);
         }
 
         // Settings menu + hold phases. Same diagnostics payload the simulator
@@ -3466,6 +3708,7 @@ mod tests {
                 .collect(),
             display_on: true,
             off_state: Default::default(),
+            local_clock: false,
             epoch: 0,
             brightness: 100,
         }
