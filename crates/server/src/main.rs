@@ -99,6 +99,16 @@ pub struct AppState {
     /// render and its manifest registration — that write pair isn't atomic).
     pub frames: Arc<Mutex<HashMap<FrameId, (u64, Vec<u8>)>>>,
     pub configs: Arc<Mutex<HashMap<String, BoardConfig>>>, // board_id -> prefs
+    /// Boards whose stored config could not be parsed at startup. They are
+    /// QUARANTINED: `persist_config` refuses to write for them, so a row this
+    /// binary cannot read is never overwritten by the default it fell back to.
+    ///
+    /// Losing a config in memory is recoverable — roll the server back and the
+    /// row is still there. Overwriting it is not, and that is what used to
+    /// happen: a drop here handed out `BoardConfig::default()`, and the next
+    /// command upserted that default over the user's name, favorites,
+    /// brightness and timezone with no error anywhere.
+    pub unparsed: Arc<Mutex<HashSet<String>>>,
     pub devices: Arc<Mutex<HashMap<String, UnboundedSender<Message>>>>, // board_id -> sink
     pub controllers: Arc<Mutex<HashMap<String, Vec<UnboundedSender<Message>>>>>, // board_id -> app sinks
     /// Live pairing codes: code -> (board_id, when the board registered it).
@@ -334,9 +344,12 @@ impl AppState {
     }
 
     fn new_inner(db: Option<Connection>, catalog: Catalog) -> Self {
-        let (mut configs, allow) = match &db {
-            Some(conn) => (load_configs(conn), load_pairings(conn)),
-            None => (HashMap::new(), HashMap::new()),
+        let (mut configs, unparsed, allow) = match &db {
+            Some(conn) => {
+                let (cfgs, bad) = load_configs(conn);
+                (cfgs, bad, load_pairings(conn))
+            }
+            None => (HashMap::new(), HashSet::new(), HashMap::new()),
         };
         sanitize_configs(&catalog, &mut configs);
         AppState {
@@ -348,6 +361,7 @@ impl AppState {
             games: Arc::new(Mutex::new(Vec::new())),
             frames: Arc::new(Mutex::new(HashMap::new())),
             configs: Arc::new(Mutex::new(configs)),
+            unparsed: Arc::new(Mutex::new(unparsed)),
             devices: Arc::new(Mutex::new(HashMap::new())),
             controllers: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
@@ -407,6 +421,11 @@ impl AppState {
     /// SQLite gives the atomicity + durability the JSON file couldn't.
     pub fn persist_config(&self, board_id: &str, cfg: &BoardConfig) {
         let Some(db) = &self.db else { return };
+        // Never write over a row this binary could not read — see `unparsed`.
+        if self.unparsed.lock().unwrap().contains(board_id) {
+            tracing::warn!("refusing to overwrite unreadable config for board {board_id}");
+            return;
+        }
         let Ok(json) = serde_json::to_string(cfg) else { return };
         let _ = db.lock().unwrap().execute(
             "INSERT INTO boards (pubkey, config) VALUES (?1, ?2)
@@ -551,18 +570,35 @@ fn sanitize_configs(catalog: &Catalog, configs: &mut HashMap<String, BoardConfig
 }
 
 /// Load every persisted board config (board pubkey -> config).
-fn load_configs(conn: &Connection) -> HashMap<String, BoardConfig> {
+/// Returns the parsed configs and the pubkeys whose stored JSON this binary
+/// could NOT read. The second half matters as much as the first: an unreadable
+/// row used to vanish silently, and the default that replaced it was then
+/// persisted straight over the original. Callers quarantine the returned ids.
+fn load_configs(conn: &Connection) -> (HashMap<String, BoardConfig>, HashSet<String>) {
     let mut out = HashMap::new();
-    let Ok(mut stmt) = conn.prepare("SELECT pubkey, config FROM boards") else { return out };
+    let mut bad = HashSet::new();
+    let Ok(mut stmt) = conn.prepare("SELECT pubkey, config FROM boards") else {
+        return (out, bad);
+    };
     let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) else {
-        return out;
+        return (out, bad);
     };
     for (pubkey, json) in rows.flatten() {
-        if let Ok(cfg) = serde_json::from_str::<BoardConfig>(&json) {
-            out.insert(pubkey, cfg);
+        match serde_json::from_str::<BoardConfig>(&json) {
+            Ok(cfg) => {
+                out.insert(pubkey, cfg);
+            }
+            Err(e) => {
+                // Loud, because the alternative is a board that silently comes
+                // back factory-fresh after a deploy.
+                tracing::error!("board {pubkey}: stored config is unreadable ({e}); \
+                                 quarantining it — settings preserved on disk, \
+                                 board runs on defaults until this is fixed");
+                bad.insert(pubkey);
+            }
         }
     }
-    out
+    (out, bad)
 }
 
 /// Load the pairing allow-list (board pubkey -> set of controller pubkeys).
@@ -5042,6 +5078,38 @@ mod tests {
             state.config_for("b").spoiler_game_ids.contains(&demo_id),
             "a demo game's spoiler hide must survive the prune"
         );
+    }
+
+    /// The data-loss guard. A row this binary cannot parse must survive on
+    /// disk: the board falls back to defaults for the session, but the next
+    /// command must NOT persist those defaults over the user's settings.
+    #[test]
+    fn an_unreadable_config_is_never_overwritten() {
+        let path = std::env::temp_dir().join(format!("sb-quarantine-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let hostile = r#"{"brightness":"not-a-number","power":true,"sports":[]}"#;
+        {
+            let conn = open_db(&path).unwrap();
+            conn.execute(
+                "INSERT INTO boards (pubkey, config) VALUES (?1, ?2)",
+                rusqlite::params!["board-x", hostile],
+            )
+            .unwrap();
+        }
+        {
+            let state = AppState::new_inner(Some(open_db(&path).unwrap()), mock_catalog());
+            assert!(state.unparsed.lock().unwrap().contains("board-x"), "quarantined");
+            // The board still works, on defaults.
+            assert_eq!(state.config_for("board-x").brightness, BoardConfig::default().brightness);
+            // A command lands; the write must be refused.
+            crate::ws::apply_command(&state, "board-x", Command::SetBrightness { level: 5 });
+        }
+        let conn = open_db(&path).unwrap();
+        let stored: String = conn
+            .query_row("SELECT config FROM boards WHERE pubkey = 'board-x'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, hostile, "the unreadable row must be preserved byte for byte");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
