@@ -349,7 +349,6 @@ fn draw_team_box(c: &mut Canvas, sport_id: &str, team: &TeamSide, style: NameSty
     let right_x = SCORE_RIGHT - text_width(right_text, lay.big);
     let name_x = accent_w as i32 + 3;
     let max_right = right_x - 2;
-    let avail = max_right - name_x;
     // Resolve the styled name, then GUARANTEE it's readable: if the chosen
     // style (after shortening) still overflows the row, fall back to the
     // abbreviation, which always fits — a clipped half-name is worse than a
