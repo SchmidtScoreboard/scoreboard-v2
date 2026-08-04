@@ -269,7 +269,7 @@ impl SportsDataSource for EspnSource {
         }
         // Leaderboard sports (PGA / LPGA / F1) aren't ESPN team lists — add them.
         sports.extend(crate::leaderboard_sports());
-        Some(Catalog { sports })
+        Some(Catalog { sports, off_modes: crate::offmode::off_modes() })
     }
 }
 

@@ -8,11 +8,13 @@ uniffi::setup_scaffolding!();
 use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use scoreboard_protocol::{
+    OffModeDescriptor,
     decode_frame, default_name_style as p_default_name_style,
     name_style_options as p_name_style_options, pubkey_hex, rgb565_to_888, sign_hex, BoardConfig,
-    Catalog, ClientMsg, Command, FwChannel, FwImage, GameSummary, NameStyle, OffState, Role,
+    Catalog, ClientMsg, Command, FwChannel, FwImage, GameSummary, NameStyle, Role,
     ServerMsg, SpoilerMode, SportConfig as PSportConfig,
 };
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::runtime::Runtime;
@@ -36,6 +38,27 @@ pub struct UiChampOption {
     pub id: String,
     pub label: String,
 }
+/// One off mode the server offers. Every string the row needs lives here.
+#[derive(uniffi::Record, Clone)]
+pub struct UiOffMode {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    /// Path of the preview PNG on the SAME server, or nil when the mode draws
+    /// nothing (the app fills black locally rather than fetching a black PNG
+    /// it cannot tell apart from a failed load).
+    pub preview: Option<String>,
+    pub input: Option<UiOffModeInput>,
+}
+
+#[derive(uniffi::Record, Clone)]
+pub struct UiOffModeInput {
+    pub key: String,
+    pub label: String,
+    pub placeholder: String,
+    pub max_len: u32,
+}
+
 #[derive(uniffi::Record, Clone)]
 pub struct UiSport {
     pub id: String,
@@ -80,11 +103,6 @@ pub struct UiSportConfig {
     pub spoiler_team_ids: Vec<String>,
 }
 /// What the panel shows while off / idle.
-#[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq)]
-pub enum UiOffState {
-    Blank,
-    Clock,
-}
 /// Firmware release channel a board follows (protocol `FwChannel`). Channels
 /// are cumulative toward Dev: a beta board may also be offered stable builds
 /// when stable is newer — newest version wins.
@@ -113,7 +131,13 @@ pub struct UiBoardConfig {
     pub excluded_game_ids: Vec<String>,
     pub focused_game_id: Option<String>,
     pub name: Option<String>,
-    pub off_state: UiOffState,
+    /// Id of the server-declared off mode (`UiOffMode::id`). A STRING, never an
+    /// enum: a closed enum here would throw `unexpectedEnumCase` in the
+    /// generated Swift and abort the whole config decode the first time a
+    /// forked server named a mode this build had never heard of.
+    pub off_mode: String,
+    /// Values the user typed for the selected mode's declared input.
+    pub off_mode_params: HashMap<String, String>,
     pub sleep_hours: u32,
     /// Seconds each game holds the panel before the rotation advances.
     pub dwell_secs: u32,
@@ -180,6 +204,10 @@ pub trait ClientListener: Send + Sync {
     fn on_connection(&self, connected: bool);
     fn on_board_state(&self, board_id: String, now_showing: Vec<UiGame>, online: bool);
     fn on_catalog(&self, sports: Vec<UiSport>);
+    /// The off modes THIS server offers, in menu order. Delivered with the
+    /// catalog. The app renders them generically — it must never branch on an
+    /// id, or forks start needing app releases again.
+    fn on_off_modes(&self, modes: Vec<UiOffMode>);
     fn on_config(&self, board_id: String, config: UiBoardConfig);
     fn on_games(&self, games: Vec<UiGame>);
     /// A rendered frame arrived (pushed over the WS). `rgba` is 64×32 RGBA8 bytes.
@@ -388,7 +416,11 @@ impl ScoreboardClient {
                                             if let Some(l) = listener.lock().unwrap().as_ref() { l.on_pair_failed(reason); }
                                         }
                                         ServerMsg::Catalog(cat) => {
-                                            if let Some(l) = listener.lock().unwrap().as_ref() { l.on_catalog(to_ui_sports(cat)); }
+                                            let modes = to_ui_off_modes(&cat.off_modes);
+                                            if let Some(l) = listener.lock().unwrap().as_ref() {
+                                                l.on_off_modes(modes);
+                                                l.on_catalog(to_ui_sports(cat));
+                                            }
                                         }
                                         ServerMsg::Games { games } => {
                                             if let Some(l) = listener.lock().unwrap().as_ref() { l.on_games(to_ui_games(games)); }
@@ -561,13 +593,17 @@ impl ScoreboardClient {
     }
 
     /// What the panel shows while off / idle (blank or a server-rendered clock).
-    pub fn set_off_state(&self, board_id: String, off_state: UiOffState) {
-        let off = match off_state {
-            UiOffState::Blank => OffState::Blank,
-            UiOffState::Clock => OffState::Clock,
-        };
-        let _ = self.tx.send(Out::Command(board_id, Command::SetOffState { off_state: off }));
+    /// Pick a server-declared off mode. The id comes from `on_off_modes`; the
+    /// server validates it and ignores one it does not offer.
+    pub fn set_off_mode(&self, board_id: String, id: String) {
+        let _ = self.tx.send(Out::Command(board_id, Command::SetOffMode { id }));
     }
+
+    /// Set the selected mode's input value. An empty string clears it.
+    pub fn set_off_mode_param(&self, board_id: String, key: String, value: String) {
+        let _ = self.tx.send(Out::Command(board_id, Command::SetOffModeParam { key, value }));
+    }
+
 
     /// How long a knob-press sleep lasts before the board wakes itself.
     pub fn set_sleep_hours(&self, board_id: String, hours: u32) {
@@ -731,6 +767,24 @@ impl ScoreboardClient {
     }
 }
 
+fn to_ui_off_modes(modes: &[OffModeDescriptor]) -> Vec<UiOffMode> {
+    modes
+        .iter()
+        .map(|m| UiOffMode {
+            id: m.id.clone(),
+            label: m.label.clone(),
+            description: m.description.clone(),
+            preview: m.preview.clone(),
+            input: m.input.as_ref().map(|i| UiOffModeInput {
+                key: i.key.clone(),
+                label: i.label.clone(),
+                placeholder: i.placeholder.clone(),
+                max_len: i.max_len,
+            }),
+        })
+        .collect()
+}
+
 fn to_ui_sports(cat: Catalog) -> Vec<UiSport> {
     cat.sports
         .into_iter()
@@ -771,6 +825,7 @@ mod wss_tests {
         }
         fn on_board_state(&self, _: String, _: Vec<UiGame>, _: bool) {}
         fn on_catalog(&self, _: Vec<UiSport>) {}
+        fn on_off_modes(&self, _: Vec<UiOffMode>) {}
         fn on_config(&self, _: String, _: UiBoardConfig) {}
         fn on_games(&self, games: Vec<UiGame>) {
             let _ = self.tx.lock().unwrap().send(format!("games={}", games.len()));
@@ -919,6 +974,10 @@ pub fn default_name_style(sport_id: String) -> UiNameStyle {
 }
 
 fn to_ui_board_config(c: BoardConfig) -> UiBoardConfig {
+    // Resolved before the literal below moves fields out of `c`.
+    let off_mode = c.off_mode_id().to_string();
+    let off_mode_params: HashMap<String, String> =
+        c.off_mode_params.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     UiBoardConfig {
         sports: to_ui_configs(c.sports),
         brightness: c.brightness,
@@ -927,10 +986,8 @@ fn to_ui_board_config(c: BoardConfig) -> UiBoardConfig {
         excluded_game_ids: c.excluded_game_ids,
         focused_game_id: c.focused_game_id,
         name: c.name,
-        off_state: match c.off_state {
-            OffState::Blank => UiOffState::Blank,
-            OffState::Clock => UiOffState::Clock,
-        },
+        off_mode,
+        off_mode_params,
         sleep_hours: c.sleep_hours,
         dwell_secs: c.dwell_secs,
         wake_at: c.wake_at,

@@ -512,6 +512,13 @@ pub(crate) fn apply_settings_import(state: &AppState, board_id: &str, json: &str
     // Keep first occurrence, drop the rest.
     let mut seen = std::collections::HashSet::new();
     settings.sports.retain(|s| seen.insert(s.sport_id.clone()));
+    // An off mode this server doesn't offer is dropped BEFORE applying, the
+    // same way brightness and dwell are re-clamped: an export from a FORKED
+    // server must degrade to this server's default, never reject the whole
+    // import over one unknown string.
+    if settings.off_mode.as_deref().is_some_and(|id| !crate::offmode::offers(id)) {
+        settings.off_mode = None;
+    }
     // An unparseable timezone in a hand-edited blob is dropped BEFORE applying
     // — `apply_to` skips None, so the board keeps its current (valid) zone.
     if settings.timezone.as_deref().is_some_and(|t| t.parse::<chrono_tz::Tz>().is_err()) {
@@ -643,7 +650,40 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
                 let trimmed = name.trim();
                 cfg.name = (!trimmed.is_empty()).then(|| trimmed.to_string());
             }
-            Command::SetOffState { off_state } => cfg.off_state = off_state,
+            // Kept for app builds that predate declared off modes. Mapped
+            // onto the new field so both stay consistent.
+            Command::SetOffState { off_state } => {
+                let id = match off_state {
+                    OffState::Blank => "blank",
+                    OffState::Clock => "clock",
+                };
+                cfg.set_off_mode(id, crate::offmode::draws_nothing(id));
+            }
+            // VALIDATED, unlike the legacy command above. With open string ids
+            // an unchecked assignment would let a typo — or an export from a
+            // fork offering modes this server doesn't — park a board on a mode
+            // nothing can render.
+            Command::SetOffMode { id } => {
+                if crate::offmode::offers(&id) {
+                    cfg.set_off_mode(&id, crate::offmode::draws_nothing(&id));
+                } else {
+                    tracing::warn!("board {board_id}: unknown off mode {id:?}, ignoring");
+                }
+            }
+            Command::SetOffModeParam { key, value } => {
+                // Bounded: this map is persisted and cloned on every render.
+                const MAX_KEYS: usize = 8;
+                if key.len() <= 64
+                    && value.len() <= 256
+                    && (cfg.off_mode_params.len() < MAX_KEYS || cfg.off_mode_params.contains_key(&key))
+                {
+                    if value.is_empty() {
+                        cfg.off_mode_params.remove(&key);
+                    } else {
+                        cfg.off_mode_params.insert(key, value);
+                    }
+                }
+            }
             Command::SetSleepHours { hours } => cfg.sleep_hours = hours.clamp(1, 72),
             // Indefinite off: drop the auto-wake but leave the power state alone
             // (only meaningful while asleep; harmless no-op when awake).

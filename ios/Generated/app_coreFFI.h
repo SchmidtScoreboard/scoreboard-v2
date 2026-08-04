@@ -274,28 +274,28 @@ typedef void (*UniffiCallbackInterfaceClientListenerMethod2)(uint64_t, RustBuffe
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD3
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD3
-typedef void (*UniffiCallbackInterfaceClientListenerMethod3)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceClientListenerMethod3)(uint64_t, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD4
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD4
-typedef void (*UniffiCallbackInterfaceClientListenerMethod4)(uint64_t, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceClientListenerMethod4)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD5
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD5
-typedef void (*UniffiCallbackInterfaceClientListenerMethod5)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceClientListenerMethod5)(uint64_t, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD6
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD6
-typedef void (*UniffiCallbackInterfaceClientListenerMethod6)(uint64_t, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceClientListenerMethod6)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
@@ -309,7 +309,7 @@ typedef void (*UniffiCallbackInterfaceClientListenerMethod7)(uint64_t, RustBuffe
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD8
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD8
-typedef void (*UniffiCallbackInterfaceClientListenerMethod8)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceClientListenerMethod8)(uint64_t, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
@@ -323,14 +323,21 @@ typedef void (*UniffiCallbackInterfaceClientListenerMethod9)(uint64_t, RustBuffe
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD10
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD10
-typedef void (*UniffiCallbackInterfaceClientListenerMethod10)(uint64_t, RustBuffer, RustBuffer, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceClientListenerMethod10)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD11
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD11
-typedef void (*UniffiCallbackInterfaceClientListenerMethod11)(uint64_t, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceClientListenerMethod11)(uint64_t, RustBuffer, RustBuffer, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD12
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD12
+typedef void (*UniffiCallbackInterfaceClientListenerMethod12)(uint64_t, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
@@ -341,15 +348,16 @@ typedef struct UniffiVTableCallbackInterfaceClientListener {
     UniffiCallbackInterfaceClientListenerMethod0 _Nonnull onConnection;
     UniffiCallbackInterfaceClientListenerMethod1 _Nonnull onBoardState;
     UniffiCallbackInterfaceClientListenerMethod2 _Nonnull onCatalog;
-    UniffiCallbackInterfaceClientListenerMethod3 _Nonnull onConfig;
-    UniffiCallbackInterfaceClientListenerMethod4 _Nonnull onGames;
-    UniffiCallbackInterfaceClientListenerMethod5 _Nonnull onFrame;
-    UniffiCallbackInterfaceClientListenerMethod6 _Nonnull onPaired;
-    UniffiCallbackInterfaceClientListenerMethod7 _Nonnull onPairFailed;
-    UniffiCallbackInterfaceClientListenerMethod8 _Nonnull onSettingsExport;
-    UniffiCallbackInterfaceClientListenerMethod9 _Nonnull onImportResult;
-    UniffiCallbackInterfaceClientListenerMethod10 _Nonnull onBoardVersion;
-    UniffiCallbackInterfaceClientListenerMethod11 _Nonnull onFirmwareList;
+    UniffiCallbackInterfaceClientListenerMethod3 _Nonnull onOffModes;
+    UniffiCallbackInterfaceClientListenerMethod4 _Nonnull onConfig;
+    UniffiCallbackInterfaceClientListenerMethod5 _Nonnull onGames;
+    UniffiCallbackInterfaceClientListenerMethod6 _Nonnull onFrame;
+    UniffiCallbackInterfaceClientListenerMethod7 _Nonnull onPaired;
+    UniffiCallbackInterfaceClientListenerMethod8 _Nonnull onPairFailed;
+    UniffiCallbackInterfaceClientListenerMethod9 _Nonnull onSettingsExport;
+    UniffiCallbackInterfaceClientListenerMethod10 _Nonnull onImportResult;
+    UniffiCallbackInterfaceClientListenerMethod11 _Nonnull onBoardVersion;
+    UniffiCallbackInterfaceClientListenerMethod12 _Nonnull onFirmwareList;
     UniffiCallbackInterfaceFree _Nonnull uniffiFree;
 } UniffiVTableCallbackInterfaceClientListener;
 
@@ -514,9 +522,19 @@ void uniffi_app_core_fn_method_scoreboardclient_set_league_spoiler(void*_Nonnull
 void uniffi_app_core_fn_method_scoreboardclient_set_listener(void*_Nonnull ptr, uint64_t listener, RustCallStatus *_Nonnull out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_OFF_STATE
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_OFF_STATE
-void uniffi_app_core_fn_method_scoreboardclient_set_off_state(void*_Nonnull ptr, RustBuffer board_id, RustBuffer off_state, RustCallStatus *_Nonnull out_status
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_OFF_MODE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_OFF_MODE
+void uniffi_app_core_fn_method_scoreboardclient_set_off_mode(void*_Nonnull ptr, RustBuffer board_id, RustBuffer id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_OFF_MODE_PARAM
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_OFF_MODE_PARAM
+void uniffi_app_core_fn_method_scoreboardclient_set_off_mode_param(void*_Nonnull ptr, RustBuffer board_id, RustBuffer key, RustBuffer value, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_OFF_STATE_REMOVED
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_OFF_STATE_REMOVED
+void uniffi_app_core_fn_method_scoreboardclient_set_off_state_removed(void*_Nonnull ptr, RustBuffer board_id, RustBuffer off_state, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_POWER
@@ -1045,9 +1063,21 @@ uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_listener(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_OFF_STATE
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_OFF_STATE
-uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_off_state(void
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_OFF_MODE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_OFF_MODE
+uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_off_mode(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_OFF_MODE_PARAM
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_OFF_MODE_PARAM
+uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_off_mode_param(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_OFF_STATE_REMOVED
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_OFF_STATE_REMOVED
+uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_off_state_removed(void
     
 );
 #endif
@@ -1126,6 +1156,12 @@ uint16_t uniffi_app_core_checksum_method_clientlistener_on_board_state(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_CATALOG
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_CATALOG
 uint16_t uniffi_app_core_checksum_method_clientlistener_on_catalog(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_OFF_MODES
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_OFF_MODES
+uint16_t uniffi_app_core_checksum_method_clientlistener_on_off_modes(void
     
 );
 #endif

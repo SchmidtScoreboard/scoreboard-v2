@@ -69,6 +69,9 @@ final class ListenerAdapter: ClientListener {
     func onCatalog(sports: [UiSport]) {
         Task { @MainActor in self.model?.applyCatalog(self.serverUrl, sports) }
     }
+    func onOffModes(modes: [UiOffMode]) {
+        Task { @MainActor in self.model?.applyOffModes(self.serverUrl, modes) }
+    }
     func onConfig(boardId: String, config: UiBoardConfig) {
         Task { @MainActor in self.model?.applyConfig(boardId, config) }
     }
@@ -117,7 +120,8 @@ struct BoardInfo {
     var extraGameIds: Set<String> = []
     var excludedGameIds: Set<String> = []
     var focusedGameId: String?
-    var offState: UiOffState = .clock
+    var offMode: String = "clock"
+    var offModeParams: [String: String] = [:]
     var sleepHours: UInt32 = 24
     var dwellSecs: UInt32 = 10
     var leagueDwell: [String: UInt32] = [:]     // sportId -> per-league override
@@ -179,10 +183,30 @@ final class BoardViewModel: ObservableObject {
     /// when the demo server won, every real league card silently vanished.
     @Published private var liveGamesByServer: [String: [UiGame]] = [:]
     @Published private var sportsByServer: [String: [UiSport]] = [:]
+    @Published private var offModesByServer: [String: [UiOffMode]] = [:]
     /// The selected board's server owns what the UI reads.
     var liveGames: [UiGame] { liveGamesByServer[serverURL(of: selectedBoardId)] ?? [] }
     var sports: [UiSport] { sportsByServer[serverURL(of: selectedBoardId)] ?? [] }
     func applyCatalog(_ server: String, _ list: [UiSport]) { sportsByServer[server] = list }
+    func applyOffModes(_ server: String, _ list: [UiOffMode]) { offModesByServer[server] = list }
+
+    /// The selected board's server's off modes. The fallback below is the ONLY
+    /// place this app names a built-in mode id, and it is a constant, not a
+    /// dispatch: it covers a server too old to declare any, and the moment
+    /// before the first catalog lands. Anything that branches on an id beyond
+    /// this point gives away the whole point of declaring them — a forked
+    /// server adding a mode with no app release.
+    var offModes: [UiOffMode] {
+        let declared = offModesByServer[serverURL(of: selectedBoardId)] ?? []
+        guard declared.isEmpty else { return declared }
+        return [
+            UiOffMode(id: "clock", label: "Clock",
+                      description: "The time, in the scoreboard's timezone.",
+                      preview: "/offmode/clock.png", input: nil),
+            UiOffMode(id: "blank", label: "Nothing",
+                      description: "The panel stays dark.", preview: nil, input: nil),
+        ]
+    }
     func applyGames(_ server: String, _ games: [UiGame]) { liveGamesByServer[server] = games }
     /// The firmware menu the server hosts (reply to `listFirmware`) — global to
     /// the server, refreshed on demand by the DEBUG firmware picker.
@@ -325,6 +349,7 @@ final class BoardViewModel: ObservableObject {
         if let pending = pendingPairServer { needed.insert(pending) }
         clients = clients.filter { needed.contains($0.key) }
         sportsByServer = sportsByServer.filter { needed.contains($0.key) }
+        offModesByServer = offModesByServer.filter { needed.contains($0.key) }
         liveGamesByServer = liveGamesByServer.filter { needed.contains($0.key) }
     }
     /// Where an in-flight pairing will file the new board.
@@ -418,6 +443,7 @@ final class BoardViewModel: ObservableObject {
         boards = [:]
         for id in boardIds { boards[id] = BoardInfo(name: boardNames[id]) }
         sportsByServer = [:]
+        offModesByServer = [:]
         liveGamesByServer = [:]
         frames = [:]
         start()
@@ -1110,7 +1136,8 @@ final class BoardViewModel: ObservableObject {
             $0.name = c.name
             $0.favorites = fav
             $0.championship = champ
-            $0.offState = c.offState
+            $0.offMode = c.offMode
+            $0.offModeParams = c.offModeParams
             $0.sleepHours = c.sleepHours
             $0.dwellSecs = c.dwellSecs
             $0.leagueDwell = dwell
@@ -1133,10 +1160,15 @@ final class BoardViewModel: ObservableObject {
     }
 
     // ---- off behavior + sleep duration (selected board; optimistic) ----
-    func setOffState(_ s: UiOffState) {
-        guard let id = selectedBoardId else { return }
-        mutate(id) { $0.offState = s }
-        client?.setOffState(boardId: id, offState: s)
+    func setOffMode(_ id: String) {
+        guard let bid = selectedBoardId else { return }
+        mutate(bid) { $0.offMode = id }
+        client?.setOffMode(boardId: bid, id: id)
+    }
+    func setOffModeParam(_ key: String, _ value: String) {
+        guard let bid = selectedBoardId else { return }
+        mutate(bid) { $0.offModeParams[key] = value }
+        client?.setOffModeParam(boardId: bid, key: key, value: value)
     }
 
     func setSleepHours(_ h: UInt32) {
@@ -2554,8 +2586,11 @@ enum SettingsInfoTopic: String, Identifiable {
         switch self {
         case .whenOff:
             """
-            What the panel shows while the scoreboard is off — a dim clock, \
-            or nothing at all.
+            What the panel shows while the scoreboard is off, dimmed to \
+            whatever brightness you have set.
+
+            The choices come from your server, so a server running custom \
+            screens will offer them here too.
             """
         case .sleep:
             """
@@ -4473,6 +4508,7 @@ struct SettingsView: View {
                 // board-scoped sections would just be empty rows there.
                 if model.selectedBoardId != nil {
                     settingsSection
+                    offModeSection
                     spoilerSection
                     demoSection
                     transferSection
@@ -4627,21 +4663,6 @@ struct SettingsView: View {
     private var settingsSection: some View {
         Section("Settings") {
             HStack(spacing: 6) {
-                Text("When off")
-                infoButton(.whenOff)
-                Spacer()
-                Picker("When off", selection: Binding(
-                    get: { model.current.offState },
-                    set: { model.setOffState($0) }
-                )) {
-                    Text("Clock").tag(UiOffState.clock)
-                    Text("Blank").tag(UiOffState.blank)
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-            }
-
-            HStack(spacing: 6) {
                 Text("Sleep duration")
                 infoButton(.sleep)
                 Spacer()
@@ -4713,6 +4734,75 @@ struct SettingsView: View {
                 )
                 .foregroundStyle(.orange)
             }
+        }
+    }
+
+    /// What the panel shows while the scoreboard is off.
+    ///
+    /// Every row here comes from the SERVER (`model.offModes`) — label,
+    /// subtitle, preview path, and the optional text input all travel in the
+    /// descriptor. Nothing in this view knows what any mode id means, which is
+    /// what lets a forked server add "Stocks" and have this app list it, draw
+    /// its preview, and let someone pick it, with no rebuild.
+    private var offModeSection: some View {
+        Section {
+            ForEach(model.offModes, id: \.id) { mode in
+                offModeRow(mode)
+                // The mode's own input, shown only while it is selected — a
+                // ZIP under a weather row, tickers under a stocks row.
+                if mode.id == model.current.offMode, let input = mode.input {
+                    offModeInputRow(input)
+                }
+            }
+        } header: {
+            HStack {
+                Text("When off")
+                Spacer()
+                infoButton(.whenOff)
+            }
+        }
+    }
+
+    private func offModeRow(_ mode: UiOffMode) -> some View {
+        let selected = mode.id == model.current.offMode
+        return Button {
+            model.setOffMode(mode.id)
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(mode.label).foregroundStyle(.primary)
+                    Text(mode.description).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                if let path = mode.preview, let url = URL(string: "\(model.httpBase)\(path)") {
+                    // grayFailure: a forked or older server may not host this
+                    // preview, and an alarming badge there would be noise.
+                    FetchedFrameImage(url: url, grayFailure: true)
+                        .ledPanel(width: 96, height: 48)
+                } else {
+                    // No preview declared means the mode draws nothing. Filled
+                    // locally: a fetched all-black PNG is byte-identical to the
+                    // loading state, so it would look broken.
+                    Rectangle().fill(.black).ledPanel(width: 96, height: 48)
+                }
+            }
+        }
+    }
+
+    private func offModeInputRow(_ input: UiOffModeInput) -> some View {
+        HStack(spacing: 8) {
+            Text(input.label).font(.subheadline)
+            Spacer()
+            TextField(input.placeholder, text: Binding(
+                get: { model.current.offModeParams[input.key] ?? "" },
+                set: { model.setOffModeParam(input.key, String($0.prefix(Int(input.maxLen)))) }
+            ))
+            .multilineTextAlignment(.trailing)
+            .textInputAutocapitalization(.characters)
+            .autocorrectionDisabled()
+            .frame(maxWidth: 160)
         }
     }
 

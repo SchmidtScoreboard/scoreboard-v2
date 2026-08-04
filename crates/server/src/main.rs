@@ -5,6 +5,7 @@
 mod bdf;
 mod espn;
 mod model;
+mod offmode;
 mod render;
 mod serve;
 mod team_names;
@@ -352,6 +353,7 @@ impl AppState {
             None => (HashMap::new(), HashSet::new(), HashMap::new()),
         };
         sanitize_configs(&catalog, &mut configs);
+        sanitize_off_modes(&mut configs);
         AppState {
             demo: Arc::new(Mutex::new(espn::demo_games(0, 0))),
             demo_source: Arc::new(espn::DemoSource::new()),
@@ -552,6 +554,21 @@ fn open_db(path: &std::path::Path) -> rusqlite::Result<Connection> {
 /// option-subscription leagues, orphaning their old pseudo-teams). Sports
 /// absent from the catalog are left untouched — the catalog may be the small
 /// mock fallback, and deleting real preferences against it would be data loss.
+/// Reset any board parked on an off mode this binary does not offer — a fork
+/// that removed a mode, or a settings import from a different server. Without
+/// this the board keeps a dangling id: `render_off_mode` falls back to the
+/// clock so the panel is fine, but the app would show no row selected.
+fn sanitize_off_modes(configs: &mut HashMap<String, BoardConfig>) {
+    for (board, cfg) in configs.iter_mut() {
+        if let Some(id) = cfg.off_mode.clone() {
+            if !offmode::offers(&id) {
+                tracing::warn!("board {board}: off mode {id:?} is not offered here; reverting");
+                cfg.off_mode = None;
+            }
+        }
+    }
+}
+
 fn sanitize_configs(catalog: &Catalog, configs: &mut HashMap<String, BoardConfig>) {
     let teamless: HashSet<&str> = catalog
         .sports
@@ -744,6 +761,7 @@ async fn main() {
         .route("/render/:id", get(get_render))
         .route("/game/:id", get(get_game))
         .route("/sample/:variant", get(get_sample))
+        .route("/offmode/:id", get(get_offmode))
         .route("/demo/games", get(get_demo_games))
         .route("/demo/render/:id", get(get_demo_render))
         // The app's troubleshooting-sheet images: real board screens rendered
@@ -1059,6 +1077,38 @@ fn sample_game() -> model::Game {
 ///
 /// `no-store`, unlike the day-cached `/guide`: the slate advances with the poll
 /// loop, so the bytes are not stable.
+/// GET /offmode/{id}.png — what an off mode looks like on the panel, for the
+/// app's settings rows. Rendered at a FIXED time so the bytes are stable and
+/// the day-long cache is safe (same rule as `/guide`).
+///
+/// 404 on an unknown id rather than falling back to a picture of something
+/// else: the app treats a failed preview as "no image", which is honest, while
+/// a wrong image silently misrepresents what the board will do.
+async fn get_offmode(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let id = id.strip_suffix(".png").unwrap_or(&id);
+    if !offmode::offers(id) {
+        return (axum::http::StatusCode::NOT_FOUND, format!("no off mode '{id}'")).into_response();
+    }
+    let params = std::collections::BTreeMap::new();
+    let frames =
+        offmode::render_off_mode(id, &offmode::OffCtx { tz: None, params: &params, preview: true });
+    let Some(first) = frames.into_iter().next() else {
+        // A mode that draws nothing declares no preview, so the app never asks.
+        return (axum::http::StatusCode::NOT_FOUND, "off mode draws nothing").into_response();
+    };
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "image/png"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        render_png(&first.px),
+    )
+        .into_response()
+}
+
 async fn get_demo_games(State(s): State<AppState>) -> axum::response::Response {
     use axum::response::IntoResponse;
     let games = s.demo.lock().unwrap().clone();
@@ -2031,30 +2081,26 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
 
     // Priority 3: idle / asleep — the configured off-state (server-rendered clock
     // or a blank panel). Applies both to power-off and powered-on-but-no-games.
-    let rotation = if cfg.off_state == OffState::Clock {
-        use chrono::Timelike;
-        // Board-local wall time: the configured IANA zone, else the server's
-        // local zone (which on Railway is UTC — hence per-board timezones).
-        let (hour, minute) = match tz {
-            Some(tz) => {
-                let now = chrono::Utc::now().with_timezone(&tz);
-                (now.hour(), now.minute())
-            }
-            None => {
-                let now = chrono::Local::now();
-                (now.hour(), now.minute())
-            }
-        };
-        let (id, px) = render::render_clock(hour, minute);
-        state.cache_frame(id.clone(), px);
-        vec![RotationEntry { frame_id: id, dwell_ms: 60_000, scroll: false }]
-    } else {
-        vec![]
-    };
+    // The ONLY place the off mode is resolved. `offmode::render_off_mode` owns
+    // what each mode draws; everything here is slate-agnostic.
+    let rotation: Vec<RotationEntry> = offmode::render_off_mode(
+        cfg.off_mode_id(),
+        &offmode::OffCtx { tz, params: &cfg.off_mode_params, preview: false },
+    )
+    .into_iter()
+    .map(|f| {
+        state.cache_frame(f.id.clone(), f.px);
+        RotationEntry { frame_id: f.id, dwell_ms: f.dwell_ms, scroll: false }
+    })
+    .collect();
     Manifest {
         display_on: !rotation.is_empty(),
+        // DERIVED, not copied. `OffState` is a closed enum with no serde
+        // default on the wire, and firmware drops an unparseable message
+        // silently — so a board sent a novel value would freeze on its last
+        // manifest forever. Boards learn only "dark or not".
+        off_state: if rotation.is_empty() { OffState::Blank } else { OffState::Clock },
         rotation,
-        off_state: cfg.off_state,
         brightness: cfg.brightness,
         epoch: 0,
         countdown_ms: None,
@@ -3050,6 +3096,7 @@ fn mock_catalog() -> Catalog {
         championship_options: championship_options_for(id),
     };
     Catalog {
+        off_modes: offmode::off_modes(),
         sports: vec![
             sport(
                 "nhl",
@@ -5706,6 +5753,45 @@ mod tests {
     /// The demo routes: JSON discovery + a PNG per game, both serving the
     /// synthetic slate regardless of any board config, and both surviving an
     /// id nobody has.
+    /// The preview route the app's off-mode rows fetch.
+    #[tokio::test]
+    async fn offmode_preview_route_serves_declared_modes_only() {
+        let app = Router::new().route("/offmode/:id", get(get_offmode));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let resp = reqwest::get(format!("http://{addr}/offmode/clock.png")).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.headers().get(reqwest::header::CONTENT_TYPE).unwrap(), "image/png");
+        let first = resp.bytes().await.unwrap();
+        assert_eq!(&first[..8], b"\x89PNG\r\n\x1a\n");
+
+        // Byte-stable: the app caches these for a day.
+        let again = reqwest::get(format!("http://{addr}/offmode/clock.png")).await.unwrap();
+        assert_eq!(again.bytes().await.unwrap(), first, "preview must not drift with the minute");
+
+        // A mode that draws nothing declares no preview, and 404s if asked.
+        assert_eq!(reqwest::get(format!("http://{addr}/offmode/blank.png")).await.unwrap().status(), 404);
+        // An id this server does not offer 404s rather than showing something else.
+        assert_eq!(reqwest::get(format!("http://{addr}/offmode/stocks")).await.unwrap().status(), 404);
+    }
+
+    /// A board parked on a mode this binary does not offer still lights up —
+    /// and the manifest never carries anything but the closed legacy enum.
+    #[test]
+    fn a_forked_off_mode_never_reaches_the_board_as_an_unknown_value() {
+        let state = AppState::new_ephemeral();
+        state.games.lock().unwrap().clear(); // idle -> off-mode path
+        let mut cfg = BoardConfig::default();
+        cfg.set_off_mode("stocks", false); // a mode this server does not have
+        state.configs.lock().unwrap().insert("b".into(), cfg);
+        let m = manifest_for_board(&state, "b");
+        assert!(!m.rotation.is_empty(), "an unknown mode falls back to the clock, not to darkness");
+        assert_eq!(m.off_state, OffState::Clock);
+        assert!(m.display_on);
+    }
+
     #[tokio::test]
     async fn demo_routes_serve_the_synthetic_slate() {
         let state = AppState::new_ephemeral();

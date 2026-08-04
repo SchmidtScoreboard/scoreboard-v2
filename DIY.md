@@ -271,6 +271,32 @@ flags are there too. Most display work never needs a physical board.
 
 ---
 
+## Adding your own idle screen
+
+What the panel shows while the scoreboard is off — the clock, a blank panel —
+is **declared by your server**, not built into the app. Add one in
+[`crates/server/src/offmode.rs`](crates/server/src/offmode.rs): an entry in
+`off_modes()` describing it, and an arm in `render_off_mode()` that draws it.
+
+That's the whole change. The stock iOS app will list your mode, fetch its
+preview, and let you pick it, because it never learns what any mode id means —
+every string it draws travels in the descriptor. No protocol bump, no app
+rebuild, no firmware release.
+
+Two rules keep that working:
+
+- **Put every string the row needs in the descriptor** (label, subtitle, the
+  input's placeholder). The moment app code reads `if id == "weather"`, forks
+  need app releases again.
+- **A mode may declare at most one text input** — a ZIP, a list of tickers.
+  Anything richer (two fields, a picker, live validation) needs an app change.
+  That ceiling is deliberate: a field-type enum would be a closed enum in the
+  app's generated bindings, which is the exact thing this design avoids.
+
+Boards never see your mode's id. They receive frames plus a "dark or lit" flag,
+so an old board on an old firmware renders your screen without knowing it
+exists.
+
 ## Where to go next
 
 - **[docs/cli.md](docs/cli.md)** — every server flag, route, and env var; the

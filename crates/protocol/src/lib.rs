@@ -8,6 +8,7 @@
 
 extern crate alloc;
 
+use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -69,6 +70,42 @@ pub struct ChampionshipOption {
     pub label: String,
 }
 
+/// One off/idle behavior the SERVER offers, declared as data so a forked server
+/// can add an off mode and the stock app picks it up with no rebuild.
+///
+/// The app must NEVER recognize an `id`. Every string it needs to draw the row
+/// lives in this struct — the moment something reads `if id == "weather"`, the
+/// fork-without-an-app-release property is gone. Order is menu order.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct OffModeDescriptor {
+    /// Stable contract. "clock" and "blank" are reserved.
+    pub id: String,
+    pub label: String,
+    /// Row subtitle — the one-line explanation of what the panel will show.
+    pub description: String,
+    /// Path of the preview PNG ("/offmode/clock.png"). `None` means this mode
+    /// draws nothing: the app fills a black rectangle locally rather than
+    /// fetching an all-black image it cannot distinguish from a failed load.
+    #[serde(default)]
+    pub preview: Option<String>,
+    /// AT MOST ONE free-text input (a ZIP for weather, tickers for stocks).
+    /// Deliberately not a field-schema: a field-KIND enum would itself be a
+    /// closed enum in the uniffi bindings, which is the exact cliff this whole
+    /// design exists to avoid. A mode needing two inputs, a picker, or
+    /// validation feedback needs an app release — that is the stated cost.
+    #[serde(default)]
+    pub input: Option<OffModeInput>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct OffModeInput {
+    /// Key into `BoardConfig::off_mode_params`.
+    pub key: String,
+    pub label: String,
+    pub placeholder: String,
+    pub max_len: u32,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SportDescriptor {
     pub id: String,
@@ -80,6 +117,10 @@ pub struct SportDescriptor {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Catalog {
     pub sports: Vec<SportDescriptor>,
+    /// The off modes this server offers. `#[serde(default)]` so an app talking
+    /// to a server that predates them sees an empty list and falls back.
+    #[serde(default)]
+    pub off_modes: Vec<OffModeDescriptor>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -365,9 +406,22 @@ pub struct BoardConfig {
     /// the app's board switcher. `None` until named.
     #[serde(default)]
     pub name: Option<String>,
-    /// What the panel shows while the display is off / idle (server-rendered).
+    /// LEGACY, and frozen permanently. Kept load-bearing for two audiences: an
+    /// OLDER SERVER binary (a rollback) and an ALREADY-INSTALLED app whose
+    /// uniffi enum is closed and would abort the whole config decode on an
+    /// unknown value. Derived from `off_mode` on every write — Blank when the
+    /// mode draws nothing, Clock otherwise — and never read once `off_mode` is
+    /// set. This is precisely why a forked off mode cannot make anyone's
+    /// BoardConfig fail to parse.
     #[serde(default)]
     pub off_state: OffState,
+    /// The server-declared off mode (`Catalog::off_modes[].id`). None = a row
+    /// written before this field existed; `off_mode_id()` falls back.
+    #[serde(default)]
+    pub off_mode: Option<String>,
+    /// Per-mode input values, keyed by `OffModeInput::key`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub off_mode_params: BTreeMap<String, String>,
     /// How long a button-press sleep lasts before the board wakes itself.
     #[serde(default = "default_sleep_hours")]
     pub sleep_hours: u32,
@@ -457,9 +511,15 @@ pub struct PortableSettings {
     /// How long a button-press sleep lasts before the board wakes itself.
     #[serde(default = "default_sleep_hours")]
     pub sleep_hours: u32,
-    /// What the panel shows while the display is off / idle.
+    /// What the panel shows while the display is off / idle. Legacy twin of
+    /// `off_mode`, kept so an export stays readable by an older binary.
     #[serde(default)]
     pub off_state: OffState,
+    /// The declared off mode. Absent in blobs exported before this existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub off_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub off_mode_params: BTreeMap<String, String>,
     /// How spoiler-protected games render (strict = matchup + time only).
     #[serde(default)]
     pub spoiler_mode: SpoilerMode,
@@ -485,6 +545,8 @@ impl From<&BoardConfig> for PortableSettings {
             dwell_secs: cfg.dwell_secs,
             sleep_hours: cfg.sleep_hours,
             off_state: cfg.off_state,
+            off_mode: cfg.off_mode.clone(),
+            off_mode_params: cfg.off_mode_params.clone(),
             spoiler_mode: cfg.spoiler_mode,
             spoiler_all: cfg.spoiler_all,
             sports: cfg.sports.clone(),
@@ -502,6 +564,11 @@ impl PortableSettings {
         cfg.dwell_secs = self.dwell_secs;
         cfg.sleep_hours = self.sleep_hours;
         cfg.off_state = self.off_state;
+        // An export from a FORKED server can name a mode this one does not
+        // offer. Carry it across anyway and let the server re-clamp it against
+        // its own catalog — the same shape as the brightness/dwell re-clamp.
+        cfg.off_mode = self.off_mode.clone();
+        cfg.off_mode_params = self.off_mode_params.clone();
         cfg.spoiler_mode = self.spoiler_mode;
         cfg.spoiler_all = self.spoiler_all;
         cfg.sports = self.sports.clone();
@@ -510,6 +577,25 @@ impl PortableSettings {
         if let Some(tz) = &self.timezone {
             cfg.timezone = Some(tz.clone());
         }
+    }
+}
+
+impl BoardConfig {
+    /// The off mode to render: the declared id, else the legacy enum. Every
+    /// server-side reader goes through this, so a config written before
+    /// `off_mode` existed keeps behaving exactly as it did.
+    pub fn off_mode_id(&self) -> &str {
+        self.off_mode.as_deref().unwrap_or(match self.off_state {
+            OffState::Blank => "blank",
+            OffState::Clock => "clock",
+        })
+    }
+
+    /// Write BOTH fields. `draws_nothing` says whether this mode leaves the
+    /// panel dark, which is all the legacy enum was ever able to express.
+    pub fn set_off_mode(&mut self, id: &str, draws_nothing: bool) {
+        self.off_mode = Some(id.to_string());
+        self.off_state = if draws_nothing { OffState::Blank } else { OffState::Clock };
     }
 }
 
@@ -524,6 +610,8 @@ impl Default for BoardConfig {
             focused_game_id: None,
             name: None,
             off_state: OffState::default(),
+            off_mode: None,
+            off_mode_params: BTreeMap::new(),
             sleep_hours: default_sleep_hours(),
             dwell_secs: default_dwell_secs(),
             wake_at: None,
@@ -580,6 +668,11 @@ pub enum Command {
     SetSpoilerAll { on: bool },
     /// Swap this board between live games and the synthetic demo slate.
     SetDemoData { on: bool },
+    /// Pick a server-declared off mode by id. The server validates it against
+    /// its own catalog and ignores an id it does not offer.
+    SetOffMode { id: String },
+    /// Set one off-mode input value (`OffModeInput::key`).
+    SetOffModeParam { key: String, value: String },
     /// Spoiler-protect a whole league.
     SetLeagueSpoiler { sport_id: String, on: bool },
     /// Spoiler-protect one team's games.
@@ -1151,6 +1244,54 @@ mod fw_channel_tests {
     fn config_missing_channel_defaults_to_stable() {
         let cfg: BoardConfig = serde_json::from_str("{\"brightness\":80,\"power\":true,\"sports\":[]}").unwrap();
         assert_eq!(cfg.fw_channel, FwChannel::Stable);
+    }
+
+    /// A config written before off modes existed must keep behaving exactly as
+    /// it did — the legacy enum is the fallback, not a default guess.
+    #[test]
+    fn a_config_without_off_mode_falls_back_to_the_legacy_enum() {
+        let clock: BoardConfig =
+            serde_json::from_str(r#"{"brightness":80,"power":true,"sports":[],"off_state":"Clock"}"#)
+                .unwrap();
+        assert_eq!(clock.off_mode_id(), "clock");
+        let blank: BoardConfig =
+            serde_json::from_str(r#"{"brightness":80,"power":true,"sports":[],"off_state":"Blank"}"#)
+                .unwrap();
+        assert_eq!(blank.off_mode_id(), "blank");
+    }
+
+    /// The fleet-safety invariant. `Manifest::off_state` is a closed enum with
+    /// no serde default, and firmware drops an unparseable message silently —
+    /// so a forked mode id must never be able to reach a board. Writing the
+    /// mode always writes the legacy twin, and the twin only ever says "dark"
+    /// or "lit".
+    #[test]
+    fn setting_a_forked_mode_still_leaves_a_legacy_value_a_board_can_parse() {
+        let mut cfg = BoardConfig::default();
+        cfg.set_off_mode("stocks", false);
+        assert_eq!(cfg.off_mode_id(), "stocks");
+        assert_eq!(cfg.off_state, OffState::Clock, "a lit mode reads as Clock to old readers");
+        let json = serde_json::to_string(&cfg).unwrap();
+        // An OLD binary parsing this must succeed and see a sane off_state.
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["off_state"], "Clock");
+
+        cfg.set_off_mode("blank", true);
+        assert_eq!(cfg.off_state, OffState::Blank, "a dark mode reads as Blank");
+    }
+
+    /// Off-mode selection travels with an export, so cloning a setup onto a
+    /// second board carries the idle screen too.
+    #[test]
+    fn portable_settings_carry_the_off_mode() {
+        let mut source = BoardConfig::default();
+        source.set_off_mode("weather", false);
+        source.off_mode_params.insert("zip".into(), "60601".into());
+        let json = serde_json::to_string(&PortableSettings::from(&source)).unwrap();
+        let mut target = BoardConfig::default();
+        serde_json::from_str::<PortableSettings>(&json).unwrap().apply_to(&mut target);
+        assert_eq!(target.off_mode_id(), "weather");
+        assert_eq!(target.off_mode_params.get("zip").map(String::as_str), Some("60601"));
     }
 
     /// The guard against a silent config wipe. `load_configs` drops a row whose
