@@ -29,6 +29,7 @@ const GREY: Rgb888 = Rgb888::new(160, 160, 160);
 /// Public aliases for callers outside this module (diagnostic frames).
 pub const YELLOW_PUB: Rgb888 = YELLOW;
 pub const GREY_PUB: Rgb888 = GREY;
+pub const WHITE_PUB: Rgb888 = WHITE;
 const ACCENT_W: u32 = 2;
 const SCORE_RIGHT: i32 = 61; // 64 - 3
 
@@ -1513,5 +1514,671 @@ mod kern_tests {
         // (a real driver code) fits comfortably.
         let (vw, vavail) = leaderboard_name_metrics("VER", "+1.0", true);
         assert!(vw <= vavail, "an F1 code fits: {vw} <= {vavail}");
+    }
+}
+
+// ---- weather off-mode screens ----------------------------------------------
+//
+// Four layouts over one icon set. The icons are drawn from string art so the
+// shapes stay editable; every one has an EVEN ink height, because the
+// temperature beside them is 12 rows and its optical centre falls on a
+// half-pixel — an odd-height icon lands half a row off, which is exactly the
+// misalignment these layouts were rebuilt to fix. `icons_are_well_formed`
+// enforces it.
+
+const WX_CLEAR: [&str; 13] = [
+    "      S      ",
+    "  S       S  ",
+    "    SSSSS    ",
+    "   SSSSSSS   ",
+    "  SSSSSSSSS  ",
+    "S SSSSSSSSS S",
+    "S SSSSSSSSS S",
+    "  SSSSSSSSS  ",
+    "   SSSSSSS   ",
+    "    SSSSS    ",
+    "  S       S  ",
+    "      S      ",
+    "             ",
+];
+const WX_PARTLY: [&str; 13] = [
+    "   S         ",
+    " S   S       ",
+    "  SSS        ",
+    "S SSS S      ",
+    "  SSS        ",
+    " S   S       ",
+    "             ",
+    "       CCCC  ",
+    "   CCCCCCCCC ",
+    "  CCCCCCCCCCC",
+    " CCCCCCCCCCCC",
+    "  CCCCCCCCCC ",
+    "             ",
+];
+const WX_CLOUDY: [&str; 13] = [
+    "  DDDDD      ",
+    " DDDDDDDDD   ",
+    "DDDDDDDDDDD  ",
+    " DDDDDDDDD   ",
+    "             ",
+    "             ",
+    "       CCCC  ",
+    "   CCCCCCCCC ",
+    "  CCCCCCCCCCC",
+    " CCCCCCCCCCCC",
+    " CCCCCCCCCCCC",
+    "  CCCCCCCCCC ",
+    "             ",
+];
+const WX_FOG: [&str; 13] = [
+    " FFFFFFFFFFF ",
+    "             ",
+    "             ",
+    "FFFFFFFFFFFFF",
+    "             ",
+    "             ",
+    "  FFFFFFFFF  ",
+    "             ",
+    "             ",
+    " FFFFFFFFFFF ",
+    "             ",
+    "             ",
+    "             ",
+];
+const WX_DRIZZLE: [&str; 13] = [
+    "      CCCC   ",
+    "   CCCCCCCCC ",
+    "  CCCCCCCCCCC",
+    " CCCCCCCCCCCC",
+    " CCCCCCCCCCCC",
+    "  CCCCCCCCCC ",
+    "             ",
+    "   R   R   R ",
+    "             ",
+    "  R   R   R  ",
+    "             ",
+    "             ",
+    "             ",
+];
+const WX_RAIN: [&str; 13] = [
+    "      CCCC   ",
+    "   CCCCCCCCC ",
+    "  CCCCCCCCCCC",
+    " CCCCCCCCCCCC",
+    " CCCCCCCCCCCC",
+    "  CCCCCCCCCC ",
+    "             ",
+    "   R   R   R ",
+    "  R   R   R  ",
+    " R   R   R   ",
+    "             ",
+    "             ",
+    "             ",
+];
+const WX_SLEET: [&str; 13] = [
+    "      CCCC   ",
+    "   CCCCCCCCC ",
+    "  CCCCCCCCCCC",
+    " CCCCCCCCCCCC",
+    " CCCCCCCCCCCC",
+    "  CCCCCCCCCC ",
+    "             ",
+    "   R   R   R ",
+    "             ",
+    "  W   W   W  ",
+    "             ",
+    "             ",
+    "             ",
+];
+const WX_SNOW: [&str; 13] = [
+    "      CCCC   ",
+    "   CCCCCCCCC ",
+    "  CCCCCCCCCCC",
+    " CCCCCCCCCCCC",
+    " CCCCCCCCCCCC",
+    "  CCCCCCCCCC ",
+    "             ",
+    " W  W  W  W  ",
+    "             ",
+    "   W  W  W   ",
+    "             ",
+    " W  W  W  W  ",
+    "             ",
+];
+const WX_STORM: [&str; 13] = [
+    "      CCCC   ",
+    "   CCCCCCCCC ",
+    "  CCCCCCCCCCC",
+    " CCCCCCCCCCCC",
+    "  CCCCCCCCCC ",
+    "       BB    ",
+    "      BB     ",
+    "     BB      ",
+    "   BBBBBB    ",
+    "      BB     ",
+    "     BB      ",
+    "    BB       ",
+    "             ",
+];
+const WX_CLEAR_NIGHT: [&str; 13] = [
+    "    MMMM     ",
+    "  MMM        ",
+    "  MM         ",
+    " MM          ",
+    " MM          ",
+    " MM          ",
+    " MM          ",
+    "  MM         ",
+    "  MMM        ",
+    "    MMMM     ",
+    "             ",
+    "             ",
+    "             ",
+];
+const WX_PARTLY_NIGHT: [&str; 13] = [
+    " MMM         ",
+    "MM           ",
+    "MM           ",
+    "MM           ",
+    "MM           ",
+    " MMM         ",
+    "             ",
+    "       CCCC  ",
+    "   CCCCCCCCC ",
+    "  CCCCCCCCCCC",
+    " CCCCCCCCCCCC",
+    "  CCCCCCCCCC ",
+    "             ",
+];
+
+const WX_CLEAR9: [&str; 9] = [
+    "    S    ",
+    "         ",
+    "   SSS   ",
+    "  SSSSS  ",
+    "S SSSSS S",
+    "  SSSSS  ",
+    "   SSS   ",
+    "    S    ",
+    "         ",
+];
+const WX_PARTLY9: [&str; 9] = [
+    " SSS     ",
+    "SSSSS    ",
+    " SSS     ",
+    "         ",
+    "     CCC ",
+    "   CCCCCC",
+    "  CCCCCCC",
+    "   CCCCC ",
+    "         ",
+];
+const WX_CLOUDY9: [&str; 9] = [
+    " DDDD    ",
+    "DDDDDD   ",
+    " DDDD    ",
+    "         ",
+    "   CCC   ",
+    " CCCCCCC ",
+    "CCCCCCCCC",
+    " CCCCCCC ",
+    "         ",
+];
+const WX_FOG9: [&str; 9] = [
+    " FFFFFFF ",
+    "         ",
+    "FFFFFFFFF",
+    "         ",
+    "         ",
+    " FFFFFFF ",
+    "         ",
+    "  FFFFF  ",
+    "         ",
+];
+const WX_DRIZZLE9: [&str; 9] = [
+    "   CCC   ",
+    " CCCCCCC ",
+    "CCCCCCCCC",
+    " CCCCCCC ",
+    "         ",
+    "  R   R  ",
+    "         ",
+    " R   R   ",
+    "         ",
+];
+const WX_RAIN9: [&str; 9] = [
+    "   CCC   ",
+    " CCCCCCC ",
+    "CCCCCCCCC",
+    " CCCCCCC ",
+    "         ",
+    "  R  R  R",
+    " R  R  R ",
+    "R  R  R  ",
+    "         ",
+];
+const WX_SLEET9: [&str; 9] = [
+    "   CCC   ",
+    " CCCCCCC ",
+    "CCCCCCCCC",
+    " CCCCCCC ",
+    "         ",
+    "  R   R  ",
+    "         ",
+    " W   W   ",
+    "         ",
+];
+const WX_SNOW9: [&str; 9] = [
+    "   CCC   ",
+    " CCCCCCC ",
+    "CCCCCCCCC",
+    " CCCCCCC ",
+    "         ",
+    " W  W  W ",
+    "         ",
+    "  W  W   ",
+    "         ",
+];
+const WX_STORM9: [&str; 9] = [
+    "  CCCCC  ",
+    " CCCCCCC ",
+    "CCCCCCCCC",
+    "    BB   ",
+    "   BB    ",
+    " BBBBB   ",
+    "   BB    ",
+    "  BB     ",
+    "         ",
+];
+const WX_CLEAR_NIGHT9: [&str; 9] = [
+    "  MMM    ",
+    " MM      ",
+    "MM       ",
+    "MM       ",
+    "MM       ",
+    "MM       ",
+    " MM      ",
+    "  MMM    ",
+    "         ",
+];
+const WX_PARTLY_NIGHT9: [&str; 9] = [
+    " MM      ",
+    "MM       ",
+    "MM       ",
+    " MM      ",
+    "    CCC  ",
+    "  CCCCCC ",
+    " CCCCCCCC",
+    "  CCCCCC ",
+    "         ",
+];
+
+/// The art for a symbol name, at the size a layout needs. Unknown names fall
+/// back to the plain cloud rather than to nothing: a blank sky reads as a
+/// broken screen, which is the same rule the off-mode dispatch follows.
+fn wx_art(name: &str, small: bool) -> &'static [&'static str] {
+    match (name, small) {
+        ("clear", false) => &WX_CLEAR,
+        ("clear", true) => &WX_CLEAR9,
+        ("partly", false) => &WX_PARTLY,
+        ("partly", true) => &WX_PARTLY9,
+        ("fog", false) => &WX_FOG,
+        ("fog", true) => &WX_FOG9,
+        ("drizzle", false) => &WX_DRIZZLE,
+        ("drizzle", true) => &WX_DRIZZLE9,
+        ("rain", false) => &WX_RAIN,
+        ("rain", true) => &WX_RAIN9,
+        ("sleet", false) => &WX_SLEET,
+        ("sleet", true) => &WX_SLEET9,
+        ("snow", false) => &WX_SNOW,
+        ("snow", true) => &WX_SNOW9,
+        ("storm", false) => &WX_STORM,
+        ("storm", true) => &WX_STORM9,
+        ("clear-night", false) => &WX_CLEAR_NIGHT,
+        ("clear-night", true) => &WX_CLEAR_NIGHT9,
+        ("partly-night", false) => &WX_PARTLY_NIGHT,
+        ("partly-night", true) => &WX_PARTLY_NIGHT9,
+        (_, false) => &WX_CLOUDY,
+        (_, true) => &WX_CLOUDY9,
+    }
+}
+
+fn wx_color(ch: char) -> Option<Rgb888> {
+    Some(match ch {
+        'S' => Rgb888::new(255, 200, 40),
+        'M' => Rgb888::new(225, 225, 170),
+        'C' => Rgb888::new(185, 198, 215),
+        'D' => Rgb888::new(105, 115, 130),
+        'R' => Rgb888::new(80, 160, 255),
+        'W' => Rgb888::new(235, 245, 255),
+        'F' => Rgb888::new(150, 158, 170),
+        'B' => Rgb888::new(255, 225, 60),
+        _ => return None,
+    })
+}
+
+/// Offset that centres an ink span `[lo, hi]` on `cy`.
+///
+/// `div_euclid` (floor), NOT `/` (truncate toward zero). Text ink extents are
+/// NEGATIVE (measured up from the baseline) and icon extents POSITIVE, so plain
+/// division rounds the two in opposite directions — which put every icon
+/// exactly one pixel below the number beside it.
+fn wx_center_off(lo: i32, hi: i32, cy: i32) -> i32 {
+    cy - (lo + hi).div_euclid(2)
+}
+
+fn wx_bbox(art: &[&str]) -> (i32, i32, i32, i32) {
+    let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for (r, row) in art.iter().enumerate() {
+        for (col, ch) in row.chars().enumerate() {
+            if wx_color(ch).is_some() {
+                x0 = x0.min(col as i32);
+                x1 = x1.max(col as i32);
+                y0 = y0.min(r as i32);
+                y1 = y1.max(r as i32);
+            }
+        }
+    }
+    (x0, y0, x1, y1)
+}
+
+/// Draw an icon with its INK centred on (cx, cy) — optical centring, not
+/// bounding-box centring, so swapping one symbol for another never shifts a
+/// layout. Returns the ink row span.
+fn wx_icon(c: &mut Canvas, art: &[&str], cx: i32, cy: i32) -> (i32, i32) {
+    let (x0, y0, x1, y1) = wx_bbox(art);
+    let (ox, oy) = (wx_center_off(x0, x1, cx), wx_center_off(y0, y1, cy));
+    for (r, row) in art.iter().enumerate() {
+        for (col, ch) in row.chars().enumerate() {
+            if let Some(color) = wx_color(ch) {
+                let (px, py) = (ox + col as i32, oy + r as i32);
+                if px >= 0 && py >= 0 && (px as usize) < FRAME_WIDTH && (py as usize) < c.height {
+                    c.buf[py as usize * FRAME_WIDTH + px as usize] = color;
+                }
+            }
+        }
+    }
+    (oy + y0, oy + y1)
+}
+
+fn wx_icon_w(art: &[&str]) -> i32 {
+    let (x0, _, x1, _) = wx_bbox(art);
+    x1 - x0 + 1
+}
+
+/// `draw_text` at an integer scale, for a temperature readable across a room.
+fn wx_draw_scaled(c: &mut Canvas, s: &str, x: i32, by: i32, big: bool, scale: i32, color: Rgb888) {
+    let font = if big { crate::bdf::font_5x8() } else { crate::bdf::font_4x6() };
+    let mut cx = x;
+    let mut prev: Option<char> = None;
+    for ch in s.chars() {
+        if let Some(p) = prev {
+            cx += kerned_advance(p, ch, big) * scale;
+        }
+        if let Some(g) = font.glyph(ch) {
+            for (row, &byte) in g.rows.iter().enumerate() {
+                for col in 0..g.w {
+                    if (byte >> (7 - col)) & 1 == 1 {
+                        let dx = g.xoff + col;
+                        let dy = row as i32 - g.yoff - g.h + 1;
+                        fill(c, cx + dx * scale, by + dy * scale, scale as u32, scale as u32, color);
+                    }
+                }
+            }
+        }
+        prev = Some(ch);
+    }
+}
+
+/// Vertical ink extent of a run drawn at baseline 0.
+fn wx_ink_rows(s: &str, big: bool, scale: i32) -> (i32, i32) {
+    let font = if big { crate::bdf::font_5x8() } else { crate::bdf::font_4x6() };
+    let (mut top, mut bot) = (i32::MAX, i32::MIN);
+    for ch in s.chars() {
+        if let Some(g) = font.glyph(ch) {
+            for (row, &byte) in g.rows.iter().enumerate() {
+                if byte == 0 {
+                    continue;
+                }
+                let dy = row as i32 - g.yoff - g.h + 1;
+                top = top.min(dy * scale);
+                bot = bot.max(dy * scale + scale - 1);
+            }
+        }
+    }
+    if top == i32::MAX {
+        (0, 0)
+    } else {
+        (top, bot)
+    }
+}
+
+/// Draw text centred on row `cy` by its INK, so a big number and a small one in
+/// the same band line up optically instead of sharing a baseline that makes
+/// their different cap heights look crooked. Returns the ink row span.
+fn wx_text(c: &mut Canvas, s: &str, x: i32, cy: i32, big: bool, scale: i32, color: Rgb888) -> (i32, i32) {
+    let (t, b) = wx_ink_rows(s, big, scale);
+    let by = wx_center_off(t, b, cy);
+    wx_draw_scaled(c, s, x, by, big, scale, color);
+    (by + t, by + b)
+}
+
+fn wx_w(s: &str, big: bool, scale: i32) -> i32 {
+    text_width(s, big) * scale
+}
+
+const WX_HOT: Rgb888 = Rgb888::new(255, 150, 90);
+const WX_COLD: Rgb888 = Rgb888::new(110, 180, 255);
+const WX_DIM: Rgb888 = Rgb888::new(120, 120, 120);
+
+fn wx_temp(t: i32) -> String {
+    format!("{t}\u{b0}")
+}
+
+/// Icon + temperature on one centre line, and nothing else.
+pub fn render_weather_simple(w: &crate::weather::Weather) -> (FrameId, Vec<u8>) {
+    let mut c = Canvas::new();
+    let art = wx_art(crate::weather::icon_for(w.code, w.is_day), false);
+    let temp = wx_temp(w.temp);
+    let gap = 5;
+    let group = wx_icon_w(art) + gap + wx_w(&temp, true, 2);
+    let gx = (FRAME_WIDTH as i32 - group) / 2;
+    let cy = 15;
+    wx_icon(&mut c, art, gx + wx_icon_w(art) / 2, cy);
+    wx_text(&mut c, &temp, gx + wx_icon_w(art) + gap, cy, true, 2, WHITE);
+    let px = c.to_rgb565();
+    (frame_id(&px), px)
+}
+
+/// Icon, temperature, the day's range, and the condition in words. No rule
+/// between the two blocks: the three whitespace bands ARE the structure, and
+/// `weather_detailed_spaces_its_bands_evenly` holds them equal.
+pub fn render_weather_detailed(w: &crate::weather::Weather) -> (FrameId, Vec<u8>) {
+    let mut c = Canvas::new();
+    let art = wx_art(crate::weather::icon_for(w.code, w.is_day), false);
+    let temp = wx_temp(w.temp);
+    let top_cy = 10;
+    let t_span = wx_text(&mut c, &temp, 17, top_cy, true, 2, WHITE);
+    wx_icon(&mut c, art, 8, top_cy);
+    // Anchored to the temperature's MEASURED span, so the pair occupies exactly
+    // the same rows whatever the glyphs turn out to be.
+    let (hi, lo) = (w.hi.to_string(), w.lo.to_string());
+    wx_text(&mut c, &hi, 61 - text_width(&hi, false), t_span.0 + 2, false, 1, WX_HOT);
+    wx_text(&mut c, &lo, 61 - text_width(&lo, false), t_span.1 - 2, false, 1, WX_COLD);
+    let cond = crate::weather::condition_for(w.code);
+    wx_text(&mut c, cond, (FRAME_WIDTH as i32 - text_width(cond, false)) / 2, 24, false, 1, WX_DIM);
+    let px = c.to_rgb565();
+    (frame_id(&px), px)
+}
+
+/// Three days across, in equal columns.
+pub fn render_weather_forecast(w: &crate::weather::Weather) -> (FrameId, Vec<u8>) {
+    let mut c = Canvas::new();
+    for (i, day) in w.days.iter().take(3).enumerate() {
+        let cx = i as i32 * 22 + 10;
+        let tint = if i == 0 { WHITE } else { WX_DIM };
+        // "TODAY" is as wide as the column; the short form always fits.
+        let label = if day.label.len() > 3 { &day.label[..3] } else { &day.label };
+        wx_text(&mut c, label, cx - text_width(label, false) / 2, 3, false, 1, tint);
+        // Daily codes have no day/night sense — a forecast is for the daytime.
+        wx_icon(&mut c, wx_art(crate::weather::icon_for(day.code, true), true), cx, 12);
+        let (hi, lo) = (day.hi.to_string(), day.lo.to_string());
+        wx_text(&mut c, &hi, cx - text_width(&hi, false) / 2, 22, false, 1, WX_HOT);
+        wx_text(&mut c, &lo, cx - text_width(&lo, false) / 2, 28, false, 1, WX_COLD);
+        if i > 0 {
+            fill(&mut c, cx - 11, 1, 1, 30, Rgb888::new(30, 30, 30));
+        }
+    }
+    let px = c.to_rgb565();
+    (frame_id(&px), px)
+}
+
+/// The clock, with weather sharing the panel underneath it.
+pub fn render_weather_clock(w: &crate::weather::Weather, hour24: u32, minute: u32) -> (FrameId, Vec<u8>) {
+    let mut c = Canvas::new();
+    let (h12, meridiem) = match hour24 % 24 {
+        0 => (12, "AM"),
+        h if h < 12 => (h, "AM"),
+        12 => (12, "PM"),
+        h => (h - 12, "PM"),
+    };
+    let time = format!("{h12}:{minute:02}");
+    let gap = 3;
+    let width = wx_w(&time, true, 2) + gap + text_width(meridiem, false);
+    let x0 = (FRAME_WIDTH as i32 - width) / 2;
+    let clock_span = wx_text(&mut c, &time, x0, 9, true, 2, WHITE);
+    // The meridiem rides the BOTTOM of the digits: floating at mid-height it
+    // reads as part of the number rather than as an annotation.
+    wx_text(&mut c, meridiem, x0 + wx_w(&time, true, 2) + gap, clock_span.1 - 2, false, 1, WX_DIM);
+
+    let art = wx_art(crate::weather::icon_for(w.code, w.is_day), true);
+    let scy = 23;
+    wx_icon(&mut c, art, 6, scy);
+    let temp = wx_temp(w.temp);
+    wx_text(&mut c, &temp, 14, scy, true, 1, WHITE);
+    let (hi, lo) = (w.hi.to_string(), w.lo.to_string());
+    wx_text(&mut c, &hi, 49 - text_width(&hi, true), scy, true, 1, WX_HOT);
+    wx_text(&mut c, &lo, 63 - text_width(&lo, true), scy, true, 1, WX_COLD);
+    let px = c.to_rgb565();
+    (frame_id(&px), px)
+}
+
+#[cfg(test)]
+mod wx_tests {
+    use super::*;
+
+    /// Every symbol must have BOTH sizes, rows of the right width, and an EVEN
+    /// ink height. The parity is the load-bearing part: the temperature beside
+    /// these is 12 rows, so its optical centre falls on a half-pixel, and an
+    /// odd-height icon lands half a row off — the exact misalignment these
+    /// layouts were rebuilt to remove.
+    #[test]
+    fn icons_are_well_formed() {
+        const NAMES: [&str; 11] = [
+            "clear", "clear-night", "partly", "partly-night", "cloudy", "fog", "drizzle", "rain",
+            "sleet", "snow", "storm",
+        ];
+        for name in NAMES {
+            for (small, w) in [(false, 13usize), (true, 9usize)] {
+                let art = wx_art(name, small);
+                for (i, row) in art.iter().enumerate() {
+                    assert_eq!(row.chars().count(), w, "{name} ({w}px) row {i}");
+                }
+                let (x0, y0, x1, y1) = wx_bbox(art);
+                assert!(x0 <= x1 && y0 <= y1, "{name} ({w}px) has no ink");
+                assert_eq!((y1 - y0 + 1) % 2, 0, "{name} ({w}px) ink height must be even");
+            }
+        }
+    }
+
+    /// A symbol swap must never knock the temperature off its line.
+    ///
+    /// The invariant is the shared CENTRE, not an identical span: symbols are
+    /// legitimately different heights (fog is 10 ink rows, the sun 12). Because
+    /// every height is even, the centres coincide exactly — compared doubled,
+    /// so there is no rounding to argue about.
+    #[test]
+    fn the_temperature_holds_its_line_across_every_condition() {
+        let mut centers = std::collections::HashSet::new();
+        for code in [0u16, 2, 3, 45, 51, 63, 66, 71, 95] {
+            let w = crate::weather::Weather { code, ..crate::weather::Weather::sample() };
+            let mut c = Canvas::new();
+            let art = wx_art(crate::weather::icon_for(w.code, true), false);
+            let temp = wx_temp(w.temp);
+            let icon = wx_icon(&mut c, art, 8, 10);
+            let text = wx_text(&mut c, &temp, 17, 10, true, 2, WHITE);
+            assert_eq!(
+                icon.0 + icon.1,
+                text.0 + text.1,
+                "code {code}: icon and temperature must share a centre line"
+            );
+            centers.insert(icon.0 + icon.1);
+        }
+        assert_eq!(centers.len(), 1, "every condition centres on the same line");
+    }
+
+    /// Three digits and a minus sign both happen. Neither may run off the panel.
+    #[test]
+    fn extreme_temperatures_stay_on_the_panel() {
+        for (t, hi, lo) in [(-40, -20, -45), (105, 112, 88), (0, 5, -9)] {
+            let w = crate::weather::Weather { temp: t, hi, lo, ..crate::weather::Weather::sample() };
+            for (name, (_, px)) in [
+                ("simple", render_weather_simple(&w)),
+                ("detailed", render_weather_detailed(&w)),
+                ("forecast", render_weather_forecast(&w)),
+                ("clock", render_weather_clock(&w, 13, 5)),
+            ] {
+                assert_eq!(px.len(), FRAME_WIDTH * FRAME_HEIGHT * 2, "{name} at {t}");
+                assert!(px.iter().any(|&b| b != 0), "{name} at {t} rendered an empty panel");
+            }
+        }
+    }
+
+    /// Different weather has to produce different pixels — a layout that
+    /// ignored its input would still pass every geometry check above.
+    #[test]
+    fn the_screens_actually_reflect_the_weather() {
+        let a = crate::weather::Weather::sample();
+        let b = crate::weather::Weather { temp: 12, code: 71, hi: 20, lo: 4, ..a.clone() };
+        assert_ne!(render_weather_simple(&a).0, render_weather_simple(&b).0);
+        assert_ne!(render_weather_detailed(&a).0, render_weather_detailed(&b).0);
+        assert_ne!(render_weather_clock(&a, 9, 0).0, render_weather_clock(&b, 9, 0).0);
+        // And the clock half moves on its own.
+        assert_ne!(render_weather_clock(&a, 9, 0).0, render_weather_clock(&a, 9, 1).0);
+    }
+}
+
+#[cfg(test)]
+mod wx_dump {
+    use super::*;
+    #[test]
+    #[ignore = "writes weather previews; run with --ignored"]
+    fn dump() {
+        let w = crate::weather::Weather::sample();
+        let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mockups");
+        std::fs::create_dir_all(&out).unwrap();
+        let shots: [(&str, (FrameId, Vec<u8>)); 4] = [
+            ("simple", render_weather_simple(&w)),
+            ("detailed", render_weather_detailed(&w)),
+            ("forecast", render_weather_forecast(&w)),
+            ("clock", render_weather_clock(&w, 22, 9)),
+        ];
+        for (name, (_, px)) in shots {
+            let mut img = image::RgbImage::new(FRAME_WIDTH as u32 * 8, FRAME_HEIGHT as u32 * 8);
+            for y in 0..FRAME_HEIGHT {
+                for x in 0..FRAME_WIDTH {
+                    let v = u16::from_le_bytes([px[(y * FRAME_WIDTH + x) * 2], px[(y * FRAME_WIDTH + x) * 2 + 1]]);
+                    let (r, g, b) = (
+                        ((v >> 11) as u8) << 3, (((v >> 5) & 0x3F) as u8) << 2, ((v & 0x1F) as u8) << 3,
+                    );
+                    if r == 0 && g == 0 && b == 0 { continue; }
+                    for dy in 0..6u32 { for dx in 0..6u32 {
+                        img.put_pixel(x as u32 * 8 + 1 + dx, y as u32 * 8 + 1 + dy, image::Rgb([r, g, b]));
+                    }}
+                }
+            }
+            img.save(out.join(format!("wx-{name}.png"))).unwrap();
+        }
     }
 }

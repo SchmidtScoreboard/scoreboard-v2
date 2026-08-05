@@ -582,6 +582,11 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
     // looking broken rather than looking toggled.
     let mut demo_toggled: Option<bool> = None;
     let mut tz_changed = false;
+    // Set when a weather screen or its location changes, so the reading is
+    // fetched now rather than whenever the refresh loop next comes round —
+    // typing a ZIP and staring at "UNAVAILABLE" for ten minutes is not a
+    // feature.
+    let mut weather_dirty = false;
     let updated = {
         let mut configs = state.configs.lock().unwrap();
         let cfg = configs.entry(board_id.to_string()).or_default();
@@ -674,6 +679,7 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
             // nothing can render.
             Command::SetOffMode { id } => {
                 if crate::offmode::offers(&id) {
+                    weather_dirty |= id.starts_with("weather");
                     cfg.set_off_mode(&id, crate::offmode::draws_nothing(&id));
                 } else {
                     tracing::warn!("board {board_id}: unknown off mode {id:?}, ignoring");
@@ -686,6 +692,7 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
                     && value.len() <= 256
                     && (cfg.off_mode_params.len() < MAX_KEYS || cfg.off_mode_params.contains_key(&key))
                 {
+                    weather_dirty |= key == crate::offmode::LOCATION;
                     if value.is_empty() {
                         cfg.off_mode_params.remove(&key);
                     } else {
@@ -821,6 +828,14 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
     }
     if tz_changed {
         crate::push_time(state, board_id);
+    }
+    if weather_dirty {
+        let st = state.clone();
+        let board = board_id.to_string();
+        tokio::spawn(async move {
+            crate::weather::refresh_all(&st.weather, crate::weather_locations(&st)).await;
+            crate::push_board(&st, &board);
+        });
     }
     push_board(state, board_id);
     push_board_state(state, board_id);

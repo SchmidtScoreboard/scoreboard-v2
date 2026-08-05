@@ -6,6 +6,7 @@ mod bdf;
 mod espn;
 mod model;
 mod offmode;
+mod weather;
 mod render;
 mod serve;
 mod team_names;
@@ -95,6 +96,10 @@ pub struct AppState {
     /// Owns the demo generator's clocks, so the fake slate advances on its own
     /// schedule rather than restarting on every read.
     pub demo_source: Arc<espn::DemoSource>,
+    /// Weather by location string, kept warm by `weather_loop`. Renderers read
+    /// it and never wait on it: a board must not be held up drawing a frame
+    /// while an HTTP call to a third party completes.
+    pub weather: Arc<weather::Cache>,
     /// Rendered frames by content id, stamped with the eviction generation they
     /// were minted in (so `evict_stale_frames` never drops a frame between its
     /// render and its manifest registration — that write pair isn't atomic).
@@ -357,6 +362,7 @@ impl AppState {
         AppState {
             demo: Arc::new(Mutex::new(espn::demo_games(0, 0))),
             demo_source: Arc::new(espn::DemoSource::new()),
+            weather: Arc::new(weather::Cache::default()),
             catalog: Arc::new(catalog),
             // Empty until the first real fetch — boards show their no-games
             // behavior rather than fake placeholder games.
@@ -754,6 +760,7 @@ async fn main() {
     // Patch notes ride alongside the dists in the same FIRMWARE_DIR.
     state.fw_notes_dir = fw_dir.join("notes");
     tokio::spawn(poll_loop(state.clone(), source));
+    tokio::spawn(weather_loop(state.clone()));
     tokio::spawn(tick_loop(state.clone()));
 
     let app = Router::new()
@@ -1094,7 +1101,17 @@ async fn get_offmode(
     }
     let params = std::collections::BTreeMap::new();
     let frames =
-        offmode::render_off_mode(id, &offmode::OffCtx { tz: None, params: &params, preview: true });
+        offmode::render_off_mode(
+        id,
+        &offmode::OffCtx {
+            tz: None,
+            params: &params,
+            preview: true,
+            // Fixed sample weather, for the same reason the preview clock is
+            // pinned: two fetches of a day-cached PNG must be identical.
+            weather: weather::Reading::Ready(weather::Weather::sample()),
+        },
+    );
     let Some(first) = frames.into_iter().next() else {
         // A mode that draws nothing declares no preview, so the app never asks.
         return (axum::http::StatusCode::NOT_FOUND, "off mode draws nothing").into_response();
@@ -2103,7 +2120,14 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
     // what each mode draws; everything here is slate-agnostic.
     let rotation: Vec<RotationEntry> = offmode::render_off_mode(
         cfg.off_mode_id(),
-        &offmode::OffCtx { tz, params: &cfg.off_mode_params, preview: false },
+        &offmode::OffCtx {
+            tz,
+            params: &cfg.off_mode_params,
+            preview: false,
+            weather: state
+                .weather
+                .get(cfg.off_mode_params.get(offmode::LOCATION).map(String::as_str).unwrap_or("")),
+        },
     )
     .into_iter()
     .map(|f| {
@@ -2653,6 +2677,40 @@ pub fn prune_spoiler_lists(state: &AppState) {
         cfg.revealed_game_ids.retain(|id| ids.contains(id));
         state.configs.lock().unwrap().insert(bid.clone(), cfg.clone());
         state.persist_config(&bid, &cfg);
+    }
+}
+
+/// Every location a board is actually configured to show. Nothing else is
+/// fetched — the services are free, but they are somebody else's.
+pub fn weather_locations(state: &AppState) -> Vec<String> {
+    let mut out: Vec<String> = state
+        .configs
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|c| c.off_mode_id().starts_with("weather"))
+        .filter_map(|c| c.off_mode_params.get(offmode::LOCATION).cloned())
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Keep the weather cache warm. Separate from `poll_loop` because the cadences
+/// have nothing to do with each other: scores move by the minute, weather by
+/// the hour.
+pub async fn weather_loop(state: AppState) {
+    loop {
+        let locations = weather_locations(&state);
+        if !locations.is_empty() {
+            weather::refresh_all(&state.weather, locations).await;
+            // A fresh reading can change every weather board's frame.
+            for bid in state.devices.lock().unwrap().keys().cloned().collect::<Vec<_>>() {
+                push_board(&state, &bid);
+            }
+        }
+        tokio::time::sleep(weather::REFRESH).await;
     }
 }
 

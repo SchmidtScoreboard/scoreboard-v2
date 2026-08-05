@@ -39,6 +39,10 @@ All curl-able; the app uses the same ones.
   Omitting `board` serves the raw data. Unknown id → plain-text 404.
 - `GET /sample/{off|normal|strict}.png` — the fixed sample game rendered at
   each spoiler level (drives the app's spoiler-settings preview rows).
+- Weather screens read `off_mode_params["location"]` — a US ZIP or `lat,lon`.
+  Data comes from Open-Meteo, coordinates from Zippopotam; both key-free, so a
+  self-hosted server needs no accounts. Cached and refreshed every 10 minutes
+  by `weather_loop`, never fetched while rendering a frame.
 - `GET /offmode/{id}.png` — what an off mode looks like on the panel, rendered
   at a fixed time so the bytes are stable (`max-age=86400`, same rule as
   `/guide`). Drives the app's "When off" rows. 404 on an id this server does

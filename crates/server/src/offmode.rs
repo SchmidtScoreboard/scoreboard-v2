@@ -23,7 +23,7 @@
 //!    manifest forever. Boards are sent frames and a Blank/Clock flag; the id
 //!    lives only between the app, the server, and the database.
 
-use scoreboard_protocol::{FrameId, OffModeDescriptor};
+use scoreboard_protocol::{FrameId, OffModeDescriptor, OffModeInput};
 use std::collections::BTreeMap;
 
 use crate::render;
@@ -35,13 +35,17 @@ pub struct OffFrame {
     pub dwell_ms: u32,
 }
 
-/// True when this mode is the CLOCK, which the board draws itself once it has
+/// True ONLY for the plain clock, which the board can draw itself once it has
 /// been told the time. The server still renders and ships the frame — old
 /// firmware blits it, and so does a board that hasn't received a `Time` yet —
 /// but a board that can draw it locally keeps ticking through an outage
 /// instead of freezing on a picture of a minute that has passed.
+///
+/// Deliberately an EXACT match, not "anything that isn't blank". The
+/// clock+weather screen also shows a time, but the board has no weather and
+/// would draw a bare clock straight over it.
 pub fn is_local_clock(id: &str) -> bool {
-    id != "blank"
+    id == "clock"
 }
 
 /// Everything a mode is allowed to depend on. Add fields here rather than
@@ -56,6 +60,8 @@ pub struct OffCtx<'a> {
     /// STABLE image in this state — the app caches previews for a day, and two
     /// fetches have to be byte-identical.
     pub preview: bool,
+    /// What the weather cache holds for this board's location.
+    pub weather: crate::weather::Reading,
 }
 
 /// The wall time every preview renders at. Fixed for the same reason
@@ -82,13 +88,52 @@ pub fn off_modes() -> Vec<OffModeDescriptor> {
             preview: None,
             input: None,
         },
+        weather_mode("weather-simple", "Simple", "The temperature, and what it's doing."),
+        weather_mode(
+            "weather-detailed",
+            "Detailed",
+            "Temperature, today's high and low, and conditions.",
+        ),
+        weather_mode("weather-forecast", "Forecast", "Today and the next two days."),
+        weather_mode("weather-clock", "Clock + Weather", "The time, with the weather below it."),
     ]
 }
+
+/// The four weather screens differ only in layout, so they share a descriptor
+/// shape — including the one text input all of them need.
+fn weather_mode(id: &str, label: &str, description: &str) -> OffModeDescriptor {
+    OffModeDescriptor {
+        id: id.into(),
+        label: label.into(),
+        description: description.into(),
+        preview: Some(format!("/offmode/{id}.png")),
+        input: Some(OffModeInput {
+            key: LOCATION.into(),
+            label: "Location".into(),
+            // A ZIP is the friendly path; the pair is what keeps this usable
+            // outside the US without a second field.
+            placeholder: "ZIP or lat,lon".into(),
+            max_len: 32,
+        }),
+    }
+}
+
+/// The key every weather screen reads its location from.
+pub const LOCATION: &str = "location";
 
 /// Whether a mode leaves the panel dark — the one bit the legacy `OffState`
 /// enum could express, and what `BoardConfig::set_off_mode` records.
 pub fn draws_nothing(id: &str) -> bool {
-    render_off_mode(id, &OffCtx { tz: None, params: &BTreeMap::new(), preview: true }).is_empty()
+    render_off_mode(
+        id,
+        &OffCtx {
+            tz: None,
+            params: &BTreeMap::new(),
+            preview: true,
+            weather: crate::weather::Reading::Ready(crate::weather::Weather::sample()),
+        },
+    )
+    .is_empty()
 }
 
 /// True when this server offers `id`. Commands are validated against it: with
@@ -106,6 +151,32 @@ pub fn offers(id: &str) -> bool {
 pub fn render_off_mode(id: &str, cx: &OffCtx) -> Vec<OffFrame> {
     match id {
         "blank" => vec![],
+        "weather-simple" | "weather-detailed" | "weather-forecast" | "weather-clock" => {
+            let w = match &cx.weather {
+                crate::weather::Reading::Ready(w) => w.clone(),
+                // Say which of the two problems it is. "No location" is
+                // something the user can fix in the app; "unavailable" is ours.
+                crate::weather::Reading::NoLocation => {
+                    return vec![notice("WEATHER", "SET A LOCATION")];
+                }
+                crate::weather::Reading::Unavailable => {
+                    return vec![notice("WEATHER", "UNAVAILABLE")];
+                }
+            };
+            let (fid, px) = match id {
+                "weather-simple" => render::render_weather_simple(&w),
+                "weather-detailed" => render::render_weather_detailed(&w),
+                "weather-forecast" => render::render_weather_forecast(&w),
+                _ => {
+                    let (h, m) = if cx.preview { PREVIEW_TIME } else { now_hm(cx.tz) };
+                    render::render_weather_clock(&w, h, m)
+                }
+            };
+            // A minute, because the clock+weather screen shows one. The others
+            // change far more slowly, but one cadence is simpler than four and
+            // an unchanged frame re-pushes as the same content hash anyway.
+            vec![OffFrame { id: fid, px, dwell_ms: 60_000 }]
+        }
         // Add your mode here. Anything that produces a 64x32 RGB565 frame
         // works; `render::render_notice` is the shortest path to text.
         _ => {
@@ -120,6 +191,14 @@ pub fn render_off_mode(id: &str, cx: &OffCtx) -> Vec<OffFrame> {
             vec![OffFrame { id, px, dwell_ms: 60_000 }]
         }
     }
+}
+
+fn notice(title: &str, detail: &str) -> OffFrame {
+    let (id, px) = render::render_notice(
+        &[(title, true, render::WHITE_PUB), (detail, false, render::GREY_PUB)],
+        None,
+    );
+    OffFrame { id, px, dwell_ms: 60_000 }
 }
 
 /// Board-local wall time: the configured zone, else the server's local zone
@@ -142,6 +221,10 @@ fn now_hm(tz: Option<chrono_tz::Tz>) -> (u32, u32) {
 mod tests {
     use super::*;
 
+    fn sample() -> crate::weather::Reading {
+        crate::weather::Reading::Ready(crate::weather::Weather::sample())
+    }
+
     /// The app renders these blind, so anything missing here is a blank row on
     /// someone's phone.
     #[test]
@@ -151,7 +234,7 @@ mod tests {
             assert!(!m.id.is_empty(), "id");
             assert!(!m.label.is_empty(), "{}: label", m.id);
             assert!(!m.description.is_empty(), "{}: description", m.id);
-            let frames = render_off_mode(&m.id, &OffCtx { tz: None, params: &params, preview: true });
+            let frames = render_off_mode(&m.id, &OffCtx { tz: None, params: &params, preview: true, weather: sample() });
             // A mode declares a preview if and only if it draws something.
             assert_eq!(
                 m.preview.is_some(),
@@ -167,9 +250,9 @@ mod tests {
     #[test]
     fn an_unknown_mode_falls_back_to_the_clock_not_to_darkness() {
         let params = BTreeMap::new();
-        let frames = render_off_mode("stocks", &OffCtx { tz: None, params: &params, preview: true });
+        let frames = render_off_mode("stocks", &OffCtx { tz: None, params: &params, preview: true, weather: sample() });
         assert_eq!(frames.len(), 1, "an unknown mode must still light the panel");
-        let clock = render_off_mode("clock", &OffCtx { tz: None, params: &params, preview: true });
+        let clock = render_off_mode("clock", &OffCtx { tz: None, params: &params, preview: true, weather: sample() });
         assert_eq!(frames[0].id, clock[0].id, "and it falls back to the clock");
     }
 
@@ -177,8 +260,8 @@ mod tests {
     #[test]
     fn previews_are_byte_stable() {
         let params = BTreeMap::new();
-        let once = render_off_mode("clock", &OffCtx { tz: None, params: &params, preview: true });
-        let twice = render_off_mode("clock", &OffCtx { tz: None, params: &params, preview: true });
+        let once = render_off_mode("clock", &OffCtx { tz: None, params: &params, preview: true, weather: sample() });
+        let twice = render_off_mode("clock", &OffCtx { tz: None, params: &params, preview: true, weather: sample() });
         assert_eq!(once[0].id, twice[0].id);
         assert_eq!(once[0].px, twice[0].px);
     }
