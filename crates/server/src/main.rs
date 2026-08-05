@@ -2716,7 +2716,15 @@ pub async fn weather_loop(state: AppState) {
         if !locations.is_empty() {
             weather::refresh_all(&state.weather, locations).await;
             // A fresh reading can change every weather board's frame.
-            for bid in state.devices.lock().unwrap().keys().cloned().collect::<Vec<_>>() {
+            //
+            // The collect MUST land in a `let` first. A guard created in a
+            // `for` iterator expression lives for the whole loop body, and
+            // `push_board` locks `devices` again — std's Mutex is not
+            // reentrant, so the thread waits on itself forever, still holding
+            // the lock every websocket and HTTP handler needs. The server does
+            // not crash; it goes silent.
+            let connected: Vec<String> = state.devices.lock().unwrap().keys().cloned().collect();
+            for bid in connected {
                 push_board(&state, &bid);
             }
         }
