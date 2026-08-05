@@ -1268,6 +1268,19 @@ mod fw_channel_tests {
         assert_eq!(cfg.fw_channel, FwChannel::Stable);
     }
 
+    /// CalVer is YYYY.M.P, so a month rollover RESETS the patch — and the
+    /// comparison has to order that correctly, or a corrected version reads as
+    /// a downgrade and no board takes it.
+    ///
+    /// Not hypothetical: releases kept climbing 2026.7.x for four days into
+    /// August before anyone noticed the month had moved.
+    #[test]
+    fn a_month_rollover_outranks_a_high_patch_in_the_old_month() {
+        assert!(version_newer("2026.8.0", "2026.7.23"));
+        assert!(!version_newer("2026.7.24", "2026.8.0"));
+        assert!(version_newer("2027.1.0", "2026.12.9"), "and a year rollover too");
+    }
+
     /// A config written before off modes existed must keep behaving exactly as
     /// it did — the legacy enum is the fallback, not a default guess.
     #[test]
