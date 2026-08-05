@@ -765,6 +765,7 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
                 // A new window is a new intent; last night's override is spent.
                 cfg.quiet_override = false;
             }
+            Command::SetQuietAllowEvents { on } => cfg.quiet_allow_events = on,
             Command::ClearQuietHours => {
                 cfg.quiet_hours = None;
                 cfg.quiet_override = false;

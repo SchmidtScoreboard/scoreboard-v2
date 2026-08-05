@@ -12,6 +12,11 @@ DEV_TARGET=aarch64-apple-ios
 GEN=ios/Generated
 HDR=ios/headers
 XCF=ios/AppCore.xcframework
+# Where cargo actually puts artifacts. Hardcoding "target" broke this script for
+# anyone with CARGO_TARGET_DIR set (a shared build cache, or a workspace whose
+# own target dir isn't writable): cargo built fine and then every path below
+# pointed at a directory that stayed empty.
+TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 # Min iOS version for the Rust static lib — must match the app target's
 # IPHONEOS_DEPLOYMENT_TARGET, or the linker warns once per object file that the
 # lib was built for a newer iOS than it's being linked against.
@@ -26,7 +31,7 @@ cargo build -p app-core
 echo "==> generating Swift bindings"
 rm -rf "$GEN"; mkdir -p "$GEN"
 cargo run -q -p app-core --bin uniffi-bindgen -- generate \
-  --library target/debug/libapp_core.dylib --language swift --out-dir "$GEN"
+  --library "$TARGET_DIR/debug/libapp_core.dylib" --language swift --out-dir "$GEN"
 
 echo "==> building static lib for $SIM_TARGET + $DEV_TARGET"
 cargo build -p app-core --lib --target "$SIM_TARGET"
@@ -37,8 +42,8 @@ rm -rf "$HDR" "$XCF"; mkdir -p "$HDR"
 cp "$GEN/app_coreFFI.h" "$HDR/"
 cp "$GEN/app_coreFFI.modulemap" "$HDR/module.modulemap"
 xcodebuild -create-xcframework \
-  -library "target/$SIM_TARGET/debug/libapp_core.a" -headers "$HDR" \
-  -library "target/$DEV_TARGET/debug/libapp_core.a" -headers "$HDR" \
+  -library "$TARGET_DIR/$SIM_TARGET/debug/libapp_core.a" -headers "$HDR" \
+  -library "$TARGET_DIR/$DEV_TARGET/debug/libapp_core.a" -headers "$HDR" \
   -output "$XCF"
 
 # iCloud Drive (this repo lives in ~/Documents) sometimes drops conflict copies

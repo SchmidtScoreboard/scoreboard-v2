@@ -301,6 +301,54 @@ Boards never see your mode's id. They receive frames plus a "dark or lit" flag,
 so an old board on an old firmware renders your screen without knowing it
 exists.
 
+## Monitoring and email alerts
+
+`GET /health` reports whether each background loop is still running, and 503s
+when one has stalled. `railway.json` points a platform healthcheck at it, so a
+hung container restarts itself.
+
+For email, set three variables on the server:
+
+| Variable | Meaning |
+|---|---|
+| `RESEND_API_KEY` | An API key from [resend.com](https://resend.com) (free tier is plenty). |
+| `ALERT_EMAIL_TO` | Where alerts and the daily report go. |
+| `ALERT_EMAIL_FROM` | Optional sender; defaults to Resend's shared onboarding address. |
+| `DAILY_REPORT_HOUR` | Optional UTC hour for the daily report (default 14). |
+
+With nothing set, alerting is simply off — no errors, no noise.
+
+You get one email when a problem is confirmed (three consecutive failed checks,
+so a single slow poll is not an incident), one when it clears, and one report a
+day.
+
+The watchdog probes with `try_lock` and never waits, which is deliberate: the
+outage that prompted it was a deadlock, where anything that waited on a lock
+joined the queue and went silent too. A lock it cannot take IS the alert.
+
+It cannot tell you the process died — nothing left to send the mail. That case
+belongs to the platform healthcheck above, and to any external uptime monitor
+pointed at `/health`. The two cover different failures.
+
+## Working in iCloud Drive
+
+If this repo lives under `~/Documents` (synced), git may fail with:
+
+```
+fatal: unable to access '.git/config': Operation not permitted
+```
+
+while `cat .git/config` works fine. `~/Documents` is TCC-protected: a process
+without the "Files and Folders" grant can still `open()` files but is denied
+`access()`, which is the call git makes before reading a config. Files the
+process itself created are exempt, so the failure looks intermittent.
+
+The real fix is to grant your terminal access under **System Settings →
+Privacy & Security → Files and Folders** (or Full Disk Access). Until then,
+`scripts/git-icloud.sh` runs git with the git directory temporarily copied
+outside the protected path and copies it back — the working tree never moves,
+so syncing is unaffected.
+
 ## Where to go next
 
 - **[docs/cli.md](docs/cli.md)** — every server flag, route, and env var; the

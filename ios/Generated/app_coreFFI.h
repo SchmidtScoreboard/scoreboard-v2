@@ -550,6 +550,11 @@ void uniffi_app_core_fn_method_scoreboardclient_set_off_mode_param(void*_Nonnull
 void uniffi_app_core_fn_method_scoreboardclient_set_power(void*_Nonnull ptr, RustBuffer board_id, int8_t on, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_QUIET_ALLOW_EVENTS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_QUIET_ALLOW_EVENTS
+void uniffi_app_core_fn_method_scoreboardclient_set_quiet_allow_events(void*_Nonnull ptr, RustBuffer board_id, int8_t on, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_QUIET_HOURS
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_QUIET_HOURS
 void uniffi_app_core_fn_method_scoreboardclient_set_quiet_hours(void*_Nonnull ptr, RustBuffer board_id, uint16_t start_min, uint16_t end_min, RustCallStatus *_Nonnull out_status
@@ -1097,6 +1102,12 @@ uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_off_mode_param(voi
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_POWER
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_POWER
 uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_power(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_QUIET_ALLOW_EVENTS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_QUIET_ALLOW_EVENTS
+uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_quiet_allow_events(void
     
 );
 #endif

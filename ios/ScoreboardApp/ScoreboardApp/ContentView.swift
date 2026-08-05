@@ -127,6 +127,7 @@ struct BoardInfo {
     var offModeParams: [String: String] = [:]
     var quietStartMin: UInt16? = nil
     var quietEndMin: UInt16? = nil
+    var quietAllowEvents = false
     /// Server-derived: inside the window right now. Not a setting.
     var quietActive = false
     var sleepHours: UInt32 = 24
@@ -1147,6 +1148,7 @@ final class BoardViewModel: ObservableObject {
             $0.offModeParams = c.offModeParams
             $0.quietStartMin = c.quietStartMin
             $0.quietEndMin = c.quietEndMin
+            $0.quietAllowEvents = c.quietAllowEvents
             $0.sleepHours = c.sleepHours
             $0.dwellSecs = c.dwellSecs
             $0.leagueDwell = dwell
@@ -1188,6 +1190,12 @@ final class BoardViewModel: ObservableObject {
         guard let id = selectedBoardId else { return }
         mutate(id) { $0.quietStartMin = nil; $0.quietEndMin = nil; $0.quietActive = false }
         client?.clearQuietHours(boardId: id)
+    }
+
+    func setQuietAllowEvents(_ on: Bool) {
+        guard let id = selectedBoardId else { return }
+        mutate(id) { $0.quietAllowEvents = on }
+        client?.setQuietAllowEvents(boardId: id, on: on)
     }
 
     /// Stored value, else the field's declared default, else empty.
@@ -4495,6 +4503,8 @@ struct SettingsView: View {
     /// the connecting splash, so repointing it has to be reachable from there.
     var boardId: String? = nil
     @Environment(\.dismiss) private var dismiss
+    /// Which mode's settings screen is open, if any.
+    @State private var settingsForMode: UiOffMode?
     /// Which version's patch notes sheet is up. Item-driven so the two entry
     /// points — the firmware row (running version, read-only) and the Update
     /// button (offered version, with Install) — share one nested-sheet slot.
@@ -4593,6 +4603,12 @@ struct SettingsView: View {
             // closed. The stack outlives the rebuilds.
             .sheet(item: $settingsInfo) { topic in
                 SettingsInfoCard(topic: topic)
+            }
+            // Anchored on the stack, not on a Section: Form sections rebuild on
+            // every model push (frames land every few seconds) and a
+            // destination attached to one is torn down with it.
+            .navigationDestination(item: $settingsForMode) { mode in
+                OffModeSettingsView(model: model, mode: mode)
             }
             .sheet(item: $notesTarget) { t in
                 FirmwareNotesSheet(
@@ -4817,6 +4833,10 @@ struct SettingsView: View {
             if let start = model.current.quietStartMin, let end = model.current.quietEndMin {
                 quietTimeRow("Sleeps at", minutes: start) { model.setQuietHours($0, end) }
                 quietTimeRow("Wakes at", minutes: end) { model.setQuietHours(start, $0) }
+                Toggle("Wake for live events", isOn: Binding(
+                    get: { model.current.quietAllowEvents },
+                    set: { model.setQuietAllowEvents($0) }
+                ))
             }
         } header: {
             Text("Quiet hours")
@@ -4827,7 +4847,14 @@ struct SettingsView: View {
                     systemImage: "moon.zzz.fill"
                 )
             } else if model.current.quietStartMin != nil {
-                Text("The scoreboard sleeps during this window every night, in its own timezone.")
+                // Say what the two settings do together, because the
+                // combination is the point: dark overnight, except for a game
+                // that is genuinely on.
+                Text(
+                    model.current.quietAllowEvents
+                        ? "The panel stays dark during this window every night, in the scoreboard's own timezone — but a live game still shows."
+                        : "The panel stays dark during this window every night, in the scoreboard's own timezone."
+                )
             }
         }
     }
@@ -4897,25 +4924,37 @@ struct SettingsView: View {
                         .foregroundStyle(selected ? Color.accentColor : Color.secondary)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(mode.label).foregroundStyle(.primary)
-                        Text(mode.description).font(.caption).foregroundStyle(.secondary)
+                        Text(mode.description)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
+                    // The label column may shrink but never vanish: with no
+                    // floor, the preview and the settings button took the row
+                    // and the text wrapped to one character per line.
+                    .frame(minWidth: 90, alignment: .leading)
                     Spacer(minLength: 8)
                     offModePreview(mode)
                 }
             }
             .buttonStyle(.plain)
             if !mode.fields.isEmpty {
-                NavigationLink {
-                    OffModeSettingsView(model: model, mode: mode)
+                // A plain Button driving `navigationDestination(item:)`, NOT a
+                // NavigationLink. A NavigationLink inside a Form row claims the
+                // whole row and brings its own disclosure chevron; beside the
+                // select Button it fought for width and collapsed the labels to
+                // one character per line.
+                Button {
+                    settingsForMode = mode
                 } label: {
                     Image(systemName: "slider.horizontal.3")
-                        .font(.caption.weight(.semibold))
+                        .font(.body)
                         .foregroundStyle(.secondary)
-                        // A caption glyph alone is a sub-20pt target; pad the
-                        // hit area without moving the visual edge.
-                        .padding(6)
+                        // A glyph alone is a sub-20pt target; pad the hit area
+                        // without moving the visual edge.
+                        .padding(8)
                         .contentShape(Rectangle())
-                        .padding(-6)
+                        .padding(-8)
                 }
                 .buttonStyle(.plain)
             }
@@ -5512,3 +5551,7 @@ struct OffModeSettingsView: View {
         .buttonStyle(.plain)
     }
 }
+
+/// `navigationDestination(item:)` needs an identity, and the descriptor
+/// already carries one: the mode id is its stable contract.
+extension UiOffMode: Identifiable {}

@@ -193,6 +193,8 @@ pub struct UiBoardConfig {
     /// "unset" case is one nil check in Swift.
     pub quiet_start_min: Option<u16>,
     pub quiet_end_min: Option<u16>,
+    /// Let live games light the panel during the window.
+    pub quiet_allow_events: bool,
 }
 #[derive(uniffi::Record, Clone)]
 pub struct UiGame {
@@ -705,6 +707,11 @@ impl ScoreboardClient {
             .send(Out::Command(board_id, Command::SetQuietHours { start_min, end_min }));
     }
 
+    /// Let live games light the panel during the quiet window.
+    pub fn set_quiet_allow_events(&self, board_id: String, on: bool) {
+        let _ = self.tx.send(Out::Command(board_id, Command::SetQuietAllowEvents { on }));
+    }
+
     pub fn clear_quiet_hours(&self, board_id: String) {
         let _ = self.tx.send(Out::Command(board_id, Command::ClearQuietHours));
     }
@@ -1079,6 +1086,7 @@ fn to_ui_board_config(c: BoardConfig) -> UiBoardConfig {
         demo_data: c.demo_data,
         quiet_start_min: c.quiet_hours.map(|q| q.start_min),
         quiet_end_min: c.quiet_hours.map(|q| q.end_min),
+        quiet_allow_events: c.quiet_allow_events,
     }
 }
 

@@ -806,6 +806,16 @@ impl Board {
         self.wall = Some(WallClock { local_epoch_ms, anchor_ms: self.clock });
     }
 
+    /// The time to draw when the server is unreachable, if the current manifest
+    /// says this board may draw its own clock and we have ever been told what
+    /// time it is.
+    fn local_clock_now(&self) -> Option<(u32, u32)> {
+        if !self.manifest.as_ref().is_some_and(|m| m.local_clock) {
+            return None;
+        }
+        self.local_hm()
+    }
+
     /// Board-local hour (0-23) and minute, or `None` if the board has never
     /// been told the time. Advanced by the DEVICE clock — a re-anchor from the
     /// server corrects drift and DST, it does not drive the display.
@@ -1197,25 +1207,6 @@ impl Board {
             // Deliberate darkness.
             Mode::Asleep => return vec![0u32; FRAME_PIXELS],
             Mode::Running => {
-                // The idle clock is OURS the moment we know the time, checked
-                // before the online/holding ladder below. A server-rendered
-                // clock frame cannot tick: it froze on a dropped link, and 45
-                // seconds later the panel lit up with CONNECTING on whatever
-                // shelf it sits on, all night.
-                if let (Some(m), Some((h, mi))) = (self.manifest.as_ref(), self.local_hm()) {
-                    if m.local_clock && m.display_on {
-                        // Same grace as the connect screen: a deploy blip must
-                        // not flash a red slash any more than it flashes
-                        // CONNECTING.
-                        let stale = !self.online
-                            && self
-                                .offline_since
-                                .is_some_and(|t| self.clock.saturating_sub(t) >= OFFLINE_GRACE_MS);
-                        let mut buf = self.screen_clock(h, mi, stale);
-                        scale_buf(&mut buf, self.local_brightness);
-                        return buf;
-                    }
-                }
                 // A dropped websocket often re-establishes within a second or
                 // two; swapping screens instantly makes every blip flash
                 // "CONNECTING / FINDING SERVER". While there's content to show,
@@ -1235,6 +1226,19 @@ impl Board {
                 if self.online || holding || dark_by_intent {
                     server_content = true;
                     self.screen_running()
+                } else if let Some((h, mi)) = self.local_clock_now() {
+                    // Offline, past the grace window, and we know the time:
+                    // keep the clock ticking instead of showing CONNECTING all
+                    // night. The badge always shows here — reaching this branch
+                    // IS the outage being real.
+                    //
+                    // Deliberately BELOW the online check. Drawing locally
+                    // while connected meant the board ignored the frame the
+                    // server sent, so choosing a clock style or 24-hour time
+                    // changed nothing on the panel.
+                    let mut buf = self.screen_clock(h, mi, true);
+                    scale_buf(&mut buf, self.local_brightness);
+                    return buf;
                 } else {
                     self.screen_connecting()
                 }
@@ -1335,16 +1339,23 @@ impl Board {
     /// tells you what it knows.
     fn screen_clock(&self, hour24: u32, minute: u32, offline: bool) -> Vec<u32> {
         let mut c = Canvas::new();
-        let (h12, meridiem) = match hour24 % 24 {
-            0 => (12, "AM"),
-            h if h < 12 => (h, "AM"),
-            12 => (12, "PM"),
-            h => (h - 12, "PM"),
+        let h24 = self.manifest.as_ref().is_some_and(|m| m.clock_hour24);
+        let (hour, meridiem) = if h24 {
+            (hour24 % 24, None)
+        } else {
+            match hour24 % 24 {
+                0 => (12, Some("AM")),
+                h if h < 12 => (h, Some("AM")),
+                12 => (12, Some("PM")),
+                h => (h - 12, Some("PM")),
+            }
         };
         let mut buf = [0u8; 5];
-        let time = fmt_hhmm(&mut buf, h12, minute);
+        let time = fmt_hhmm(&mut buf, hour, minute, h24);
         center_text(&mut c, time, 13, &FONT_6X10, Rgb888::WHITE);
-        center_text(&mut c, meridiem, 24, &FONT_4X6, Rgb888::new(0x88, 0x88, 0x88));
+        if let Some(m) = meridiem {
+            center_text(&mut c, m, 24, &FONT_4X6, Rgb888::new(0x88, 0x88, 0x88));
+        }
         if offline {
             draw_wifi_off(&mut c, 51, 20);
         }
@@ -1756,9 +1767,9 @@ impl DrawTarget for Canvas {
 
 /// "H:MM" into a caller-owned buffer — board-core is no_std, so there is no
 /// `format!` here. Hour is 1-12, minute 0-59.
-fn fmt_hhmm(buf: &mut [u8; 5], hour: u32, minute: u32) -> &str {
+fn fmt_hhmm(buf: &mut [u8; 5], hour: u32, minute: u32, pad_hour: bool) -> &str {
     let mut n = 0;
-    if hour >= 10 {
+    if pad_hour || hour >= 10 {
         buf[n] = b'0' + (hour / 10) as u8;
         n += 1;
     }
@@ -2170,6 +2181,7 @@ mod tests {
             display_on: true,
             off_state: Default::default(),
             local_clock: false,
+            clock_hour24: false,
             epoch: 0,
             brightness: bright,
         };
@@ -2222,6 +2234,7 @@ mod tests {
             display_on: true,
             off_state: Default::default(),
             local_clock: false,
+            clock_hour24: false,
             epoch: 0,
             brightness: bright,
         };
@@ -2254,6 +2267,7 @@ mod tests {
             display_on: true,
             off_state: Default::default(),
             local_clock: false,
+            clock_hour24: false,
             epoch: 0,
             brightness: 100,
         };
@@ -2319,6 +2333,7 @@ mod tests {
             display_on: true,
             off_state: Default::default(),
             local_clock: false,
+            clock_hour24: false,
             epoch: 0,
             brightness: 100,
         });
@@ -2345,6 +2360,7 @@ mod tests {
             display_on: true,
             off_state: Default::default(),
             local_clock: false,
+            clock_hour24: false,
             epoch: 0,
             brightness: 100,
         });
@@ -2415,6 +2431,7 @@ mod tests {
             display_on: true,
             off_state: Default::default(),
             local_clock: false,
+            clock_hour24: false,
             brightness: 100,
             epoch,
             countdown_ms: Some(4000),
@@ -3007,6 +3024,7 @@ mod tests {
             display_on: true,
             off_state: Default::default(),
             local_clock: false,
+            clock_hour24: false,
             epoch: 0,
             brightness: 100,
         });
@@ -3049,6 +3067,7 @@ mod tests {
             display_on: false,
             off_state: Default::default(),
             local_clock: false,
+            clock_hour24: false,
             epoch: 0,
             brightness: 100,
         });
@@ -3083,6 +3102,7 @@ mod tests {
             display_on: true,
             off_state: Default::default(),
             local_clock: false,
+            clock_hour24: false,
             epoch,
             brightness: 100,
         };
@@ -3116,10 +3136,40 @@ mod tests {
             rotation: Vec::new(),
             display_on: true,
             local_clock: true,
+            clock_hour24: false,
             off_state: Default::default(),
             epoch: 0,
             brightness: 100,
         }
+    }
+
+    /// While CONNECTED the board must draw the server's frame, not its own
+    /// clock.
+    ///
+    /// This is the bug it shipped with: the local clock was checked before the
+    /// online test, so a connected board ignored the frame it had just been
+    /// sent — and picking a clock style or 24-hour time in the app changed
+    /// nothing on the panel.
+    #[test]
+    fn a_connected_board_draws_the_servers_clock_frame_not_its_own() {
+        let px = flat_frame(FRAME_HEIGHT, 0x7A);
+        let mut m = clock_manifest();
+        m.rotation = vec![scoreboard_protocol::RotationEntry { frame_id: "f1".into(), dwell_ms: 60_000, scroll: false }];
+        let mut b = running_board();
+        b.on_manifest(m);
+        b.on_frame("f1".into(), payload(&px));
+        b.set_time(22 * 3_600_000 + 9 * 60_000);
+        b.tick(1_000);
+
+        // The server's frame, not the device clock.
+        let shown = b.framebuffer();
+        let mut local = running_board();
+        local.on_manifest(clock_manifest());
+        local.set_time(22 * 3_600_000 + 9 * 60_000);
+        local.set_online(false);
+        local.tick(OFFLINE_GRACE_MS + 1);
+        assert_ne!(shown, local.framebuffer(), "connected must not draw the local clock");
+        assert!(shown.iter().any(|&p| p != 0), "and must not be blank");
     }
 
     /// The whole point: the clock keeps time with the server gone. A
@@ -3237,6 +3287,7 @@ mod tests {
             display_on: true,
             off_state: Default::default(),
             local_clock: false,
+            clock_hour24: false,
             epoch: 0,
             brightness: 100,
         });
@@ -3351,6 +3402,7 @@ mod tests {
             display_on: on,
             off_state: Default::default(),
             local_clock: false,
+            clock_hour24: false,
             epoch: 0,
             brightness: 100,
         };
@@ -3446,6 +3498,7 @@ mod tests {
             display_on: true,
             off_state: Default::default(),
             local_clock: false,
+            clock_hour24: false,
             epoch: 0,
             brightness: 100,
         };
@@ -3572,6 +3625,7 @@ mod tests {
             display_on: true,
             off_state: Default::default(),
             local_clock: false,
+            clock_hour24: false,
             epoch: 0,
             brightness: 100,
         });
@@ -3732,6 +3786,7 @@ mod tests {
             display_on: true,
             off_state: Default::default(),
             local_clock: false,
+            clock_hour24: false,
             epoch: 0,
             brightness: 100,
         }

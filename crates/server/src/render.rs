@@ -2072,8 +2072,7 @@ pub fn render_weather_forecast(w: &crate::weather::Weather) -> (FrameId, Vec<u8>
     for (i, day) in w.days.iter().take(3).enumerate() {
         let cx = i as i32 * 22 + 10;
         let tint = if i == 0 { WHITE } else { WX_DIM };
-        // "TODAY" is as wide as the column; the short form always fits.
-        let label = if day.label.len() > 3 { &day.label[..3] } else { &day.label };
+        let label = day.label.as_str();
         wx_text(&mut c, label, cx - text_width(label, false) / 2, 3, false, 1, tint);
         // Daily codes have no day/night sense — a forecast is for the daytime.
         wx_icon(&mut c, wx_art(crate::weather::icon_for(day.code, true), true), cx, 12);

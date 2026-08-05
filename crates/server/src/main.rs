@@ -2,6 +2,7 @@
 //! preferences (favorite teams etc.), and renders a per-board rotation filtered
 //! by those preferences. Talks to boards + controllers over a websocket.
 
+mod alerts;
 mod bdf;
 mod espn;
 mod model;
@@ -100,6 +101,14 @@ pub struct AppState {
     /// it and never wait on it: a board must not be held up drawing a frame
     /// while an HTTP call to a third party completes.
     pub weather: Arc<weather::Cache>,
+    /// Liveness heartbeats, one per background loop.
+    ///
+    /// The outage that motivated these was not a crash: the poll loop wedged on
+    /// a lock and the process kept running, answering nothing, logging nothing.
+    /// A plain "is the port open" check would have caught THAT one, but not the
+    /// general case of a loop dying while HTTP still serves — so each loop
+    /// stamps its own beat and `/health` reports the ages.
+    pub beats: Arc<Mutex<HashMap<&'static str, Instant>>>,
     /// Rendered frames by content id, stamped with the eviction generation they
     /// were minted in (so `evict_stale_frames` never drops a frame between its
     /// render and its manifest registration — that write pair isn't atomic).
@@ -363,6 +372,7 @@ impl AppState {
             demo: Arc::new(Mutex::new(espn::demo_games(0, 0))),
             demo_source: Arc::new(espn::DemoSource::new()),
             weather: Arc::new(weather::Cache::default()),
+            beats: Arc::new(Mutex::new(HashMap::new())),
             catalog: Arc::new(catalog),
             // Empty until the first real fetch — boards show their no-games
             // behavior rather than fake placeholder games.
@@ -779,9 +789,26 @@ async fn main() {
     state.fw_notes_dir = fw_dir.join("notes");
     tokio::spawn(poll_loop(state.clone(), source));
     tokio::spawn(weather_loop(state.clone()));
+    // Email alerting is opt-in: with nothing configured the server simply does
+    // not start these, and says so once rather than warning forever.
+    match alerts::Mailer::from_env() {
+        Some(_) => {
+            tracing::info!("email alerts enabled");
+            if let Some(m) = alerts::Mailer::from_env() {
+                tokio::spawn(alerts::watchdog(state.clone(), m));
+            }
+            if let Some(m) = alerts::Mailer::from_env() {
+                tokio::spawn(alerts::daily_report(state.clone(), m));
+            }
+        }
+        None => tracing::info!(
+            "email alerts off (set RESEND_API_KEY and ALERT_EMAIL_TO to enable)"
+        ),
+    }
     tokio::spawn(tick_loop(state.clone()));
 
     let app = Router::new()
+        .route("/health", get(get_health))
         .route("/catalog", get(get_catalog))
         .route("/render/:id", get(get_render))
         .route("/game/:id", get(get_game))
@@ -2078,8 +2105,19 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
     // Priority 0: quiet hours. Above BOTH games and notices, because the notice
     // path returns `display_on: true` regardless of power — a demo toggle or a
     // power splash would otherwise light the panel at 3am, mid-window.
+    //
+    // Quiet means DARK, not the off mode. "Quiet hours" that answer with a lit
+    // clock at 1am have not done the thing they were turned on for; a board
+    // that wants a clock overnight simply leaves the window off.
     if quiet_now(&cfg) {
-        return idle_manifest(state, &cfg, tz);
+        // The exception: a game that is actually happening. The point is a dark
+        // bedroom, not a missed race — but only for real games, so the panel
+        // goes back to dark when the race ends rather than falling through to
+        // the clock.
+        let live = cfg.power && cfg.quiet_allow_events && !chosen_games(state, &cfg).is_empty();
+        if !live {
+            return dark_manifest(&cfg);
+        }
     }
 
     // Priority 1: live games (only while powered on).
@@ -2115,6 +2153,7 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
                 rotation.push(RotationEntry { frame_id: id, dwell_ms, scroll: scrolls });
             }
             return Manifest {
+                clock_hour24: false,
                 // Games / notice path: never a device-drawn clock.
                 local_clock: false,
                 rotation,
@@ -2156,6 +2195,7 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
                     scroll: false,
                 }];
                 return Manifest {
+                    clock_hour24: false,
                     // Games / notice path: never a device-drawn clock.
                     local_clock: false,
                     rotation,
@@ -2173,6 +2213,21 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
     // Priority 3: idle / asleep — the configured off-state (server-rendered clock
     // or a blank panel). Applies both to power-off and powered-on-but-no-games.
     idle_manifest(state, &cfg, tz)
+}
+
+/// A deliberately dark panel. Distinct from `idle_manifest`, which draws the
+/// configured off mode — during quiet hours there is nothing to draw.
+fn dark_manifest(cfg: &BoardConfig) -> Manifest {
+    Manifest {
+        clock_hour24: false,
+        rotation: Vec::new(),
+        display_on: false,
+        local_clock: false,
+        off_state: OffState::Blank,
+        brightness: cfg.brightness,
+        epoch: 0,
+        countdown_ms: None,
+    }
 }
 
 /// The idle panel: whatever the configured off mode draws, or darkness.
@@ -2203,6 +2258,8 @@ fn idle_manifest(state: &AppState, cfg: &BoardConfig, tz: Option<chrono_tz::Tz>)
         // Only the idle path can be a local clock, and only when it drew
         // something. The rendered frame still ships alongside it.
         local_clock: !rotation.is_empty() && offmode::is_local_clock(cfg.off_mode_id()),
+        // So the offline clock keeps the format the app chose.
+        clock_hour24: cfg.off_mode_params.get(offmode::HOUR24).map(String::as_str) == Some("1"),
         display_on: !rotation.is_empty(),
         // DERIVED, not copied. `OffState` is a closed enum with no serde
         // default on the wire, and firmware drops an unparseable message
@@ -2237,6 +2294,74 @@ pub fn push_time(state: &AppState, board_id: &str) {
 /// Mutex is not reentrant. Written inline, this deadlocked the thread against
 /// itself while it held the lock every websocket and HTTP handler needs — the
 /// server did not crash or log, it just stopped answering.
+/// Record that a background loop is alive. Called at the TOP of each pass, so
+/// a loop that wedges mid-pass still goes stale.
+/// Generous multiples of each loop's real period: 3 min poll, 10 min weather,
+/// 30 s tick. Tight enough to catch a stall within minutes, loose enough that
+/// one slow upstream fetch is not an alert. Shared by `/health` and the email
+/// watchdog so the two can never disagree about what "stalled" means.
+pub const LOOP_LIMITS: [(&str, u64); 3] = [("poll", 600), ("weather", 2400), ("tick", 180)];
+
+pub fn beat(state: &AppState, loop_name: &'static str) {
+    state.beats.lock().unwrap().insert(loop_name, Instant::now());
+}
+
+/// How long since each loop last checked in, plus the numbers worth graphing.
+/// `ok` is false when any loop has missed several turns — the shape a stall
+/// takes, whether it is a deadlock, a panic in a spawned task, or a hang in an
+/// upstream call with no timeout.
+pub fn health_report(state: &AppState) -> (bool, serde_json::Value) {
+    // Generous multiples of each loop's real period: 3 min poll, 10 min
+    // weather, 30 s tick. Tight enough to catch a stall within minutes, loose
+    // enough that one slow upstream fetch is not an alert.
+    let beats = state.beats.lock().unwrap().clone();
+    let mut loops = serde_json::Map::new();
+    let mut ok = true;
+    for (name, limit) in LOOP_LIMITS {
+        let age = beats.get(name).map(|t| t.elapsed().as_secs());
+        // A loop that has never beaten is starting up, not stalled.
+        let stale = age.is_some_and(|a| a > limit);
+        ok &= !stale;
+        loops.insert(
+            name.to_string(),
+            serde_json::json!({ "age_secs": age, "limit_secs": limit, "stale": stale }),
+        );
+    }
+    let report = serde_json::json!({
+        "ok": ok,
+        "loops": loops,
+        "boards_connected": state.devices.lock().unwrap().len(),
+        "controllers_connected": state.controllers.lock().unwrap().len(),
+        "boards_known": state.configs.lock().unwrap().len(),
+        "games": state.games.lock().unwrap().len(),
+        "frames_cached": state.frames.lock().unwrap().len(),
+        "version": env!("CARGO_PKG_VERSION"),
+    });
+    (ok, report)
+}
+
+/// GET /health — liveness for an uptime monitor, and the few numbers worth
+/// watching. Returns 503 when a loop has stalled, so a platform healthcheck
+/// restarts the container instead of leaving it up and useless.
+async fn get_health(State(s): State<AppState>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let (ok, report) = health_report(&s);
+    let code = if ok {
+        axum::http::StatusCode::OK
+    } else {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        code,
+        [
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        serde_json::to_string_pretty(&report).unwrap_or_default(),
+    )
+        .into_response()
+}
+
 pub fn push_all_connected(state: &AppState) {
     let connected: Vec<String> = state.devices.lock().unwrap().keys().cloned().collect();
     for bid in connected {
@@ -2797,6 +2922,7 @@ pub fn weather_locations(state: &AppState) -> Vec<String> {
 pub async fn weather_loop(state: AppState) {
     loop {
         let locations = weather_locations(&state);
+        beat(&state, "weather");
         if !locations.is_empty() {
             weather::refresh_all(&state.weather, locations).await;
             // A fresh reading can change every weather board's frame.
@@ -2807,6 +2933,7 @@ pub async fn weather_loop(state: AppState) {
 }
 
 pub fn tick_once(state: &AppState) {
+    beat(state, "tick");
     // Re-anchor every connected board's clock. The board runs its own clock
     // between these; this only corrects drift and carries DST over.
     let connected: Vec<String> = state.devices.lock().unwrap().keys().cloned().collect();
@@ -3075,6 +3202,7 @@ async fn poll_loop(state: AppState, source: Arc<dyn SportsDataSource>) {
                 continue;
             }
         }
+        beat(&state, "poll");
         let fetched_at = Instant::now();
         let mut games = source.fetch().await;
         // Ingestion filter: far-future scheduled games (a GP two weeks out,
@@ -6059,6 +6187,36 @@ mod tests {
         assert_eq!(cfg.off_mode.as_deref(), Some("weather"));
         assert_eq!(cfg.off_mode_params.get("variant").map(String::as_str), Some("forecast"));
         assert_eq!(cfg.off_mode_id(), "weather");
+    }
+
+    /// Health must report a STALLED loop, not just a live process. The outage
+    /// that motivated this was a wedged loop inside a process that was still
+    /// running and still accepting connections.
+    #[test]
+    fn health_reports_a_stalled_loop_rather_than_just_a_live_process() {
+        let state = AppState::new_ephemeral();
+        // Nothing has beaten yet: starting up is not stalled.
+        let (ok, _) = health_report(&state);
+        assert!(ok, "a server that has not run a pass yet is not unhealthy");
+
+        beat(&state, "poll");
+        beat(&state, "tick");
+        beat(&state, "weather");
+        let (ok, report) = health_report(&state);
+        assert!(ok);
+        assert_eq!(report["loops"]["poll"]["stale"], false);
+        assert_eq!(report["loops"]["poll"]["age_secs"], 0);
+
+        // Wind one loop's beat back past its limit.
+        let limit = report["loops"]["tick"]["limit_secs"].as_u64().unwrap();
+        state.beats.lock().unwrap().insert(
+            "tick",
+            Instant::now() - std::time::Duration::from_secs(limit + 1),
+        );
+        let (ok, report) = health_report(&state);
+        assert!(!ok, "a stalled loop must make the server report unhealthy");
+        assert_eq!(report["loops"]["tick"]["stale"], true);
+        assert_eq!(report["loops"]["poll"]["stale"], false, "and name WHICH loop");
     }
 
     /// A deadlock, caught the only way a deadlock can be: by timing out.

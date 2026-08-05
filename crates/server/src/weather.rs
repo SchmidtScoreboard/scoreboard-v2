@@ -130,11 +130,11 @@ async fn coords(location: &str) -> Option<(f64, f64)> {
 }
 
 /// Day-of-week label for an ISO `YYYY-MM-DD`, in the forecast's own timezone.
-fn day_label(iso: &str, index: usize) -> String {
+///
+/// Today gets its real weekday, not "TODAY" — the column is three characters
+/// wide, so "TODAY" was truncated to "TOD", which is not a word.
+fn day_label(iso: &str) -> String {
     use chrono::Datelike;
-    if index == 0 {
-        return "TODAY".into();
-    }
     match chrono::NaiveDate::parse_from_str(iso, "%Y-%m-%d") {
         Ok(d) => ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
             [d.weekday().num_days_from_monday() as usize]
@@ -163,7 +163,7 @@ async fn fetch(location: &str) -> Option<Weather> {
     );
     let days: Vec<Day> = (0..codes.len().min(3))
         .map(|i| Day {
-            label: day_label(times.get(i).and_then(|t| t.as_str()).unwrap_or(""), i),
+            label: day_label(times.get(i).and_then(|t| t.as_str()).unwrap_or("")),
             code: codes[i].as_u64().unwrap_or(0) as u16,
             hi: maxes.get(i).and_then(|x| x.as_f64()).unwrap_or(0.0).round() as i32,
             lo: mins.get(i).and_then(|x| x.as_f64()).unwrap_or(0.0).round() as i32,
@@ -312,10 +312,15 @@ mod tests {
         assert!(matches!(c.get("60601"), Reading::Unavailable));
     }
 
+    /// Every column is a weekday, including the first. "TODAY" does not fit a
+    /// three-character column and truncated to "TOD".
     #[test]
-    fn today_is_labelled_today_and_the_rest_by_weekday() {
-        assert_eq!(day_label("2026-08-04", 0), "TODAY");
-        assert_eq!(day_label("2026-08-05", 1), "WED");
-        assert_eq!(day_label("2026-08-06", 2), "THU");
+    fn every_forecast_column_is_a_real_weekday() {
+        assert_eq!(day_label("2026-08-04"), "TUE");
+        assert_eq!(day_label("2026-08-05"), "WED");
+        assert_eq!(day_label("2026-08-06"), "THU");
+        for iso in ["2026-08-04", "2026-08-05", "2026-08-06"] {
+            assert_eq!(day_label(iso).chars().count(), 3, "{iso} must fit the column");
+        }
     }
 }

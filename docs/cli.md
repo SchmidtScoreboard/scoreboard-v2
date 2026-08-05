@@ -51,6 +51,10 @@ All curl-able; the app uses the same ones.
   Data comes from Open-Meteo, coordinates from Zippopotam; both key-free, so a
   self-hosted server needs no accounts. Cached and refreshed every 10 minutes
   by `weather_loop`, never fetched while rendering a frame.
+- `GET /health` — liveness plus the numbers worth watching: per-loop heartbeat
+  ages, boards connected, games, cached frames. Returns **503** when a loop has
+  stalled, which is what `railway.json` points its healthcheck at, so a wedged
+  container gets restarted instead of staying up and useless.
 - `GET /offmode/{id}.png` — what an off mode looks like on the panel, rendered
   at a fixed time so the bytes are stable (`max-age=86400`, same rule as
   `/guide`). Drives the app's "When off" rows. 404 on an id this server does

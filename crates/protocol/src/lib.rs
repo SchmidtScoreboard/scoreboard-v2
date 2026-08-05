@@ -374,6 +374,14 @@ pub struct Manifest {
     /// "one frame with a 60s dwell" is not a contract.
     #[serde(default, skip_serializing_if = "is_false")]
     pub local_clock: bool,
+    /// Draw the device-local clock in 24-hour time.
+    ///
+    /// Sent so the OFFLINE clock matches the format chosen in the app. Only
+    /// the format travels, not the style: the board draws one layout, and a
+    /// board that is offline is already showing a different screen than the one
+    /// it shows connected — the struck-out Wi-Fi mark says so.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub clock_hour24: bool,
     pub off_state: OffState,
     pub brightness: u8, // 10..=100, applied device-side (one value: knob and app share it)
     /// Program identity. The board keeps its rotation slot across same-length
@@ -600,6 +608,13 @@ pub struct BoardConfig {
     /// A nightly window during which the board sleeps. None = never.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quiet_hours: Option<QuietHours>,
+    /// Let live games light the panel during the window.
+    ///
+    /// The point of quiet hours is a dark bedroom, not a missed race. With
+    /// this on, a game that is actually happening still shows; when nothing is
+    /// on, the panel stays dark rather than falling back to the clock.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub quiet_allow_events: bool,
     /// LIVE state: the user asked to see the board anyway, for the rest of
     /// tonight's window.
     ///
@@ -720,6 +735,8 @@ pub struct PortableSettings {
     /// `quiet_override` is live state and deliberately stays behind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quiet_hours: Option<QuietHours>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub quiet_allow_events: bool,
     /// How spoiler-protected games render (strict = matchup + time only).
     #[serde(default)]
     pub spoiler_mode: SpoilerMode,
@@ -748,6 +765,7 @@ impl From<&BoardConfig> for PortableSettings {
             off_mode: cfg.off_mode.clone(),
             off_mode_params: cfg.off_mode_params.clone(),
             quiet_hours: cfg.quiet_hours,
+            quiet_allow_events: cfg.quiet_allow_events,
             spoiler_mode: cfg.spoiler_mode,
             spoiler_all: cfg.spoiler_all,
             sports: cfg.sports.clone(),
@@ -771,6 +789,7 @@ impl PortableSettings {
         cfg.off_mode = self.off_mode.clone();
         cfg.off_mode_params = self.off_mode_params.clone();
         cfg.quiet_hours = self.quiet_hours;
+        cfg.quiet_allow_events = self.quiet_allow_events;
         cfg.spoiler_mode = self.spoiler_mode;
         cfg.spoiler_all = self.spoiler_all;
         cfg.sports = self.sports.clone();
@@ -815,6 +834,7 @@ impl Default for BoardConfig {
             off_mode: None,
             off_mode_params: BTreeMap::new(),
             quiet_hours: None,
+            quiet_allow_events: false,
             quiet_override: false,
             sleep_hours: default_sleep_hours(),
             dwell_secs: default_dwell_secs(),
@@ -876,6 +896,8 @@ pub enum Command {
     /// `start_min == end_min` clears it.
     SetQuietHours { start_min: u16, end_min: u16 },
     ClearQuietHours,
+    /// Whether live games may light the panel during the quiet window.
+    SetQuietAllowEvents { on: bool },
     /// Pick a server-declared off mode by id. The server validates it against
     /// its own catalog and ignores an id it does not offer.
     SetOffMode { id: String },

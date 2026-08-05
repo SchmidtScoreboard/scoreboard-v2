@@ -717,6 +717,11 @@ public protocol ScoreboardClientProtocol: AnyObject {
     func setPower(boardId: String, on: Bool)
 
     /**
+     * Let live games light the panel during the quiet window.
+     */
+    func setQuietAllowEvents(boardId: String, on: Bool)
+
+    /**
      * Set the nightly quiet window, in minutes since the board's local
      * midnight. Equal values clear it.
      */
@@ -1160,6 +1165,16 @@ open class ScoreboardClient:
     }
 
     /**
+     * Let live games light the panel during the quiet window.
+     */
+    open func setQuietAllowEvents(boardId: String, on: Bool) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_set_quiet_allow_events(self.uniffiClonePointer(),
+                                                                          FfiConverterString.lower(boardId),
+                                                                          FfiConverterBool.lower(on), $0)
+    }
+    }
+
+    /**
      * Set the nightly quiet window, in minutes since the board's local
      * midnight. Equal values clear it.
      */
@@ -1377,6 +1392,10 @@ public struct UiBoardConfig {
      */
     public var quietStartMin: UInt16?
     public var quietEndMin: UInt16?
+    /**
+     * Let live games light the panel during the window.
+     */
+    public var quietAllowEvents: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1425,7 +1444,10 @@ public struct UiBoardConfig {
                     * The nightly quiet window in minutes since the board's local midnight,
                     * or nil when there is none. Two flat fields rather than a record, so the
                     * "unset" case is one nil check in Swift.
-                    */ quietStartMin: UInt16?, quietEndMin: UInt16?)
+                    */ quietStartMin: UInt16?, quietEndMin: UInt16?,
+                /**
+                    * Let live games light the panel during the window.
+                    */ quietAllowEvents: Bool)
     {
         self.sports = sports
         self.brightness = brightness
@@ -1448,6 +1470,7 @@ public struct UiBoardConfig {
         self.demoData = demoData
         self.quietStartMin = quietStartMin
         self.quietEndMin = quietEndMin
+        self.quietAllowEvents = quietAllowEvents
     }
 }
 
@@ -1516,6 +1539,9 @@ extension UiBoardConfig: Equatable, Hashable {
         if lhs.quietEndMin != rhs.quietEndMin {
             return false
         }
+        if lhs.quietAllowEvents != rhs.quietAllowEvents {
+            return false
+        }
         return true
     }
 
@@ -1541,6 +1567,7 @@ extension UiBoardConfig: Equatable, Hashable {
         hasher.combine(demoData)
         hasher.combine(quietStartMin)
         hasher.combine(quietEndMin)
+        hasher.combine(quietAllowEvents)
     }
 }
 
@@ -1571,7 +1598,8 @@ public struct FfiConverterTypeUiBoardConfig: FfiConverterRustBuffer {
                 fwChannel: FfiConverterTypeUiFwChannel.read(from: &buf),
                 demoData: FfiConverterBool.read(from: &buf),
                 quietStartMin: FfiConverterOptionUInt16.read(from: &buf),
-                quietEndMin: FfiConverterOptionUInt16.read(from: &buf)
+                quietEndMin: FfiConverterOptionUInt16.read(from: &buf),
+                quietAllowEvents: FfiConverterBool.read(from: &buf)
             )
     }
 
@@ -1597,6 +1625,7 @@ public struct FfiConverterTypeUiBoardConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.demoData, into: &buf)
         FfiConverterOptionUInt16.write(value.quietStartMin, into: &buf)
         FfiConverterOptionUInt16.write(value.quietEndMin, into: &buf)
+        FfiConverterBool.write(value.quietAllowEvents, into: &buf)
     }
 }
 
@@ -3981,6 +4010,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_power() != 36256 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_scoreboardclient_set_quiet_allow_events() != 4128 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_quiet_hours() != 15526 {
