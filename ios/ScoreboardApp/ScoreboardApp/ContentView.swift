@@ -119,7 +119,7 @@ struct BoardInfo {
     var brightness: Double = 80
     var power = true
     var favorites: [String: [String]] = [:]      // sportId -> team ids, USER ORDER
-    var championship: [String: String] = [:]      // sportId -> option id
+    var championship: [String: Set<String>] = [:] // sportId -> selected round ids
     var extraGameIds: Set<String> = []
     var excludedGameIds: Set<String> = []
     var focusedGameId: String?
@@ -784,15 +784,17 @@ final class BoardViewModel: ObservableObject {
 
     /// The selected board's favorited team ids for one sport, in the user's order.
     func favoriteIds(_ sportId: String) -> [String] { current.favorites[sportId] ?? [] }
-    /// The selected board's big-games choice for one sport ("none" if unset).
-    func championshipId(_ sportId: String) -> String { current.championship[sportId] ?? "none" }
+    /// The rounds this board subscribes to for one sport. Empty = only the
+    /// favourited teams; there is no "none" sentinel any more, because an empty
+    /// set says the same thing without a magic string.
+    func championshipIds(_ sportId: String) -> Set<String> { current.championship[sportId] ?? [] }
 
     /// One league the user has preferences for: its ordered favorite teams
     /// (resolved against the catalog) and the active big-games option, if any.
     struct LeaguePref: Identifiable {
         let sport: UiSport
         let teams: [UiTeam]
-        let bigGame: UiChampOption?
+        let bigGames: [UiChampOption]
         var id: String { sport.id }
     }
 
@@ -803,14 +805,15 @@ final class BoardViewModel: ObservableObject {
         for sport in sports {
             let ids = st.favorites[sport.id] ?? []
             let teams = ids.compactMap { tid in sport.teams.first { $0.id == tid } }
-            let champId = st.championship[sport.id] ?? "none"
-            let big = champId == "none" ? nil : sport.championshipOptions.first { $0.id == champId }
+            let picked = st.championship[sport.id] ?? []
+            // Resolved in the server's declared order, not the user's tap order.
+            let big = sport.championshipRounds.filter { picked.contains($0.id) }
             // A dwell override alone earns a card too — otherwise it would be
             // active but invisible (set via Add League without subscribing, or
             // left behind after the last favorite is removed).
-            if !teams.isEmpty || big != nil || st.leagueDwell[sport.id] != nil || st.leagueRows[sport.id] != nil
+            if !teams.isEmpty || !big.isEmpty || st.leagueDwell[sport.id] != nil || st.leagueRows[sport.id] != nil
                 || st.leagueSpoiler[sport.id] == true || !(st.teamSpoilers[sport.id] ?? []).isEmpty {
-                prefs.append(LeaguePref(sport: sport, teams: teams, bigGame: big))
+                prefs.append(LeaguePref(sport: sport, teams: teams, bigGames: big))
             }
         }
         // Same order as the Add League sheet: category first, then name.
@@ -859,9 +862,12 @@ final class BoardViewModel: ObservableObject {
         let favs = favoriteIds(sport.id)
         let n = sport.teams.filter { favs.contains($0.id) }.count
         if n == 1 { parts.append("1 team") } else if n > 1 { parts.append("\(n) teams") }
-        let champId = championshipId(sport.id)
-        if champId != "none", let opt = sport.championshipOptions.first(where: { $0.id == champId }) {
-            parts.append(opt.label)
+        // Name one round, count the rest: "Conference Finals +2" stays readable
+        // where four labels joined by a separator would not.
+        let picked = championshipIds(sport.id)
+        let labels = sport.championshipRounds.filter { picked.contains($0.id) }.map(\.label)
+        if let first = labels.first {
+            parts.append(labels.count == 1 ? first : "\(first) +\(labels.count - 1)")
         }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
@@ -883,17 +889,21 @@ final class BoardViewModel: ObservableObject {
         pushSport(id, sportId)
     }
 
-    /// Change just the big-games option for a league (tap on the trophy row).
-    func setChampionship(_ sportId: String, _ optionId: String) {
+    /// Add or remove ONE round for a league.
+    func toggleChampionship(_ sportId: String, _ optionId: String) {
         guard let id = selectedBoardId else { return }
-        mutate(id) { $0.championship[sportId] = optionId }
+        mutate(id) {
+            var picked = $0.championship[sportId] ?? []
+            if picked.contains(optionId) { picked.remove(optionId) } else { picked.insert(optionId) }
+            $0.championship[sportId] = picked
+        }
         pushSport(id, sportId)
     }
 
     /// Apply an edited league as ONE request: replace its favorite set and big-games
     /// choice together, then push a single `setSportConfig`. Existing favorites keep
     /// their user-chosen order; newly added teams append in catalog order.
-    func commitSportEdit(_ sportId: String, teamIds: Set<String>, championshipOptionId: String) {
+    func commitSportEdit(_ sportId: String, teamIds: Set<String>, championshipOptionIds: Set<String>) {
         guard let id = selectedBoardId else { return }
         let old = boards[id]?.favorites[sportId] ?? []
         var ordered = old.filter { teamIds.contains($0) }
@@ -901,33 +911,36 @@ final class BoardViewModel: ObservableObject {
         ordered.append(contentsOf: catalogOrder.filter { teamIds.contains($0) && !ordered.contains($0) })
         mutate(id) {
             $0.favorites[sportId] = ordered
-            $0.championship[sportId] = championshipOptionId
+            $0.championship[sportId] = championshipOptionIds
         }
         pushSport(id, sportId)
     }
 
     /// Whether a league editor's working state differs from the committed config —
     /// lets the editor skip a redundant push when nothing changed.
-    func sportEditChanged(_ sportId: String, teamIds: Set<String>, championshipOptionId: String) -> Bool {
+    func sportEditChanged(_ sportId: String, teamIds: Set<String>, championshipOptionIds: Set<String>) -> Bool {
         let st = current
         let currentTeams = Set(st.favorites[sportId] ?? [])
-        let currentChamp = st.championship[sportId] ?? "none"
-        return teamIds != currentTeams || championshipOptionId != currentChamp
+        return teamIds != currentTeams || championshipOptionIds != (st.championship[sportId] ?? [])
     }
 
     /// Turn a league's big-games selection back off (swipe on the trophy row).
     func clearBigGames(_ sportId: String) {
         guard let id = selectedBoardId else { return }
-        mutate(id) { $0.championship[sportId] = "none" }
+        mutate(id) { $0.championship[sportId] = [] }
         pushSport(id, sportId)
     }
 
     private func pushSport(_ boardId: String, _ sportId: String) {
         guard let st = boards[boardId] else { return }
         let teams = st.favorites[sportId] ?? []
-        let champ = st.championship[sportId]
-        let champArg = (champ == "none") ? nil : champ
-        client?.setSportConfig(boardId: boardId, sportId: sportId, favoriteTeamIds: teams, championshipOptionId: champArg)
+        // Always the whole set, even when empty: the server reads an ABSENT
+        // list as "an older app that never knew about rounds" and would expand
+        // the legacy field rather than deselecting.
+        let rounds = Array(st.championship[sportId] ?? [])
+        client?.setSportConfig(
+            boardId: boardId, sportId: sportId, favoriteTeamIds: teams, championshipOptionIds: rounds
+        )
     }
 
     /// Whether a game involves one of this board's favorited teams.
@@ -969,10 +982,11 @@ final class BoardViewModel: ObservableObject {
     /// The label of a league's active subscription option ("Every match",
     /// "Majors only", "GP + Qualifying"), resolved from the catalog.
     func championshipLabel(_ sportId: String) -> String? {
-        let champId = championshipId(sportId)
-        guard champId != "none" else { return nil }
-        return sports.first { $0.id == sportId }?
-            .championshipOptions.first { $0.id == champId }?.label
+        let picked = championshipIds(sportId)
+        guard !picked.isEmpty, let sport = sports.first(where: { $0.id == sportId }) else { return nil }
+        let labels = sport.championshipRounds.filter { picked.contains($0.id) }.map(\.label)
+        guard let first = labels.first else { return nil }
+        return labels.count == 1 ? first : "\(first) +\(labels.count - 1)"
     }
 
     /// League groups for the expanded "view all" carousel: leagues the user has
@@ -1120,7 +1134,7 @@ final class BoardViewModel: ObservableObject {
         guard boardIds.contains(boardId) else { return }
         if selectedBoardId == nil { selectedBoardId = boardId }
         var fav: [String: [String]] = [:]
-        var champ: [String: String] = [:]
+        var champ: [String: Set<String>] = [:]
         var dwell: [String: UInt32] = [:]
         var rows: [String: UInt32] = [:]
         var nameStyle: [String: UiNameStyle] = [:]
@@ -1128,7 +1142,7 @@ final class BoardViewModel: ObservableObject {
         var tspoil: [String: Set<String>] = [:]
         for s in c.sports {
             fav[s.sportId] = s.favoriteTeamIds
-            if let o = s.championshipOptionId { champ[s.sportId] = o }
+            if !s.championshipOptionIds.isEmpty { champ[s.sportId] = Set(s.championshipOptionIds) }
             if let d = s.dwellSecs { dwell[s.sportId] = d }
             if let r = s.leaderboardRows { rows[s.sportId] = r }
             if let n = s.nameStyle { nameStyle[s.sportId] = n }
@@ -2479,14 +2493,16 @@ struct DashboardView: View {
                 }
             }
 
-            if let big = pref.bigGame {
+            if !pref.bigGames.isEmpty {
                 HStack(spacing: 8) {
                 Menu {
-                    ForEach(pref.sport.championshipOptions, id: \.id) { opt in
+                    // Multi-select: every round is its own toggle, and the menu
+                    // stays open-ended rather than committing one choice.
+                    ForEach(pref.sport.championshipRounds, id: \.id) { opt in
                         Button {
-                            model.setChampionship(pref.sport.id, opt.id)
+                            model.toggleChampionship(pref.sport.id, opt.id)
                         } label: {
-                            if opt.id == big.id {
+                            if pref.bigGames.contains(where: { $0.id == opt.id }) {
                                 Label(opt.label, systemImage: "checkmark")
                             } else {
                                 Text(opt.label)
@@ -2498,7 +2514,7 @@ struct DashboardView: View {
                         Image(systemName: "trophy.fill")
                             .foregroundStyle(.yellow)
                             .frame(width: 24)
-                        Text(big.label)
+                        Text(model.championshipLabel(pref.sport.id) ?? "")
                             .foregroundStyle(.primary)
                         Spacer()
                         Image(systemName: "chevron.up.chevron.down")
@@ -2528,7 +2544,7 @@ struct DashboardView: View {
 
             // League-wide spoiler state for leagues with no big-game row (the
             // trophy row carries the chip otherwise) — shown only when hidden.
-            if pref.bigGame == nil && model.leagueSpoiler(pref.sport.id) {
+            if pref.bigGames.isEmpty && model.leagueSpoiler(pref.sport.id) {
                 HStack(spacing: 12) {
                     Image(systemName: "eye.slash")
                         .foregroundStyle(.secondary)
@@ -3696,7 +3712,7 @@ struct LeagueEditorView: View {
     let sport: UiSport
 
     @State private var selection: Set<String> = []
-    @State private var champ = "none"
+    @State private var champ: Set<String> = []
     @State private var loaded = false
     @State private var search = ""
     /// The whole-league option the user just tapped, held until they confirm.
@@ -3752,27 +3768,39 @@ struct LeagueEditorView: View {
     private var editorList: some View {
         List {
             if !sport.championshipOptions.isEmpty {
-                Section(optionsTitle) {
-                    // Routed through a proxy binding so the whole-league option can
-                    // ask first: the getter still reports the COMMITTED choice, so
-                    // the row never shows a selection the user hasn't agreed to.
-                    Picker("Show", selection: Binding(
-                        get: { champ },
-                        set: { picked in
-                            if picked == Self.wholeLeagueOptionId, champ != picked, !isLeaderboardLeague {
-                                pendingWholeLeague = picked
-                            } else {
+                Section {
+                    ForEach(sport.championshipRounds, id: \.id) { opt in
+                        Button {
+                            if opt.id == Self.wholeLeagueOptionId, !champ.contains(opt.id), !isLeaderboardLeague {
                                 // Leaderboard leagues run ONE event at a time, so
                                 // their blanket option can't swamp the rotation —
                                 // warning there would just be noise.
-                                champ = picked
+                                pendingWholeLeague = opt.id
+                            } else if champ.contains(opt.id) {
+                                champ.remove(opt.id)
+                            } else {
+                                champ.insert(opt.id)
+                            }
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: champ.contains(opt.id) ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(champ.contains(opt.id) ? Color.accentColor : Color.secondary)
+                                Text(opt.label).foregroundStyle(Color.primary)
+                                Spacer()
                             }
                         }
-                    )) {
-                        ForEach(sport.championshipOptions, id: \.id) { opt in
-                            Text(opt.label).tag(opt.id)
-                        }
+                        .buttonStyle(.plain)
                     }
+                } header: {
+                    Text(optionsTitle)
+                } footer: {
+                    // The honesty requirement. The old picker was a ladder where
+                    // one choice quietly included the rounds beyond it; these are
+                    // separate, and saying so is the point of the change.
+                    Text("Each of these is separate. Checking one does not add the others.")
+                }
+
+                Section {
                     // Spoilers for this league's games (incl. the subscription
                     // above) — the same flag the chips on the main page toggle.
                     Toggle("Hide results (spoilers)", isOn: Binding(
@@ -3865,12 +3893,12 @@ struct LeagueEditorView: View {
         .onAppear {
             guard !loaded else { return }
             selection = Set(model.favoriteIds(sport.id))
-            champ = model.championshipId(sport.id)
+            champ = model.championshipIds(sport.id)
             loaded = true
         }
         .onDisappear {
-            if model.sportEditChanged(sport.id, teamIds: selection, championshipOptionId: champ) {
-                model.commitSportEdit(sport.id, teamIds: selection, championshipOptionId: champ)
+            if model.sportEditChanged(sport.id, teamIds: selection, championshipOptionIds: champ) {
+                model.commitSportEdit(sport.id, teamIds: selection, championshipOptionIds: champ)
             }
         }
         // A whole league is the one option that can swamp the board, and the
@@ -3884,7 +3912,10 @@ struct LeagueEditorView: View {
             // Hardcoded rather than read back from `pendingWholeLeague`: the
             // dismissal clears that state, and the two orderings shouldn't
             // decide whether the user's Continue actually took.
-            Button("Continue") { champ = Self.wholeLeagueOptionId }
+            // Inserts rather than replaces: the blanket is now one checkbox
+            // among several, and confirming it should not silently uncheck the
+            // rounds someone already picked.
+            Button("Continue") { champ.insert(Self.wholeLeagueOptionId) }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Every match can be a lot of games — on a busy night the scoreboard shows the first 20 and lists the rest as bumped. You can always pick a narrower option.")

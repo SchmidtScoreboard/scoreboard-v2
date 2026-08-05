@@ -577,7 +577,7 @@ void uniffi_app_core_fn_method_scoreboardclient_set_spoiler_mode(void*_Nonnull p
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_SPORT_CONFIG
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_SPORT_CONFIG
-void uniffi_app_core_fn_method_scoreboardclient_set_sport_config(void*_Nonnull ptr, RustBuffer board_id, RustBuffer sport_id, RustBuffer favorite_team_ids, RustBuffer championship_option_id, RustCallStatus *_Nonnull out_status
+void uniffi_app_core_fn_method_scoreboardclient_set_sport_config(void*_Nonnull ptr, RustBuffer board_id, RustBuffer sport_id, RustBuffer favorite_team_ids, RustBuffer championship_option_ids, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_TEAM_SPOILER

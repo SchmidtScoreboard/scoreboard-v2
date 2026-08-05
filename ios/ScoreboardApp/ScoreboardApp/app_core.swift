@@ -742,7 +742,14 @@ public protocol ScoreboardClientProtocol: AnyObject {
      */
     func setSpoilerMode(boardId: String, strict: Bool)
 
-    func setSportConfig(boardId: String, sportId: String, favoriteTeamIds: [String], championshipOptionId: String?)
+    /**
+     * Set a league's favourites and the rounds it subscribes to.
+     *
+     * `championship_option_ids` is the whole selection, sent as `Some` even
+     * when empty — the server reads absent as "an older app that never knew
+     * about rounds" and would expand the legacy field instead of deselecting.
+     */
+    func setSportConfig(boardId: String, sportId: String, favoriteTeamIds: [String], championshipOptionIds: [String])
 
     /**
      * Spoiler-protect one team's games.
@@ -1216,12 +1223,19 @@ open class ScoreboardClient:
     }
     }
 
-    open func setSportConfig(boardId: String, sportId: String, favoriteTeamIds: [String], championshipOptionId: String?) { try! rustCall {
+    /**
+     * Set a league's favourites and the rounds it subscribes to.
+     *
+     * `championship_option_ids` is the whole selection, sent as `Some` even
+     * when empty — the server reads absent as "an older app that never knew
+     * about rounds" and would expand the legacy field instead of deselecting.
+     */
+    open func setSportConfig(boardId: String, sportId: String, favoriteTeamIds: [String], championshipOptionIds: [String]) { try! rustCall {
         uniffi_app_core_fn_method_scoreboardclient_set_sport_config(self.uniffiClonePointer(),
                                                                     FfiConverterString.lower(boardId),
                                                                     FfiConverterString.lower(sportId),
                                                                     FfiConverterSequenceString.lower(favoriteTeamIds),
-                                                                    FfiConverterOptionString.lower(championshipOptionId), $0)
+                                                                    FfiConverterSequenceString.lower(championshipOptionIds), $0)
     }
     }
 
@@ -2501,15 +2515,30 @@ public struct UiSport {
     public var id: String
     public var name: String
     public var teams: [UiTeam]
+    /**
+     * LEGACY single-select ladder, still carried for older builds.
+     */
     public var championshipOptions: [UiChampOption]
+    /**
+     * The independently selectable rounds — what the app should render.
+     */
+    public var championshipRounds: [UiChampOption]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: String, name: String, teams: [UiTeam], championshipOptions: [UiChampOption]) {
+    public init(id: String, name: String, teams: [UiTeam],
+                /**
+                    * LEGACY single-select ladder, still carried for older builds.
+                    */ championshipOptions: [UiChampOption],
+                /**
+                    * The independently selectable rounds — what the app should render.
+                    */ championshipRounds: [UiChampOption])
+    {
         self.id = id
         self.name = name
         self.teams = teams
         self.championshipOptions = championshipOptions
+        self.championshipRounds = championshipRounds
     }
 }
 
@@ -2527,6 +2556,9 @@ extension UiSport: Equatable, Hashable {
         if lhs.championshipOptions != rhs.championshipOptions {
             return false
         }
+        if lhs.championshipRounds != rhs.championshipRounds {
+            return false
+        }
         return true
     }
 
@@ -2535,6 +2567,7 @@ extension UiSport: Equatable, Hashable {
         hasher.combine(name)
         hasher.combine(teams)
         hasher.combine(championshipOptions)
+        hasher.combine(championshipRounds)
     }
 }
 
@@ -2548,7 +2581,8 @@ public struct FfiConverterTypeUiSport: FfiConverterRustBuffer {
                 id: FfiConverterString.read(from: &buf),
                 name: FfiConverterString.read(from: &buf),
                 teams: FfiConverterSequenceTypeUiTeam.read(from: &buf),
-                championshipOptions: FfiConverterSequenceTypeUiChampOption.read(from: &buf)
+                championshipOptions: FfiConverterSequenceTypeUiChampOption.read(from: &buf),
+                championshipRounds: FfiConverterSequenceTypeUiChampOption.read(from: &buf)
             )
     }
 
@@ -2557,6 +2591,7 @@ public struct FfiConverterTypeUiSport: FfiConverterRustBuffer {
         FfiConverterString.write(value.name, into: &buf)
         FfiConverterSequenceTypeUiTeam.write(value.teams, into: &buf)
         FfiConverterSequenceTypeUiChampOption.write(value.championshipOptions, into: &buf)
+        FfiConverterSequenceTypeUiChampOption.write(value.championshipRounds, into: &buf)
     }
 }
 
@@ -2577,7 +2612,11 @@ public func FfiConverterTypeUiSport_lower(_ value: UiSport) -> RustBuffer {
 public struct UiSportConfig {
     public var sportId: String
     public var favoriteTeamIds: [String]
-    public var championshipOptionId: String?
+    /**
+     * The rounds this league subscribes to. Each is exactly one thing; none
+     * implies another.
+     */
+    public var championshipOptionIds: [String]
     /**
      * Per-league "time per event" override (seconds); None = board default.
      */
@@ -2603,7 +2642,11 @@ public struct UiSportConfig {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(sportId: String, favoriteTeamIds: [String], championshipOptionId: String?,
+    public init(sportId: String, favoriteTeamIds: [String],
+                /**
+                    * The rounds this league subscribes to. Each is exactly one thing; none
+                    * implies another.
+                    */ championshipOptionIds: [String],
                 /**
                     * Per-league "time per event" override (seconds); None = board default.
                     */ dwellSecs: UInt32?,
@@ -2624,7 +2667,7 @@ public struct UiSportConfig {
     {
         self.sportId = sportId
         self.favoriteTeamIds = favoriteTeamIds
-        self.championshipOptionId = championshipOptionId
+        self.championshipOptionIds = championshipOptionIds
         self.dwellSecs = dwellSecs
         self.leaderboardRows = leaderboardRows
         self.nameStyle = nameStyle
@@ -2641,7 +2684,7 @@ extension UiSportConfig: Equatable, Hashable {
         if lhs.favoriteTeamIds != rhs.favoriteTeamIds {
             return false
         }
-        if lhs.championshipOptionId != rhs.championshipOptionId {
+        if lhs.championshipOptionIds != rhs.championshipOptionIds {
             return false
         }
         if lhs.dwellSecs != rhs.dwellSecs {
@@ -2665,7 +2708,7 @@ extension UiSportConfig: Equatable, Hashable {
     public func hash(into hasher: inout Hasher) {
         hasher.combine(sportId)
         hasher.combine(favoriteTeamIds)
-        hasher.combine(championshipOptionId)
+        hasher.combine(championshipOptionIds)
         hasher.combine(dwellSecs)
         hasher.combine(leaderboardRows)
         hasher.combine(nameStyle)
@@ -2683,7 +2726,7 @@ public struct FfiConverterTypeUiSportConfig: FfiConverterRustBuffer {
             try UiSportConfig(
                 sportId: FfiConverterString.read(from: &buf),
                 favoriteTeamIds: FfiConverterSequenceString.read(from: &buf),
-                championshipOptionId: FfiConverterOptionString.read(from: &buf),
+                championshipOptionIds: FfiConverterSequenceString.read(from: &buf),
                 dwellSecs: FfiConverterOptionUInt32.read(from: &buf),
                 leaderboardRows: FfiConverterOptionUInt32.read(from: &buf),
                 nameStyle: FfiConverterOptionTypeUiNameStyle.read(from: &buf),
@@ -2695,7 +2738,7 @@ public struct FfiConverterTypeUiSportConfig: FfiConverterRustBuffer {
     public static func write(_ value: UiSportConfig, into buf: inout [UInt8]) {
         FfiConverterString.write(value.sportId, into: &buf)
         FfiConverterSequenceString.write(value.favoriteTeamIds, into: &buf)
-        FfiConverterOptionString.write(value.championshipOptionId, into: &buf)
+        FfiConverterSequenceString.write(value.championshipOptionIds, into: &buf)
         FfiConverterOptionUInt32.write(value.dwellSecs, into: &buf)
         FfiConverterOptionUInt32.write(value.leaderboardRows, into: &buf)
         FfiConverterOptionTypeUiNameStyle.write(value.nameStyle, into: &buf)
@@ -4027,7 +4070,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_method_scoreboardclient_set_spoiler_mode() != 36638 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_method_scoreboardclient_set_sport_config() != 63032 {
+    if uniffi_app_core_checksum_method_scoreboardclient_set_sport_config() != 7679 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_team_spoiler() != 60408 {

@@ -94,7 +94,10 @@ pub struct UiSport {
     pub id: String,
     pub name: String,
     pub teams: Vec<UiTeam>,
+    /// LEGACY single-select ladder, still carried for older builds.
     pub championship_options: Vec<UiChampOption>,
+    /// The independently selectable rounds — what the app should render.
+    pub championship_rounds: Vec<UiChampOption>,
 }
 /// How a league renders team names on the board (protocol `NameStyle`).
 /// Location = city/college/country, Name = mascot/team name, Abbrev = the
@@ -118,7 +121,9 @@ pub struct UiNameStyleOption {
 pub struct UiSportConfig {
     pub sport_id: String,
     pub favorite_team_ids: Vec<String>,
-    pub championship_option_id: Option<String>,
+    /// The rounds this league subscribes to. Each is exactly one thing; none
+    /// implies another.
+    pub championship_option_ids: Vec<String>,
     /// Per-league "time per event" override (seconds); None = board default.
     pub dwell_secs: Option<u32>,
     /// Leaderboard depth for golf/F1 (4 = static top-4 .. 20 = full field).
@@ -614,17 +619,23 @@ impl ScoreboardClient {
         let _ = self.tx.send(Out::Command(board_id, Command::SetBrightness { level }));
     }
 
+    /// Set a league's favourites and the rounds it subscribes to.
+    ///
+    /// `championship_option_ids` is the whole selection, sent as `Some` even
+    /// when empty — the server reads absent as "an older app that never knew
+    /// about rounds" and would expand the legacy field instead of deselecting.
     pub fn set_sport_config(
         &self,
         board_id: String,
         sport_id: String,
         favorite_team_ids: Vec<String>,
-        championship_option_id: Option<String>,
+        championship_option_ids: Vec<String>,
     ) {
         let _ = self.tx.send(Out::Command(board_id, Command::SetSportConfig {
             sport_id,
             favorite_team_ids,
-            championship_option_id,
+            championship_option_id: None,
+            championship_option_ids: Some(championship_option_ids),
         }));
     }
 
@@ -888,6 +899,11 @@ fn to_ui_sports(cat: Catalog) -> Vec<UiSport> {
                 .into_iter()
                 .map(|c| UiChampOption { id: c.id, label: c.label })
                 .collect(),
+            championship_rounds: s
+                .championship_rounds
+                .into_iter()
+                .map(|c| UiChampOption { id: c.id, label: c.label })
+                .collect(),
         })
         .collect()
 }
@@ -1003,7 +1019,7 @@ fn to_ui_configs(sports: Vec<PSportConfig>) -> Vec<UiSportConfig> {
         .map(|s| UiSportConfig {
             sport_id: s.sport_id,
             favorite_team_ids: s.favorite_team_ids,
-            championship_option_id: s.championship_option_id,
+            championship_option_ids: s.championship_option_ids,
             dwell_secs: s.dwell_secs,
             leaderboard_rows: s.leaderboard_rows,
             name_style: s.name_style.map(UiNameStyle::from),
