@@ -729,6 +729,16 @@ async fn main() {
             mock_catalog()
         }),
     };
+    // Off modes belong to THIS BINARY, not to the team data, so they are filled
+    // in here — once, after whichever source produced the catalog.
+    //
+    // They used to be set by the fetch path only. A server whose ESPN fetch
+    // failed fell back to the disk cache, whose JSON predates the field, and
+    // `#[serde(default)]` quietly handed the app an EMPTY list: every board
+    // showed only the two modes the app hardcodes as a fallback, and the real
+    // ones were invisible. A value that depends on which code path built the
+    // struct is the bug; this is the fix.
+    let catalog = with_off_modes(catalog);
     let mut state = AppState::new_with_catalog(catalog);
     // OTA firmware dists, one per channel: an absent channel is quietly off;
     // any present-but-broken channel refuses startup (a board must never
@@ -3170,6 +3180,12 @@ fn cache_catalog(catalog: &Catalog) {
 }
 
 /// Load the catalog cached by a previous successful fetch, if one exists.
+/// Stamp this binary's off modes onto a catalog, whatever its provenance.
+fn with_off_modes(mut c: Catalog) -> Catalog {
+    c.off_modes = offmode::off_modes();
+    c
+}
+
 fn load_cached_catalog() -> Option<Catalog> {
     let path = catalog_cache_path();
     let bytes = std::fs::read(&path).ok()?;
@@ -3193,7 +3209,10 @@ fn mock_catalog() -> Catalog {
         championship_options: championship_options_for(id),
     };
     Catalog {
-        off_modes: offmode::off_modes(),
+        // Empty, like every other construction site — `with_off_modes` is the
+        // single owner. Filling it here would hide a missing assembly step in
+        // exactly the tests meant to catch one.
+        off_modes: Vec::new(),
         sports: vec![
             sport(
                 "nhl",
@@ -5850,6 +5869,42 @@ mod tests {
     /// The demo routes: JSON discovery + a PNG per game, both serving the
     /// synthetic slate regardless of any board config, and both surviving an
     /// id nobody has.
+    /// The regression that shipped: a catalog restored from the disk cache
+    /// advertised NO off modes, so every app fell back to the two ids it
+    /// hardcodes and the real modes were invisible. The cache file predates the
+    /// field, `#[serde(default)]` made that silent, and the fetch path — the
+    /// one that DID set them — was skipped because ESPN was erroring.
+    ///
+    /// Deserialize a cache-shaped blob with no `off_modes`, then assert the
+    /// assembly step puts this binary's modes back.
+    #[test]
+    fn a_cached_catalog_still_advertises_this_binarys_off_modes() {
+        let cached: Catalog =
+            serde_json::from_str(r#"{"sports":[{"id":"nhl","name":"NHL","teams":[],"championship_options":[]}]}"#)
+                .unwrap();
+        assert!(cached.off_modes.is_empty(), "precondition: the cache carries none");
+
+        let served = with_off_modes(cached);
+        assert_eq!(
+            served.off_modes.len(),
+            offmode::off_modes().len(),
+            "the served catalog must offer every mode this binary renders"
+        );
+        for m in offmode::off_modes() {
+            assert!(served.off_modes.iter().any(|d| d.id == m.id), "missing {}", m.id);
+        }
+    }
+
+    /// Nothing may construct a Catalog with off modes of its own — that is what
+    /// let the bug above hide, because the mock set them and the cache didn't.
+    #[test]
+    fn catalog_construction_leaves_off_modes_to_the_assembly_step() {
+        assert!(
+            mock_catalog().off_modes.is_empty(),
+            "mock_catalog must not pre-fill off modes, or tests stop exercising the assembly"
+        );
+    }
+
     /// The preview route the app's off-mode rows fetch.
     #[tokio::test]
     async fn offmode_preview_route_serves_declared_modes_only() {

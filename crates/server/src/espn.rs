@@ -269,7 +269,10 @@ impl SportsDataSource for EspnSource {
         }
         // Leaderboard sports (PGA / LPGA / F1) aren't ESPN team lists — add them.
         sports.extend(crate::leaderboard_sports());
-        Some(Catalog { sports, off_modes: crate::offmode::off_modes() })
+        // Left empty on purpose: `with_off_modes` fills this in at startup, so the
+        // value cannot depend on whether the catalog came from here or from the
+        // disk cache.
+        Some(Catalog { sports, off_modes: Vec::new() })
     }
 }
 
