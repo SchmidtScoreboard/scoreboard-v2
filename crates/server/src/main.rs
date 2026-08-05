@@ -1980,47 +1980,7 @@ fn game_matches(g: &Game, favs: &HashSet<String>) -> bool {
         || favs.contains(&team_key(&g.sport_id, &g.home.abbrev))
 }
 
-/// Whether a board's big-games option covers a game's championship tier.
-/// Tier ids come from `championship_options_for` / `classify_champ` and are
-/// per-sport; broader options cover the more specific tiers above them
-/// (e.g. NHL "conf" covers conference finals AND the cup final).
-fn champ_option_covers(sport_id: &str, option_id: &str, tier: &str) -> bool {
-    match (sport_id, option_id) {
-        (_, "none") => false,
-        // The "playoffs" tier covers every championship tier for the sport.
-        (_, "playoffs") => true,
-        ("nhl", "conf") => tier == "conf" || tier == "final",
-        ("nhl", "final") => tier == "final",
-        ("nba", "final") => tier == "final",
-        ("wnba", "final") => tier == "final",
-        ("mlb", "ws") => tier == "ws",
-        ("nfl", "sb") => tier == "sb",
-        // The CFP tier covers both playoff and bowls; "bowl" covers just the bowls.
-        ("cfb", "playoff") => true,
-        ("cfb", "bowl") => tier == "bowl",
-        ("cbb" | "wcbb", "tournament") => tier == "tournament",
-        ("mls", "cup") => tier == "cup",
-        // World Cup tiers nest: final ⊂ semis ⊂ the knockout stage.
-        ("wc", "final") => tier == "final",
-        ("wc", "semi") => matches!(tier, "final" | "semi"),
-        ("wc", "knockout") => matches!(tier, "final" | "semi" | "quarter" | "knockout"),
-        // Golf: "majors" covers major-tier events (the "all" option is handled in
-        // `game_option_priority`, since regular events carry no champ tag).
-        ("pga" | "lpga", "majors") => tier == "major",
-        _ => option_id == tier,
-    }
-}
 
-/// Which F1 sessions a subscription level includes.
-fn f1_option_covers(option_id: &str, session: &str) -> bool {
-    match option_id {
-        "gp" => session == "race",
-        "gp-quali" => matches!(session, "race" | "quali"),
-        // Sprints bring their own qualifying session along.
-        "gp-quali-sprint" => matches!(session, "race" | "quali" | "sprint" | "sprint-quali"),
-        _ => false,
-    }
-}
 
 /// The board's league option for a game's sport, if one is set (never "none").
 fn league_options<'a>(cfg: &'a BoardConfig, sport_id: &str) -> &'a [String] {
@@ -5768,18 +5728,30 @@ mod tests {
 
     #[test]
     fn champ_option_coverage_matrix() {
-        assert!(champ_option_covers("nhl", "playoffs", "playoffs"));
-        assert!(champ_option_covers("nhl", "playoffs", "final"));
-        assert!(champ_option_covers("nhl", "conf", "final"));
-        assert!(champ_option_covers("nhl", "conf", "conf"));
-        assert!(!champ_option_covers("nhl", "conf", "playoffs"));
-        assert!(!champ_option_covers("nhl", "final", "conf"));
-        assert!(!champ_option_covers("nhl", "none", "final"));
-        // CFB's options are containment-inverted: the "playoff" tier covers
-        // both tiers, "bowl" only the bowls.
-        assert!(champ_option_covers("cfb", "playoff", "bowl"));
-        assert!(champ_option_covers("cfb", "playoff", "playoff"));
-        assert!(!champ_option_covers("cfb", "bowl", "playoff"));
+        // The old nesting table survives only as the migration's expansion, so
+        // that is where it is still pinned: an already-configured board must
+        // end up subscribed to exactly what its single option used to cover.
+        let set = |sport: &str, legacy: &str| expand_legacy_champ(sport, Some(legacy));
+        assert_eq!(set("nhl", "playoffs"), ["final", "conf", "playoffs"]);
+        assert_eq!(set("nhl", "conf"), ["conf", "final"]);
+        assert_eq!(set("nhl", "final"), ["final"]);
+        assert!(set("nhl", "none").is_empty());
+        // CFB's options were containment-inverted: the CFP option covered the
+        // bowls too, which is why it expands to both plus the generic tier.
+        assert_eq!(set("cfb", "playoff"), ["playoff", "bowl", "playoffs"]);
+        assert_eq!(set("cfb", "bowl"), ["bowl"]);
+        // Golf's option id and its tier never matched; the expansion is where
+        // that mismatch gets corrected.
+        assert_eq!(set("pga", "majors"), ["major"]);
+        // And the projection is the inverse, so migrating twice is a no-op.
+        for (sport, legacy) in [("nhl", "conf"), ("cfb", "bowl"), ("pga", "majors"), ("f1", "gp-quali")] {
+            let ids = set(sport, legacy);
+            assert_eq!(
+                legacy_champ_projection(sport, &ids).as_deref(),
+                Some(legacy),
+                "{sport}/{legacy} must project back to itself"
+            );
+        }
     }
 
     /// The tester read the old "Off / All playoffs / Every match" as a master
