@@ -299,7 +299,11 @@ impl SportsDataSource for EspnSource {
                 id: lg.sport_id.into(),
                 name: lg.name.into(),
                 teams,
-                championship_options: crate::championship_options_for(lg.sport_id),
+                // Left empty: `with_binary_owned` stamps both lists at startup,
+                // so their contents cannot depend on whether the catalog came
+                // from here or from the disk cache.
+                championship_options: Vec::new(),
+                championship_rounds: Vec::new(),
             });
         }
         if sports.is_empty() {

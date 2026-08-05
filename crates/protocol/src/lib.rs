@@ -250,7 +250,13 @@ pub struct SportDescriptor {
     pub id: String,
     pub name: String,
     pub teams: Vec<Team>,
+    /// LEGACY, frozen: the single-select ladder an already-installed app
+    /// renders. Kept so old builds keep a working picker.
     pub championship_options: Vec<ChampionshipOption>,
+    /// The independently selectable rounds. Each is exactly one thing, and none
+    /// implies another.
+    #[serde(default)]
+    pub championship_rounds: Vec<ChampionshipOption>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -460,7 +466,24 @@ pub fn default_name_style(sport_id: &str) -> NameStyle {
 pub struct SportConfig {
     pub sport_id: String,
     pub favorite_team_ids: Vec<String>,
+    /// LEGACY, and frozen. The single "big games" option this league used to
+    /// carry, kept load-bearing for two audiences: an OLDER SERVER binary (a
+    /// rollback) and an ALREADY-INSTALLED app, which renders this one id and
+    /// knows nothing about the set. Derived from `championship_option_ids` on
+    /// every write — the broadest selected round — and never read once the list
+    /// is present.
+    ///
+    /// Deliberately keeps NO serde default and NO skip: it is always written,
+    /// as `null` when None, so an old reader always finds the key.
     pub championship_option_id: Option<String>,
+    /// The rounds this league subscribes to, as EXACT ids.
+    ///
+    /// Each entry means that round and nothing else. The old single option
+    /// nested — picking "conf" quietly pulled in the Final beyond it — which is
+    /// what made the labels unreadable ("Selected + Conf Finals") and the
+    /// behaviour unguessable. Empty = only your selected teams.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub championship_option_ids: Vec<String>,
     /// Per-league "time per event" override (seconds); None = the board's
     /// default dwell. Lets F1 scroll for 30s while baseball flashes by in 10.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -690,6 +713,96 @@ impl QuietHours {
     }
 }
 
+/// Expand a legacy single option into the exact set of rounds it covered.
+///
+/// Derived literally from the old `champ_option_covers` / `f1_option_covers`
+/// tables, so every already-configured board keeps the behaviour it had.
+///
+/// The wildcards (`playoffs`, and cfb's `playoff`) are ENUMERATED here rather
+/// than carried across as a wildcard member. That is a deliberate behaviour
+/// change with a cost: those ids used to absorb any tier added later, and now
+/// they will not — a new tier must also be added to the round list, and to any
+/// board holding the sport's full set. The alternative keeps exactly the hidden
+/// implication this change exists to remove.
+pub fn expand_legacy_champ(sport_id: &str, legacy: Option<&str>) -> Vec<String> {
+    let ids: &[&str] = match (sport_id, legacy) {
+        (_, None) | (_, Some("none")) => &[],
+        (_, Some("all")) => &["all"],
+        ("nhl", Some("final")) => &["final"],
+        ("nhl", Some("conf")) => &["conf", "final"],
+        ("nhl", Some("playoffs")) => &["final", "conf", "playoffs"],
+        ("nba" | "wnba", Some("final")) => &["final"],
+        ("nba" | "wnba", Some("playoffs")) => &["final", "playoffs"],
+        ("mlb", Some("ws")) => &["ws"],
+        ("mlb", Some("playoffs")) => &["ws", "playoffs"],
+        ("nfl", Some("sb")) => &["sb"],
+        ("nfl", Some("playoffs")) => &["sb", "playoffs"],
+        // The CFP option covered bowls too, and so did "playoffs".
+        ("cfb", Some("playoff")) | ("cfb", Some("playoffs")) => &["playoff", "bowl", "playoffs"],
+        ("cfb", Some("bowl")) => &["bowl"],
+        ("cbb" | "wcbb", Some("tournament")) => &["tournament"],
+        ("cbb" | "wcbb", Some("playoffs")) => &["tournament", "playoffs"],
+        ("mls", Some("cup")) => &["cup"],
+        ("mls", Some("playoffs")) => &["cup", "playoffs"],
+        ("wc", Some("final")) => &["final"],
+        ("wc", Some("semi")) => &["semi", "final"],
+        ("wc", Some("knockout")) | ("wc", Some("playoffs")) => {
+            &["knockout", "quarter", "semi", "final"]
+        }
+        // The option id was "majors"; the tier is "major". They never matched,
+        // so the old option only ever worked through the wildcard.
+        ("pga" | "lpga", Some("majors")) => &["major"],
+        ("f1", Some("gp")) => &["race"],
+        ("f1", Some("gp-quali")) => &["race", "quali"],
+        ("f1", Some("gp-quali-sprint")) => &["race", "quali", "sprint", "sprint-quali"],
+        (_, Some("playoffs")) => &["playoffs"],
+        // Preserves the old `_ => option_id == tier` fallthrough for anything
+        // unrecognized, including a fork's.
+        (_, Some(other)) => {
+            let mut v = Vec::new();
+            v.push(other.to_string());
+            return v;
+        }
+    };
+    ids.iter().map(|s| s.to_string()).collect()
+}
+
+/// The single legacy id that most nearly means `ids`, for readers that only
+/// understand one.
+///
+/// `None` exactly when the set is empty — that equivalence is what makes
+/// re-running the migration a no-op.
+pub fn legacy_champ_projection(sport_id: &str, ids: &[String]) -> Option<String> {
+    if ids.is_empty() {
+        return None;
+    }
+    let has = |x: &str| ids.iter().any(|i| i == x);
+    if has("all") {
+        return Some("all".to_string());
+    }
+    // Broadest first: the inverse of the expansion above.
+    let broadest: &[&str] = match sport_id {
+        "nhl" => &["playoffs", "conf", "final"],
+        "wc" => &["knockout", "quarter", "semi", "final"],
+        "f1" => &["sprint", "quali", "race"],
+        "cfb" => &["playoff", "bowl"],
+        "pga" | "lpga" => &["major"],
+        _ => &["playoffs", "final", "ws", "sb", "cup", "tournament"],
+    };
+    let pick = broadest.iter().find(|x| has(x)).copied();
+    Some(match (sport_id, pick) {
+        ("pga" | "lpga", Some("major")) => "majors".to_string(),
+        ("f1", Some("sprint")) => "gp-quali-sprint".to_string(),
+        ("f1", Some("quali")) => "gp-quali".to_string(),
+        ("f1", Some("race")) => "gp".to_string(),
+        ("wc", Some("quarter")) => "knockout".to_string(),
+        (_, Some(p)) => p.to_string(),
+        // A set of only forked/unknown ids: name the first, so a non-empty set
+        // never projects to None and break the invariant above.
+        (_, None) => ids[0].clone(),
+    })
+}
+
 pub const PORTABLE_SETTINGS_VERSION: u32 = 1;
 
 /// The DURABLE half of a `BoardConfig`, as a portable blob: the preferences a
@@ -859,7 +972,17 @@ pub enum Command {
     SetSportConfig {
         sport_id: String,
         favorite_team_ids: Vec<String>,
+        /// LEGACY: what an already-installed app still sends. Folded into the
+        /// set ONLY when `championship_option_ids` is absent.
+        #[serde(default)]
         championship_option_id: Option<String>,
+        /// `Option`, not a plain `Vec`, and this is the sharpest compatibility
+        /// hazard in the change: an old app sends only the singular field on
+        /// every favourites edit, and a bare `#[serde(default)] Vec` would
+        /// parse that as an EMPTY SET and silently wipe the user's rounds.
+        /// `None` = the sender never knew the field; `Some([])` = deselect all.
+        #[serde(default)]
+        championship_option_ids: Option<Vec<String>>,
     },
     AddGame { game_id: String },
     RemoveGame { game_id: String },

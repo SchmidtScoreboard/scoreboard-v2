@@ -616,17 +616,33 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
                 sport_id,
                 favorite_team_ids,
                 championship_option_id,
+                championship_option_ids,
             } => {
+                // ABSENT means the sender predates rounds — fold its single
+                // option in. An explicit empty list means "deselect
+                // everything". Conflating the two would let an old app wipe the
+                // user's rounds on every favourites edit.
+                let mut ids = match championship_option_ids {
+                    Some(list) => list,
+                    None => crate::expand_legacy_champ(&sport_id, championship_option_id.as_deref()),
+                };
+                // Drop anything this binary does not offer, rather than storing
+                // an id nothing can ever match.
+                let offered = crate::championship_rounds_for(&sport_id);
+                ids.retain(|id| offered.iter().any(|o| &o.id == id));
+                let legacy = crate::legacy_champ_projection(&sport_id, &ids);
                 if let Some(s) = cfg.sports.iter_mut().find(|s| s.sport_id == sport_id) {
                     // Field-wise on purpose: a league's dwell override survives
                     // favorite/option edits.
                     s.favorite_team_ids = favorite_team_ids;
-                    s.championship_option_id = championship_option_id;
+                    s.championship_option_ids = ids;
+                    s.championship_option_id = legacy;
                 } else {
                     cfg.sports.push(SportConfig {
                         sport_id,
                         favorite_team_ids,
-                        championship_option_id,
+                        championship_option_ids: ids,
+                        championship_option_id: legacy,
                         ..Default::default()
                     });
                 }
@@ -1189,6 +1205,7 @@ mod tests {
                 sport_id: "nhl".into(),
                 favorite_team_ids: vec!["nhl-bos".into()],
                 championship_option_id: Some("playoffs".into()),
+                championship_option_ids: Vec::new(),
                 dwell_secs: Some(30),
                 leaderboard_rows: None,
                 spoiler: true,

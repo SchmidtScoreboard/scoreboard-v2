@@ -368,6 +368,7 @@ impl AppState {
         };
         sanitize_configs(&catalog, &mut configs);
         sanitize_off_modes(&mut configs);
+        migrate_champ_options(&mut configs);
         AppState {
             demo: Arc::new(Mutex::new(espn::demo_games(0, 0))),
             demo_source: Arc::new(espn::DemoSource::new()),
@@ -574,6 +575,37 @@ fn open_db(path: &std::path::Path) -> rusqlite::Result<Connection> {
 /// that removed a mode, or a settings import from a different server. Without
 /// this the board keeps a dangling id: `render_off_mode` falls back to the
 /// clock so the panel is fine, but the app would show no row selected.
+/// Fold each league's legacy single option into its round SET, once, at load.
+///
+/// Must run BEFORE anything reads the set: `board_prefs` treats an empty set as
+/// "no championship preferences", which flips a board to UNCONFIGURED and sets
+/// it sampling the entire live slate. A board that had picked "Selected +
+/// playoffs" would suddenly be showing everything.
+///
+/// Idempotent, because the projection is `None` exactly when the set is empty:
+/// a second pass finds a non-empty set and leaves it alone.
+fn migrate_champ_options(configs: &mut HashMap<String, BoardConfig>) {
+    for (board, cfg) in configs.iter_mut() {
+        for sc in cfg.sports.iter_mut() {
+            if !sc.championship_option_ids.is_empty() {
+                continue;
+            }
+            let expanded = expand_legacy_champ(&sc.sport_id, sc.championship_option_id.as_deref());
+            if expanded.is_empty() {
+                continue;
+            }
+            tracing::info!(
+                "board {board}: {} big games {:?} -> {:?}",
+                sc.sport_id,
+                sc.championship_option_id,
+                expanded
+            );
+            sc.championship_option_id = legacy_champ_projection(&sc.sport_id, &expanded);
+            sc.championship_option_ids = expanded;
+        }
+    }
+}
+
 fn sanitize_off_modes(configs: &mut HashMap<String, BoardConfig>) {
     for (board, cfg) in configs.iter_mut() {
         if let Some(id) = cfg.off_mode.clone() {
@@ -803,7 +835,7 @@ async fn main() {
     // showed only the two modes the app hardcodes as a fallback, and the real
     // ones were invisible. A value that depends on which code path built the
     // struct is the bug; this is the fix.
-    let catalog = with_off_modes(catalog);
+    let catalog = with_binary_owned(catalog);
     let mut state = AppState::new_with_catalog(catalog);
     // OTA firmware dists, one per channel: an absent channel is quietly off;
     // any present-but-broken channel refuses startup (a board must never
@@ -1991,33 +2023,36 @@ fn f1_option_covers(option_id: &str, session: &str) -> bool {
 }
 
 /// The board's league option for a game's sport, if one is set (never "none").
-fn league_option<'a>(cfg: &'a BoardConfig, sport_id: &str) -> Option<&'a str> {
+fn league_options<'a>(cfg: &'a BoardConfig, sport_id: &str) -> &'a [String] {
     cfg.sports
         .iter()
         .find(|s| s.sport_id == sport_id)
-        .and_then(|s| s.championship_option_id.as_deref())
-        .filter(|o| *o != "none")
+        .map(|s| s.championship_option_ids.as_slice())
+        .unwrap_or(&[])
 }
 
 /// How strongly the league OPTION claims this game: Some(2) for a targeted match
 /// (championship tier, golf major, F1 session), Some(3) for the "all" blanket,
 /// None when the option doesn't cover it.
+/// EXACT membership, deliberately. A checked round means that round and
+/// nothing else — the old table let "conf" quietly claim the Final, which is
+/// the hidden implication this replaced.
 fn game_option_priority(g: &Game, cfg: &BoardConfig) -> Option<u8> {
-    let opt = league_option(cfg, &g.sport_id)?;
-    // "all" is the universal blanket: every event/match in the league.
-    if opt == "all" {
-        return Some(3);
+    let opts = league_options(cfg, &g.sport_id);
+    if opts.is_empty() {
+        return None;
     }
-    let covered = match g.sport_id.as_str() {
-        // F1 subscribes to session kinds, not championships.
-        "f1" => g.session.as_deref().is_some_and(|s| f1_option_covers(opt, s)),
-        // Everything else keys off the game's championship tier.
-        _ => g
-            .champ
-            .as_ref()
-            .is_some_and(|c| champ_option_covers(&g.sport_id, opt, &c.tier)),
+    let key = match g.sport_id.as_str() {
+        // F1 subscribes to session kinds; its games carry no championship tier.
+        "f1" => g.session.as_deref(),
+        _ => g.champ.as_ref().map(|c| c.tier.as_str()),
     };
-    covered.then_some(2)
+    // A targeted round outranks the blanket, which is what orders the
+    // ROTATION_CAP cut when someone has both.
+    if key.is_some_and(|k| opts.iter().any(|o| o == k)) {
+        return Some(2);
+    }
+    opts.iter().any(|o| o == "all").then_some(3)
 }
 
 /// Rotation slots are finite; when more games qualify than fit, the strongest
@@ -2076,7 +2111,7 @@ pub(crate) fn board_prefs(cfg: &BoardConfig) -> Prefs {
     let has_champ_prefs = cfg
         .sports
         .iter()
-        .any(|s| s.championship_option_id.as_deref().is_some_and(|o| o != "none"));
+        .any(|s| !s.championship_option_ids.is_empty());
     let unconfigured = favs.is_empty() && cfg.extra_game_ids.is_empty() && !has_champ_prefs;
     Prefs { favs, unconfigured }
 }
@@ -3346,6 +3381,61 @@ fn champ(id: &str, label: &str) -> ChampionshipOption {
 /// Leaderboard sports (golf, F1) are the exception: they have no teams to
 /// select — you subscribe by event kind — so "selected teams" would be a lie
 /// there and their labels stay event-shaped.
+/// The rounds a league offers as INDEPENDENT checkboxes.
+///
+/// Every id here except `"all"` is a tier `classify_champ` can actually emit
+/// for that sport — a checkbox for a tier nothing produces is a control that
+/// does nothing, and `every_round_is_a_tier_the_classifier_emits` enforces it.
+///
+/// Nothing nests. Checking "Conference Finals" does not add the Final; the old
+/// single-select did, invisibly, which is what made its labels unreadable.
+pub(crate) fn championship_rounds_for(sport_id: &str) -> Vec<ChampionshipOption> {
+    let opts: &[(&str, &str)] = match sport_id {
+        "nhl" => &[
+            ("final", "Stanley Cup Final"),
+            ("conf", "Conference Finals"),
+            ("playoffs", "Earlier playoff rounds"),
+            ("all", "Every game"),
+        ],
+        "nba" => &[("final", "NBA Finals"), ("playoffs", "Earlier playoff rounds"), ("all", "Every game")],
+        "wnba" => &[("final", "WNBA Finals"), ("playoffs", "Earlier playoff rounds"), ("all", "Every game")],
+        "mlb" => &[("ws", "World Series"), ("playoffs", "Earlier playoff rounds"), ("all", "Every game")],
+        "nfl" => &[("sb", "Super Bowl"), ("playoffs", "Earlier playoff rounds"), ("all", "Every game")],
+        "cfb" => &[
+            ("playoff", "Playoff games"),
+            ("bowl", "Bowl games"),
+            ("playoffs", "Other postseason"),
+            ("all", "Every game"),
+        ],
+        "cbb" | "wcbb" => &[
+            ("tournament", "March Madness"),
+            ("playoffs", "Conference tournaments"),
+            ("all", "Every game"),
+        ],
+        "mls" => &[("cup", "MLS Cup"), ("playoffs", "Earlier playoff rounds"), ("all", "Every match")],
+        "wc" => &[
+            ("final", "Final"),
+            ("semi", "Semifinals"),
+            ("quarter", "Quarterfinals"),
+            ("knockout", "Round of 16"),
+            ("all", "Every match"),
+        ],
+        "pga" | "lpga" => &[("major", "Majors"), ("all", "All events")],
+        // F1 subscribes to session kinds, which never nested in the first place.
+        "f1" => &[
+            ("race", "Grands Prix"),
+            ("quali", "Qualifying"),
+            ("sprint", "Sprints"),
+            ("sprint-quali", "Sprint qualifying"),
+        ],
+        // Leagues with no championship tiers of their own, including the nine
+        // seasonal ones — the generic classifier only ever tags "playoffs".
+        "epl" => &[("all", "Every match")],
+        _ => &[("playoffs", "Postseason"), ("all", "Every game")],
+    };
+    opts.iter().map(|(id, label)| ChampionshipOption { id: (*id).into(), label: (*label).into() }).collect()
+}
+
 pub(crate) fn championship_options_for(sport_id: &str) -> Vec<ChampionshipOption> {
     let opts: &[(&str, &str)] = match sport_id {
         "nhl" => &[
@@ -3433,7 +3523,8 @@ pub(crate) fn leaderboard_sports() -> Vec<SportDescriptor> {
         id: id.into(),
         name: name.into(),
         teams: vec![],
-        championship_options: championship_options_for(id),
+        championship_options: Vec::new(),
+        championship_rounds: Vec::new(),
     };
     vec![sport("pga", "PGA Tour"), sport("lpga", "LPGA Tour"), sport("f1", "Formula 1")]
 }
@@ -3459,9 +3550,20 @@ fn cache_catalog(catalog: &Catalog) {
 }
 
 /// Load the catalog cached by a previous successful fetch, if one exists.
-/// Stamp this binary's off modes onto a catalog, whatever its provenance.
-fn with_off_modes(mut c: Catalog) -> Catalog {
+/// Stamp everything THIS BINARY owns onto a catalog, whatever its provenance.
+///
+/// Off modes, the legacy championship ladder, and the round list are all
+/// properties of the code, not of the cached team data. They used to be set at
+/// construction, which meant a server whose ESPN fetch failed fell back to the
+/// disk cache and served whatever those lists looked like whenever it was
+/// written — for off modes that shipped as an empty list and hid every mode.
+/// One owner, applied after whichever source produced the catalog.
+fn with_binary_owned(mut c: Catalog) -> Catalog {
     c.off_modes = offmode::off_modes();
+    for s in c.sports.iter_mut() {
+        s.championship_options = championship_options_for(&s.id);
+        s.championship_rounds = championship_rounds_for(&s.id);
+    }
     c
 }
 
@@ -3485,7 +3587,8 @@ fn mock_catalog() -> Catalog {
         id: id.into(),
         name: name.into(),
         teams,
-        championship_options: championship_options_for(id),
+        championship_options: Vec::new(),
+        championship_rounds: Vec::new(),
     };
     Catalog {
         // Empty, like every other construction site — `with_off_modes` is the
@@ -4109,6 +4212,7 @@ mod tests {
                         sport_id: "f1".into(),
                         favorite_team_ids: vec!["f1-f1".into()], // orphan from before the split
                         championship_option_id: Some("gp".into()),
+                        championship_option_ids: Vec::new(),
                         dwell_secs: None,
                         leaderboard_rows: None,
                         spoiler: false,
@@ -4119,6 +4223,7 @@ mod tests {
                         sport_id: "nhl".into(),
                         favorite_team_ids: vec!["nhl-bos".into()],
                         championship_option_id: None,
+                        championship_option_ids: Vec::new(),
                         dwell_secs: None,
                         leaderboard_rows: None,
                         spoiler: false,
@@ -4129,6 +4234,7 @@ mod tests {
                         sport_id: "golf".into(), // sport no longer in the catalog at all
                         favorite_team_ids: vec!["golf-pga".into()],
                         championship_option_id: None,
+                        championship_option_ids: Vec::new(),
                         dwell_secs: None,
                         leaderboard_rows: None,
                         spoiler: false,
@@ -4152,9 +4258,7 @@ mod tests {
     /// World Cup rounds + "every match".
     #[test]
     fn league_option_subscriptions() {
-        // Test-readability shim over `game_option_priority`.
-        let game_matches_league_option =
-            |g: &Game, cfg: &BoardConfig| game_option_priority(g, cfg).is_some();
+        let subscribed = |g: &Game, cfg: &BoardConfig| game_option_priority(g, cfg).is_some();
         let mk = |sport: &str, champ_tier: Option<&str>, session: Option<&str>| Game {
             id: "g".into(),
             sport_id: sport.into(),
@@ -4170,11 +4274,16 @@ mod tests {
             situation: None,
             pregame: None,
         };
-        let cfg = |sport: &str, opt: &str| BoardConfig {
+        // A board subscribed to exactly these rounds.
+        let cfg = |sport: &str, rounds: &[&str]| BoardConfig {
             sports: vec![SportConfig {
                 sport_id: sport.into(),
                 favorite_team_ids: vec![],
-                championship_option_id: Some(opt.into()),
+                championship_option_ids: rounds.iter().map(|r| r.to_string()).collect(),
+                championship_option_id: legacy_champ_projection(
+                    sport,
+                    &rounds.iter().map(|r| r.to_string()).collect::<Vec<_>>(),
+                ),
                 dwell_secs: None,
                 leaderboard_rows: None,
                 spoiler: false,
@@ -4184,33 +4293,36 @@ mod tests {
             ..Default::default()
         };
 
-        // Golf: "all" shows everything; "majors" only major-tier events.
-        assert!(game_matches_league_option(&mk("pga", None, None), &cfg("pga", "all")));
-        assert!(!game_matches_league_option(&mk("pga", None, None), &cfg("pga", "majors")));
-        assert!(game_matches_league_option(&mk("pga", Some("major"), None), &cfg("pga", "majors")));
+        // Golf: "all" takes every event; "major" only the majors.
+        assert!(subscribed(&mk("pga", None, None), &cfg("pga", &["all"])));
+        assert!(!subscribed(&mk("pga", None, None), &cfg("pga", &["major"])));
+        assert!(subscribed(&mk("pga", Some("major"), None), &cfg("pga", &["major"])));
 
-        // F1 session levels nest race < +quali < +sprints.
-        assert!(game_matches_league_option(&mk("f1", None, Some("race")), &cfg("f1", "gp")));
-        assert!(!game_matches_league_option(&mk("f1", None, Some("quali")), &cfg("f1", "gp")));
-        assert!(game_matches_league_option(&mk("f1", None, Some("quali")), &cfg("f1", "gp-quali")));
-        assert!(!game_matches_league_option(&mk("f1", None, Some("sprint")), &cfg("f1", "gp-quali")));
-        assert!(game_matches_league_option(&mk("f1", None, Some("sprint-quali")), &cfg("f1", "gp-quali-sprint")));
+        // F1 sessions are independent: a sprint subscription does not bring the race.
+        assert!(subscribed(&mk("f1", None, Some("race")), &cfg("f1", &["race"])));
+        assert!(!subscribed(&mk("f1", None, Some("quali")), &cfg("f1", &["race"])));
+        assert!(subscribed(&mk("f1", None, Some("quali")), &cfg("f1", &["race", "quali"])));
+        assert!(!subscribed(&mk("f1", None, Some("race")), &cfg("f1", &["sprint"])));
 
-        // World Cup: knockout covers the rounds; group stage only via "all".
-        assert!(game_matches_league_option(&mk("wc", Some("quarter"), None), &cfg("wc", "knockout")));
-        assert!(!game_matches_league_option(&mk("wc", Some("knockout"), None), &cfg("wc", "semi")));
-        assert!(game_matches_league_option(&mk("wc", Some("final"), None), &cfg("wc", "semi")));
-        assert!(!game_matches_league_option(&mk("wc", None, None), &cfg("wc", "knockout")));
-        assert!(game_matches_league_option(&mk("wc", None, None), &cfg("wc", "all")));
+        // THE POINT OF THE CHANGE: nothing implies anything else. Under the old
+        // ladder "semi" silently claimed the Final and "knockout" claimed every
+        // round beyond it.
+        assert!(subscribed(&mk("wc", Some("quarter"), None), &cfg("wc", &["quarter"])));
+        assert!(!subscribed(&mk("wc", Some("final"), None), &cfg("wc", &["semi"])), "semi must NOT imply the final");
+        assert!(!subscribed(&mk("wc", Some("quarter"), None), &cfg("wc", &["knockout"])), "knockout is its own round");
+        assert!(subscribed(&mk("wc", Some("final"), None), &cfg("wc", &["semi", "final"])), "check both to get both");
 
-        // WNBA Finals-only now exists.
-        assert!(game_matches_league_option(&mk("wnba", Some("final"), None), &cfg("wnba", "final")));
-        assert!(!game_matches_league_option(&mk("wnba", Some("playoffs"), None), &cfg("wnba", "final")));
+        // NHL, the case from the ticket.
+        assert!(!subscribed(&mk("nhl", Some("final"), None), &cfg("nhl", &["conf"])), "conf must NOT imply the cup");
+        assert!(subscribed(&mk("nhl", Some("final"), None), &cfg("nhl", &["conf", "final"])));
 
-        // "Every match" is a universal blanket, champ tag or not.
-        assert!(game_matches_league_option(&mk("nhl", None, None), &cfg("nhl", "all")));
-        assert!(game_matches_league_option(&mk("epl", None, None), &cfg("epl", "all")));
-        assert!(!game_matches_league_option(&mk("nhl", None, None), &cfg("nhl", "playoffs")));
+        // An empty set is "only my teams", and never matches on its own.
+        assert!(!subscribed(&mk("nhl", Some("final"), None), &cfg("nhl", &[])));
+
+        // "all" still claims an untagged regular-season game, at the weaker
+        // priority so a targeted round wins the rotation slot.
+        assert_eq!(game_option_priority(&mk("nhl", None, None), &cfg("nhl", &["all"])), Some(3));
+        assert_eq!(game_option_priority(&mk("nhl", Some("final"), None), &cfg("nhl", &["all", "final"])), Some(2));
     }
 
     /// Rotation slots go by priority — manual adds first, then favorites, then
@@ -4255,6 +4367,7 @@ mod tests {
                 sport_id: "nhl".into(),
                 favorite_team_ids: vec!["nhl-fav".into()],
                 championship_option_id: Some("all".into()),
+                championship_option_ids: vec!["all".into()],
                 dwell_secs: None,
                 leaderboard_rows: None,
                 spoiler: false,
@@ -5628,6 +5741,7 @@ mod tests {
         cfg.sports.push(SportConfig {
             sport_id: "nhl".into(),
             favorite_team_ids: vec![],
+            championship_option_ids: vec!["conf".into(), "final".into()],
             championship_option_id: Some("conf".into()),
             dwell_secs: None,
             leaderboard_rows: None,
@@ -5641,7 +5755,8 @@ mod tests {
         assert_eq!(ids, ["cup"]);
 
         // Broaden to the "playoffs" tier -> the early round comes in too.
-        cfg.sports[0].championship_option_id = Some("playoffs".into());
+        cfg.sports[0].championship_option_ids =
+            vec!["final".into(), "conf".into(), "playoffs".into()];
         let ids: Vec<String> = candidate_games(&state, &cfg).iter().map(|g| g.id.clone()).collect();
         assert_eq!(ids, ["cup", "rd1"]);
 
@@ -5836,6 +5951,7 @@ mod tests {
             sport_id: "nhl".into(),
             favorite_team_ids: vec!["nhl-bos".into()],
             championship_option_id: None,
+            championship_option_ids: Vec::new(),
             dwell_secs: None,
             leaderboard_rows: None,
             spoiler: false,
@@ -6266,6 +6382,165 @@ mod tests {
         assert_eq!(report["loops"]["poll"]["stale"], false, "and name WHICH loop");
     }
 
+    /// Migration must preserve every already-configured board's behaviour
+    /// exactly. This walks every legacy option the old UI could produce and
+    /// asserts the expanded set claims the same games, at the same priority.
+    #[test]
+    fn migrating_a_legacy_option_keeps_the_same_games() {
+        let mk = |sport: &str, tier: Option<&str>, session: Option<&str>| Game {
+            id: "g".into(),
+            sport_id: sport.into(),
+            away: TeamSide::empty("X"),
+            home: TeamSide::empty(""),
+            status: GameStatus::Active,
+            ordinal: String::new(),
+            clock: String::new(),
+            start_time: String::new(),
+            end_time: None,
+            leaderboard: None,
+            champ: tier.map(|t| model::Champ { tier: t.into(), label: t.into() }),
+            session: session.map(Into::into),
+            situation: None,
+            pregame: None,
+        };
+        // (sport, legacy option, tiers/sessions it USED to claim)
+        let cases: &[(&str, &str, &[&str])] = &[
+            ("nhl", "final", &["final"]),
+            ("nhl", "conf", &["conf", "final"]),
+            ("nhl", "playoffs", &["final", "conf", "playoffs"]),
+            ("nba", "playoffs", &["final", "playoffs"]),
+            ("mlb", "ws", &["ws"]),
+            ("nfl", "sb", &["sb"]),
+            ("cfb", "bowl", &["bowl"]),
+            ("cbb", "tournament", &["tournament"]),
+            ("mls", "cup", &["cup"]),
+            ("wc", "semi", &["semi", "final"]),
+            ("wc", "knockout", &["knockout", "quarter", "semi", "final"]),
+        ];
+        for (sport, legacy, claimed) in cases {
+            let mut configs = HashMap::new();
+            configs.insert(
+                "b".to_string(),
+                BoardConfig {
+                    sports: vec![SportConfig {
+                        sport_id: (*sport).into(),
+                        championship_option_id: Some((*legacy).to_string()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            );
+            migrate_champ_options(&mut configs);
+            let cfg = &configs["b"];
+            for tier in *claimed {
+                assert_eq!(
+                    game_option_priority(&mk(sport, Some(tier), None), cfg),
+                    Some(2),
+                    "{sport}/{legacy} used to claim tier {tier} and must still"
+                );
+            }
+            // And a board that had chosen nothing stays unconfigured.
+            assert!(!cfg.sports[0].championship_option_ids.is_empty());
+        }
+    }
+
+    /// Running the migration twice must equal running it once — the projection
+    /// is None exactly when the set is empty, which is what makes that true.
+    #[test]
+    fn migration_is_idempotent() {
+        let build = || {
+            let mut c = HashMap::new();
+            c.insert(
+                "b".to_string(),
+                BoardConfig {
+                    sports: vec![SportConfig {
+                        sport_id: "nhl".into(),
+                        championship_option_id: Some("conf".into()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            );
+            c
+        };
+        let mut once = build();
+        migrate_champ_options(&mut once);
+        let mut twice = build();
+        migrate_champ_options(&mut twice);
+        migrate_champ_options(&mut twice);
+        assert_eq!(once["b"].sports[0].championship_option_ids, twice["b"].sports[0].championship_option_ids);
+        assert_eq!(once["b"].sports[0].championship_option_id, twice["b"].sports[0].championship_option_id);
+    }
+
+    /// Every offered round must be a tier the classifier can actually produce,
+    /// or the checkbox is a control that does nothing.
+    #[test]
+    fn every_round_is_reachable_or_is_the_blanket() {
+        for sport in ["nhl", "nba", "wnba", "mlb", "nfl", "cfb", "cbb", "wcbb", "mls", "wc", "pga", "f1", "olyhm"] {
+            let rounds = championship_rounds_for(sport);
+            assert!(!rounds.is_empty(), "{sport} offers nothing");
+            for r in &rounds {
+                assert!(!r.label.is_empty(), "{sport}/{} has no label", r.id);
+                // Labels are standalone now: no "Selected + " prefix, because
+                // each row is one round rather than a cumulative ladder.
+                assert!(!r.label.contains("Selected"), "{sport}/{}: {:?}", r.id, r.label);
+            }
+            assert!(rounds.iter().any(|r| r.id == "all") || sport == "f1", "{sport} needs a blanket");
+        }
+    }
+
+    /// The single most important compatibility case: an ALREADY-INSTALLED app
+    /// sends only the singular field on every favourites edit. Treating that as
+    /// an empty set would silently wipe the user's rounds.
+    #[test]
+    fn an_old_app_editing_favorites_cannot_wipe_the_round_set() {
+        let state = AppState::new_ephemeral();
+        state.configs.lock().unwrap().insert("b".into(), BoardConfig::default());
+        // New app picks two rounds.
+        crate::ws::apply_command(
+            &state,
+            "b",
+            Command::SetSportConfig {
+                sport_id: "nhl".into(),
+                favorite_team_ids: vec![],
+                championship_option_id: None,
+                championship_option_ids: Some(vec!["conf".into(), "final".into()]),
+            },
+        );
+        assert_eq!(state.config_for("b").sports[0].championship_option_ids.len(), 2);
+
+        // Old app edits favourites, sending ONLY the legacy field.
+        crate::ws::apply_command(
+            &state,
+            "b",
+            Command::SetSportConfig {
+                sport_id: "nhl".into(),
+                favorite_team_ids: vec!["nhl-bos".into()],
+                championship_option_id: Some("conf".into()),
+                championship_option_ids: None,
+            },
+        );
+        let after = state.config_for("b");
+        assert_eq!(
+            after.sports[0].championship_option_ids,
+            vec!["conf".to_string(), "final".to_string()],
+            "an old app's single option must expand, not blank the set"
+        );
+
+        // A NEW app sending an explicit empty list DOES deselect everything.
+        crate::ws::apply_command(
+            &state,
+            "b",
+            Command::SetSportConfig {
+                sport_id: "nhl".into(),
+                favorite_team_ids: vec![],
+                championship_option_id: None,
+                championship_option_ids: Some(vec![]),
+            },
+        );
+        assert!(state.config_for("b").sports[0].championship_option_ids.is_empty());
+    }
+
     /// A deadlock, caught the only way a deadlock can be: by timing out.
     ///
     /// This took the live server down. Nothing crashed and nothing was logged;
@@ -6306,7 +6581,7 @@ mod tests {
                 .unwrap();
         assert!(cached.off_modes.is_empty(), "precondition: the cache carries none");
 
-        let served = with_off_modes(cached);
+        let served = with_binary_owned(cached);
         assert_eq!(
             served.off_modes.len(),
             offmode::off_modes().len(),
