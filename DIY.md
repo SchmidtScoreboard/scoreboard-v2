@@ -318,6 +318,16 @@ For email, set three variables on the server:
 
 With nothing set, alerting is simply off — no errors, no noise.
 
+Test it before trusting it:
+
+```sh
+railway run -s live cargo run -p server -- --test-alert
+```
+
+That reads the deployed service's variables, sends one email, and exits
+non-zero with the provider's reason if it fails (an unverified `FROM` domain is
+the usual one).
+
 You get one email when a problem is confirmed (three consecutive failed checks,
 so a single slow poll is not an incident), one when it clears, and one report a
 day.
@@ -332,22 +342,33 @@ pointed at `/health`. The two cover different failures.
 
 ## Working in iCloud Drive
 
-If this repo lives under `~/Documents` (synced), git may fail with:
+If this repo lives under `~/Documents` (synced), git can fail with:
 
 ```
 fatal: unable to access '.git/config': Operation not permitted
 ```
 
-while `cat .git/config` works fine. `~/Documents` is TCC-protected: a process
-without the "Files and Folders" grant can still `open()` files but is denied
-`access()`, which is the call git makes before reading a config. Files the
-process itself created are exempt, so the failure looks intermittent.
+while `cat .git/config` works fine, and cargo fails the same way on
+`target/debug/.cargo-build-lock`.
 
-The real fix is to grant your terminal access under **System Settings →
-Privacy & Security → Files and Folders** (or Full Disk Access). Until then,
-`scripts/git-icloud.sh` runs git with the git directory temporarily copied
-outside the protected path and copies it back — the working tree never moves,
-so syncing is unaffected.
+The cause is iCloud **eviction**, not permissions. When iCloud reclaims space it
+replaces a file's contents with a placeholder ("dataless"). `open()` triggers a
+download and blocks until it lands — so `cat`, editors and compilers mostly just
+work. `access()` does NOT: it returns `EPERM` on a dataless file rather than
+fetching it, and `access(R_OK)` is exactly what git calls before reading a
+config file. Files that happen to be materialized work; evicted ones don't, so
+the failure looks random and intermittent.
+
+It clears once the files are downloaded. To stop it recurring, pin the repo:
+right-click the folder in Finder and choose **Keep Downloaded**. That is the
+fix — no permission change is involved, and granting Full Disk Access will not
+help, because nothing was ever denied.
+
+If you are stuck mid-session, forcing a read of the affected directory
+(`find .git -type f -exec cat {} + > /dev/null`) materializes it, after which
+git works again. `scripts/git-icloud.sh` does something similar by copying the
+git directory out and back, but on a large repo the copy itself is slow for the
+same reason — pinning is better.
 
 ## Where to go next
 

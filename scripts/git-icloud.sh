@@ -7,32 +7,27 @@
 #   ...while `cat .git/config` works fine.
 #
 # THE CAUSE
-#   ~/Documents is TCC-protected ("Files and Folders" in Privacy & Security).
-#   A process without that grant can still `open()` many files — which is why
-#   `cat`, editors, and cargo mostly work — but `access(path, R_OK)` is denied,
-#   and that is the exact call git makes before reading a config file. Files the
-#   process created itself are exempt, which is why the failure looks random:
-#   whatever you just wrote works, everything older does not.
+#   iCloud EVICTION, not permissions. When iCloud reclaims space it turns a
+#   file into a placeholder ("dataless"). `open()` triggers a download and
+#   waits, so cat/editors/compilers mostly work. `access()` does not — it
+#   returns EPERM on a dataless file instead of fetching it, and access(R_OK)
+#   is exactly what git calls before reading a config. Whichever files happen
+#   to be materialized work, so the failure looks intermittent.
+#
+#   No permission is being denied. Granting Full Disk Access does nothing.
 #
 # THE REAL FIX
-#   Grant the terminal (or whatever runs git) access to Documents:
-#   System Settings -> Privacy & Security -> Files and Folders, or Full Disk
-#   Access. Do that and this script is unnecessary.
+#   Pin the repo so iCloud stops evicting it: right-click the folder in Finder
+#   and choose "Keep Downloaded".
 #
-# THE WORKAROUND
-#   Keep the working tree where it is — in Documents, synced, unchanged — and
-#   move only the git DIRECTORY somewhere untouched by TCC for the duration of
-#   a command. The tree stays authoritative and iCloud keeps syncing it; git
-#   just stops being asked to probe files it is not allowed to probe.
+#   Failing that, force a read of whatever is evicted and it materializes:
+#       find .git -type f -exec cat {} + > /dev/null
 #
-#   The git dir is copied out, the command runs, and the result is copied back,
-#   so ~/Documents keeps the history. Nothing lives outside Documents between
-#   invocations.
+# THIS SCRIPT
+#   Copies the git dir out of the synced path, runs the command, copies it
+#   back. That works, but on a large repo the copy is slow for exactly the
+#   reason above — every evicted object has to download. Prefer pinning.
 #
-# USAGE
-#   scripts/git-icloud.sh status
-#   scripts/git-icloud.sh add -A
-#   scripts/git-icloud.sh commit -m "..."
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

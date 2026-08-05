@@ -709,6 +709,53 @@ async fn main() {
 
     // One-shot: fetch the full ESPN catalog, write the disk cache, exit. Seeds
     // demo mode (which never contacts ESPN) with the real team lists.
+    // Prove the mail path end to end without waiting for an incident or for the
+    // daily hour. Exits with a non-zero status when it fails, so it is usable
+    // as a check rather than just a thing that prints.
+    if std::env::args().any(|a| a == "--test-alert") {
+        match alerts::Mailer::from_env() {
+            None => {
+                eprintln!(
+                    "email alerts are not configured.\n\
+                     Set RESEND_API_KEY and ALERT_EMAIL_TO (optionally ALERT_EMAIL_FROM).\n\
+                     Run against the deployed service's variables with:\n\
+                     \n    railway run -s live cargo run -p server -- --test-alert\n"
+                );
+                std::process::exit(1);
+            }
+            Some(m) => {
+                println!("sending a test alert to {}...", m.recipient());
+                match m
+                    .send(
+                        "Scoreboard: test alert",
+                        "This is a test from `server --test-alert`.\n\n\
+                         If you are reading it, alerting is wired up: you will get one \
+                         email when a problem is confirmed, one when it clears, and a \
+                         report once a day.\n",
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        println!("sent. If it does not arrive, check spam, and check that");
+                        println!("ALERT_EMAIL_FROM is on a domain verified with Resend.");
+                    }
+                    Err(e) => {
+                        eprintln!("FAILED: {e}");
+                        eprintln!(
+                            "\nCommon causes:\n\
+                             - 401/403: the API key is wrong or lacks sending access\n\
+                             - 403 with 'domain is not verified': ALERT_EMAIL_FROM is not on\n\
+                               a domain you have verified with Resend\n\
+                             - 422: the from/to address is malformed"
+                        );
+                        std::process::exit(1);
+                    }
+                }
+                return;
+            }
+        }
+    }
+
     if std::env::args().any(|a| a == "--fetch-catalog") {
         match espn::EspnSource::new().fetch_catalog().await {
             Some(c) => {

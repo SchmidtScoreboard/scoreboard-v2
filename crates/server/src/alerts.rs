@@ -63,6 +63,12 @@ impl Mailer {
         })
     }
 
+    /// Where alerts go — for the test command to echo, so a typo in the
+    /// variable is visible before waiting on an email that never arrives.
+    pub fn recipient(&self) -> &str {
+        &self.to
+    }
+
     pub async fn send(&self, subject: &str, body: &str) -> Result<(), String> {
         let payload = serde_json::json!({
             "from": self.from,
