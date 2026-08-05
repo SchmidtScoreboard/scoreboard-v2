@@ -903,16 +903,70 @@ pub fn render_notice(lines: &[(&str, bool, Rgb888)], remaining: Option<f32>) -> 
 
 /// The idle clock: big 12-hour time centered, small AM/PM below. Rendered
 /// server-side (the board is a dumb display), re-pushed each minute while shown.
-pub fn render_clock(hour24: u32, minute: u32) -> (FrameId, Vec<u8>) {
+/// Split a 24-hour clock into what the panel should show.
+fn clock_parts(hour24: u32, minute: u32, h24: bool) -> (String, Option<&'static str>) {
+    if h24 {
+        return (format!("{:02}:{:02}", hour24 % 24, minute), None);
+    }
     let (h12, ampm) = match hour24 % 24 {
         0 => (12, "AM"),
         h if h < 12 => (h, "AM"),
         12 => (12, "PM"),
         h => (h - 12, "PM"),
     };
-    let time = format!("{}:{:02}", h12, minute);
-    render_notice(&[(&time, true, WHITE), (ampm, false, GREY)], None)
+    (format!("{}:{:02}", h12, minute), Some(ampm))
 }
+
+/// The idle clock.
+///
+/// `style` is one of `classic`, `large`, `compact`; anything else falls back to
+/// `classic` rather than to a blank panel, for the same reason an unknown off
+/// mode does.
+pub fn render_clock_styled(hour24: u32, minute: u32, style: &str, h24: bool) -> (FrameId, Vec<u8>) {
+    let (time, ampm) = clock_parts(hour24, minute, h24);
+    match style {
+        // Two lines of large type filling the panel, the meridiem riding the
+        // bottom edge of the digits rather than floating at their middle —
+        // there it reads as part of the number.
+        "large" => {
+            let mut c = Canvas::new();
+            let gap = 3;
+            let ampm_w = ampm.map(|a| gap + text_width(a, false)).unwrap_or(0);
+            let width = wx_w(&time, true, 2) + ampm_w;
+            let x0 = (FRAME_WIDTH as i32 - width) / 2;
+            let span = wx_text(&mut c, &time, x0, 15, true, 2, WHITE);
+            if let Some(a) = ampm {
+                wx_text(&mut c, a, x0 + wx_w(&time, true, 2) + gap, span.1 - 2, false, 1, GREY);
+            }
+            let px = c.to_rgb565();
+            (frame_id(&px), px)
+        }
+        // The smallest legible clock: least light in a dark room, which is the
+        // whole reason to pick it.
+        "compact" => {
+            let mut c = Canvas::new();
+            let gap = 2;
+            let ampm_w = ampm.map(|a| gap + text_width(a, false)).unwrap_or(0);
+            let width = text_width(&time, false) + ampm_w;
+            let x0 = (FRAME_WIDTH as i32 - width) / 2;
+            wx_text(&mut c, &time, x0, 16, false, 1, WHITE);
+            if let Some(a) = ampm {
+                wx_text(&mut c, a, x0 + text_width(&time, false) + gap, 16, false, 1, GREY);
+            }
+            let px = c.to_rgb565();
+            (frame_id(&px), px)
+        }
+        _ => match ampm {
+            Some(a) => render_notice(&[(&time, true, WHITE), (a, false, GREY)], None),
+            None => render_notice(&[(&time, true, WHITE)], None),
+        },
+    }
+}
+
+/// The styles this binary draws, in menu order — the descriptor is built from
+/// this, so a style can never be offered that `render_clock_styled` cannot draw.
+pub const CLOCK_STYLES: [(&str, &str); 3] =
+    [("classic", "Classic"), ("large", "Large"), ("compact", "Compact")];
 
 #[cfg(test)]
 mod kern_tests {
@@ -2035,22 +2089,24 @@ pub fn render_weather_forecast(w: &crate::weather::Weather) -> (FrameId, Vec<u8>
 }
 
 /// The clock, with weather sharing the panel underneath it.
-pub fn render_weather_clock(w: &crate::weather::Weather, hour24: u32, minute: u32) -> (FrameId, Vec<u8>) {
+pub fn render_weather_clock(
+    w: &crate::weather::Weather,
+    hour24: u32,
+    minute: u32,
+    h24: bool,
+) -> (FrameId, Vec<u8>) {
     let mut c = Canvas::new();
-    let (h12, meridiem) = match hour24 % 24 {
-        0 => (12, "AM"),
-        h if h < 12 => (h, "AM"),
-        12 => (12, "PM"),
-        h => (h - 12, "PM"),
-    };
-    let time = format!("{h12}:{minute:02}");
+    let (time, meridiem) = clock_parts(hour24, minute, h24);
     let gap = 3;
-    let width = wx_w(&time, true, 2) + gap + text_width(meridiem, false);
+    let meridiem_w = meridiem.map(|m| gap + text_width(m, false)).unwrap_or(0);
+    let width = wx_w(&time, true, 2) + meridiem_w;
     let x0 = (FRAME_WIDTH as i32 - width) / 2;
     let clock_span = wx_text(&mut c, &time, x0, 9, true, 2, WHITE);
     // The meridiem rides the BOTTOM of the digits: floating at mid-height it
     // reads as part of the number rather than as an annotation.
-    wx_text(&mut c, meridiem, x0 + wx_w(&time, true, 2) + gap, clock_span.1 - 2, false, 1, WX_DIM);
+    if let Some(m) = meridiem {
+        wx_text(&mut c, m, x0 + wx_w(&time, true, 2) + gap, clock_span.1 - 2, false, 1, WX_DIM);
+    }
 
     let art = wx_art(crate::weather::icon_for(w.code, w.is_day), true);
     let scy = 23;
@@ -2127,7 +2183,7 @@ mod wx_tests {
                 ("simple", render_weather_simple(&w)),
                 ("detailed", render_weather_detailed(&w)),
                 ("forecast", render_weather_forecast(&w)),
-                ("clock", render_weather_clock(&w, 13, 5)),
+                ("clock", render_weather_clock(&w, 13, 5, false)),
             ] {
                 assert_eq!(px.len(), FRAME_WIDTH * FRAME_HEIGHT * 2, "{name} at {t}");
                 assert!(px.iter().any(|&b| b != 0), "{name} at {t} rendered an empty panel");
@@ -2143,9 +2199,9 @@ mod wx_tests {
         let b = crate::weather::Weather { temp: 12, code: 71, hi: 20, lo: 4, ..a.clone() };
         assert_ne!(render_weather_simple(&a).0, render_weather_simple(&b).0);
         assert_ne!(render_weather_detailed(&a).0, render_weather_detailed(&b).0);
-        assert_ne!(render_weather_clock(&a, 9, 0).0, render_weather_clock(&b, 9, 0).0);
+        assert_ne!(render_weather_clock(&a, 9, 0, false).0, render_weather_clock(&b, 9, 0, false).0);
         // And the clock half moves on its own.
-        assert_ne!(render_weather_clock(&a, 9, 0).0, render_weather_clock(&a, 9, 1).0);
+        assert_ne!(render_weather_clock(&a, 9, 0, false).0, render_weather_clock(&a, 9, 1, false).0);
     }
 }
 
@@ -2162,7 +2218,7 @@ mod wx_dump {
             ("simple", render_weather_simple(&w)),
             ("detailed", render_weather_detailed(&w)),
             ("forecast", render_weather_forecast(&w)),
-            ("clock", render_weather_clock(&w, 22, 9)),
+            ("clock", render_weather_clock(&w, 22, 9, false)),
         ];
         for (name, (_, px)) in shots {
             let mut img = image::RgbImage::new(FRAME_WIDTH as u32 * 8, FRAME_HEIGHT as u32 * 8);

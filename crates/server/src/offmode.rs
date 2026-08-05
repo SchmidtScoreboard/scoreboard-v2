@@ -23,7 +23,9 @@
 //!    manifest forever. Boards are sent frames and a Blank/Clock flag; the id
 //!    lives only between the app, the server, and the database.
 
-use scoreboard_protocol::{FrameId, OffModeDescriptor, OffModeInput};
+use scoreboard_protocol::{
+    FieldCondition, FrameId, OffModeChoice, OffModeDescriptor, OffModeField, OffModeInput,
+};
 use std::collections::BTreeMap;
 
 use crate::render;
@@ -69,6 +71,72 @@ pub struct OffCtx<'a> {
 /// current into the app's URL cache, and read as a bug besides.
 const PREVIEW_TIME: (u32, u32) = (10, 9);
 
+pub const LOCATION: &str = "location";
+pub const VARIANT: &str = "variant";
+pub const HOUR24: &str = "hour24";
+pub const STYLE: &str = "style";
+
+fn text_field(key: &str, label: &str, placeholder: &str, max_len: u32) -> OffModeField {
+    OffModeField {
+        key: key.into(),
+        label: label.into(),
+        kind: "text".into(),
+        placeholder: placeholder.into(),
+        max_len,
+        default: String::new(),
+        options: vec![],
+        visible_when: None,
+    }
+}
+
+fn toggle_field(key: &str, label: &str, default_on: bool) -> OffModeField {
+    OffModeField {
+        key: key.into(),
+        label: label.into(),
+        kind: "toggle".into(),
+        placeholder: String::new(),
+        max_len: 0,
+        default: if default_on { "1".into() } else { "0".into() },
+        options: vec![],
+        visible_when: None,
+    }
+}
+
+fn choice_field(key: &str, label: &str, default: &str, options: Vec<OffModeChoice>) -> OffModeField {
+    OffModeField {
+        key: key.into(),
+        label: label.into(),
+        kind: "choice".into(),
+        placeholder: String::new(),
+        max_len: 0,
+        default: default.into(),
+        options,
+        visible_when: None,
+    }
+}
+
+fn only_when(mut f: OffModeField, key: &str, equals: &str) -> OffModeField {
+    f.visible_when = Some(FieldCondition { key: key.into(), equals: equals.into() });
+    f
+}
+
+/// The four weather layouts, as choices rather than as four top-level modes.
+fn weather_variants() -> Vec<OffModeChoice> {
+    [
+        ("simple", "Simple"),
+        ("detailed", "Detailed"),
+        ("forecast", "Forecast"),
+        ("clock", "Clock + Weather"),
+    ]
+    .iter()
+    .map(|(v, l)| OffModeChoice {
+        value: (*v).into(),
+        label: (*l).into(),
+        preview: Some(format!("/offmode/weather.png?{VARIANT}={v}")),
+    })
+    .collect()
+}
+
 /// The off modes this server offers, in menu order.
 pub fn off_modes() -> Vec<OffModeDescriptor> {
     vec![
@@ -78,6 +146,22 @@ pub fn off_modes() -> Vec<OffModeDescriptor> {
             description: "The time, in the scoreboard's timezone.".into(),
             preview: Some("/offmode/clock.png".into()),
             input: None,
+            fields: vec![
+                toggle_field(HOUR24, "24-hour time", false),
+                choice_field(
+                    STYLE,
+                    "Style",
+                    "classic",
+                    render::CLOCK_STYLES
+                        .iter()
+                        .map(|(v, l)| OffModeChoice {
+                            value: (*v).into(),
+                            label: (*l).into(),
+                            preview: Some(format!("/offmode/clock.png?{STYLE}={v}")),
+                        })
+                        .collect(),
+                ),
+            ],
         },
         OffModeDescriptor {
             id: "blank".into(),
@@ -87,39 +171,45 @@ pub fn off_modes() -> Vec<OffModeDescriptor> {
             // load, so the app draws the black panel itself.
             preview: None,
             input: None,
+            fields: vec![],
         },
-        weather_mode("weather-simple", "Simple", "The temperature, and what it's doing."),
-        weather_mode(
-            "weather-detailed",
-            "Detailed",
-            "Temperature, today's high and low, and conditions.",
-        ),
-        weather_mode("weather-forecast", "Forecast", "Today and the next two days."),
-        weather_mode("weather-clock", "Clock + Weather", "The time, with the weather below it."),
+        OffModeDescriptor {
+            id: "weather".into(),
+            label: "Weather".into(),
+            description: "Conditions where the scoreboard lives.".into(),
+            preview: Some("/offmode/weather.png".into()),
+            // Legacy twin, so an app built before `fields` still shows the one
+            // control that makes this mode work at all.
+            input: Some(OffModeInput {
+                key: LOCATION.into(),
+                label: "Location".into(),
+                placeholder: "ZIP or lat,lon".into(),
+                max_len: 32,
+            }),
+            fields: vec![
+                text_field(LOCATION, "Location", "ZIP or lat,lon", 32),
+                choice_field(VARIANT, "Layout", "detailed", weather_variants()),
+                // The conditional: a 24-hour option only matters on the layout
+                // that shows a clock.
+                only_when(toggle_field(HOUR24, "24-hour time", false), VARIANT, "clock"),
+            ],
+        },
     ]
 }
 
-/// The four weather screens differ only in layout, so they share a descriptor
-/// shape — including the one text input all of them need.
-fn weather_mode(id: &str, label: &str, description: &str) -> OffModeDescriptor {
-    OffModeDescriptor {
-        id: id.into(),
-        label: label.into(),
-        description: description.into(),
-        preview: Some(format!("/offmode/{id}.png")),
-        input: Some(OffModeInput {
-            key: LOCATION.into(),
-            label: "Location".into(),
-            // A ZIP is the friendly path; the pair is what keeps this usable
-            // outside the US without a second field.
-            placeholder: "ZIP or lat,lon".into(),
-            max_len: 32,
-        }),
+/// Boards configured before the four weather layouts became one mode.
+///
+/// A stored `weather-detailed` becomes `weather` with `variant=detailed`, so
+/// nobody's panel changes under them. Called wherever a stored id is read
+/// rather than at startup only, because a settings IMPORT can introduce an old
+/// id long after any migration pass has run.
+pub fn migrate(id: &str, params: &mut BTreeMap<String, String>) -> String {
+    if let Some(variant) = id.strip_prefix("weather-") {
+        params.entry(VARIANT.to_string()).or_insert_with(|| variant.to_string());
+        return "weather".to_string();
     }
+    id.to_string()
 }
-
-/// The key every weather screen reads its location from.
-pub const LOCATION: &str = "location";
 
 /// Whether a mode leaves the panel dark — the one bit the legacy `OffState`
 /// enum could express, and what `BoardConfig::set_off_mode` records.
@@ -149,13 +239,21 @@ pub fn offers(id: &str) -> bool {
 /// indistinguishable from a broken one, and this is reachable from a config
 /// that names a mode a fork removed.
 pub fn render_off_mode(id: &str, cx: &OffCtx) -> Vec<OffFrame> {
+    // Resolve through the DESCRIPTOR, so an unset field means the same thing
+    // here as it does on the settings screen.
+    let descriptor = off_modes().into_iter().find(|m| m.id == id);
+    let get = |key: &str| -> String {
+        descriptor.as_ref().map(|d| d.value(key, cx.params).to_string()).unwrap_or_default()
+    };
+    let on = |key: &str| get(key) == "1";
+
     match id {
         "blank" => vec![],
-        "weather-simple" | "weather-detailed" | "weather-forecast" | "weather-clock" => {
+        "weather" => {
             let w = match &cx.weather {
                 crate::weather::Reading::Ready(w) => w.clone(),
-                // Say which of the two problems it is. "No location" is
-                // something the user can fix in the app; "unavailable" is ours.
+                // Say which of the two problems it is: one the user can fix,
+                // one is ours.
                 crate::weather::Reading::NoLocation => {
                     return vec![notice("WEATHER", "SET A LOCATION")];
                 }
@@ -163,32 +261,27 @@ pub fn render_off_mode(id: &str, cx: &OffCtx) -> Vec<OffFrame> {
                     return vec![notice("WEATHER", "UNAVAILABLE")];
                 }
             };
-            let (fid, px) = match id {
-                "weather-simple" => render::render_weather_simple(&w),
-                "weather-detailed" => render::render_weather_detailed(&w),
-                "weather-forecast" => render::render_weather_forecast(&w),
-                _ => {
+            let (fid, px) = match get(VARIANT).as_str() {
+                "simple" => render::render_weather_simple(&w),
+                "forecast" => render::render_weather_forecast(&w),
+                "clock" => {
                     let (h, m) = if cx.preview { PREVIEW_TIME } else { now_hm(cx.tz) };
-                    render::render_weather_clock(&w, h, m)
+                    render::render_weather_clock(&w, h, m, on(HOUR24))
                 }
+                // Unknown variant (a fork's, or a stale import) draws the
+                // default rather than nothing.
+                _ => render::render_weather_detailed(&w),
             };
-            // A minute, because the clock+weather screen shows one. The others
-            // change far more slowly, but one cadence is simpler than four and
-            // an unchanged frame re-pushes as the same content hash anyway.
             vec![OffFrame { id: fid, px, dwell_ms: 60_000 }]
         }
-        // Add your mode here. Anything that produces a 64x32 RGB565 frame
-        // works; `render::render_notice` is the shortest path to text.
+        // Anything else is the clock — an unknown id must still light the
+        // panel, since a dark one is indistinguishable from a broken one.
         _ => {
-            let (hour, minute) = if cx.preview {
-                PREVIEW_TIME
-            } else {
-                now_hm(cx.tz)
-            };
-            let (id, px) = render::render_clock(hour, minute);
-            // A minute is the smallest unit the clock shows, so re-pushing
-            // faster would burn frames to redraw identical pixels.
-            vec![OffFrame { id, px, dwell_ms: 60_000 }]
+            let (hour, minute) = if cx.preview { PREVIEW_TIME } else { now_hm(cx.tz) };
+            let (fid, px) = render::render_clock_styled(hour, minute, &get(STYLE), on(HOUR24));
+            // A minute is the smallest unit shown, so re-pushing faster would
+            // burn frames redrawing identical pixels.
+            vec![OffFrame { id: fid, px, dwell_ms: 60_000 }]
         }
     }
 }

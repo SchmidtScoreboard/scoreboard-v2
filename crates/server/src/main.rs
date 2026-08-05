@@ -567,8 +567,16 @@ fn open_db(path: &std::path::Path) -> rusqlite::Result<Connection> {
 fn sanitize_off_modes(configs: &mut HashMap<String, BoardConfig>) {
     for (board, cfg) in configs.iter_mut() {
         if let Some(id) = cfg.off_mode.clone() {
-            if !offmode::offers(&id) {
-                tracing::warn!("board {board}: off mode {id:?} is not offered here; reverting");
+            // The four weather layouts became one mode with a `variant` field.
+            // Migrate BEFORE deciding an id is unknown, or every board that had
+            // picked one would silently revert to the clock.
+            let migrated = offmode::migrate(&id, &mut cfg.off_mode_params);
+            if migrated != id {
+                tracing::info!("board {board}: off mode {id:?} -> {migrated:?}");
+                cfg.off_mode = Some(migrated.clone());
+            }
+            if !offmode::offers(&migrated) {
+                tracing::warn!("board {board}: off mode {migrated:?} is not offered here; reverting");
                 cfg.off_mode = None;
             }
         }
@@ -1103,13 +1111,19 @@ fn sample_game() -> model::Game {
 /// a wrong image silently misrepresents what the board will do.
 async fn get_offmode(
     axum::extract::Path(id): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     let id = id.strip_suffix(".png").unwrap_or(&id);
     if !offmode::offers(id) {
         return (axum::http::StatusCode::NOT_FOUND, format!("no off mode '{id}'")).into_response();
     }
-    let params = std::collections::BTreeMap::new();
+    // Query params let each CHOICE preview itself ("?variant=forecast"), which
+    // is what the settings screen shows beside its options. Anything not given
+    // resolves to the descriptor's default rather than to empty — a preview of
+    // a state the user can never actually be in would be a lie.
+    let params: std::collections::BTreeMap<String, String> =
+        q.into_iter().filter(|(k, _)| k != "board").collect();
     let frames =
         offmode::render_off_mode(
         id,
@@ -1665,6 +1679,31 @@ pub(crate) fn board_local_epoch_ms(cfg: &BoardConfig) -> u64 {
     (now.timestamp_millis() + offset_secs * 1000).max(0) as u64
 }
 
+/// Is this board inside its quiet window right now, and has the user not
+/// overridden it?
+///
+/// DERIVED on every read — never written into `cfg.power`. Three reasons, all
+/// visible in the code as it stands: `tick_once` sets `power = true`
+/// unconditionally when a sleep timer lapses and would fight a written flag
+/// every 30 seconds; the app's power toggle writes that same field, so a
+/// written quiet flag would need a second bit recording who turned it off; and
+/// after a restart a persisted `power = false` is indistinguishable from a
+/// manual switch-off, so morning could not know whether to undo it.
+pub(crate) fn quiet_now(cfg: &BoardConfig) -> bool {
+    quiet_window_now(cfg) && !cfg.quiet_override
+}
+
+/// Whether the wall clock is inside the window, ignoring any override.
+pub(crate) fn quiet_window_now(cfg: &BoardConfig) -> bool {
+    let Some(q) = cfg.quiet_hours else { return false };
+    use chrono::Timelike;
+    let now = match board_tz(cfg) {
+        Some(tz) => chrono::Utc::now().with_timezone(&tz).time(),
+        None => chrono::Local::now().time(),
+    };
+    q.contains((now.hour() * 60 + now.minute()) as u16)
+}
+
 pub(crate) fn board_tz(cfg: &BoardConfig) -> Option<chrono_tz::Tz> {
     cfg.timezone
         .as_deref()
@@ -2036,6 +2075,13 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
     let cfg = state.config_for(board_id);
     let tz = board_tz(&cfg);
 
+    // Priority 0: quiet hours. Above BOTH games and notices, because the notice
+    // path returns `display_on: true` regardless of power — a demo toggle or a
+    // power splash would otherwise light the panel at 3am, mid-window.
+    if quiet_now(&cfg) {
+        return idle_manifest(state, &cfg, tz);
+    }
+
     // Priority 1: live games (only while powered on).
     if cfg.power {
         let chosen = chosen_games(state, &cfg);
@@ -2126,8 +2172,15 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
 
     // Priority 3: idle / asleep — the configured off-state (server-rendered clock
     // or a blank panel). Applies both to power-off and powered-on-but-no-games.
-    // The ONLY place the off mode is resolved. `offmode::render_off_mode` owns
-    // what each mode draws; everything here is slate-agnostic.
+    idle_manifest(state, &cfg, tz)
+}
+
+/// The idle panel: whatever the configured off mode draws, or darkness.
+///
+/// Extracted so the `display_on` / `off_state` derivation exists once — quiet
+/// hours and the ordinary idle path must not be able to disagree about it.
+fn idle_manifest(state: &AppState, cfg: &BoardConfig, tz: Option<chrono_tz::Tz>) -> Manifest {
+    // The ONLY place the off mode is resolved.
     let rotation: Vec<RotationEntry> = offmode::render_off_mode(
         cfg.off_mode_id(),
         &offmode::OffCtx {
@@ -2145,6 +2198,7 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
         RotationEntry { frame_id: f.id, dwell_ms: f.dwell_ms, scroll: false }
     })
     .collect();
+
     Manifest {
         // Only the idle path can be a local clock, and only when it drew
         // something. The rendered frame still ships alongside it.
@@ -2303,6 +2357,21 @@ pub fn handle_button(state: &AppState, board_id: &str) {
         state.configs.lock().unwrap().insert(board_id.to_string(), cfg.clone());
         state.persist_config(board_id, &cfg);
         tracing::info!("board '{board_id}': button skipped the no-games countdown -> sleep");
+        push_board(state, board_id);
+        push_board_state(state, board_id);
+        return;
+    }
+
+    // A press inside a quiet window means "I want to see it, for the rest of
+    // tonight". This arm goes FIRST: `cfg.power` is still true in a window, so
+    // without it the press falls into the showing-games arm below and the
+    // server answers a dark panel by arming a 24-hour sleep.
+    if quiet_now(&cfg) {
+        cfg.quiet_override = true;
+        state.notices.lock().unwrap().remove(board_id);
+        state.configs.lock().unwrap().insert(board_id.to_string(), cfg.clone());
+        state.persist_config(board_id, &cfg);
+        tracing::info!("board '{board_id}': button overrode quiet hours for the rest of the window");
         push_board(state, board_id);
         push_board_state(state, board_id);
         return;
@@ -2745,6 +2814,25 @@ pub fn tick_once(state: &AppState) {
         push_time(state, bid);
     }
 
+    // An override is spent when the window it overrode ends. Rides the pass
+    // that already walks every config every 30s — no scheduler, no per-board
+    // task, and no absolute instant to drift across a DST change.
+    let expired: Vec<String> = state
+        .configs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, c)| c.quiet_override && !quiet_window_now(c))
+        .map(|(id, _)| id.clone())
+        .collect();
+    for bid in expired {
+        let mut cfg = state.config_for(&bid);
+        cfg.quiet_override = false;
+        state.configs.lock().unwrap().insert(bid.clone(), cfg.clone());
+        state.persist_config(&bid, &cfg);
+        push_board_state(state, &bid);
+    }
+
     // Wake-timer check covers ALL configured boards (a board can be offline when
     // its timer lapses; the config should still flip so the app shows it awake).
     let lapsed: Vec<String> = state
@@ -2948,6 +3036,9 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
         board_id: board_id.to_string(),
         online,
         now_showing,
+        // Derived here, beside the firmware fields, for the same reason: it is
+        // what the config MEANS right now, not part of the config.
+        quiet_active: quiet_now(&cfg),
         config: cfg,
         firmware_version,
         firmware_update,
@@ -5882,6 +5973,94 @@ mod tests {
     /// The demo routes: JSON discovery + a PNG per game, both serving the
     /// synthetic slate regardless of any board config, and both surviving an
     /// id nobody has.
+    /// Minutes since local midnight for a board, so a window can be built
+    /// around "now" and the test means the same thing at any hour.
+    fn local_minute(cfg: &BoardConfig) -> u16 {
+        use chrono::Timelike;
+        let now = match board_tz(cfg) {
+            Some(tz) => chrono::Utc::now().with_timezone(&tz).time(),
+            None => chrono::Local::now().time(),
+        };
+        (now.hour() * 60 + now.minute()) as u16
+    }
+
+    fn window_around_now(cfg: &BoardConfig) -> QuietHours {
+        let m = local_minute(cfg);
+        QuietHours { start_min: (m + 1439) % 1440, end_min: (m + 60) % 1440 }
+    }
+
+    /// Quiet hours must beat the NOTICE path too. Notices return
+    /// `display_on: true` regardless of power, so a demo toggle or a power
+    /// splash would otherwise light a dark bedroom at 3am.
+    #[test]
+    fn quiet_hours_outrank_games_and_notices_alike() {
+        let state = AppState::new_ephemeral();
+        let cfg = BoardConfig {
+            quiet_hours: Some(window_around_now(&BoardConfig::default())),
+            ..Default::default()
+        };
+        state.configs.lock().unwrap().insert("b".into(), cfg.clone());
+        assert!(quiet_now(&state.config_for("b")), "precondition: inside the window");
+
+        // Games are live, and a notice is pending — neither may wake the panel.
+        set_notice(&state, "b", &[("HELLO", true, NOTICE_WHITE)], 30, false);
+        let m = manifest_for_board(&state, "b");
+        assert!(
+            m.rotation.iter().all(|r| !r.scroll) && m.rotation.len() <= 1,
+            "a quiet board shows only its off mode"
+        );
+        assert!(m.countdown_ms.is_none(), "no notice countdown while quiet");
+    }
+
+    /// The knob inside a window means "show me anyway", NOT "sleep 24 hours" —
+    /// `power` is still true in a window, so without its own arm the press
+    /// lands in the showing-games branch and arms the sleep timer.
+    #[test]
+    fn the_knob_during_quiet_hours_overrides_it_rather_than_arming_sleep() {
+        let state = AppState::new_ephemeral();
+        let cfg = BoardConfig {
+            quiet_hours: Some(window_around_now(&BoardConfig::default())),
+            ..Default::default()
+        };
+        state.configs.lock().unwrap().insert("b".into(), cfg);
+        handle_button(&state, "b");
+        let after = state.config_for("b");
+        assert!(after.quiet_override, "the press overrides the window");
+        assert!(after.power, "and must not power the board off");
+        assert!(after.wake_at.is_none(), "no 24-hour sleep timer");
+        assert!(!quiet_now(&after), "the board is awake for the rest of the window");
+    }
+
+    /// Equal bounds mean DISABLED. A board dark around the clock is the worst
+    /// outcome this feature has available.
+    #[test]
+    fn a_degenerate_window_never_darkens_the_board() {
+        let state = AppState::new_ephemeral();
+        let m = local_minute(&BoardConfig::default());
+        let cfg = BoardConfig {
+            quiet_hours: Some(QuietHours { start_min: m, end_min: m }),
+            ..Default::default()
+        };
+        state.configs.lock().unwrap().insert("b".into(), cfg);
+        assert!(!quiet_now(&state.config_for("b")));
+    }
+
+    /// Boards configured before the four weather layouts became one mode must
+    /// keep the layout they chose.
+    #[test]
+    fn an_old_weather_id_migrates_to_the_variant_it_named() {
+        let mut configs = HashMap::new();
+        configs.insert(
+            "b".to_string(),
+            BoardConfig { off_mode: Some("weather-forecast".into()), ..Default::default() },
+        );
+        sanitize_off_modes(&mut configs);
+        let cfg = &configs["b"];
+        assert_eq!(cfg.off_mode.as_deref(), Some("weather"));
+        assert_eq!(cfg.off_mode_params.get("variant").map(String::as_str), Some("forecast"));
+        assert_eq!(cfg.off_mode_id(), "weather");
+    }
+
     /// A deadlock, caught the only way a deadlock can be: by timing out.
     ///
     /// This took the live server down. Nothing crashed and nothing was logged;

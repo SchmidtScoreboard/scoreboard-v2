@@ -39,6 +39,14 @@ All curl-able; the app uses the same ones.
   Omitting `board` serves the raw data. Unknown id → plain-text 404.
 - `GET /sample/{off|normal|strict}.png` — the fixed sample game rendered at
   each spoiler level (drives the app's spoiler-settings preview rows).
+- Off modes declare their own SETTINGS SCREEN as data: `fields` on the
+  descriptor, each `{key, label, kind, default, options, visible_when}`. `kind`
+  is a string (`text` / `toggle` / `choice`), never an enum — an app that meets
+  a kind it does not know skips that field instead of failing to decode the
+  config. `visible_when` gives one level of conditionality (the 24-hour toggle
+  appears only on the clock weather layout). Values live in `off_mode_params`
+  as strings; `OffModeDescriptor::value` in the protocol crate is the single
+  resolution order (stored, else declared default) that server and app share.
 - Weather screens read `off_mode_params["location"]` — a US ZIP or `lat,lon`.
   Data comes from Open-Meteo, coordinates from Zippopotam; both key-free, so a
   self-hosted server needs no accounts. Cached and refreshed every 10 minutes

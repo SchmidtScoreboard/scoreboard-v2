@@ -72,6 +72,9 @@ final class ListenerAdapter: ClientListener {
     func onOffModes(modes: [UiOffMode]) {
         Task { @MainActor in self.model?.applyOffModes(self.serverUrl, modes) }
     }
+    func onQuietActive(boardId: String, active: Bool) {
+        Task { @MainActor in self.model?.applyQuietActive(boardId, active) }
+    }
     func onConfig(boardId: String, config: UiBoardConfig) {
         Task { @MainActor in self.model?.applyConfig(boardId, config) }
     }
@@ -122,6 +125,10 @@ struct BoardInfo {
     var focusedGameId: String?
     var offMode: String = "clock"
     var offModeParams: [String: String] = [:]
+    var quietStartMin: UInt16? = nil
+    var quietEndMin: UInt16? = nil
+    /// Server-derived: inside the window right now. Not a setting.
+    var quietActive = false
     var sleepHours: UInt32 = 24
     var dwellSecs: UInt32 = 10
     var leagueDwell: [String: UInt32] = [:]     // sportId -> per-league override
@@ -202,9 +209,9 @@ final class BoardViewModel: ObservableObject {
         return [
             UiOffMode(id: "clock", label: "Clock",
                       description: "The time, in the scoreboard's timezone.",
-                      preview: "/offmode/clock.png", input: nil),
+                      preview: "/offmode/clock.png", input: nil, fields: []),
             UiOffMode(id: "blank", label: "Nothing",
-                      description: "The panel stays dark.", preview: nil, input: nil),
+                      description: "The panel stays dark.", preview: nil, input: nil, fields: []),
         ]
     }
     func applyGames(_ server: String, _ games: [UiGame]) { liveGamesByServer[server] = games }
@@ -1138,6 +1145,8 @@ final class BoardViewModel: ObservableObject {
             $0.championship = champ
             $0.offMode = c.offMode
             $0.offModeParams = c.offModeParams
+            $0.quietStartMin = c.quietStartMin
+            $0.quietEndMin = c.quietEndMin
             $0.sleepHours = c.sleepHours
             $0.dwellSecs = c.dwellSecs
             $0.leagueDwell = dwell
@@ -1165,6 +1174,58 @@ final class BoardViewModel: ObservableObject {
         mutate(bid) { $0.offMode = id }
         client?.setOffMode(boardId: bid, id: id)
     }
+    func applyQuietActive(_ boardId: String, _ active: Bool) {
+        mutate(boardId) { $0.quietActive = active }
+    }
+
+    func setQuietHours(_ startMin: UInt16, _ endMin: UInt16) {
+        guard let id = selectedBoardId else { return }
+        mutate(id) { $0.quietStartMin = startMin; $0.quietEndMin = endMin }
+        client?.setQuietHours(boardId: id, startMin: startMin, endMin: endMin)
+    }
+
+    func clearQuietHours() {
+        guard let id = selectedBoardId else { return }
+        mutate(id) { $0.quietStartMin = nil; $0.quietEndMin = nil; $0.quietActive = false }
+        client?.clearQuietHours(boardId: id)
+    }
+
+    /// Stored value, else the field's declared default, else empty.
+    ///
+    /// MUST match `OffModeDescriptor::value` in the protocol crate — the server
+    /// renders from that one. If these disagreed, the panel and the phone would
+    /// show different things with nothing to point at.
+    func offModeValue(_ mode: UiOffMode, _ key: String) -> String {
+        if let v = current.offModeParams[key] { return v }
+        return mode.fields.first(where: { $0.key == key })?.default ?? ""
+    }
+
+    /// The fields to draw, honouring one level of conditional visibility
+    /// against the RESOLVED value — so a condition on a defaulted field works
+    /// before the user has touched anything.
+    func visibleOffModeFields(_ mode: UiOffMode) -> [UiOffModeField] {
+        mode.fields.filter { f in
+            guard let key = f.visibleWhenKey, let want = f.visibleWhenValue else { return true }
+            return offModeValue(mode, key) == want
+        }
+    }
+
+    /// The preview to show for a mode: the selected choice's, if any choice
+    /// field declares one, else the mode's own.
+    ///
+    /// Every path here comes from the DESCRIPTOR. The app never builds a
+    /// preview URL out of an id or a value, because the moment it does, a
+    /// forked server's mode stops previewing correctly.
+    func currentPreviewPath(_ mode: UiOffMode) -> String? {
+        for f in visibleOffModeFields(mode) where f.kind == "choice" {
+            let picked = offModeValue(mode, f.key)
+            if let opt = f.options.first(where: { $0.value == picked }), let p = opt.preview {
+                return p
+            }
+        }
+        return mode.preview
+    }
+
     func setOffModeParam(_ key: String, _ value: String) {
         guard let bid = selectedBoardId else { return }
         mutate(bid) { $0.offModeParams[key] = value }
@@ -4509,6 +4570,7 @@ struct SettingsView: View {
                 if model.selectedBoardId != nil {
                     settingsSection
                     offModeSection
+                    quietHoursSection
                     spoilerSection
                     demoSection
                     transferSection
@@ -4737,6 +4799,69 @@ struct SettingsView: View {
         }
     }
 
+    /// A nightly window in which the scoreboard sleeps.
+    ///
+    /// The pickers write minutes since the BOARD's local midnight, never an
+    /// absolute time: the window means "quiet after 10pm" wherever the board
+    /// lives, and any instant derived from it would slide an hour twice a year.
+    private var quietHoursSection: some View {
+        Section {
+            Toggle("Quiet hours", isOn: Binding(
+                get: { model.current.quietStartMin != nil },
+                set: { on in
+                    // A sensible first window beats making someone dial two
+                    // pickers before the toggle does anything.
+                    if on { model.setQuietHours(22 * 60, 7 * 60) } else { model.clearQuietHours() }
+                }
+            ))
+            if let start = model.current.quietStartMin, let end = model.current.quietEndMin {
+                quietTimeRow("Sleeps at", minutes: start) { model.setQuietHours($0, end) }
+                quietTimeRow("Wakes at", minutes: end) { model.setQuietHours(start, $0) }
+            }
+        } header: {
+            Text("Quiet hours")
+        } footer: {
+            if model.current.quietActive {
+                Label(
+                    "Sleeping now. Press the scoreboard's button to see it for the rest of tonight.",
+                    systemImage: "moon.zzz.fill"
+                )
+            } else if model.current.quietStartMin != nil {
+                Text("The scoreboard sleeps during this window every night, in its own timezone.")
+            }
+        }
+    }
+
+    private func quietTimeRow(
+        _ title: String,
+        minutes: UInt16,
+        set: @escaping (UInt16) -> Void
+    ) -> some View {
+        DatePicker(
+            title,
+            selection: Binding(
+                get: { Self.dateFrom(minutes: minutes) },
+                set: { set(Self.minutesFrom(date: $0)) }
+            ),
+            displayedComponents: .hourAndMinute
+        )
+    }
+
+    /// Minutes-since-midnight <-> a Date the picker can chew on. The date part
+    /// is arbitrary and never leaves this view; only the clock face matters.
+    private static func dateFrom(minutes: UInt16) -> Date {
+        var c = DateComponents()
+        c.year = 2000; c.month = 1; c.day = 1
+        c.hour = Int(minutes) / 60
+        c.minute = Int(minutes) % 60
+        return Calendar.current.date(from: c) ?? Date()
+    }
+
+    private static func minutesFrom(date: Date) -> UInt16 {
+        let c = Calendar.current.dateComponents([.hour, .minute], from: date)
+        return UInt16((c.hour ?? 0) * 60 + (c.minute ?? 0))
+    }
+
     /// What the panel shows while the scoreboard is off.
     ///
     /// Every row here comes from the SERVER (`model.offModes`) — label,
@@ -4748,11 +4873,6 @@ struct SettingsView: View {
         Section {
             ForEach(model.offModes, id: \.id) { mode in
                 offModeRow(mode)
-                // The mode's own input, shown only while it is selected — a
-                // ZIP under a weather row, tickers under a stocks row.
-                if mode.id == model.current.offMode, let input = mode.input {
-                    offModeInputRow(input)
-                }
             }
         } header: {
             HStack {
@@ -4763,48 +4883,61 @@ struct SettingsView: View {
         }
     }
 
+    /// One mode: pick it by tapping the row, configure it with the trailing
+    /// control. The settings button appears only for modes that DECLARED
+    /// fields — nothing here knows which modes those are.
     private func offModeRow(_ mode: UiOffMode) -> some View {
         let selected = mode.id == model.current.offMode
-        return Button {
-            model.setOffMode(mode.id)
-        } label: {
-            HStack(spacing: 12) {
-                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(mode.label).foregroundStyle(.primary)
-                    Text(mode.description).font(.caption).foregroundStyle(.secondary)
+        return HStack(spacing: 12) {
+            Button {
+                model.setOffMode(mode.id)
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(mode.label).foregroundStyle(.primary)
+                        Text(mode.description).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 8)
+                    offModePreview(mode)
                 }
-                Spacer(minLength: 8)
-                if let path = mode.preview, let url = URL(string: "\(model.httpBase)\(path)") {
-                    // grayFailure: a forked or older server may not host this
-                    // preview, and an alarming badge there would be noise.
-                    FetchedFrameImage(url: url, grayFailure: true)
-                        .ledPanel(width: 96, height: 48)
-                } else {
-                    // No preview declared means the mode draws nothing. Filled
-                    // locally: a fetched all-black PNG is byte-identical to the
-                    // loading state, so it would look broken.
-                    Rectangle().fill(.black).ledPanel(width: 96, height: 48)
+            }
+            .buttonStyle(.plain)
+            if !mode.fields.isEmpty {
+                NavigationLink {
+                    OffModeSettingsView(model: model, mode: mode)
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        // A caption glyph alone is a sub-20pt target; pad the
+                        // hit area without moving the visual edge.
+                        .padding(6)
+                        .contentShape(Rectangle())
+                        .padding(-6)
                 }
+                .buttonStyle(.plain)
             }
         }
     }
 
-    private func offModeInputRow(_ input: UiOffModeInput) -> some View {
-        HStack(spacing: 8) {
-            Text(input.label).font(.subheadline)
-            Spacer()
-            TextField(input.placeholder, text: Binding(
-                get: { model.current.offModeParams[input.key] ?? "" },
-                set: { model.setOffModeParam(input.key, String($0.prefix(Int(input.maxLen)))) }
-            ))
-            .multilineTextAlignment(.trailing)
-            .textInputAutocapitalization(.characters)
-            .autocorrectionDisabled()
-            .frame(maxWidth: 160)
+    /// The mode's preview, following the CURRENT choice where the mode declares
+    /// one — so the Weather row shows the layout actually selected rather than
+    /// a fixed picture of one of them.
+    @ViewBuilder
+    private func offModePreview(_ mode: UiOffMode) -> some View {
+        if let path = model.currentPreviewPath(mode), let url = URL(string: "\(model.httpBase)\(path)") {
+            // grayFailure: a forked or older server may not host this preview,
+            // and an alarming badge there would be noise.
+            FetchedFrameImage(url: url, grayFailure: true).ledPanel(width: 96, height: 48)
+        } else {
+            // No preview declared means the mode draws nothing. Filled locally:
+            // a fetched all-black PNG is byte-identical to the loading state.
+            Rectangle().fill(.black).ledPanel(width: 96, height: 48)
         }
     }
+
 
     /// Spoiler settings, drawn with the receipts: the two display modes show
     /// the SAME example game rendered exactly as the board would show it.
@@ -5300,5 +5433,82 @@ struct FirmwareNotesSheet: View {
         } catch {
             notes = .unavailable
         }
+    }
+}
+
+/// An off mode's settings, built entirely from what the SERVER declared.
+///
+/// Nothing in this view knows what any mode or field means. It renders the
+/// kinds it understands, SKIPS the ones it doesn't, and writes values straight
+/// back as strings — which is what lets a forked server ship a mode with its
+/// own settings and have the stock app configure it.
+struct OffModeSettingsView: View {
+    @ObservedObject var model: BoardViewModel
+    let mode: UiOffMode
+
+    var body: some View {
+        Form {
+            ForEach(model.visibleOffModeFields(mode), id: \.key) { field in
+                fieldSection(field)
+            }
+        }
+        .navigationTitle(mode.label)
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    @ViewBuilder
+    private func fieldSection(_ f: UiOffModeField) -> some View {
+        switch f.kind {
+        case "toggle":
+            Section {
+                Toggle(f.label, isOn: Binding(
+                    get: { model.offModeValue(mode, f.key) == "1" },
+                    set: { model.setOffModeParam(f.key, $0 ? "1" : "0") }
+                ))
+            }
+        case "text":
+            Section {
+                TextField(f.placeholder, text: Binding(
+                    get: { model.offModeValue(mode, f.key) },
+                    set: { model.setOffModeParam(f.key, String($0.prefix(Int(f.maxLen)))) }
+                ))
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.characters)
+            } header: {
+                Text(f.label)
+            }
+        case "choice":
+            Section {
+                ForEach(f.options, id: \.value) { opt in
+                    choiceRow(f, opt)
+                }
+            } header: {
+                Text(f.label)
+            }
+        default:
+            // A kind this build has never heard of — a newer or forked server's.
+            // Skipped rather than guessed at, and the field's declared default
+            // keeps the mode working meanwhile.
+            EmptyView()
+        }
+    }
+
+    private func choiceRow(_ f: UiOffModeField, _ opt: UiOffModeChoice) -> some View {
+        let selected = model.offModeValue(mode, f.key) == opt.value
+        return Button {
+            model.setOffModeParam(f.key, opt.value)
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                Text(opt.label).foregroundStyle(.primary)
+                Spacer(minLength: 8)
+                if let p = opt.preview, let url = URL(string: "\(model.httpBase)\(p)") {
+                    FetchedFrameImage(url: url, grayFailure: true)
+                        .ledPanel(width: 96, height: 48)
+                }
+            }
+        }
+        .buttonStyle(.plain)
     }
 }

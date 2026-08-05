@@ -414,6 +414,22 @@ private struct FfiConverterUInt8: FfiConverterPrimitive {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterUInt16: FfiConverterPrimitive {
+    typealias FfiType = UInt16
+    typealias SwiftType = UInt16
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt16 {
+        return try lift(readInt(&buf))
+    }
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterUInt32: FfiConverterPrimitive {
     typealias FfiType = UInt32
     typealias SwiftType = UInt32
@@ -542,6 +558,8 @@ public protocol ScoreboardClientProtocol: AnyObject {
      * Clear a focus, returning to the normal rotation.
      */
     func clearFocus(boardId: String)
+
+    func clearQuietHours(boardId: String)
 
     /**
      * Keep the board off with no auto-wake (cancels a running sleep timer).
@@ -696,9 +714,13 @@ public protocol ScoreboardClientProtocol: AnyObject {
      */
     func setOffModeParam(boardId: String, key: String, value: String)
 
-    func setOffStateRemoved(boardId: String, offState: UiOffStateUnused)
-
     func setPower(boardId: String, on: Bool)
+
+    /**
+     * Set the nightly quiet window, in minutes since the board's local
+     * midnight. Equal values clear it.
+     */
+    func setQuietHours(boardId: String, startMin: UInt16, endMin: UInt16)
 
     /**
      * How long a knob-press sleep lasts before the board wakes itself.
@@ -837,6 +859,12 @@ open class ScoreboardClient:
     open func clearFocus(boardId: String) { try! rustCall {
         uniffi_app_core_fn_method_scoreboardclient_clear_focus(self.uniffiClonePointer(),
                                                                FfiConverterString.lower(boardId), $0)
+    }
+    }
+
+    open func clearQuietHours(boardId: String) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_clear_quiet_hours(self.uniffiClonePointer(),
+                                                                     FfiConverterString.lower(boardId), $0)
     }
     }
 
@@ -1124,17 +1152,22 @@ open class ScoreboardClient:
     }
     }
 
-    open func setOffStateRemoved(boardId: String, offState: UiOffStateUnused) { try! rustCall {
-        uniffi_app_core_fn_method_scoreboardclient_set_off_state_removed(self.uniffiClonePointer(),
-                                                                         FfiConverterString.lower(boardId),
-                                                                         FfiConverterTypeUiOffStateUnused.lower(offState), $0)
-    }
-    }
-
     open func setPower(boardId: String, on: Bool) { try! rustCall {
         uniffi_app_core_fn_method_scoreboardclient_set_power(self.uniffiClonePointer(),
                                                              FfiConverterString.lower(boardId),
                                                              FfiConverterBool.lower(on), $0)
+    }
+    }
+
+    /**
+     * Set the nightly quiet window, in minutes since the board's local
+     * midnight. Equal values clear it.
+     */
+    open func setQuietHours(boardId: String, startMin: UInt16, endMin: UInt16) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_set_quiet_hours(self.uniffiClonePointer(),
+                                                                   FfiConverterString.lower(boardId),
+                                                                   FfiConverterUInt16.lower(startMin),
+                                                                   FfiConverterUInt16.lower(endMin), $0)
     }
     }
 
@@ -1337,6 +1370,13 @@ public struct UiBoardConfig {
      * GAMES change — every other setting on the board is untouched.
      */
     public var demoData: Bool
+    /**
+     * The nightly quiet window in minutes since the board's local midnight,
+     * or nil when there is none. Two flat fields rather than a record, so the
+     * "unset" case is one nil check in Swift.
+     */
+    public var quietStartMin: UInt16?
+    public var quietEndMin: UInt16?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -1380,7 +1420,12 @@ public struct UiBoardConfig {
                 /**
                     * Serve this board a synthetic slate instead of live games. Only the
                     * GAMES change — every other setting on the board is untouched.
-                    */ demoData: Bool)
+                    */ demoData: Bool,
+                /**
+                    * The nightly quiet window in minutes since the board's local midnight,
+                    * or nil when there is none. Two flat fields rather than a record, so the
+                    * "unset" case is one nil check in Swift.
+                    */ quietStartMin: UInt16?, quietEndMin: UInt16?)
     {
         self.sports = sports
         self.brightness = brightness
@@ -1401,6 +1446,8 @@ public struct UiBoardConfig {
         self.timezone = timezone
         self.fwChannel = fwChannel
         self.demoData = demoData
+        self.quietStartMin = quietStartMin
+        self.quietEndMin = quietEndMin
     }
 }
 
@@ -1463,6 +1510,12 @@ extension UiBoardConfig: Equatable, Hashable {
         if lhs.demoData != rhs.demoData {
             return false
         }
+        if lhs.quietStartMin != rhs.quietStartMin {
+            return false
+        }
+        if lhs.quietEndMin != rhs.quietEndMin {
+            return false
+        }
         return true
     }
 
@@ -1486,6 +1539,8 @@ extension UiBoardConfig: Equatable, Hashable {
         hasher.combine(timezone)
         hasher.combine(fwChannel)
         hasher.combine(demoData)
+        hasher.combine(quietStartMin)
+        hasher.combine(quietEndMin)
     }
 }
 
@@ -1514,7 +1569,9 @@ public struct FfiConverterTypeUiBoardConfig: FfiConverterRustBuffer {
                 revealedGameIds: FfiConverterSequenceString.read(from: &buf),
                 timezone: FfiConverterOptionString.read(from: &buf),
                 fwChannel: FfiConverterTypeUiFwChannel.read(from: &buf),
-                demoData: FfiConverterBool.read(from: &buf)
+                demoData: FfiConverterBool.read(from: &buf),
+                quietStartMin: FfiConverterOptionUInt16.read(from: &buf),
+                quietEndMin: FfiConverterOptionUInt16.read(from: &buf)
             )
     }
 
@@ -1538,6 +1595,8 @@ public struct FfiConverterTypeUiBoardConfig: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.timezone, into: &buf)
         FfiConverterTypeUiFwChannel.write(value.fwChannel, into: &buf)
         FfiConverterBool.write(value.demoData, into: &buf)
+        FfiConverterOptionUInt16.write(value.quietStartMin, into: &buf)
+        FfiConverterOptionUInt16.write(value.quietEndMin, into: &buf)
     }
 }
 
@@ -2017,6 +2076,10 @@ public struct UiOffMode {
      */
     public var preview: String?
     public var input: UiOffModeInput?
+    /**
+     * The mode's settings screen, in display order.
+     */
+    public var fields: [UiOffModeField]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -2025,13 +2088,17 @@ public struct UiOffMode {
                     * Path of the preview PNG on the SAME server, or nil when the mode draws
                     * nothing (the app fills black locally rather than fetching a black PNG
                     * it cannot tell apart from a failed load).
-                    */ preview: String?, input: UiOffModeInput?)
+                    */ preview: String?, input: UiOffModeInput?,
+                /**
+                    * The mode's settings screen, in display order.
+                    */ fields: [UiOffModeField])
     {
         self.id = id
         self.label = label
         self.description = description
         self.preview = preview
         self.input = input
+        self.fields = fields
     }
 }
 
@@ -2052,6 +2119,9 @@ extension UiOffMode: Equatable, Hashable {
         if lhs.input != rhs.input {
             return false
         }
+        if lhs.fields != rhs.fields {
+            return false
+        }
         return true
     }
 
@@ -2061,6 +2131,7 @@ extension UiOffMode: Equatable, Hashable {
         hasher.combine(description)
         hasher.combine(preview)
         hasher.combine(input)
+        hasher.combine(fields)
     }
 }
 
@@ -2075,7 +2146,8 @@ public struct FfiConverterTypeUiOffMode: FfiConverterRustBuffer {
                 label: FfiConverterString.read(from: &buf),
                 description: FfiConverterString.read(from: &buf),
                 preview: FfiConverterOptionString.read(from: &buf),
-                input: FfiConverterOptionTypeUiOffModeInput.read(from: &buf)
+                input: FfiConverterOptionTypeUiOffModeInput.read(from: &buf),
+                fields: FfiConverterSequenceTypeUiOffModeField.read(from: &buf)
             )
     }
 
@@ -2085,6 +2157,7 @@ public struct FfiConverterTypeUiOffMode: FfiConverterRustBuffer {
         FfiConverterString.write(value.description, into: &buf)
         FfiConverterOptionString.write(value.preview, into: &buf)
         FfiConverterOptionTypeUiOffModeInput.write(value.input, into: &buf)
+        FfiConverterSequenceTypeUiOffModeField.write(value.fields, into: &buf)
     }
 }
 
@@ -2100,6 +2173,222 @@ public func FfiConverterTypeUiOffMode_lift(_ buf: RustBuffer) throws -> UiOffMod
 #endif
 public func FfiConverterTypeUiOffMode_lower(_ value: UiOffMode) -> RustBuffer {
     return FfiConverterTypeUiOffMode.lower(value)
+}
+
+public struct UiOffModeChoice {
+    public var value: String
+    public var label: String
+    public var preview: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(value: String, label: String, preview: String?) {
+        self.value = value
+        self.label = label
+        self.preview = preview
+    }
+}
+
+extension UiOffModeChoice: Equatable, Hashable {
+    public static func == (lhs: UiOffModeChoice, rhs: UiOffModeChoice) -> Bool {
+        if lhs.value != rhs.value {
+            return false
+        }
+        if lhs.label != rhs.label {
+            return false
+        }
+        if lhs.preview != rhs.preview {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(value)
+        hasher.combine(label)
+        hasher.combine(preview)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiOffModeChoice: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiOffModeChoice {
+        return
+            try UiOffModeChoice(
+                value: FfiConverterString.read(from: &buf),
+                label: FfiConverterString.read(from: &buf),
+                preview: FfiConverterOptionString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UiOffModeChoice, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.value, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterOptionString.write(value.preview, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiOffModeChoice_lift(_ buf: RustBuffer) throws -> UiOffModeChoice {
+    return try FfiConverterTypeUiOffModeChoice.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiOffModeChoice_lower(_ value: UiOffModeChoice) -> RustBuffer {
+    return FfiConverterTypeUiOffModeChoice.lower(value)
+}
+
+/**
+ * One control on a mode's settings screen.
+ */
+public struct UiOffModeField {
+    public var key: String
+    public var label: String
+    /**
+     * "text" | "toggle" | "choice" — a STRING, never an enum. A closed enum
+     * here would abort the whole config decode the first time a forked server
+     * named a kind this build has not heard of. Unknown kinds are SKIPPED.
+     */
+    public var kind: String
+    public var placeholder: String
+    public var maxLen: UInt32
+    /**
+     * What the field means when nothing is stored.
+     */
+    public var `default`: String
+    public var options: [UiOffModeChoice]
+    /**
+     * Show only while `visible_when_key` holds `visible_when_value`. Two flat
+     * Options rather than a nested record: uniffi records nest fine, but the
+     * Swift is markedly simpler and this is never more than one condition.
+     */
+    public var visibleWhenKey: String?
+    public var visibleWhenValue: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(key: String, label: String,
+                /**
+                    * "text" | "toggle" | "choice" — a STRING, never an enum. A closed enum
+                    * here would abort the whole config decode the first time a forked server
+                    * named a kind this build has not heard of. Unknown kinds are SKIPPED.
+                    */ kind: String, placeholder: String, maxLen: UInt32,
+                /**
+                    * What the field means when nothing is stored.
+                    */ default: String, options: [UiOffModeChoice],
+                /**
+                    * Show only while `visible_when_key` holds `visible_when_value`. Two flat
+                    * Options rather than a nested record: uniffi records nest fine, but the
+                    * Swift is markedly simpler and this is never more than one condition.
+                    */ visibleWhenKey: String?, visibleWhenValue: String?)
+    {
+        self.key = key
+        self.label = label
+        self.kind = kind
+        self.placeholder = placeholder
+        self.maxLen = maxLen
+        self.default = `default`
+        self.options = options
+        self.visibleWhenKey = visibleWhenKey
+        self.visibleWhenValue = visibleWhenValue
+    }
+}
+
+extension UiOffModeField: Equatable, Hashable {
+    public static func == (lhs: UiOffModeField, rhs: UiOffModeField) -> Bool {
+        if lhs.key != rhs.key {
+            return false
+        }
+        if lhs.label != rhs.label {
+            return false
+        }
+        if lhs.kind != rhs.kind {
+            return false
+        }
+        if lhs.placeholder != rhs.placeholder {
+            return false
+        }
+        if lhs.maxLen != rhs.maxLen {
+            return false
+        }
+        if lhs.default != rhs.default {
+            return false
+        }
+        if lhs.options != rhs.options {
+            return false
+        }
+        if lhs.visibleWhenKey != rhs.visibleWhenKey {
+            return false
+        }
+        if lhs.visibleWhenValue != rhs.visibleWhenValue {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(key)
+        hasher.combine(label)
+        hasher.combine(kind)
+        hasher.combine(placeholder)
+        hasher.combine(maxLen)
+        hasher.combine(`default`)
+        hasher.combine(options)
+        hasher.combine(visibleWhenKey)
+        hasher.combine(visibleWhenValue)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiOffModeField: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiOffModeField {
+        return
+            try UiOffModeField(
+                key: FfiConverterString.read(from: &buf),
+                label: FfiConverterString.read(from: &buf),
+                kind: FfiConverterString.read(from: &buf),
+                placeholder: FfiConverterString.read(from: &buf),
+                maxLen: FfiConverterUInt32.read(from: &buf),
+                default: FfiConverterString.read(from: &buf),
+                options: FfiConverterSequenceTypeUiOffModeChoice.read(from: &buf),
+                visibleWhenKey: FfiConverterOptionString.read(from: &buf),
+                visibleWhenValue: FfiConverterOptionString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UiOffModeField, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.key, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterString.write(value.placeholder, into: &buf)
+        FfiConverterUInt32.write(value.maxLen, into: &buf)
+        FfiConverterString.write(value.default, into: &buf)
+        FfiConverterSequenceTypeUiOffModeChoice.write(value.options, into: &buf)
+        FfiConverterOptionString.write(value.visibleWhenKey, into: &buf)
+        FfiConverterOptionString.write(value.visibleWhenValue, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiOffModeField_lift(_ buf: RustBuffer) throws -> UiOffModeField {
+    return try FfiConverterTypeUiOffModeField.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiOffModeField_lower(_ value: UiOffModeField) -> RustBuffer {
+    return FfiConverterTypeUiOffModeField.lower(value)
 }
 
 public struct UiOffModeInput {
@@ -2501,6 +2790,7 @@ public func FfiConverterTypeUiTeam_lower(_ value: UiTeam) -> RustBuffer {
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * What the panel shows while off / idle.
  * Firmware release channel a board follows (protocol `FwChannel`). Channels
  * are cumulative toward Dev: a beta board may also be offered stable builds
  * when stable is newer — newest version wins.
@@ -2624,61 +2914,6 @@ public func FfiConverterTypeUiNameStyle_lower(_ value: UiNameStyle) -> RustBuffe
 
 extension UiNameStyle: Equatable, Hashable {}
 
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-/**
- * What the panel shows while off / idle.
- */
-
-public enum UiOffStateUnused {
-    case blank
-    case clock
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeUiOffStateUnused: FfiConverterRustBuffer {
-    typealias SwiftType = UiOffStateUnused
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiOffStateUnused {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-        case 1: return .blank
-
-        case 2: return .clock
-
-        default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: UiOffStateUnused, into buf: inout [UInt8]) {
-        switch value {
-        case .blank:
-            writeInt(&buf, Int32(1))
-
-        case .clock:
-            writeInt(&buf, Int32(2))
-        }
-    }
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeUiOffStateUnused_lift(_ buf: RustBuffer) throws -> UiOffStateUnused {
-    return try FfiConverterTypeUiOffStateUnused.lift(buf)
-}
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-public func FfiConverterTypeUiOffStateUnused_lower(_ value: UiOffStateUnused) -> RustBuffer {
-    return FfiConverterTypeUiOffStateUnused.lower(value)
-}
-
-extension UiOffStateUnused: Equatable, Hashable {}
-
 /**
  * Implemented on the Swift/Kotlin side to receive pushed state.
  */
@@ -2695,6 +2930,12 @@ public protocol ClientListener: AnyObject {
      * id, or forks start needing app releases again.
      */
     func onOffModes(modes: [UiOffMode])
+
+    /**
+     * True while the board is inside its quiet window right now. Derived by
+     * the server per push — the window is the setting, this is what it means.
+     */
+    func onQuietActive(boardId: String, active: Bool)
 
     func onConfig(boardId: String, config: UiBoardConfig)
 
@@ -2837,6 +3078,31 @@ private enum UniffiCallbackInterfaceClientListener {
                 }
                 return try uniffiObj.onOffModes(
                     modes: FfiConverterSequenceTypeUiOffMode.lift(modes)
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onQuietActive: { (
+            uniffiHandle: UInt64,
+            boardId: RustBuffer,
+            active: Int8,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceClientListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.onQuietActive(
+                    boardId: FfiConverterString.lift(boardId),
+                    active: FfiConverterBool.lift(active)
                 )
             }
 
@@ -3127,6 +3393,30 @@ extension FfiConverterCallbackInterfaceClientListener: FfiConverter {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterOptionUInt16: FfiConverterRustBuffer {
+    typealias SwiftType = UInt16?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt16.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt16.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
     typealias SwiftType = UInt32?
 
@@ -3397,6 +3687,56 @@ private struct FfiConverterSequenceTypeUiOffMode: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterSequenceTypeUiOffModeChoice: FfiConverterRustBuffer {
+    typealias SwiftType = [UiOffModeChoice]
+
+    static func write(_ value: [UiOffModeChoice], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeUiOffModeChoice.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UiOffModeChoice] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UiOffModeChoice]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeUiOffModeChoice.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeUiOffModeField: FfiConverterRustBuffer {
+    typealias SwiftType = [UiOffModeField]
+
+    static func write(_ value: [UiOffModeField], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeUiOffModeField.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UiOffModeField] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UiOffModeField]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeUiOffModeField.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterSequenceTypeUiSport: FfiConverterRustBuffer {
     typealias SwiftType = [UiSport]
 
@@ -3553,6 +3893,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_method_scoreboardclient_clear_focus() != 55769 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_app_core_checksum_method_scoreboardclient_clear_quiet_hours() != 36403 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_method_scoreboardclient_clear_wake_timer() != 29871 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3637,10 +3980,10 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_method_scoreboardclient_set_off_mode_param() != 36797 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_method_scoreboardclient_set_off_state_removed() != 12371 {
+    if uniffi_app_core_checksum_method_scoreboardclient_set_power() != 36256 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_method_scoreboardclient_set_power() != 36256 {
+    if uniffi_app_core_checksum_method_scoreboardclient_set_quiet_hours() != 15526 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_sleep_hours() != 40272 {
@@ -3682,31 +4025,34 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_method_clientlistener_on_off_modes() != 50087 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_method_clientlistener_on_config() != 64316 {
+    if uniffi_app_core_checksum_method_clientlistener_on_quiet_active() != 16402 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_method_clientlistener_on_games() != 25251 {
+    if uniffi_app_core_checksum_method_clientlistener_on_config() != 30287 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_method_clientlistener_on_frame() != 61810 {
+    if uniffi_app_core_checksum_method_clientlistener_on_games() != 62504 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_method_clientlistener_on_paired() != 41996 {
+    if uniffi_app_core_checksum_method_clientlistener_on_frame() != 191 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_method_clientlistener_on_pair_failed() != 21666 {
+    if uniffi_app_core_checksum_method_clientlistener_on_paired() != 42209 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_method_clientlistener_on_settings_export() != 15847 {
+    if uniffi_app_core_checksum_method_clientlistener_on_pair_failed() != 58861 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_method_clientlistener_on_import_result() != 53157 {
+    if uniffi_app_core_checksum_method_clientlistener_on_settings_export() != 30107 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_method_clientlistener_on_board_version() != 64748 {
+    if uniffi_app_core_checksum_method_clientlistener_on_import_result() != 43830 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_method_clientlistener_on_firmware_list() != 13619 {
+    if uniffi_app_core_checksum_method_clientlistener_on_board_version() != 41990 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_clientlistener_on_firmware_list() != 40766 {
         return InitializationResult.apiChecksumMismatch
     }
 

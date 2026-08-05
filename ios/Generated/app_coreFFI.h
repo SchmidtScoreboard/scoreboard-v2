@@ -281,28 +281,28 @@ typedef void (*UniffiCallbackInterfaceClientListenerMethod3)(uint64_t, RustBuffe
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD4
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD4
-typedef void (*UniffiCallbackInterfaceClientListenerMethod4)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceClientListenerMethod4)(uint64_t, RustBuffer, int8_t, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD5
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD5
-typedef void (*UniffiCallbackInterfaceClientListenerMethod5)(uint64_t, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceClientListenerMethod5)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD6
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD6
-typedef void (*UniffiCallbackInterfaceClientListenerMethod6)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceClientListenerMethod6)(uint64_t, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD7
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD7
-typedef void (*UniffiCallbackInterfaceClientListenerMethod7)(uint64_t, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceClientListenerMethod7)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
@@ -316,7 +316,7 @@ typedef void (*UniffiCallbackInterfaceClientListenerMethod8)(uint64_t, RustBuffe
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD9
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD9
-typedef void (*UniffiCallbackInterfaceClientListenerMethod9)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceClientListenerMethod9)(uint64_t, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
@@ -330,14 +330,21 @@ typedef void (*UniffiCallbackInterfaceClientListenerMethod10)(uint64_t, RustBuff
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD11
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD11
-typedef void (*UniffiCallbackInterfaceClientListenerMethod11)(uint64_t, RustBuffer, RustBuffer, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceClientListenerMethod11)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD12
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD12
-typedef void (*UniffiCallbackInterfaceClientListenerMethod12)(uint64_t, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceClientListenerMethod12)(uint64_t, RustBuffer, RustBuffer, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD13
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD13
+typedef void (*UniffiCallbackInterfaceClientListenerMethod13)(uint64_t, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
@@ -349,15 +356,16 @@ typedef struct UniffiVTableCallbackInterfaceClientListener {
     UniffiCallbackInterfaceClientListenerMethod1 _Nonnull onBoardState;
     UniffiCallbackInterfaceClientListenerMethod2 _Nonnull onCatalog;
     UniffiCallbackInterfaceClientListenerMethod3 _Nonnull onOffModes;
-    UniffiCallbackInterfaceClientListenerMethod4 _Nonnull onConfig;
-    UniffiCallbackInterfaceClientListenerMethod5 _Nonnull onGames;
-    UniffiCallbackInterfaceClientListenerMethod6 _Nonnull onFrame;
-    UniffiCallbackInterfaceClientListenerMethod7 _Nonnull onPaired;
-    UniffiCallbackInterfaceClientListenerMethod8 _Nonnull onPairFailed;
-    UniffiCallbackInterfaceClientListenerMethod9 _Nonnull onSettingsExport;
-    UniffiCallbackInterfaceClientListenerMethod10 _Nonnull onImportResult;
-    UniffiCallbackInterfaceClientListenerMethod11 _Nonnull onBoardVersion;
-    UniffiCallbackInterfaceClientListenerMethod12 _Nonnull onFirmwareList;
+    UniffiCallbackInterfaceClientListenerMethod4 _Nonnull onQuietActive;
+    UniffiCallbackInterfaceClientListenerMethod5 _Nonnull onConfig;
+    UniffiCallbackInterfaceClientListenerMethod6 _Nonnull onGames;
+    UniffiCallbackInterfaceClientListenerMethod7 _Nonnull onFrame;
+    UniffiCallbackInterfaceClientListenerMethod8 _Nonnull onPaired;
+    UniffiCallbackInterfaceClientListenerMethod9 _Nonnull onPairFailed;
+    UniffiCallbackInterfaceClientListenerMethod10 _Nonnull onSettingsExport;
+    UniffiCallbackInterfaceClientListenerMethod11 _Nonnull onImportResult;
+    UniffiCallbackInterfaceClientListenerMethod12 _Nonnull onBoardVersion;
+    UniffiCallbackInterfaceClientListenerMethod13 _Nonnull onFirmwareList;
     UniffiCallbackInterfaceFree _Nonnull uniffiFree;
 } UniffiVTableCallbackInterfaceClientListener;
 
@@ -390,6 +398,11 @@ RustBuffer uniffi_app_core_fn_method_scoreboardclient_board_ids(void*_Nonnull pt
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_CLEAR_FOCUS
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_CLEAR_FOCUS
 void uniffi_app_core_fn_method_scoreboardclient_clear_focus(void*_Nonnull ptr, RustBuffer board_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_CLEAR_QUIET_HOURS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_CLEAR_QUIET_HOURS
+void uniffi_app_core_fn_method_scoreboardclient_clear_quiet_hours(void*_Nonnull ptr, RustBuffer board_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_CLEAR_WAKE_TIMER
@@ -532,14 +545,14 @@ void uniffi_app_core_fn_method_scoreboardclient_set_off_mode(void*_Nonnull ptr, 
 void uniffi_app_core_fn_method_scoreboardclient_set_off_mode_param(void*_Nonnull ptr, RustBuffer board_id, RustBuffer key, RustBuffer value, RustCallStatus *_Nonnull out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_OFF_STATE_REMOVED
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_OFF_STATE_REMOVED
-void uniffi_app_core_fn_method_scoreboardclient_set_off_state_removed(void*_Nonnull ptr, RustBuffer board_id, RustBuffer off_state, RustCallStatus *_Nonnull out_status
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_POWER
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_POWER
 void uniffi_app_core_fn_method_scoreboardclient_set_power(void*_Nonnull ptr, RustBuffer board_id, int8_t on, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_QUIET_HOURS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_QUIET_HOURS
+void uniffi_app_core_fn_method_scoreboardclient_set_quiet_hours(void*_Nonnull ptr, RustBuffer board_id, uint16_t start_min, uint16_t end_min, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_SLEEP_HOURS
@@ -907,6 +920,12 @@ uint16_t uniffi_app_core_checksum_method_scoreboardclient_clear_focus(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_CLEAR_QUIET_HOURS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_CLEAR_QUIET_HOURS
+uint16_t uniffi_app_core_checksum_method_scoreboardclient_clear_quiet_hours(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_CLEAR_WAKE_TIMER
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_CLEAR_WAKE_TIMER
 uint16_t uniffi_app_core_checksum_method_scoreboardclient_clear_wake_timer(void
@@ -1075,15 +1094,15 @@ uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_off_mode_param(voi
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_OFF_STATE_REMOVED
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_OFF_STATE_REMOVED
-uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_off_state_removed(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_POWER
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_POWER
 uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_power(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_QUIET_HOURS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_QUIET_HOURS
+uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_quiet_hours(void
     
 );
 #endif
@@ -1162,6 +1181,12 @@ uint16_t uniffi_app_core_checksum_method_clientlistener_on_catalog(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_OFF_MODES
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_OFF_MODES
 uint16_t uniffi_app_core_checksum_method_clientlistener_on_off_modes(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_QUIET_ACTIVE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_QUIET_ACTIVE
+uint16_t uniffi_app_core_checksum_method_clientlistener_on_quiet_active(void
     
 );
 #endif

@@ -524,8 +524,13 @@ pub(crate) fn apply_settings_import(state: &AppState, board_id: &str, json: &str
     // same way brightness and dwell are re-clamped: an export from a FORKED
     // server must degrade to this server's default, never reject the whole
     // import over one unknown string.
-    if settings.off_mode.as_deref().is_some_and(|id| !crate::offmode::offers(id)) {
-        settings.off_mode = None;
+    // Migrate before judging: an export taken before the weather layouts
+    // collapsed names an id this binary no longer offers, and rejecting it
+    // would silently drop the user's screen choice.
+    if let Some(id) = settings.off_mode.clone() {
+        let migrated = crate::offmode::migrate(&id, &mut settings.off_mode_params);
+        settings.off_mode =
+            if crate::offmode::offers(&migrated) { Some(migrated) } else { None };
     }
     // An unparseable timezone in a hand-edited blob is dropped BEFORE applying
     // — `apply_to` skips None, so the board keeps its current (valid) zone.
@@ -678,6 +683,9 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
             // fork offering modes this server doesn't — park a board on a mode
             // nothing can render.
             Command::SetOffMode { id } => {
+                // An old app (or an import) can still name one of the four
+                // former weather ids; migrate before deciding it is unknown.
+                let id = crate::offmode::migrate(&id, &mut cfg.off_mode_params);
                 if crate::offmode::offers(&id) {
                     weather_dirty |= id.starts_with("weather");
                     cfg.set_off_mode(&id, crate::offmode::draws_nothing(&id));
@@ -686,18 +694,26 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
                 }
             }
             Command::SetOffModeParam { key, value } => {
-                // Bounded: this map is persisted and cloned on every render.
-                const MAX_KEYS: usize = 8;
-                if key.len() <= 64
-                    && value.len() <= 256
-                    && (cfg.off_mode_params.len() < MAX_KEYS || cfg.off_mode_params.contains_key(&key))
-                {
-                    weather_dirty |= key == crate::offmode::LOCATION;
-                    if value.is_empty() {
-                        cfg.off_mode_params.remove(&key);
-                    } else {
-                        cfg.off_mode_params.insert(key, value);
+                // Validated against the DECLARED field: an undeclared key never
+                // lands in the map, a choice must be one that was offered, and
+                // text is bounded in CHARACTERS to match the app's clamp.
+                let ok = crate::offmode::off_modes()
+                    .iter()
+                    .find(|m| m.id == cfg.off_mode_id())
+                    .map(|d| d.validate(&key, &value));
+                match ok {
+                    Some(Ok(())) => {
+                        weather_dirty |= key == crate::offmode::LOCATION;
+                        if value.is_empty() {
+                            cfg.off_mode_params.remove(&key);
+                        } else {
+                            cfg.off_mode_params.insert(key, value);
+                        }
                     }
+                    Some(Err(why)) => {
+                        tracing::warn!("board {board_id}: rejected {key}={value:?} ({why})");
+                    }
+                    None => {}
                 }
             }
             Command::SetSleepHours { hours } => cfg.sleep_hours = hours.clamp(1, 72),
@@ -738,6 +754,21 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
             }
             Command::SetSpoilerMode { mode } => cfg.spoiler_mode = mode,
             Command::SetSpoilerAll { on } => cfg.spoiler_all = on,
+            Command::SetQuietHours { start_min, end_min } => {
+                cfg.quiet_hours = if start_min == end_min {
+                    // Equal bounds mean DISABLED, never "always" — the one
+                    // failure here that would darken a board around the clock.
+                    None
+                } else {
+                    Some(QuietHours { start_min: start_min.min(1439), end_min: end_min.min(1439) })
+                };
+                // A new window is a new intent; last night's override is spent.
+                cfg.quiet_override = false;
+            }
+            Command::ClearQuietHours => {
+                cfg.quiet_hours = None;
+                cfg.quiet_override = false;
+            }
             Command::SetDemoData { on } => {
                 cfg.demo_data = on;
                 // A pin points at a game in the slate we just left, and

@@ -49,6 +49,36 @@ pub struct UiOffMode {
     /// it cannot tell apart from a failed load).
     pub preview: Option<String>,
     pub input: Option<UiOffModeInput>,
+    /// The mode's settings screen, in display order.
+    pub fields: Vec<UiOffModeField>,
+}
+
+/// One control on a mode's settings screen.
+#[derive(uniffi::Record, Clone)]
+pub struct UiOffModeField {
+    pub key: String,
+    pub label: String,
+    /// "text" | "toggle" | "choice" — a STRING, never an enum. A closed enum
+    /// here would abort the whole config decode the first time a forked server
+    /// named a kind this build has not heard of. Unknown kinds are SKIPPED.
+    pub kind: String,
+    pub placeholder: String,
+    pub max_len: u32,
+    /// What the field means when nothing is stored.
+    pub default: String,
+    pub options: Vec<UiOffModeChoice>,
+    /// Show only while `visible_when_key` holds `visible_when_value`. Two flat
+    /// Options rather than a nested record: uniffi records nest fine, but the
+    /// Swift is markedly simpler and this is never more than one condition.
+    pub visible_when_key: Option<String>,
+    pub visible_when_value: Option<String>,
+}
+
+#[derive(uniffi::Record, Clone)]
+pub struct UiOffModeChoice {
+    pub value: String,
+    pub label: String,
+    pub preview: Option<String>,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -158,6 +188,11 @@ pub struct UiBoardConfig {
     /// Serve this board a synthetic slate instead of live games. Only the
     /// GAMES change — every other setting on the board is untouched.
     pub demo_data: bool,
+    /// The nightly quiet window in minutes since the board's local midnight,
+    /// or nil when there is none. Two flat fields rather than a record, so the
+    /// "unset" case is one nil check in Swift.
+    pub quiet_start_min: Option<u16>,
+    pub quiet_end_min: Option<u16>,
 }
 #[derive(uniffi::Record, Clone)]
 pub struct UiGame {
@@ -208,6 +243,9 @@ pub trait ClientListener: Send + Sync {
     /// catalog. The app renders them generically — it must never branch on an
     /// id, or forks start needing app releases again.
     fn on_off_modes(&self, modes: Vec<UiOffMode>);
+    /// True while the board is inside its quiet window right now. Derived by
+    /// the server per push — the window is the setting, this is what it means.
+    fn on_quiet_active(&self, board_id: String, active: bool);
     fn on_config(&self, board_id: String, config: UiBoardConfig);
     fn on_games(&self, games: Vec<UiGame>);
     /// A rendered frame arrived (pushed over the WS). `rgba` is 64×32 RGBA8 bytes.
@@ -425,10 +463,11 @@ impl ScoreboardClient {
                                         ServerMsg::Games { games } => {
                                             if let Some(l) = listener.lock().unwrap().as_ref() { l.on_games(to_ui_games(games)); }
                                         }
-                                        ServerMsg::BoardState { board_id: bid, online, now_showing, config, firmware_version, firmware_update } => {
+                                        ServerMsg::BoardState { board_id: bid, online, now_showing, config, firmware_version, firmware_update, quiet_active } => {
                                             if let Some(l) = listener.lock().unwrap().as_ref() {
                                                 l.on_board_state(bid.clone(), to_ui_games(now_showing), online);
                                                 l.on_config(bid.clone(), to_ui_board_config(config));
+                                                l.on_quiet_active(bid.clone(), quiet_active);
                                                 l.on_board_version(bid, firmware_version, firmware_update);
                                             }
                                         }
@@ -658,6 +697,18 @@ impl ScoreboardClient {
         let _ = self.tx.send(Out::Command(board_id, Command::SetSpoilerAll { on }));
     }
 
+    /// Set the nightly quiet window, in minutes since the board's local
+    /// midnight. Equal values clear it.
+    pub fn set_quiet_hours(&self, board_id: String, start_min: u16, end_min: u16) {
+        let _ = self
+            .tx
+            .send(Out::Command(board_id, Command::SetQuietHours { start_min, end_min }));
+    }
+
+    pub fn clear_quiet_hours(&self, board_id: String) {
+        let _ = self.tx.send(Out::Command(board_id, Command::ClearQuietHours));
+    }
+
     /// Serve this board synthetic demo games instead of live ones. Persisted
     /// server-side and per-board, so it survives a restart and can be cleared
     /// from any paired phone even while the board is offline.
@@ -781,6 +832,29 @@ fn to_ui_off_modes(modes: &[OffModeDescriptor]) -> Vec<UiOffMode> {
                 placeholder: i.placeholder.clone(),
                 max_len: i.max_len,
             }),
+            fields: m
+                .fields
+                .iter()
+                .map(|f| UiOffModeField {
+                    key: f.key.clone(),
+                    label: f.label.clone(),
+                    kind: f.kind.clone(),
+                    placeholder: f.placeholder.clone(),
+                    max_len: f.max_len,
+                    default: f.default.clone(),
+                    options: f
+                        .options
+                        .iter()
+                        .map(|o| UiOffModeChoice {
+                            value: o.value.clone(),
+                            label: o.label.clone(),
+                            preview: o.preview.clone(),
+                        })
+                        .collect(),
+                    visible_when_key: f.visible_when.as_ref().map(|c| c.key.clone()),
+                    visible_when_value: f.visible_when.as_ref().map(|c| c.equals.clone()),
+                })
+                .collect(),
         })
         .collect()
 }
@@ -826,6 +900,7 @@ mod wss_tests {
         fn on_board_state(&self, _: String, _: Vec<UiGame>, _: bool) {}
         fn on_catalog(&self, _: Vec<UiSport>) {}
         fn on_off_modes(&self, _: Vec<UiOffMode>) {}
+        fn on_quiet_active(&self, _: String, _: bool) {}
         fn on_config(&self, _: String, _: UiBoardConfig) {}
         fn on_games(&self, games: Vec<UiGame>) {
             let _ = self.tx.lock().unwrap().send(format!("games={}", games.len()));
@@ -1002,6 +1077,8 @@ fn to_ui_board_config(c: BoardConfig) -> UiBoardConfig {
             FwChannel::Dev => UiFwChannel::Dev,
         },
         demo_data: c.demo_data,
+        quiet_start_min: c.quiet_hours.map(|q| q.start_min),
+        quiet_end_min: c.quiet_hours.map(|q| q.end_min),
     }
 }
 

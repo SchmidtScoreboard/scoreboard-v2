@@ -288,7 +288,11 @@ Two rules keep that working:
 - **Put every string the row needs in the descriptor** (label, subtitle, the
   input's placeholder). The moment app code reads `if id == "weather"`, forks
   need app releases again.
-- **A mode may declare at most one text input** — a ZIP, a list of tickers.
+- **A mode declares its own settings screen.** `fields` on the descriptor:
+  `text`, `toggle`, and `choice`, each with a default, and one level of
+  `visible_when` so a field can depend on another. `kind` is a string, so an
+  app that predates your field type skips it rather than breaking.
+- **(Superseded) A mode may declare at most one text input** — a ZIP, a list of tickers.
   Anything richer (two fields, a picker, live validation) needs an app change.
   That ceiling is deliberate: a field-type enum would be a closed enum in the
   app's generated bindings, which is the exact thing this design avoids.

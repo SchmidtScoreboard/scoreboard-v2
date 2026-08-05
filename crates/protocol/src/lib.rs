@@ -88,6 +88,10 @@ pub struct OffModeDescriptor {
     /// fetching an all-black image it cannot distinguish from a failed load.
     #[serde(default)]
     pub preview: Option<String>,
+    /// LEGACY, and still emitted: an app built before `fields` existed reads
+    /// only this, so a server that dropped it would take the location box away
+    /// from every installed copy. Filled with the first text field.
+    ///
     /// AT MOST ONE free-text input (a ZIP for weather, tickers for stocks).
     /// Deliberately not a field-schema: a field-KIND enum would itself be a
     /// closed enum in the uniffi bindings, which is the exact cliff this whole
@@ -95,6 +99,141 @@ pub struct OffModeDescriptor {
     /// validation feedback needs an app release — that is the stated cost.
     #[serde(default)]
     pub input: Option<OffModeInput>,
+    /// The mode's settings screen, in display order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<OffModeField>,
+}
+
+impl OffModeDescriptor {
+    /// Stored value, else the declared default, else empty.
+    ///
+    /// THE resolution order, and the reason it lives in the protocol crate:
+    /// the server renders from it and the app displays from it, so if they
+    /// disagreed about what an unset field means the panel and the phone would
+    /// show different things with nothing to point at.
+    pub fn value<'a>(&'a self, key: &str, params: &'a BTreeMap<String, String>) -> &'a str {
+        if let Some(v) = params.get(key) {
+            return v;
+        }
+        self.fields
+            .iter()
+            .find(|f| f.key == key)
+            .map(|f| f.default.as_str())
+            .unwrap_or("")
+    }
+
+    /// Whether a field shows, given the RESOLVED value of the key it watches.
+    pub fn visible(&self, field: &OffModeField, params: &BTreeMap<String, String>) -> bool {
+        match &field.visible_when {
+            None => true,
+            Some(c) => self.value(&c.key, params) == c.equals,
+        }
+    }
+
+    pub fn visible_fields(&self, params: &BTreeMap<String, String>) -> Vec<&OffModeField> {
+        self.fields.iter().filter(|f| self.visible(f, params)).collect()
+    }
+
+    /// Every declared field resolved — what a renderer reads.
+    pub fn resolved(&self, params: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+        self.fields
+            .iter()
+            .map(|f| (f.key.clone(), self.value(&f.key, params).to_string()))
+            .collect()
+    }
+
+    /// Is `value` legal for the declared field? Rejects anything undeclared,
+    /// so a hand-edited import cannot smuggle keys into the stored map.
+    pub fn validate(&self, key: &str, value: &str) -> Result<(), &'static str> {
+        let Some(f) = self.fields.iter().find(|f| f.key == key) else {
+            return Err("no such setting");
+        };
+        match f.kind.as_str() {
+            // CHARACTERS, not bytes. The app clamps with `String.prefix`, which
+            // counts characters; bounding bytes here meant the two disagreed on
+            // anything non-ASCII and the server silently rejected what the app
+            // had already accepted.
+            "text" => {
+                if f.max_len > 0 && value.chars().count() > f.max_len as usize {
+                    Err("too long")
+                } else {
+                    Ok(())
+                }
+            }
+            "toggle" => {
+                if value == "0" || value == "1" {
+                    Ok(())
+                } else {
+                    Err("a toggle is \"0\" or \"1\"")
+                }
+            }
+            "choice" => {
+                if f.options.iter().any(|o| o.value == value) {
+                    Ok(())
+                } else {
+                    Err("not one of the offered choices")
+                }
+            }
+            // An unknown kind is a FORK'S field this binary does not implement.
+            // Store it untouched rather than rejecting: the server that
+            // declared it is the one that will read it.
+            _ => Ok(()),
+        }
+    }
+}
+
+/// One control on a mode's settings screen.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct OffModeField {
+    /// Key into `BoardConfig::off_mode_params`.
+    pub key: String,
+    pub label: String,
+    /// `"text"`, `"toggle"`, or `"choice"`.
+    ///
+    /// A STRING, never an enum. A closed enum here is the cliff this whole
+    /// architecture exists to avoid: the generated Swift ends its decode in
+    /// `unexpectedEnumCase`, and that read runs inside the single call that
+    /// decodes the WHOLE config — one unknown discriminant and the board's
+    /// entire settings blob is discarded. An app that meets a kind it does not
+    /// know SKIPS that field, and `default` keeps the mode working meanwhile.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub placeholder: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub max_len: u32,
+    /// What the field means when nothing is stored. Never written into
+    /// `off_mode_params` — storing defaults would freeze them at the value the
+    /// server happened to have when the user first opened the screen.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub default: String,
+    /// The choices, for `kind == "choice"`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<OffModeChoice>,
+    /// Show this field only while another field holds a given value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_when: Option<FieldCondition>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct OffModeChoice {
+    pub value: String,
+    pub label: String,
+    /// Preview for THIS choice. Descriptor-carried, so the app never has to
+    /// build a URL out of an id it is not allowed to understand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+}
+
+/// One level of conditional visibility — not a rule engine. Anything needing
+/// nesting is a sign the mode wants two screens, not a cleverer condition.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct FieldCondition {
+    pub key: String,
+    pub equals: String,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -458,6 +597,18 @@ pub struct BoardConfig {
     /// and game start-time labels track where the BOARD lives.
     #[serde(default)]
     pub timezone: Option<String>,
+    /// A nightly window during which the board sleeps. None = never.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quiet_hours: Option<QuietHours>,
+    /// LIVE state: the user asked to see the board anyway, for the rest of
+    /// tonight's window.
+    ///
+    /// A bool, cleared when the window ends — deliberately not "override until
+    /// T". The window is wall-clock, so any absolute instant stored against it
+    /// would drift an hour twice a year, which is the exact failure evaluating
+    /// in wall-clock avoids.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub quiet_override: bool,
     /// Firmware release channel this board follows (`Command::SetFwChannel`).
     /// Durable per-board config, but deliberately NOT part of
     /// `PortableSettings` — see the note there.
@@ -488,6 +639,42 @@ fn default_brightness() -> u8 {
 }
 
 /// Version stamped into every settings export (`scoreboard_settings` field).
+/// A nightly window during which the scoreboard sleeps, in minutes since the
+/// BOARD's local midnight. Half-open `[start, end)`.
+///
+/// `start == end` means DISABLED, never "always". An off-by-one that darkens a
+/// board around the clock is the worst thing this feature could do, so the
+/// degenerate case fails safe.
+///
+/// Minutes-since-local-midnight, not an instant: a window is a wall-clock
+/// intent ("quiet after 10pm"), and any absolute timestamp derived from it
+/// slides an hour twice a year.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QuietHours {
+    pub start_min: u16,
+    pub end_min: u16,
+}
+
+impl QuietHours {
+    pub fn enabled(&self) -> bool {
+        self.start_min != self.end_min
+    }
+
+    /// Is `minute_of_day` inside the window? Midnight crossing is one branch
+    /// rather than a date calculation — which is the whole point of storing
+    /// minutes since local midnight.
+    pub fn contains(&self, minute_of_day: u16) -> bool {
+        if !self.enabled() {
+            return false;
+        }
+        if self.start_min < self.end_min {
+            self.start_min <= minute_of_day && minute_of_day < self.end_min
+        } else {
+            minute_of_day >= self.start_min || minute_of_day < self.end_min
+        }
+    }
+}
+
 pub const PORTABLE_SETTINGS_VERSION: u32 = 1;
 
 /// The DURABLE half of a `BoardConfig`, as a portable blob: the preferences a
@@ -529,6 +716,10 @@ pub struct PortableSettings {
     pub off_mode: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub off_mode_params: BTreeMap<String, String>,
+    /// The nightly quiet window — a durable preference, like `sleep_hours`.
+    /// `quiet_override` is live state and deliberately stays behind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quiet_hours: Option<QuietHours>,
     /// How spoiler-protected games render (strict = matchup + time only).
     #[serde(default)]
     pub spoiler_mode: SpoilerMode,
@@ -556,6 +747,7 @@ impl From<&BoardConfig> for PortableSettings {
             off_state: cfg.off_state,
             off_mode: cfg.off_mode.clone(),
             off_mode_params: cfg.off_mode_params.clone(),
+            quiet_hours: cfg.quiet_hours,
             spoiler_mode: cfg.spoiler_mode,
             spoiler_all: cfg.spoiler_all,
             sports: cfg.sports.clone(),
@@ -578,6 +770,7 @@ impl PortableSettings {
         // its own catalog — the same shape as the brightness/dwell re-clamp.
         cfg.off_mode = self.off_mode.clone();
         cfg.off_mode_params = self.off_mode_params.clone();
+        cfg.quiet_hours = self.quiet_hours;
         cfg.spoiler_mode = self.spoiler_mode;
         cfg.spoiler_all = self.spoiler_all;
         cfg.sports = self.sports.clone();
@@ -621,6 +814,8 @@ impl Default for BoardConfig {
             off_state: OffState::default(),
             off_mode: None,
             off_mode_params: BTreeMap::new(),
+            quiet_hours: None,
+            quiet_override: false,
             sleep_hours: default_sleep_hours(),
             dwell_secs: default_dwell_secs(),
             wake_at: None,
@@ -677,6 +872,10 @@ pub enum Command {
     SetSpoilerAll { on: bool },
     /// Swap this board between live games and the synthetic demo slate.
     SetDemoData { on: bool },
+    /// Set the nightly quiet window (minutes since board-local midnight).
+    /// `start_min == end_min` clears it.
+    SetQuietHours { start_min: u16, end_min: u16 },
+    ClearQuietHours,
     /// Pick a server-declared off mode by id. The server validates it against
     /// its own catalog and ignores an id it does not offer.
     SetOffMode { id: String },
@@ -836,6 +1035,11 @@ pub enum ServerMsg {
         /// shows its Update button exactly when this is Some.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         firmware_update: Option<String>,
+        /// True while the board is inside its quiet window. DERIVED per push
+        /// and never stored — the window is the durable thing, this is just
+        /// what it means right now.
+        #[serde(default, skip_serializing_if = "is_false")]
+        quiet_active: bool,
     },
     CommandAck {
         req_id: u64,
@@ -1266,6 +1470,122 @@ mod fw_channel_tests {
     fn config_missing_channel_defaults_to_stable() {
         let cfg: BoardConfig = serde_json::from_str("{\"brightness\":80,\"power\":true,\"sports\":[]}").unwrap();
         assert_eq!(cfg.fw_channel, FwChannel::Stable);
+    }
+
+    fn descriptor() -> OffModeDescriptor {
+        OffModeDescriptor {
+            id: "weather".into(),
+            label: "Weather".into(),
+            description: "".into(),
+            preview: None,
+            input: None,
+            fields: vec![
+                OffModeField {
+                    key: "location".into(), label: "Location".into(), kind: "text".into(),
+                    placeholder: "ZIP".into(), max_len: 5, default: String::new(),
+                    options: vec![], visible_when: None,
+                },
+                OffModeField {
+                    key: "variant".into(), label: "Layout".into(), kind: "choice".into(),
+                    placeholder: String::new(), max_len: 0, default: "simple".into(),
+                    options: vec![
+                        OffModeChoice { value: "simple".into(), label: "Simple".into(), preview: None },
+                        OffModeChoice { value: "clock".into(), label: "Clock".into(), preview: None },
+                    ],
+                    visible_when: None,
+                },
+                OffModeField {
+                    key: "hour24".into(), label: "24-hour".into(), kind: "toggle".into(),
+                    placeholder: String::new(), max_len: 0, default: "0".into(),
+                    options: vec![],
+                    visible_when: Some(FieldCondition { key: "variant".into(), equals: "clock".into() }),
+                },
+            ],
+        }
+    }
+
+    /// Defaults must NOT be written into the stored map. Storing them would
+    /// freeze a field at whatever the server happened to offer the first time
+    /// someone opened the screen, so changing a default could never reach
+    /// anyone who had visited it.
+    #[test]
+    fn an_unset_field_resolves_to_its_declared_default() {
+        let d = descriptor();
+        let empty = BTreeMap::new();
+        assert_eq!(d.value("variant", &empty), "simple");
+        assert_eq!(d.value("location", &empty), "");
+        assert_eq!(d.value("nonexistent", &empty), "");
+        let mut set = BTreeMap::new();
+        set.insert("variant".into(), "clock".to_string());
+        assert_eq!(d.value("variant", &set), "clock");
+    }
+
+    /// The conditional field in the brief: the 24-hour toggle exists only while
+    /// the clock layout is chosen — including when that choice is the DEFAULT
+    /// rather than something stored.
+    #[test]
+    fn a_conditional_field_follows_the_resolved_value_not_just_the_stored_one() {
+        let d = descriptor();
+        let mut p = BTreeMap::new();
+        assert_eq!(d.visible_fields(&p).len(), 2, "hour24 hidden under the default layout");
+        p.insert("variant".into(), "clock".to_string());
+        assert_eq!(d.visible_fields(&p).len(), 3, "and appears once clock is picked");
+        p.insert("variant".into(), "simple".to_string());
+        assert_eq!(d.visible_fields(&p).len(), 2);
+    }
+
+    #[test]
+    fn validation_rejects_what_the_app_could_never_have_sent() {
+        let d = descriptor();
+        assert!(d.validate("variant", "simple").is_ok());
+        assert!(d.validate("variant", "banana").is_err(), "not an offered choice");
+        assert!(d.validate("hour24", "1").is_ok());
+        assert!(d.validate("hour24", "yes").is_err(), "a toggle is 0 or 1");
+        assert!(d.validate("nope", "x").is_err(), "undeclared keys never land in the map");
+        // Characters, not bytes: the app clamps with String.prefix.
+        assert!(d.validate("location", "60601").is_ok());
+        assert!(d.validate("location", "606011").is_err());
+        assert!(d.validate("location", "\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}").is_ok(), "5 chars, 10 bytes");
+    }
+
+    /// A window is a wall-clock intent, so the degenerate and wrapping cases
+    /// are the ones worth pinning.
+    #[test]
+    fn a_quiet_window_wraps_midnight_and_fails_safe_when_degenerate() {
+        let night = QuietHours { start_min: 22 * 60, end_min: 7 * 60 };
+        assert!(night.contains(23 * 60));
+        assert!(night.contains(3 * 60));
+        assert!(night.contains(22 * 60), "inclusive at the start");
+        assert!(!night.contains(7 * 60), "exclusive at the end");
+        assert!(!night.contains(12 * 60));
+
+        let day = QuietHours { start_min: 9 * 60, end_min: 17 * 60 };
+        assert!(day.contains(12 * 60));
+        assert!(!day.contains(3 * 60));
+
+        // start == end is DISABLED. A board dark 24/7 is the worst outcome
+        // available here, so the degenerate case must never mean "always".
+        let degenerate = QuietHours { start_min: 600, end_min: 600 };
+        assert!(!degenerate.enabled());
+        for m in [0u16, 599, 600, 601, 1439] {
+            assert!(!degenerate.contains(m), "minute {m} must not be quiet");
+        }
+    }
+
+    /// The window travels between boards; the override does not.
+    #[test]
+    fn portable_settings_carry_the_window_but_not_the_override() {
+        let source = BoardConfig {
+            quiet_hours: Some(QuietHours { start_min: 1320, end_min: 420 }),
+            quiet_override: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&PortableSettings::from(&source)).unwrap();
+        assert!(!json.contains("override"), "live state must not travel: {json}");
+        let mut target = BoardConfig::default();
+        serde_json::from_str::<PortableSettings>(&json).unwrap().apply_to(&mut target);
+        assert_eq!(target.quiet_hours, source.quiet_hours);
+        assert!(!target.quiet_override);
     }
 
     /// CalVer is YYYY.M.P, so a month rollover RESETS the patch — and the
