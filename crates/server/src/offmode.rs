@@ -141,6 +141,16 @@ fn weather_variants() -> Vec<OffModeChoice> {
 pub fn off_modes() -> Vec<OffModeDescriptor> {
     vec![
         OffModeDescriptor {
+            id: "blank".into(),
+            label: "Nothing".into(),
+            description: "The panel stays dark.".into(),
+            // No preview: an all-black PNG is indistinguishable from a failed
+            // load, so the app draws the black panel itself.
+            preview: None,
+            input: None,
+            fields: vec![],
+        },
+        OffModeDescriptor {
             id: "clock".into(),
             label: "Clock".into(),
             description: "The time, in the scoreboard's timezone.".into(),
@@ -162,16 +172,6 @@ pub fn off_modes() -> Vec<OffModeDescriptor> {
                         .collect(),
                 ),
             ],
-        },
-        OffModeDescriptor {
-            id: "blank".into(),
-            label: "Nothing".into(),
-            description: "The panel stays dark.".into(),
-            // No preview: an all-black PNG is indistinguishable from a failed
-            // load, so the app draws the black panel itself.
-            preview: None,
-            input: None,
-            fields: vec![],
         },
         OffModeDescriptor {
             id: "weather".into(),
@@ -316,6 +316,14 @@ mod tests {
 
     fn sample() -> crate::weather::Reading {
         crate::weather::Reading::Ready(crate::weather::Weather::sample())
+    }
+
+    /// Menu order is a product decision, so it is pinned rather than left to
+    /// whatever order the vec happens to have.
+    #[test]
+    fn nothing_leads_the_menu() {
+        let ids: Vec<String> = off_modes().into_iter().map(|m| m.id).collect();
+        assert_eq!(ids.first().map(String::as_str), Some("blank"), "got {ids:?}");
     }
 
     /// The app renders these blind, so anything missing here is a blank row on

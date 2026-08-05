@@ -309,8 +309,11 @@ struct Layout {
 
 fn layout_for(sport: &str) -> Layout {
     match sport {
-        "nhl" => Layout { glyph_h: 6, spacing: 2, big: true, status_big: true },
-        "nba" | "wnba" | "cbb" | "wcbb" => Layout { glyph_h: 5, spacing: 2, big: false, status_big: false },
+        // Olympic hockey is hockey: same row geometry as the NHL.
+        "nhl" | "olyhm" | "olyhw" => Layout { glyph_h: 6, spacing: 2, big: true, status_big: true },
+        "nba" | "wnba" | "cbb" | "wcbb" | "olybm" | "olybw" => {
+            Layout { glyph_h: 5, spacing: 2, big: false, status_big: false }
+        }
         // mlb + nfl + cfb: 4x6 rows, 1px spacing
         _ => Layout { glyph_h: 5, spacing: 1, big: false, status_big: false },
     }

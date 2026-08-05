@@ -67,6 +67,22 @@ impl EspnSource {
                 League { sport_id: "cbb", sport: "basketball", league: "mens-college-basketball", name: "Men's College Basketball", games_query: "?groups=50" },
                 League { sport_id: "wcbb", sport: "basketball", league: "womens-college-basketball", name: "Women's College Basketball", games_query: "?groups=50" },
                 League { sport_id: "wnba", sport: "basketball", league: "wnba", name: "WNBA", games_query: "" },
+                // Tournaments that only exist some of the time. They cost one
+                // request each per poll and sit dormant out of season — the
+                // ingestion filter drops anything more than 24h out, so an
+                // idle league contributes nothing to the slate.
+                //
+                // Every slug here was verified against ESPN before being added;
+                // a wrong one is a warning line every poll forever.
+                League { sport_id: "olyhm", sport: "hockey", league: "olympics-mens-ice-hockey", name: "Olympic Hockey (M)", games_query: "" },
+                League { sport_id: "olyhw", sport: "hockey", league: "olympics-womens-ice-hockey", name: "Olympic Hockey (W)", games_query: "" },
+                League { sport_id: "olybm", sport: "basketball", league: "mens-olympics-basketball", name: "Olympic Basketball (M)", games_query: "" },
+                League { sport_id: "olybw", sport: "basketball", league: "womens-olympics-basketball", name: "Olympic Basketball (W)", games_query: "" },
+                League { sport_id: "olysm", sport: "soccer", league: "fifa.olympics", name: "Olympic Soccer (M)", games_query: "" },
+                League { sport_id: "olysw", sport: "soccer", league: "fifa.w.olympics", name: "Olympic Soccer (W)", games_query: "" },
+                League { sport_id: "wwc", sport: "soccer", league: "fifa.wwc", name: "Women's World Cup", games_query: "" },
+                League { sport_id: "ucl", sport: "soccer", league: "uefa.champions", name: "UEFA Champions League", games_query: "" },
+                League { sport_id: "cbase", sport: "baseball", league: "college-baseball", name: "NCAA Baseball", games_query: "" },
                 League { sport_id: "mls", sport: "soccer", league: "usa.1", name: "MLS", games_query: "" },
                 League { sport_id: "epl", sport: "soccer", league: "eng.1", name: "Premier League", games_query: "" },
                 // The World Cup is its own ESPN "league" of national teams;

@@ -1,0 +1,5 @@
+- Encrypted connection to the server, with the scoreboard checking it is really talking to the right one. Automatic — nothing to set up.
+- You can point a scoreboard at your own server during Bluetooth setup.
+- The clock keeps running when the connection drops, instead of freezing and then showing a "connecting" screen all night. A small red crossed-out Wi-Fi mark appears while it is down, so you can tell the scores have stopped even though the time is still right.
+- Clock styles and 24-hour time from the app now change the panel.
+- Holding the knob for ten seconds still resets the scoreboard from any state, including one that cannot connect.
