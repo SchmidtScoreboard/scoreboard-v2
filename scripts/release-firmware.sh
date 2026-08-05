@@ -137,6 +137,13 @@ ERR
     exit 1
 fi
 
+# Where cargo actually writes. Hardcoding the path broke this script whenever
+# CARGO_TARGET_DIR was set — the build succeeded and then espflash was handed a
+# path that had stayed empty. firmware-rs is its own workspace, so an override
+# collapses both workspaces into one directory; the artifact name is unique, so
+# that is fine.
+FW_TARGET="${CARGO_TARGET_DIR:-firmware-rs/target}"
+
 echo "==> building firmware (features: ${FEATURES:-<none>})"
 # Subshell: export-esp.sh mutates PATH/env for the xtensa toolchain, and the
 # host cargo invocation below must not inherit that.
@@ -157,7 +164,7 @@ espflash save-image --chip esp32s3 \
     --flash-size 8mb \
     --partition-table firmware-rs/partitions.csv \
     --target-app-partition ota_0 \
-    firmware-rs/target/xtensa-esp32s3-none-elf/release/firmware-rs \
+    "$FW_TARGET/xtensa-esp32s3-none-elf/release/firmware-rs" \
     "$DIST/firmware.bin"
 
 echo "==> signing"

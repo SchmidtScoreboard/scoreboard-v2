@@ -1,0 +1,3 @@
+- Clock styles and 24-hour time now actually change the panel. The scoreboard was drawing its own clock and ignoring the one the server sent, so picking a style in the app did nothing.
+- The scoreboard still keeps time on its own when the connection drops, with the crossed-out Wi-Fi mark — that was the only thing it was supposed to be doing locally.
+- 24-hour time carries over to the offline clock too.
