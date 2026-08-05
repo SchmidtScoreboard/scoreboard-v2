@@ -1581,7 +1581,7 @@ struct SetupView: View {
             serverPreset = ServerPreset.matching(model.serverUrl)
             model.prepareServer(pairServer)
         } content: {
-            SettingsView(model: model)
+            SettingsView(model: model, openServerDirectly: true)
         }
     }
 }
@@ -1839,8 +1839,14 @@ struct GameCard<Footer: View, MenuItems: View>: View {
     /// The LED panel — and the card's menu button. The picture of the board is the
     /// most obviously "this game" thing on the card, so it's what the secondary
     /// actions hang off; a "…" pill next to the primary button was invisible to a
-    /// first-time user. The corner glyph straddles the panel edge (mostly out in
-    /// the card's own padding) so the affordance is visible without eating LEDs.
+    /// first-time user.
+    ///
+    /// There WAS a corner "…" badge marking the affordance. It was removed
+    /// deliberately: at caption size on a 64x32 picture it read as grit on the
+    /// panel rather than as a control. The whole frame is still the button, so
+    /// nothing moved — but the menu is now unsignposted, which is a real cost
+    /// and the reason the badge existed. If the seven actions behind it start
+    /// going unused, this is the first thing to look at.
     private var panel: some View {
         Menu {
             menu
@@ -1849,16 +1855,6 @@ struct GameCard<Footer: View, MenuItems: View>: View {
                 // Unlit pixels are black, not empty — without this the taps that
                 // land on them would fall through to whatever is behind the card.
                 .contentShape(Rectangle())
-                .overlay(alignment: .bottomTrailing) {
-                    Image(systemName: "ellipsis.circle.fill")
-                        .font(.caption)
-                        .symbolRenderingMode(.palette)
-                        .foregroundStyle(.white, .black.opacity(0.75))
-                        // Half in the card's padding, half on the panel: enough
-                        // of it lands on the black to read as part of the image
-                        // while covering ~2 LEDs of a corner instead of a score.
-                        .offset(x: 6, y: 6)
-                }
         }
         .buttonStyle(.plain)
         // The frame itself is decorative, so VoiceOver would otherwise announce an
@@ -2627,6 +2623,35 @@ struct DashboardView: View {
 }
 
 /// Settings rows that have an explainer card behind an ⓘ button.
+/// Patch notes for the APP, compiled in.
+///
+/// Bundled rather than served, and deliberately: notes ship with whatever
+/// publishes the thing. The server publishes firmware, so firmware notes come
+/// from `/firmware/notes/{version}`. The App Store publishes this app, and the
+/// server has no concept of an app version at all — a self-hoster's board
+/// server is the wrong machine to ask for the App Store build's changelog.
+///
+/// Same voice and same `- ` bullets as `firmware-dist/notes/*.txt`: plain
+/// language about what someone will notice, not a commit log.
+enum AppNotes {
+    static let byVersion: [String: String] = [
+        "2026.8.0": """
+        - Off modes now have their own settings. Tap the slider next to Clock or Weather to pick a style, a layout, or 24-hour time.
+        - Weather is one entry with four layouts, instead of four separate entries.
+        - Quiet hours: pick a window and the scoreboard sleeps through it every night. Turn on "Wake for live events" and a game that is actually on will still show.
+        - Patch notes for the app and the scoreboard now live behind the buttons next to their version numbers.
+        """,
+    ]
+
+    static func has(_ version: String) -> Bool {
+        byVersion[version] != nil
+    }
+
+    static func forVersion(_ version: String) -> String {
+        byVersion[version] ?? ""
+    }
+}
+
 enum SettingsInfoTopic: String, Identifiable {
     case whenOff, sleep, dwell, spoilers, demoData
     var id: String { rawValue }
@@ -4502,6 +4527,10 @@ struct SettingsView: View {
     /// server for new pairings. A pinned board whose server is down shows only
     /// the connecting splash, so repointing it has to be reachable from there.
     var boardId: String? = nil
+    /// Open straight to the server screen. Setup's "Use my own server" means
+    /// exactly that — routing it through Advanced would add a tap on the one
+    /// path where changing servers IS the errand.
+    var openServerDirectly = false
     @Environment(\.dismiss) private var dismiss
     /// Which mode's settings screen is open, if any.
     @State private var settingsForMode: UiOffMode?
@@ -4509,10 +4538,15 @@ struct SettingsView: View {
     /// points — the firmware row (running version, read-only) and the Update
     /// button (offered version, with Install) — share one nested-sheet slot.
     private struct NotesTarget: Identifiable {
+        enum Kind { case firmware, app }
+        let kind: Kind
         let version: String
         /// True only for the update offer: the sheet gains the Install button.
         let installable: Bool
-        var id: String { "\(installable)-\(version)" }
+        /// The kind is part of the identity: app and firmware share one CalVer
+        /// space, so without it opening the app notes right after the firmware
+        /// notes at the same version would not re-present the sheet.
+        var id: String { "\(kind)-\(installable)-\(version)" }
     }
     @State private var notesTarget: NotesTarget?
     /// Settings' own remove confirm.
@@ -4573,7 +4607,28 @@ struct SettingsView: View {
             Form {
                 // Self-hosting is a supported way to run this thing, so the
                 // server section ships in release builds too — see its footer.
-                serverSection
+                //
+                // Behind "Advanced" in ordinary settings: almost nobody changes
+                // their server, and it sat above the things people DO change.
+                //
+                // NOT hidden when this sheet is scoped to a board (`boardId`).
+                // That case IS the dead-server recovery screen — a board whose
+                // server is unreachable shows only the connecting splash, and
+                // this is the way back. Burying it behind a submenu would empty
+                // out the one screen that exists to fix the problem.
+                if boardId == nil && !openServerDirectly {
+                    Section {
+                        NavigationLink {
+                            Form { serverSection }
+                                .navigationTitle("Advanced")
+                                .navigationBarTitleDisplayMode(.inline)
+                        } label: {
+                            Label("Advanced", systemImage: "gearshape.2")
+                        }
+                    }
+                } else {
+                    serverSection
+                }
                 // This sheet also opens from the connecting splash and the
                 // pairing screen, where no board may be selected — the
                 // board-scoped sections would just be empty rows there.
@@ -4613,7 +4668,9 @@ struct SettingsView: View {
             .sheet(item: $notesTarget) { t in
                 FirmwareNotesSheet(
                     version: t.version,
-                    httpBase: model.httpBase,
+                    source: t.kind == .app
+                        ? .bundled(AppNotes.forVersion(t.version))
+                        : .firmware(httpBase: model.httpBase),
                     install: t.installable ? { model.updateFirmware() } : nil
                 )
             }
@@ -4980,32 +5037,14 @@ struct SettingsView: View {
 
     /// Spoiler settings, drawn with the receipts: the two display modes show
     /// the SAME example game rendered exactly as the board would show it.
+    // Two sections, so it needs the builder attribute.
+    @ViewBuilder
     private var spoilerSection: some View {
         Section {
             Toggle("Hide all spoilers", isOn: Binding(
                 get: { model.current.spoilerAll },
                 set: { model.setSpoilerAll($0) }
             ))
-            Text("When spoilers are hidden…")
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .listRowSeparator(.hidden, edges: .bottom)
-            spoilerOptionRow(
-                "Hide results",
-                "Matchup and period — no scores.",
-                variant: "normal",
-                selected: !model.current.strictSpoilers
-            ) {
-                model.setStrictSpoilers(false)
-            }
-            spoilerOptionRow(
-                "Hide everything",
-                "Matchup only; FINAL when done.",
-                variant: "strict",
-                selected: model.current.strictSpoilers
-            ) {
-                model.setStrictSpoilers(true)
-            }
         } header: {
             HStack {
                 Text("Spoilers")
@@ -5015,6 +5054,34 @@ struct SettingsView: View {
                 // this screen says so.
                 infoButton(.spoilers)
             }
+        }
+
+        // Its own section rather than a pseudo-header row inside the one above.
+        // The mode rows lead with a checkmark and the toggle does not, so
+        // sharing a section left every label starting at a different x.
+        //
+        // These stay visible when "Hide all" is off: the mode also governs
+        // per-league and per-game hides, so gating it on the blanket toggle
+        // would hide a setting that is still doing something.
+        Section {
+            spoilerOptionRow(
+                "Hide results",
+                "Matchup and period, no scores.",
+                variant: "normal",
+                selected: !model.current.strictSpoilers
+            ) {
+                model.setStrictSpoilers(false)
+            }
+            spoilerOptionRow(
+                "Hide everything",
+                "Matchup only, then FINAL.",
+                variant: "strict",
+                selected: model.current.strictSpoilers
+            ) {
+                model.setStrictSpoilers(true)
+            }
+        } header: {
+            Text("When a game is hidden")
         }
     }
 
@@ -5030,8 +5097,11 @@ struct SettingsView: View {
                 Image(systemName: selected ? "checkmark.circle.fill" : "circle")
                     .foregroundStyle(selected ? Color.accentColor : Color.secondary)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title).foregroundStyle(.primary)
-                    Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                    // Concrete Color, not the hierarchical `.primary`: inside a
+                    // Form button label the accent is already the base style, so
+                    // the bare version resolves to blue.
+                    Text(title).foregroundStyle(Color.primary)
+                    Text(subtitle).font(.caption).foregroundStyle(Color.secondary)
                 }
                 Spacer(minLength: 8)
                 // The example frame, rendered by the server's real pipeline,
@@ -5039,6 +5109,39 @@ struct SettingsView: View {
                 FetchedFrameImage(url: URL(string: "\(model.httpBase)/sample/\(variant).png"))
                     .ledPanel(width: 96, height: 48)
             }
+        }
+        // Matches offModeRow and choiceRow; without it this row alone tinted blue.
+        .buttonStyle(.plain)
+    }
+
+    static var appVersion: String? {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+    }
+
+    /// A version fact plus a discrete button for its notes.
+    ///
+    /// The notes button is `.borderless` so it does not claim the row — the same
+    /// reason `infoButton` is — and the label styles are concrete `Color`s
+    /// rather than the hierarchical `.primary`/`.secondary`, which resolve
+    /// against the accent inside a Form and come out blue.
+    private func versionRow(_ title: String, _ version: String?, kind: NotesTarget.Kind) -> some View {
+        HStack {
+            Text(title).foregroundStyle(Color.primary)
+            Spacer()
+            Text(version ?? "—")
+                .foregroundStyle(Color.secondary)
+                .monospacedDigit()
+            Button {
+                if let v = version {
+                    notesTarget = NotesTarget(kind: kind, version: v, installable: false)
+                }
+            } label: {
+                Image(systemName: "doc.text")
+                    .foregroundStyle(Color.secondary)
+            }
+            .buttonStyle(.borderless)
+            .disabled(version == nil || (kind == .app && !AppNotes.has(version ?? "")))
+            .accessibilityLabel("\(title) patch notes")
         }
     }
 
@@ -5125,31 +5228,12 @@ struct SettingsView: View {
             } message: {
                 Text("Shown in your scoreboard list. Saved to the server.")
             }
-            Button {
-                if let v = model.current.firmwareVersion {
-                    notesTarget = NotesTarget(version: v, installable: false)
-                }
-            } label: {
-                HStack {
-                    // Explicit styles: a Form button tints its whole label, which
-                    // would make this read as an action row instead of a fact row
-                    // that happens to open its own patch notes.
-                    Text("Scoreboard firmware")
-                        .foregroundStyle(.primary)
-                    Spacer()
-                    Text(model.current.firmwareVersion ?? "—")
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
-            }
-            .disabled(model.current.firmwareVersion == nil)
-            HStack {
-                Text("App")
-                Spacer()
-                Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—")
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
+            // Both version rows are FACTS, not actions. They used to be Form
+            // buttons, which tint their whole label — so a row that only
+            // reports a number rendered in accent blue and read as something to
+            // press. The notes live behind their own small button instead.
+            versionRow("Scoreboard firmware", model.current.firmwareVersion, kind: .firmware)
+            versionRow("App", Self.appVersion, kind: .app)
             // Which release channel this board's updates come from. Dev is a
             // development-build affordance (#if DEBUG); a release app facing a
             // board that IS on Dev still shows the truth — the Dev option
@@ -5193,7 +5277,7 @@ struct SettingsView: View {
                     // Patch notes replace the bare confirmation dialog: the
                     // sheet carries the Install button (which must keep working
                     // even when the notes themselves fail to load).
-                    notesTarget = NotesTarget(version: target, installable: true)
+                    notesTarget = NotesTarget(kind: .firmware, version: target, installable: true)
                 } label: {
                     Label("Update to \(target)", systemImage: "arrow.down.circle.fill")
                         .font(.body.weight(.semibold))
@@ -5347,9 +5431,21 @@ struct SettingsView: View {
 /// which adds a prominent Install button. The notes are decoration on the
 /// install decision, not a gate: a 404 or a network failure shows a fallback
 /// line and the Install button keeps working.
+/// Where a set of patch notes comes from.
+///
+/// Firmware notes are SERVED, because the server is the thing that publishes
+/// firmware. App notes are BUNDLED, because the App Store publishes the app and
+/// the server has no concept of an app version at all — asking a board's server
+/// (which a self-hoster runs) for the app's changelog would be asking the wrong
+/// machine.
+enum NotesSource {
+    case firmware(httpBase: String)
+    case bundled(String)
+}
+
 struct FirmwareNotesSheet: View {
     let version: String
-    let httpBase: String
+    let source: NotesSource
     /// Present only in the update-offer flow; runs the existing update path.
     /// The caller owns the actual work — this sheet never touches the model.
     var install: (() -> Void)? = nil
@@ -5445,6 +5541,13 @@ struct FirmwareNotesSheet: View {
     }
 
     private func fetchNotes() async {
+        // Bundled notes are already here; no request, no loading state to flash.
+        if case .bundled(let text) = source {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            notes = trimmed.isEmpty ? .unavailable : .loaded(trimmed)
+            return
+        }
+        guard case .firmware(let httpBase) = source else { return }
         // Versions are CalVer ([0-9.] only), so this never actually escapes
         // anything — it's here so a malformed version string can't build a
         // malformed URL and crash the force-unwrap-free path below.
