@@ -2175,6 +2175,21 @@ pub fn push_time(state: &AppState, board_id: &str) {
     let _ = tx.send(Message::Text(serde_json::to_string(&msg).unwrap()));
 }
 
+/// Re-push the manifest to every connected board.
+///
+/// The collect lands in a `let` on purpose, and this function exists so that
+/// stays true in one place. A guard created in a `for` iterator expression
+/// lives for the WHOLE loop body; `push_board` locks `devices` again; std's
+/// Mutex is not reentrant. Written inline, this deadlocked the thread against
+/// itself while it held the lock every websocket and HTTP handler needs — the
+/// server did not crash or log, it just stopped answering.
+pub fn push_all_connected(state: &AppState) {
+    let connected: Vec<String> = state.devices.lock().unwrap().keys().cloned().collect();
+    for bid in connected {
+        push_board(state, &bid);
+    }
+}
+
 pub fn push_board(state: &AppState, board_id: &str) {
     let manifest = manifest_for_board(state, board_id);
     let json = serde_json::to_string(&ServerMsg::Manifest(manifest)).unwrap();
@@ -2716,17 +2731,7 @@ pub async fn weather_loop(state: AppState) {
         if !locations.is_empty() {
             weather::refresh_all(&state.weather, locations).await;
             // A fresh reading can change every weather board's frame.
-            //
-            // The collect MUST land in a `let` first. A guard created in a
-            // `for` iterator expression lives for the whole loop body, and
-            // `push_board` locks `devices` again — std's Mutex is not
-            // reentrant, so the thread waits on itself forever, still holding
-            // the lock every websocket and HTTP handler needs. The server does
-            // not crash; it goes silent.
-            let connected: Vec<String> = state.devices.lock().unwrap().keys().cloned().collect();
-            for bid in connected {
-                push_board(&state, &bid);
-            }
+            push_all_connected(&state);
         }
         tokio::time::sleep(weather::REFRESH).await;
     }
@@ -5877,6 +5882,31 @@ mod tests {
     /// The demo routes: JSON discovery + a PNG per game, both serving the
     /// synthetic slate regardless of any board config, and both surviving an
     /// id nobody has.
+    /// A deadlock, caught the only way a deadlock can be: by timing out.
+    ///
+    /// This took the live server down. Nothing crashed and nothing was logged;
+    /// the process simply stopped answering, because the thread was waiting on
+    /// a lock it already held while every handler queued behind it.
+    #[test]
+    fn pushing_to_every_connected_board_cannot_deadlock() {
+        let state = AppState::new_ephemeral();
+        // Two registered devices, so the loop body actually runs more than once.
+        for id in ["board-a", "board-b"] {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            state.devices.lock().unwrap().insert(id.to_string(), tx);
+            state.configs.lock().unwrap().insert(id.to_string(), BoardConfig::default());
+        }
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            push_all_connected(&state);
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
+            "push_all_connected deadlocked — it is holding `devices` while push_board relocks it"
+        );
+    }
+
     /// The regression that shipped: a catalog restored from the disk cache
     /// advertised NO off modes, so every app fell back to the two ids it
     /// hardcodes and the real modes were invisible. The cache file predates the

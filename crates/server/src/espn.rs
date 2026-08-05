@@ -17,6 +17,15 @@ pub trait SportsDataSource: Send + Sync {
     }
 }
 
+/// How this server identifies itself to ESPN. Honest by default — it names the
+/// software, not a browser — and overridable so a fork can point at its own
+/// project instead.
+fn espn_user_agent() -> String {
+    std::env::var("ESPN_USER_AGENT").unwrap_or_else(|_| {
+        format!("scoreboard/{} (+https://github.com)", env!("CARGO_PKG_VERSION"))
+    })
+}
+
 struct League {
     sport_id: &'static str,
     sport: &'static str,
@@ -37,6 +46,16 @@ impl EspnSource {
             // stall the poll loop — a lost cycle beats a frozen slate.
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
+                // ESPN's edge refuses requests with NO User-Agent — reqwest
+                // sends none by default — and answers 403 with an HTML page.
+                // `.json()` then fails as "error decoding response body", which
+                // says nothing about the actual cause; the feeds went dark for
+                // hours looking like a parser bug.
+                //
+                // The URL in the comment is not decoration: a bare token
+                // ("scoreboard-server") and an unresolvable host are both still
+                // refused. Override with ESPN_USER_AGENT if you fork this.
+                .user_agent(espn_user_agent())
                 .build()
                 .expect("reqwest client"),
             leagues: vec![
@@ -184,6 +203,9 @@ impl SportsDataSource for EspnSource {
                 lg.sport, lg.league, lg.games_query
             );
             match self.client.get(&url).send().await {
+                Ok(resp) if !resp.status().is_success() => {
+                    tracing::warn!("espn {}: HTTP {}", lg.league, resp.status());
+                }
                 Ok(resp) => match resp.json::<Scoreboard>().await {
                     Ok(sb) => {
                         let n = sb.events.len();
