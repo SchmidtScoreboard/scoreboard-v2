@@ -490,6 +490,8 @@ fn parse_golf(sport_id: &str, ev: LeaderEvent) -> Option<Game> {
     // JUMP AROUND, because position is a RANK and ties share one: four
     // players at positions 1,2,3,3 gave four rows, while a five-way tie for
     // third gave seven, with nothing changed in the app.
+    // Read before the field is consumed below.
+    let tee_off = first_tee_time(&comp);
     let mut ranked: Vec<(i64, LeaderRow)> = comp
         .competitors
         .into_iter()
@@ -524,7 +526,10 @@ fn parse_golf(sport_id: &str, ev: LeaderEvent) -> Option<Game> {
         status,
         ordinal: String::new(),
         clock: String::new(),
-        start_time: comp.date,
+        // The FIRST tee time, not the event date — see `LeaderCompStatus::tee_time`.
+        // Falls back to the event date when the field has no tee times yet
+        // (ESPN publishes them a day or two out), which is no worse than before.
+        start_time: tee_off.unwrap_or(comp.date),
         // Tournaments run for days — surface when this one wraps up.
         end_time: (!ev.end_date.is_empty()).then(|| ev.end_date.clone()),
         leaderboard: Some(Leaderboard { name, rows }),
@@ -533,6 +538,25 @@ fn parse_golf(sport_id: &str, ev: LeaderEvent) -> Option<Game> {
         situation: None,
         pregame: None,
     })
+}
+
+/// The earliest tee time in the field, or None when ESPN has not published them.
+///
+/// Golf's event `date` is a DATE, not a time — midnight local on day one, with
+/// `timeValid: false` alongside it. The board's half-hour pre-game window
+/// applied to that put a Thursday tournament on the panel at 10:30pm Wednesday.
+///
+/// Racing needs no equivalent: F1 competitions carry a real per-session `date`
+/// with `timeValid: true`, which `f1_session_game` already uses.
+fn first_tee_time(comp: &LeaderComp) -> Option<String> {
+    comp.competitors
+        .iter()
+        .filter_map(|c| c.status.as_ref())
+        .map(|s| s.tee_time.as_str())
+        .filter(|t| !t.is_empty())
+        // RFC3339 in a fixed UTC format, so lexical order IS chronological.
+        .min()
+        .map(str::to_string)
 }
 
 /// One F1 event is a whole race weekend; each session the user can subscribe to
@@ -802,6 +826,15 @@ struct LeaderAthlete {
 #[derive(Deserialize)]
 struct LeaderCompStatus {
     position: Option<LeaderPosition>,
+    /// When this player actually tees off.
+    ///
+    /// The event's own `date` is NOT a start time for golf: ESPN reports
+    /// midnight local on day one and sets `timeValid: false` to say so. Taken
+    /// literally it put a tournament on the board at 10:30pm the night before,
+    /// via the half-hour pre-game window. The earliest of these is the real
+    /// start of play.
+    #[serde(default, rename = "teeTime")]
+    tee_time: String,
 }
 #[derive(Deserialize)]
 struct LeaderPosition {
@@ -2247,6 +2280,43 @@ mod champ_tests {
     /// The demo slate must exercise every board feature: all three situational
     /// layouts (football on both leagues), the OT badge case, and both pregame
     /// variants — so a demo run shows everything without waiting on real games.
+    /// The reported bug: a Thursday tournament appeared on the panel at 10:30pm
+    /// WEDNESDAY.
+    ///
+    /// ESPN gives golf an event date of midnight LOCAL on day one — 04:00Z for
+    /// a US event — and flags `timeValid: false` to say the time means nothing.
+    /// The board's half-hour pre-game window applied to that opens at 03:30Z,
+    /// which is 10:30pm the previous evening in Central time. The first tee
+    /// time is the real start.
+    #[test]
+    fn golf_starts_at_the_first_tee_time_not_at_midnight() {
+        let body = r#"{"events":[{"id":"401","shortName":"Wyndham","endDate":"2026-08-09T04:00Z",
+          "competitions":[{"date":"2026-08-06T04:00Z","status":{"type":{"state":"pre","completed":false}},
+          "competitors":[
+            {"order":1,"athlete":{"displayName":"A"},"status":{"position":{"id":1},"teeTime":"2026-08-06T18:22Z"},"statistics":[]},
+            {"order":2,"athlete":{"displayName":"B"},"status":{"position":{"id":2},"teeTime":"2026-08-06T10:50Z"},"statistics":[]},
+            {"order":3,"athlete":{"displayName":"C"},"status":{"position":{"id":3},"teeTime":"2026-08-06T12:05Z"},"statistics":[]}
+          ]}]}]}"#;
+        let resp: LeaderboardResponse = serde_json::from_str(body).unwrap();
+        let ev = resp.events.into_iter().next().unwrap();
+        let g = parse_golf("pga", ev).expect("a game");
+        assert_eq!(g.start_time, "2026-08-06T10:50Z", "the EARLIEST tee time, not the event date");
+        assert_ne!(g.start_time, "2026-08-06T04:00Z", "midnight is what put it on the panel a day early");
+    }
+
+    /// No tee times published yet (ESPN posts them a day or two out) must fall
+    /// back to the old behaviour rather than to no start time at all.
+    #[test]
+    fn golf_without_tee_times_falls_back_to_the_event_date() {
+        let body = r#"{"events":[{"id":"402","shortName":"Open","endDate":"",
+          "competitions":[{"date":"2026-09-01T04:00Z","status":{"type":{"state":"pre","completed":false}},
+          "competitors":[{"order":1,"athlete":{"displayName":"A"},"status":{"position":{"id":1}},"statistics":[]}]}]}]}"#;
+        let resp: LeaderboardResponse = serde_json::from_str(body).unwrap();
+        let ev = resp.events.into_iter().next().unwrap();
+        let g = parse_golf("pga", ev).expect("a game");
+        assert_eq!(g.start_time, "2026-09-01T04:00Z");
+    }
+
     #[test]
     fn demo_covers_the_feature_matrix() {
         let games = demo_games(0, 0);
