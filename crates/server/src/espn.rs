@@ -434,15 +434,15 @@ impl EspnSource {
 /// session) rather than what's actually happening. Pick the most relevant: one in
 /// progress, else the soonest upcoming, else the most recent finished.
 fn pick_leader_comp(comps: Vec<LeaderComp>) -> Option<LeaderComp> {
-    fn category(name: &str) -> u8 {
-        match map_status(name) {
+    fn category(t: &StatusType) -> u8 {
+        match map_status(t) {
             Some(GameStatus::Active) | Some(GameStatus::Intermission) => 2, // live
             Some(GameStatus::Pregame) => 1,                                  // upcoming
             _ => 0,                                                          // finished/unknown
         }
     }
     comps.into_iter().max_by(|a, b| {
-        let (ca, cb) = (category(&a.status.type_.name), category(&b.status.type_.name));
+        let (ca, cb) = (category(&a.status.type_), category(&b.status.type_));
         if ca != cb {
             ca.cmp(&cb) // live > upcoming > finished
         } else if ca == 1 {
@@ -481,7 +481,11 @@ fn golf_major_label(sport_id: &str, event_name: &str) -> Option<&'static str> {
 
 fn parse_golf(sport_id: &str, ev: LeaderEvent) -> Option<Game> {
     let comp = pick_leader_comp(ev.competitions)?;
-    let status = map_status(&comp.status.type_.name).unwrap_or(GameStatus::Pregame);
+    // `?`, not a Pregame fallback: a tournament that is suspended for the day
+    // (or canceled) has no business on the board until the feed says play is on
+    // again. Falling back to Pregame would not help — the tee times we'd date it
+    // by are the ones already played.
+    let status = map_status(&comp.status.type_)?;
     // The whole field by current position (ties allowed), name = last name,
     // score = "+5"/"E". This used to cut at position 4 — a leftover from when
     // the board only ever drew four static rows — which silently capped every
@@ -575,7 +579,7 @@ fn parse_f1(ev: LeaderEvent) -> Vec<Game> {
                 Some("SS") => ("sprint-quali", " SQ"),
                 _ => return None, // practice / unknown
             };
-            let status = map_status(&comp.status.type_.name).unwrap_or(GameStatus::Pregame);
+            let status = map_status(&comp.status.type_)?;
             let mut drivers: Vec<(i64, LeaderRow)> = comp
                 .competitors
                 .into_iter()
@@ -1429,6 +1433,11 @@ struct Status {
 struct StatusType {
     #[serde(default)]
     name: String,
+    /// "pre" | "in" | "post". ESPN's own verdict on whether play is happening,
+    /// and the only field that separates a pause *within* a game from one that
+    /// ends the day — see `map_status`.
+    #[serde(default)]
+    state: String,
     /// e.g. "Top 5th" — the original server derived baseball's inning half from
     /// this ("Top" substring check), so we do too.
     #[serde(default, rename = "shortDetail")]
@@ -1647,7 +1656,7 @@ struct CatalogTeam {
 fn parse_event(sport_id: &str, ev: Event) -> Option<Game> {
     let season = ev.season;
     let comp = ev.competitions.into_iter().next()?;
-    let status = map_status(&comp.status.type_.name)?;
+    let status = map_status(&comp.status.type_)?;
     let champ = classify_champ(
         sport_id,
         season.as_ref(),
@@ -1863,8 +1872,18 @@ fn classify_champ(sport_id: &str, season: Option<&EventSeason>, headline: &str) 
     None
 }
 
-fn map_status(name: &str) -> Option<GameStatus> {
-    Some(match name {
+/// `None` means "don't put this on the board at all".
+///
+/// The name alone is not enough. STATUS_SUSPENDED covers both a rain delay that
+/// resumes in twenty minutes and a golf round called for darkness that resumes
+/// TOMORROW MORNING — and we were calling both of them live, so a suspended
+/// tournament sat on the panel all night. ESPN distinguishes them in `state`:
+/// a pause within the game keeps `state: "in"`, while play stopping for the day
+/// flips it to `"post"`. So anything ESPN has moved to "post" without also
+/// naming it finished has stopped without finishing: drop it until the feed
+/// puts it back in play.
+fn map_status(t: &StatusType) -> Option<GameStatus> {
+    let status = match t.name.as_str() {
         "STATUS_SCHEDULED" => GameStatus::Pregame,
         // Soccer runs through halves, extra time, and shootouts as distinct states.
         "STATUS_IN_PROGRESS" | "STATUS_FIRST_HALF" | "STATUS_SECOND_HALF"
@@ -1875,7 +1894,11 @@ fn map_status(name: &str) -> Option<GameStatus> {
         | "STATUS_FINAL_AET" => GameStatus::Final,
         "STATUS_POSTPONED" | "STATUS_CANCELED" | "STATUS_ABANDONED" => return None,
         _ => GameStatus::Pregame,
-    })
+    };
+    if t.state == "post" && status != GameStatus::Final {
+        return None;
+    }
+    Some(status)
 }
 
 fn ordinal(n: i64) -> String {
@@ -2302,6 +2325,47 @@ mod champ_tests {
         let g = parse_golf("pga", ev).expect("a game");
         assert_eq!(g.start_time, "2026-08-06T10:50Z", "the EARLIEST tee time, not the event date");
         assert_ne!(g.start_time, "2026-08-06T04:00Z", "midnight is what put it on the panel a day early");
+    }
+
+    /// The reported bug: the Wyndham was called for the day and stayed on the
+    /// board, still labelled live, all evening.
+    ///
+    /// A golf round called for darkness comes back as STATUS_SUSPENDED, which
+    /// we mapped to Intermission — and Intermission counts as live, with no
+    /// time bound on it. So the tournament sat there until play resumed the
+    /// next morning. ESPN had already said it wasn't in play: `state: "post"`.
+    #[test]
+    fn a_round_suspended_for_the_day_leaves_the_board() {
+        let body = r#"{"events":[{"id":"401","shortName":"Wyndham","endDate":"2026-08-09T04:00Z",
+          "competitions":[{"date":"2026-08-06T04:00Z",
+          "status":{"period":1,"type":{"name":"STATUS_SUSPENDED","state":"post","detail":"Round 1 - Suspended"}},
+          "competitors":[
+            {"order":1,"athlete":{"displayName":"A"},"status":{"position":{"id":1},"teeTime":"2026-08-06T10:50Z","thru":18},"statistics":[]},
+            {"order":2,"athlete":{"displayName":"B"},"status":{"position":{"id":2},"teeTime":"2026-08-06T11:12Z","thru":16},"statistics":[]}
+          ]}]}]}"#;
+        let resp: LeaderboardResponse = serde_json::from_str(body).unwrap();
+        let ev = resp.events.into_iter().next().unwrap();
+        assert!(parse_golf("pga", ev).is_none(), "play is done for the day — the panel must drop it");
+    }
+
+    /// The other half of that: a pause ESPN keeps at `state: "in"` is a delay
+    /// *within* the game. Those still belong on the board — dropping a rain
+    /// delay would blank the panel mid-game and bring it back minutes later.
+    #[test]
+    fn a_delay_within_a_game_stays_live() {
+        let t = |name: &str, state: &str| StatusType {
+            name: name.into(),
+            state: state.into(),
+            short_detail: String::new(),
+        };
+        assert_eq!(map_status(&t("STATUS_DELAYED", "in")), Some(GameStatus::Intermission));
+        assert_eq!(map_status(&t("STATUS_HALFTIME", "in")), Some(GameStatus::Intermission));
+        assert_eq!(map_status(&t("STATUS_SUSPENDED", "in")), Some(GameStatus::Intermission));
+        // Finished is finished — "post" must not swallow the final score.
+        assert_eq!(map_status(&t("STATUS_FINAL", "post")), Some(GameStatus::Final));
+        assert_eq!(map_status(&t("STATUS_PLAY_COMPLETE", "post")), Some(GameStatus::Final));
+        // A feed that omits `state` behaves exactly as it did before.
+        assert_eq!(map_status(&t("STATUS_IN_PROGRESS", "")), Some(GameStatus::Active));
     }
 
     /// No tee times published yet (ESPN posts them a day or two out) must fall
