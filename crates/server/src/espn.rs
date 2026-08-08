@@ -562,8 +562,9 @@ fn parse_golf(sport_id: &str, ev: LeaderEvent) -> Option<Game> {
     // JUMP AROUND, because position is a RANK and ties share one: four
     // players at positions 1,2,3,3 gave four rows, while a five-way tie for
     // third gave seven, with nothing changed in the app.
-    // Read before the field is consumed below.
+    // Both read before the field is consumed below.
     let tee_off = first_tee_time(&comp);
+    let round = golf_round(&comp);
     let mut ranked: Vec<(i64, LeaderRow)> = comp
         .competitors
         .into_iter()
@@ -596,7 +597,11 @@ fn parse_golf(sport_id: &str, ev: LeaderEvent) -> Option<Game> {
         away: TeamSide::empty(&sport_id.to_uppercase()),
         home: TeamSide::empty(""),
         status,
-        ordinal: String::new(),
+        // Golf's "period" IS the tournament round, so it belongs in the field
+        // every other sport keeps its period in. Without it a golf card could
+        // not say which of four days you were looking at — the leaderboard
+        // alone looks the same on Thursday as on Sunday.
+        ordinal: round,
         clock: String::new(),
         // The FIRST tee time, not the event date — see `LeaderCompStatus::tee_time`.
         // Falls back to the event date when the field has no tee times yet
@@ -612,6 +617,19 @@ fn parse_golf(sport_id: &str, ev: LeaderEvent) -> Option<Game> {
     })
 }
 
+/// The tournament round as a board-sized label ("R3"), empty when the feed has
+/// no round yet (a tournament that hasn't started reports period 0).
+///
+/// Rounds beyond the fourth exist — a Monday finish after a weather week still
+/// reports its own period — so this formats whatever the feed says rather than
+/// assuming the usual four.
+fn golf_round(comp: &LeaderComp) -> String {
+    match comp.status.period {
+        n if n >= 1 => format!("R{n}"),
+        _ => String::new(),
+    }
+}
+
 /// The earliest tee time in the field, or None when ESPN has not published them.
 ///
 /// Golf's event `date` is a DATE, not a time — midnight local on day one, with
@@ -620,10 +638,22 @@ fn parse_golf(sport_id: &str, ev: LeaderEvent) -> Option<Game> {
 ///
 /// Racing needs no equivalent: F1 competitions carry a real per-session `date`
 /// with `timeValid: true`, which `f1_session_game` already uses.
+///
+/// This is a per-ROUND start, which is what makes a multi-day tournament work as
+/// one card: on Saturday it returns Saturday's first tee, not Thursday's. Two
+/// things keep it that way. ESPN only publishes `teeTime` for players still
+/// active in the current round — a golfer who missed the cut has none, which is
+/// why the field can report mixed `period`s while every tee time belongs to the
+/// same round. And the round filter below makes that explicit rather than
+/// incidental, so a feed that one day starts carrying finished rounds' times
+/// can't drag the start back to a day already played.
 fn first_tee_time(comp: &LeaderComp) -> Option<String> {
+    let round = comp.status.period;
     comp.competitors
         .iter()
         .filter_map(|c| c.status.as_ref())
+        // period 0 means the feed didn't say; take those rather than none.
+        .filter(|s| round < 1 || s.period < 1 || s.period == round)
         .map(|s| s.tee_time.as_str())
         .filter(|t| !t.is_empty())
         // RFC3339 in a fixed UTC format, so lexical order IS chronological.
@@ -907,6 +937,12 @@ struct LeaderCompStatus {
     /// start of play.
     #[serde(default, rename = "teeTime")]
     tee_time: String,
+    /// Which round this player's `tee_time` belongs to. The field can hold a
+    /// MIX — a golfer who missed the cut stays on the round they were cut in —
+    /// so `first_tee_time` matches it against the competition's round rather
+    /// than trusting every entry to be current.
+    #[serde(default)]
+    period: i64,
 }
 #[derive(Deserialize)]
 struct LeaderPosition {
@@ -2702,6 +2738,48 @@ mod champ_tests {
         assert_eq!(map_status(&t("STATUS_PLAY_COMPLETE", "post")), Some(GameStatus::Final));
         // A feed that omits `state` behaves exactly as it did before.
         assert_eq!(map_status(&t("STATUS_IN_PROGRESS", "")), Some(GameStatus::Active));
+    }
+
+    /// A tournament's round comes from the competition's period, and the start
+    /// advances with it — Saturday's card opens on Saturday's first tee, not on
+    /// the one played on Thursday.
+    ///
+    /// The mixed `period`s below are real: at round 3 of the 2026 Wyndham the
+    /// live feed reported 83 competitors on period 3, 63 on period 2 and one on
+    /// period 1 (players cut, or stopped by the round-1 suspension). ESPN
+    /// publishes no `teeTime` for those, but the round filter means it would not
+    /// matter if it started to.
+    #[test]
+    fn golf_reports_the_round_and_that_rounds_first_tee() {
+        let body = r#"{"events":[{"id":"401","shortName":"Wyndham","endDate":"2026-08-09T04:00Z",
+          "competitions":[{"date":"2026-08-06T04:00Z",
+          "status":{"period":3,"type":{"name":"STATUS_IN_PROGRESS","state":"in","detail":"Round 3 - In Progress"}},
+          "competitors":[
+            {"order":1,"athlete":{"displayName":"A"},"status":{"position":{"id":1},"period":3,"teeTime":"2026-08-08T16:10Z"},"statistics":[]},
+            {"order":2,"athlete":{"displayName":"B"},"status":{"position":{"id":2},"period":3,"teeTime":"2026-08-08T11:00Z"},"statistics":[]},
+            {"order":3,"athlete":{"displayName":"C"},"status":{"position":{"id":3},"period":2,"teeTime":"2026-08-07T12:40Z"},"statistics":[]}
+          ]}]}]}"#;
+        let resp: LeaderboardResponse = serde_json::from_str(body).unwrap();
+        let g = parse_golf("pga", resp.events.into_iter().next().unwrap()).expect("a game");
+        assert_eq!(g.ordinal, "R3", "the card has to say which day of the tournament this is");
+        assert_eq!(
+            g.start_time, "2026-08-08T11:00Z",
+            "the earliest tee of THIS round; a cut player's round-2 time must not drag it back a day"
+        );
+    }
+
+    /// A tournament ESPN hasn't started yet reports period 0, and inventing "R0"
+    /// would be worse than saying nothing.
+    #[test]
+    fn a_tournament_that_has_not_started_has_no_round() {
+        let body = r#"{"events":[{"id":"402","shortName":"Open","endDate":"",
+          "competitions":[{"date":"2026-09-01T04:00Z","status":{"period":0,"type":{"state":"pre"}},
+          "competitors":[{"order":1,"athlete":{"displayName":"A"},"status":{"position":{"id":1},"teeTime":"2026-09-03T12:00Z"},"statistics":[]}]}]}]}"#;
+        let resp: LeaderboardResponse = serde_json::from_str(body).unwrap();
+        let g = parse_golf("pga", resp.events.into_iter().next().unwrap()).expect("a game");
+        assert_eq!(g.ordinal, "", "no round yet");
+        // The round filter must not swallow the tee time when nobody has a period.
+        assert_eq!(g.start_time, "2026-09-03T12:00Z");
     }
 
     /// No tee times published yet (ESPN posts them a day or two out) must fall

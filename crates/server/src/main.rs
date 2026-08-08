@@ -153,7 +153,7 @@ pub struct AppState {
     /// When we WATCHED each game transition to Final (ESPN has no end time, so we
     /// observe it at poll granularity). Drives the post-game linger; memory-only —
     /// a restart mid-linger just ends the linger early.
-    pub finished: Arc<Mutex<HashMap<String, std::time::Instant>>>,
+    pub finished: Arc<Mutex<HashMap<String, Finish>>>,
     /// The OTA firmware images this server hosts, one per release channel
     /// (loaded once from FIRMWARE_DIR/{stable,beta,dev} at startup, each
     /// integrity-checked). An absent channel is simply off: its routes 404 and
@@ -1588,10 +1588,15 @@ pub(crate) fn to_summary(g: &Game, tz: Option<chrono_tz::Tz>) -> GameSummary {
     // Leaderboard sports (golf/F1): no away/home — show the event + leader.
     if let Some(lb) = &g.leaderboard {
         let detail = pregame_detail().unwrap_or_else(|| {
-            lb.rows
-                .first()
-                .map(|r| format!("{} {}", r.name, r.value))
-                .unwrap_or_default()
+            let leader = lb.rows.first().map(|r| format!("{} {}", r.name, r.value)).unwrap_or_default();
+            // Golf's round leads the detail ("R3 · SCHEFFLER -6"). Without it a
+            // tournament card reads identically on all four days. F1 has no
+            // round — its `ordinal` stays empty — so nothing is prefixed there.
+            match (g.ordinal.as_str(), leader.as_str()) {
+                ("", l) => l.to_string(),
+                (r, "") => r.to_string(),
+                (r, l) => format!("{r} · {l}"),
+            }
         });
         return GameSummary {
             id: g.id.clone(),
@@ -1702,6 +1707,21 @@ pub(crate) fn with_slate<R>(state: &AppState, cfg: Option<&BoardConfig>, f: impl
     }
 }
 
+/// When a game finished, in both clocks.
+///
+/// Two clocks because they answer different questions and neither substitutes
+/// for the other: the linger window has to survive a wall clock that jumps
+/// (NTP, DST, a laptop waking up), and "Ended 9:47 PM" cannot be rendered from
+/// a monotonic instant at all.
+#[derive(Clone, Copy)]
+pub(crate) struct Finish {
+    /// Monotonic — how long the finished game keeps its board slot.
+    pub at: Instant,
+    /// Wall clock, for the app's "Ended …" row. Derived from the same evidence
+    /// as `at`, so the two can never disagree about which moment they mean.
+    pub wall: chrono::DateTime<chrono::Utc>,
+}
+
 pub(crate) fn record_finished_transitions(state: &AppState, incoming: &[Game], prev_poll: Instant) {
     // Both slates: `state.finished` is one id-keyed map serving both, so a
     // scan that saw only the live slate would let each poll evict the other's
@@ -1736,15 +1756,44 @@ pub(crate) fn record_finished_transitions(state: &AppState, incoming: &[Game], p
                     Instant::now().checked_sub(ago)
                 })
                 .unwrap_or(prev_poll);
-            fin.entry(g.id.clone()).or_insert(ended);
+            // The wall-clock twin of `ended`, from the same evidence rather than
+            // from `now`: the feed's endDate when it had one, else back-dated by
+            // how long ago that instant was. This is the ONLY end time most
+            // sports ever get — ESPN's scoreboard feed carries no end timestamp
+            // for a team game, just `completed: true` — so it is deliberately
+            // conservative. Its error is bounded by the poll interval, and a
+            // game that was already Final when this process started never gets
+            // one at all, which is honest: we did not see it end.
+            let wall = chrono::Duration::from_std(ended.elapsed())
+                .ok()
+                .and_then(|ago| now_utc.checked_sub_signed(ago))
+                .unwrap_or(now_utc);
+            fin.entry(g.id.clone()).or_insert(Finish { at: ended, wall });
             let left = FINAL_LINGER.saturating_sub(ended.elapsed());
             tracing::info!("game '{}' ended; lingering {}m", g.id, left.as_secs() / 60);
         }
     }
     // Keep the map bounded: drop stamps past the linger or for vanished games.
-    fin.retain(|id, t| {
-        t.elapsed() < FINAL_LINGER && incoming.iter().any(|g| &g.id == id)
+    fin.retain(|id, f| {
+        f.at.elapsed() < FINAL_LINGER && incoming.iter().any(|g| &g.id == id)
     });
+}
+
+/// Fill in `end_time` on finished games from what the server watched happen.
+///
+/// Only ever ADDS one. A feed that carries its own endDate (golf tournaments,
+/// F1 race weekends) is left alone — it knows better than our poll cadence does
+/// — and a game we never saw end keeps `None` rather than being given a
+/// plausible-looking guess.
+pub(crate) fn stamp_observed_end_times(state: &AppState, slate: &mut [Game]) {
+    let fin = state.finished.lock().unwrap();
+    for g in slate.iter_mut() {
+        if g.status == GameStatus::Final && g.end_time.is_none() {
+            if let Some(f) = fin.get(&g.id) {
+                g.end_time = Some(rfc3339_utc(f.wall));
+            }
+        }
+    }
 }
 
 /// Parse ESPN's start-time format ("2026-06-28T13:00Z", sometimes with seconds).
@@ -1949,7 +1998,7 @@ pub(crate) fn board_shows(state: &AppState, g: &Game) -> bool {
             .lock()
             .unwrap()
             .get(&g.id)
-            .is_some_and(|t| t.elapsed() < FINAL_LINGER);
+            .is_some_and(|f| f.at.elapsed() < FINAL_LINGER);
     }
     board_shows_at(g, chrono::Utc::now())
 }
@@ -3281,6 +3330,13 @@ async fn poll_loop(state: AppState, source: Arc<dyn SportsDataSource>) {
         // dated to the slate they're measured against (not to now).
         record_finished_transitions(&state, &both, prev_poll.unwrap_or(fetched_at));
         prev_poll = Some(fetched_at);
+        // Hand the observed finish time back to the slate, so the frames, the
+        // app's cards and GET /game all read one value. Patched on the STORED
+        // slate rather than in the summary builders because ESPN hands us a
+        // fresh, end-time-less copy every poll — this is the one place the
+        // server's own observation and the feed's data are merged.
+        stamp_observed_end_times(&state, &mut games);
+        stamp_observed_end_times(&state, &mut demo);
         *state.demo.lock().unwrap() = demo;
         *state.games.lock().unwrap() = games;
         let board_ids: Vec<String> = state.devices.lock().unwrap().keys().cloned().collect();
@@ -4488,7 +4544,10 @@ mod tests {
             .finished
             .lock()
             .unwrap()
-            .insert("g1".into(), std::time::Instant::now() - FINAL_LINGER);
+            .insert("g1".into(), Finish {
+                at: std::time::Instant::now() - FINAL_LINGER,
+                wall: chrono::Utc::now(),
+            });
         let ids: Vec<String> = candidate_games(&state, &cfg).iter().map(|g| g.id.clone()).collect();
         assert!(!ids.contains(&"g1".to_string()), "linger expires after 30m");
     }
@@ -4548,6 +4607,57 @@ mod tests {
             state.finished.lock().unwrap().is_empty(),
             "the expired stamp is swept, not left to accumulate"
         );
+    }
+
+    /// A team sport gets no end time from ESPN — the scoreboard feed carries
+    /// `completed: true` and nothing else — so the app's "Ended …" row stayed
+    /// blank for every game that wasn't golf or F1. The server watched the game
+    /// finish, though, so it can say when.
+    #[test]
+    fn a_finished_team_game_gets_the_end_time_the_server_observed() {
+        let state = AppState::new_ephemeral();
+        *state.games.lock().unwrap() = vec![live_game("g1")];
+        let ended = Game { status: GameStatus::Final, ..live_game("g1") };
+        assert_eq!(ended.end_time, None, "precondition: the feed gave us nothing");
+
+        // Observed ending ten minutes ago.
+        record_finished_transitions(
+            &state,
+            std::slice::from_ref(&ended),
+            std::time::Instant::now() - Duration::from_secs(600),
+        );
+        let mut slate = vec![ended.clone()];
+        stamp_observed_end_times(&state, &mut slate);
+
+        let stamped = slate[0].end_time.as_deref().expect("an end time");
+        let parsed = parse_espn_time(stamped).expect("normalized RFC3339");
+        let ago = chrono::Utc::now().signed_duration_since(parsed).num_seconds();
+        assert!(
+            (540..=660).contains(&ago),
+            "dated to when we saw it end (~600s ago), not to now; got {ago}s from {stamped}"
+        );
+    }
+
+    /// The feed's own end time outranks ours, and a game we never watched finish
+    /// gets no invented one.
+    #[test]
+    fn observed_end_times_never_overwrite_or_invent() {
+        let state = AppState::new_ephemeral();
+        *state.games.lock().unwrap() = vec![live_game("g1")];
+        let ended = Game { status: GameStatus::Final, ..live_game("g1") };
+        record_finished_transitions(&state, std::slice::from_ref(&ended), std::time::Instant::now());
+
+        // A feed-supplied endDate (golf/F1) is left exactly as it was.
+        let mut with_feed = vec![Game { end_time: Some("2026-08-09T04:00Z".into()), ..ended.clone() }];
+        stamp_observed_end_times(&state, &mut with_feed);
+        assert_eq!(with_feed[0].end_time.as_deref(), Some("2026-08-09T04:00Z"));
+
+        // A game that was already Final when we started has no stamp, so no
+        // end time — we did not see it end and will not guess.
+        let unwatched = Game { status: GameStatus::Final, ..live_game("never-seen-live") };
+        let mut slate = vec![unwatched];
+        stamp_observed_end_times(&state, &mut slate);
+        assert_eq!(slate[0].end_time, None, "no observation, no claim");
     }
 
     /// Board and browse must never disagree: a Final the board is lingering is

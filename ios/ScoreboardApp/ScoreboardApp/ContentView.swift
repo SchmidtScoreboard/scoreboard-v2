@@ -2677,6 +2677,9 @@ enum AppNotes {
         - The Olympics offer the gold and bronze medal games instead of a "Postseason" option that could never match anything.
         - Conference Finals, March Madness and MLS Cup were quietly matching no games at all. Fixed — those options work now.
         - Following everything now ticks every round in the list, so the screen shows what it is actually doing.
+        - Golf tournaments show which round they are on, on the scoreboard and on the card. A Thursday leaderboard no longer looks exactly like a Sunday one.
+        - A golf card's start time is that round's first tee, so it moves along with the tournament.
+        - Finished games show when they ended, not just when they started.
         """,
     ]
 
@@ -3196,13 +3199,17 @@ struct CardMenuItems: View {
 
     var body: some View {
         let pinned = model.focusedGameId == game.id
-        // Golf's timestamps are midnight-Eastern DATE boundaries, not tee
-        // times (the server renders those as a day too) — showing a clock here
-        // would put a Thursday-morning tournament at "11:00 PM" the night
-        // before for anyone west of Eastern.
-        let dayOnly = game.sportId == "pga" || game.sportId == "lpga"
-        let starts = game.startTime.flatMap { Self.localTimeLabel($0, dayOnly: dayOnly) }
-        let ends = game.endTime.flatMap { Self.localTimeLabel($0, dayOnly: dayOnly) }
+        // The two halves of a golf tournament's schedule are different KINDS of
+        // timestamp, so they can't share one setting.
+        //
+        // The start is a real tee time now — the earliest of the current round's,
+        // which is why it advances as the tournament goes on — so it deserves a
+        // clock. The end is still ESPN's tournament endDate, a midnight-Eastern
+        // DATE boundary; rendering that as a clock would claim the Sunday
+        // tournament "ends 11:00 PM Saturday" for anyone west of Eastern.
+        let golf = game.sportId == "pga" || game.sportId == "lpga"
+        let starts = game.startTime.flatMap { Self.localTimeLabel($0) }
+        let ends = game.endTime.flatMap { Self.localTimeLabel($0, dayOnly: golf) }
         if canPin {
             Button {
                 withAnimation { pinned ? model.clearFocus() : model.focusGame(game.id) }

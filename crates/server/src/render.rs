@@ -478,6 +478,24 @@ pub fn render_frame(g: &Game, spoiler: Option<SpoilerMode>, tz: Option<chrono_tz
     }
 }
 
+/// Draw a golf round ("R3") flush to the right edge of the title row, or draw
+/// nothing when the centered title would collide with it.
+///
+/// Returns whether it drew, so the spoiled frame can fall back to its own text.
+fn draw_round_marker(c: &mut Canvas, round: &str, title_x: i32, title_w: i32, color: Rgb888) -> bool {
+    if round.is_empty() {
+        return false;
+    }
+    let w = text_width(round, false);
+    let x = 63 - w;
+    // 2px of clearance, measured against the title's right edge.
+    if title_x + title_w > x - 2 {
+        return false;
+    }
+    draw_text(c, round, x, 5, false, color);
+    true
+}
+
 /// The spoiler-protected frame: matchup stays (team rows / event title), the
 /// result goes. Strict shows only when the game started (and FINAL when done);
 /// Normal adds basic progress — period/quarter for team games, the lap count
@@ -491,9 +509,15 @@ fn render_spoiled(g: &Game, mode: SpoilerMode, style: NameStyle) -> (FrameId, Ve
             SpoilerMode::Normal => {
                 if let Some(lb) = &g.leaderboard {
                     // Lap count is sanctioned basic progress; anything richer
-                    // (positions, gaps) is a spoiler.
+                    // (positions, gaps) is a spoiler. Golf's round is the same
+                    // kind of fact — which day of the tournament it is gives
+                    // away nothing about who is winning — and beats "LIVE".
                     let lap = lb.rows.first().filter(|r| r.value.starts_with("LAP"));
-                    (lap.map(|r| r.value.clone()).unwrap_or_else(|| "LIVE".into()), WHITE)
+                    let progress = lap
+                        .map(|r| r.value.clone())
+                        .or_else(|| (!g.ordinal.is_empty()).then(|| g.ordinal.clone()))
+                        .unwrap_or_else(|| "LIVE".into());
+                    (progress, WHITE)
                 } else if g.ordinal.is_empty() {
                     ("LIVE".into(), WHITE)
                 } else {
@@ -780,6 +804,13 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
             checkered_flag(&mut c, 1);
             checkered_flag(&mut c, 55);
         }
+    } else {
+        // Golf's round, right-aligned on the title row — the one thing the
+        // leaderboard itself cannot tell you, since Thursday and Sunday look
+        // the same. Drawn only when it clears the centered title by 2px, the
+        // same rule the flags follow: a long tournament name keeps the name
+        // and drops the round rather than overprinting it.
+        draw_round_marker(&mut c, &g.ordinal, tx, title_w, accent);
     }
 
     if matches!(g.status, GameStatus::Pregame) {
@@ -974,6 +1005,61 @@ pub const CLOCK_STYLES: [(&str, &str); 3] =
 #[cfg(test)]
 mod kern_tests {
     use super::*;
+
+    /// The round marker draws in the title row's right edge, and gives that
+    /// space back to a long tournament name rather than overprinting it.
+    ///
+    /// Checks the PIXELS, not the call: the whole point of the width guard is
+    /// what lands on the panel, and "R3" printed on top of the last letters of a
+    /// name is unreadable in a way no non-visual assertion would catch.
+    #[test]
+    fn the_golf_round_yields_the_title_row_to_a_long_name() {
+        let golf = |name: &str, round: &str| Game {
+            id: "401".into(),
+            sport_id: "pga".into(),
+            away: TeamSide::empty("PGA"),
+            home: TeamSide::empty(""),
+            status: GameStatus::Active,
+            ordinal: round.into(),
+            clock: String::new(),
+            start_time: "2026-08-08T11:00Z".into(),
+            end_time: None,
+            leaderboard: Some(crate::model::Leaderboard {
+                name: name.into(),
+                rows: vec![crate::model::LeaderRow {
+                    name: "SCHEFFLER".into(),
+                    value: "-6".into(),
+                    ..Default::default()
+                }],
+            }),
+            champ: None,
+            session: None,
+            situation: None,
+            pregame: None,
+        };
+        // Right-hand columns of the title row, where "R3" would land.
+        let marker_lit = |g: &Game| {
+            let (_, px) = render_game(g, None, NameStyle::Name);
+            let w = FRAME_WIDTH as usize;
+            (0..6).any(|y| {
+                (52..64).any(|x| {
+                    let i = (y * w + x) * 2;
+                    px[i] != 0 || px[i + 1] != 0
+                })
+            })
+        };
+        assert!(marker_lit(&golf("WYNDHAM", "R3")), "a short name leaves room for the round");
+        assert!(!marker_lit(&golf("WYNDHAM", "")), "no round, nothing drawn there");
+        // A name wide enough to reach the marker keeps the name.
+        let long = "WYNDHAMCHAMPIONSHIP";
+        assert!(
+            text_width(long, false) > 44,
+            "precondition: this name really does reach the right edge"
+        );
+        let with_round = render_game(&golf(long, "R3"), None, NameStyle::Name).1;
+        let without = render_game(&golf(long, ""), None, NameStyle::Name).1;
+        assert_eq!(with_round, without, "a long title drops the round instead of colliding with it");
+    }
 
     /// Both rows must use the SAME name style. Deciding per team produced
     /// lines like "CHI @ CARDINALS" — one name happened to fit, the other
