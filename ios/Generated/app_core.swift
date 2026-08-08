@@ -696,6 +696,12 @@ public protocol ScoreboardClientProtocol: AnyObject {
     func setLeagueRows(boardId: String, sportId: String, rows: UInt32?)
 
     /**
+     * Golf's round indicator ("R3") on the panel and the card; None reverts to
+     * the default, which is shown.
+     */
+    func setLeagueShowRound(boardId: String, sportId: String, show: Bool?)
+
+    /**
      * Spoiler-protect a whole league.
      */
     func setLeagueSpoiler(boardId: String, sportId: String, on: Bool)
@@ -1121,6 +1127,18 @@ open class ScoreboardClient:
                                                                    FfiConverterString.lower(boardId),
                                                                    FfiConverterString.lower(sportId),
                                                                    FfiConverterOptionUInt32.lower(rows), $0)
+    }
+    }
+
+    /**
+     * Golf's round indicator ("R3") on the panel and the card; None reverts to
+     * the default, which is shown.
+     */
+    open func setLeagueShowRound(boardId: String, sportId: String, show: Bool?) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_set_league_show_round(self.uniffiClonePointer(),
+                                                                         FfiConverterString.lower(boardId),
+                                                                         FfiConverterString.lower(sportId),
+                                                                         FfiConverterOptionBool.lower(show), $0)
     }
     }
 
@@ -2658,6 +2676,10 @@ public struct UiSportConfig {
      */
     public var leaderboardRows: UInt32?
     /**
+     * Golf's round indicator; None = the default, which is shown.
+     */
+    public var showRound: Bool?
+    /**
      * Per-league team-name display style; None = the league default
      * (`default_name_style`). Location = city/college/country, Name = mascot,
      * Abbrev = abbreviation.
@@ -2686,6 +2708,9 @@ public struct UiSportConfig {
                     * Leaderboard depth for golf/F1 (4 = static top-4 .. 20 = full field).
                     */ leaderboardRows: UInt32?,
                 /**
+                    * Golf's round indicator; None = the default, which is shown.
+                    */ showRound: Bool?,
+                /**
                     * Per-league team-name display style; None = the league default
                     * (`default_name_style`). Location = city/college/country, Name = mascot,
                     * Abbrev = abbreviation.
@@ -2702,6 +2727,7 @@ public struct UiSportConfig {
         self.championshipOptionIds = championshipOptionIds
         self.dwellSecs = dwellSecs
         self.leaderboardRows = leaderboardRows
+        self.showRound = showRound
         self.nameStyle = nameStyle
         self.spoiler = spoiler
         self.spoilerTeamIds = spoilerTeamIds
@@ -2725,6 +2751,9 @@ extension UiSportConfig: Equatable, Hashable {
         if lhs.leaderboardRows != rhs.leaderboardRows {
             return false
         }
+        if lhs.showRound != rhs.showRound {
+            return false
+        }
         if lhs.nameStyle != rhs.nameStyle {
             return false
         }
@@ -2743,6 +2772,7 @@ extension UiSportConfig: Equatable, Hashable {
         hasher.combine(championshipOptionIds)
         hasher.combine(dwellSecs)
         hasher.combine(leaderboardRows)
+        hasher.combine(showRound)
         hasher.combine(nameStyle)
         hasher.combine(spoiler)
         hasher.combine(spoilerTeamIds)
@@ -2761,6 +2791,7 @@ public struct FfiConverterTypeUiSportConfig: FfiConverterRustBuffer {
                 championshipOptionIds: FfiConverterSequenceString.read(from: &buf),
                 dwellSecs: FfiConverterOptionUInt32.read(from: &buf),
                 leaderboardRows: FfiConverterOptionUInt32.read(from: &buf),
+                showRound: FfiConverterOptionBool.read(from: &buf),
                 nameStyle: FfiConverterOptionTypeUiNameStyle.read(from: &buf),
                 spoiler: FfiConverterBool.read(from: &buf),
                 spoilerTeamIds: FfiConverterSequenceString.read(from: &buf)
@@ -2773,6 +2804,7 @@ public struct FfiConverterTypeUiSportConfig: FfiConverterRustBuffer {
         FfiConverterSequenceString.write(value.championshipOptionIds, into: &buf)
         FfiConverterOptionUInt32.write(value.dwellSecs, into: &buf)
         FfiConverterOptionUInt32.write(value.leaderboardRows, into: &buf)
+        FfiConverterOptionBool.write(value.showRound, into: &buf)
         FfiConverterOptionTypeUiNameStyle.write(value.nameStyle, into: &buf)
         FfiConverterBool.write(value.spoiler, into: &buf)
         FfiConverterSequenceString.write(value.spoilerTeamIds, into: &buf)
@@ -3569,6 +3601,30 @@ private struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterOptionBool: FfiConverterRustBuffer {
+    typealias SwiftType = Bool?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterBool.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterBool.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterOptionString: FfiConverterRustBuffer {
     typealias SwiftType = String?
 
@@ -4070,6 +4126,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_league_rows() != 35011 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_scoreboardclient_set_league_show_round() != 59263 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_league_spoiler() != 26835 {

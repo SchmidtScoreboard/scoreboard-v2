@@ -134,6 +134,7 @@ struct BoardInfo {
     var dwellSecs: UInt32 = 10
     var leagueDwell: [String: UInt32] = [:]     // sportId -> per-league override
     var leagueRows: [String: UInt32] = [:]      // sportId -> leaderboard depth (golf/F1)
+    var leagueShowRound: [String: Bool] = [:]   // sportId -> golf round indicator (absent = shown)
     var leagueNameStyle: [String: UiNameStyle] = [:] // sportId -> name-style override (absent = league default)
     var strictSpoilers = false                   // spoiled games: strict vs normal display
     var spoilerAll = false                       // protect every game on this board
@@ -1157,6 +1158,7 @@ final class BoardViewModel: ObservableObject {
         var champ: [String: Set<String>] = [:]
         var dwell: [String: UInt32] = [:]
         var rows: [String: UInt32] = [:]
+        var showRound: [String: Bool] = [:]
         var nameStyle: [String: UiNameStyle] = [:]
         var lspoil: [String: Bool] = [:]
         var tspoil: [String: Set<String>] = [:]
@@ -1165,6 +1167,7 @@ final class BoardViewModel: ObservableObject {
             if !s.championshipOptionIds.isEmpty { champ[s.sportId] = Set(s.championshipOptionIds) }
             if let d = s.dwellSecs { dwell[s.sportId] = d }
             if let r = s.leaderboardRows { rows[s.sportId] = r }
+            if let sr = s.showRound { showRound[s.sportId] = sr }
             if let n = s.nameStyle { nameStyle[s.sportId] = n }
             if s.spoiler { lspoil[s.sportId] = true }
             if !s.spoilerTeamIds.isEmpty { tspoil[s.sportId] = Set(s.spoilerTeamIds) }
@@ -1187,6 +1190,7 @@ final class BoardViewModel: ObservableObject {
             $0.dwellSecs = c.dwellSecs
             $0.leagueDwell = dwell
             $0.leagueRows = rows
+            $0.leagueShowRound = showRound
             $0.leagueNameStyle = nameStyle
             $0.strictSpoilers = c.strictSpoilers
             $0.spoilerAll = c.spoilerAll
@@ -1298,6 +1302,21 @@ final class BoardViewModel: ObservableObject {
             if let rows { $0.leagueRows[sportId] = rows } else { $0.leagueRows.removeValue(forKey: sportId) }
         }
         client?.setLeagueRows(boardId: id, sportId: sportId, rows: rows)
+    }
+
+    /// Golf's round indicator. Defaults to SHOWN — a leaderboard looks the same
+    /// on Thursday as on Sunday, so the round earns its corner until turned off.
+    func leagueShowRound(_ sportId: String) -> Bool { current.leagueShowRound[sportId] ?? true }
+    func setLeagueShowRound(_ sportId: String, _ show: Bool) {
+        guard let id = selectedBoardId else { return }
+        // Sent as nil when it matches the default, so a board that never
+        // touched this carries no setting rather than an explicit "yes".
+        let stored: Bool? = show ? nil : false
+        mutate(id) {
+            if let stored { $0.leagueShowRound[sportId] = stored }
+            else { $0.leagueShowRound.removeValue(forKey: sportId) }
+        }
+        client?.setLeagueShowRound(boardId: id, sportId: sportId, show: stored)
     }
 
     /// Per-league team-name display style override; nil = the league default.
@@ -2191,26 +2210,24 @@ struct DashboardView: View {
         Form {
             liveAndUpcomingSection
             controlsSection
-            // The "League Preferences" title rides as the FIRST league card's
-            // section header, so the header→card gap matches the other
-            // sections' header padding. A header in its own empty section
-            // pays an extra inter-section gap instead (the standalone header
-            // remains only for the no-leagues empty state).
+            // No "League Preferences" title. Once the leagues were grouped by
+            // sport it sat directly on top of "Hockey" — two headings stacked
+            // with nothing between them, the second explaining the list and the
+            // first explaining nothing the sections didn't already say.
             if model.leaguePrefs.isEmpty {
-                leaguePreferencesHeader
+                Section {
+                    Text("No leagues yet — add one to pick favorite teams and big games.")
+                        .foregroundStyle(.secondary)
+                }
             }
-            // One section per SPORT, mirroring the Add League sheet. The first
-            // section carries the "League Preferences" title so the header→card
-            // gap matches the sections above it.
-            ForEach(Array(model.leaguePrefsByCategory.enumerated()), id: \.element.0) { index, group in
-                sportSection(group.0, group.1, showsAreaHeader: index == 0)
+            // One section per SPORT, mirroring the Add League sheet.
+            ForEach(model.leaguePrefsByCategory, id: \.0) { category, prefs in
+                sportSection(category, prefs)
             }
+            addLeagueButton
             // Board settings, spoilers, and transfer live in the Settings
             // sheet (gear) — the dashboard is for what's ON the board now.
         }
-        // One uniform gap between top-level sections. Individual sections that
-        // belong to the section above them (the league cards under the
-        // "League Preferences" header) opt into a tighter gap locally.
         .listSectionSpacing(20)
     }
 
@@ -2430,39 +2447,29 @@ struct DashboardView: View {
         }
     }
 
-    /// The League Preferences title row + Add League menu. Rendered as the
-    /// first league card's section header (or the empty-state section's).
-    private var leaguePrefsHeaderContent: some View {
-        HStack {
-            Text("League Preferences")
-            Spacer()
-            Button {
-                showLeaguePicker = true
-            } label: {
-                HStack(spacing: 3) {
-                    Image(systemName: "plus")
-                    Text("Add League")
-                }
-                .font(.subheadline.weight(.semibold))
-            }
-            .textCase(nil)
-        }
-    }
-
-    /// Empty state: no league cards to carry the header, so it gets its own
-    /// section with the explainer row.
-    private var leaguePreferencesHeader: some View {
+    /// Add League, as a full-width capsule under every sport section.
+    ///
+    /// It sits after the list rather than in a heading above it because that is
+    /// where the action belongs once the list is grouped: you read what you
+    /// follow, then add to it. A row with a cleared background and no insets so
+    /// the capsule spans the form's width instead of floating in a list cell.
+    private var addLeagueButton: some View {
         Section {
-            Text("No leagues yet — add one to pick favorite teams and big games.")
-                .foregroundStyle(.secondary)
-        } header: {
-            leaguePrefsHeaderContent
+            Button { showLeaguePicker = true } label: {
+                Label("Add League", systemImage: "plus")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.capsule)
+            .controlSize(.large)
+            .listRowInsets(EdgeInsets())
+            .listRowBackground(Color.clear)
         }
     }
 
     /// One SPORT's section: every league the user follows in it, each as its own
-    /// block. Mirrors the Add League sheet's grouping so the two screens read
-    /// the same way, and the first section carries the area's title.
+    /// block. Mirrors the Add League sheet's grouping.
     ///
     /// Three nested levels need three different gaps, which is the whole point
     /// of the layout: sports are separated by the section gap, leagues within a
@@ -2471,21 +2478,15 @@ struct DashboardView: View {
     /// they read as belonging to the league above them rather than as peers.
     private func sportSection(
         _ category: String,
-        _ prefs: [BoardViewModel.LeaguePref],
-        showsAreaHeader: Bool
+        _ prefs: [BoardViewModel.LeaguePref]
     ) -> some View {
         Section {
             ForEach(Array(prefs.enumerated()), id: \.element.id) { index, pref in
                 leagueBlock(pref, isFirstInSection: index == 0)
             }
         } header: {
-            VStack(alignment: .leading, spacing: 6) {
-                if showsAreaHeader { leaguePrefsHeaderContent }
-                Text(category)
-            }
+            Text(category)
         }
-        // One uniform gap between sports. The first section keeps the standard
-        // top-level gap because its header is the area title.
         .listSectionSpacing(20)
     }
 
@@ -2677,7 +2678,8 @@ enum AppNotes {
         - The Olympics offer the gold and bronze medal games instead of a "Postseason" option that could never match anything.
         - Conference Finals, March Madness and MLS Cup were quietly matching no games at all. Fixed — those options work now.
         - Following everything now ticks every round in the list, so the screen shows what it is actually doing.
-        - Golf tournaments show which round they are on, on the scoreboard and on the card. A Thursday leaderboard no longer looks exactly like a Sunday one.
+        - Golf tournaments show which round they are on, on the scoreboard and on the card. A Thursday leaderboard no longer looks exactly like a Sunday one. Turn it off under Show round in the tour's settings.
+        - Add League is a button under the list now, and the leagues are grouped by sport without a second heading on top of them.
         - A golf card's start time is that round's first tee, so it moves along with the tournament.
         - Finished games show when they ended, not just when they started.
         """,
@@ -3758,6 +3760,11 @@ struct LeagueEditorView: View {
         ["pga", "lpga", "f1"].contains(sport.id)
     }
 
+    /// The golf tours specifically — the only leagues with rounds.
+    private var isGolfLeague: Bool {
+        ["pga", "lpga"].contains(sport.id)
+    }
+
     /// Check or uncheck one round.
     ///
     /// "Follow everything" is the one row that isn't independent of the others:
@@ -3922,6 +3929,18 @@ struct LeagueEditorView: View {
                     }
                 } footer: {
                     Text("How much of the field the board shows. More than four rows scrolls through the list.")
+                }
+            }
+            // Golf only: F1 weekends have sessions, not rounds, and every other
+            // league plays one game at a time.
+            if isGolfLeague {
+                Section {
+                    Toggle("Show round", isOn: Binding(
+                        get: { model.leagueShowRound(sport.id) },
+                        set: { model.setLeagueShowRound(sport.id, $0) }
+                    ))
+                } footer: {
+                    Text("Marks which round a tournament is on, in the corner of the panel and on the card. A leaderboard alone looks the same on Thursday as on Sunday.")
                 }
             }
             Section {

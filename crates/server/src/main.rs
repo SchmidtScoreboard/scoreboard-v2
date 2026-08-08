@@ -1554,6 +1554,26 @@ pub(crate) fn redact_game(g: &Game, mode: SpoilerMode) -> Game {
 /// Board-scoped summary: spoiler protection zeroes the scores and swaps the
 /// detail for spoiler-safe status, so protected results can't leak through
 /// the app's data model even if the UI mishandled them.
+/// One board's view of a game, after its per-league DISPLAY settings.
+///
+/// Not a spoiler pass — that is `to_summary_for`/`render_spoiled`, and it hides
+/// results. This drops things the user simply asked not to see, so the panel and
+/// the card agree without every renderer growing a parameter for each new
+/// toggle. Borrowed unless a setting actually changes something, so the common
+/// case allocates nothing.
+pub(crate) fn board_view<'a>(cfg: &BoardConfig, g: &'a Game) -> std::borrow::Cow<'a, Game> {
+    let league = cfg.sports.iter().find(|s| s.sport_id == g.sport_id);
+    // Default ON: a leaderboard looks the same on Thursday as on Sunday, so the
+    // round earns its corner until someone turns it off.
+    let show_round = league.and_then(|s| s.show_round).unwrap_or(true);
+    if !show_round && !g.ordinal.is_empty() {
+        let mut hidden = g.clone();
+        hidden.ordinal.clear();
+        return std::borrow::Cow::Owned(hidden);
+    }
+    std::borrow::Cow::Borrowed(g)
+}
+
 pub(crate) fn to_summary_for(g: &Game, spoiler: Option<SpoilerMode>, tz: Option<chrono_tz::Tz>) -> GameSummary {
     let mut s = to_summary(g, tz);
     if let Some(mode) = spoiler {
@@ -2239,7 +2259,8 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
                     .map(|r| r as usize)
                     .unwrap_or(render::LEADERBOARD_DEFAULT_ROWS);
                 let style = name_style_for(&cfg, &g.sport_id);
-                let (id, px, scrolls) = render::render_board_frame(g, rows_cap, spoiler_for(&cfg, g), tz, style);
+                let view = board_view(&cfg, g);
+                let (id, px, scrolls) = render::render_board_frame(&view, rows_cap, spoiler_for(&cfg, g), tz, style);
                 state.cache_frame(id.clone(), px);
                 rotation.push(RotationEntry { frame_id: id, dwell_ms, scroll: scrolls });
             }
@@ -3165,7 +3186,7 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
             .iter()
             .map(|g| {
                 let spoiler = spoiler_for(&cfg, g);
-                let mut s = to_summary_for(g, spoiler, tz);
+                let mut s = to_summary_for(&board_view(&cfg, g), spoiler, tz);
                 s.scrolls = game_scroll_capable(&cfg, g);
                 let (fid, px) = render::render_frame(g, spoiler, tz, name_style_for(&cfg, &g.sport_id));
                 state.cache_frame(fid.clone(), px);
@@ -3176,7 +3197,7 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
         // Bumped games ride along flagged, without pre-rendered frames (the app
         // falls back to HTTP rendering for those cards).
         out.extend(bumped.iter().map(|g| {
-            let mut s = to_summary_for(g, spoiler_for(&cfg, g), tz);
+            let mut s = to_summary_for(&board_view(&cfg, g), spoiler_for(&cfg, g), tz);
             s.scrolls = game_scroll_capable(&cfg, g);
             s.bumped = true;
             s
@@ -3222,7 +3243,7 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
         });
         out.extend(upcoming.iter().take(UPCOMING_CAP).map(|g| {
             let spoiler = spoiler_for(&cfg, g);
-            let mut s = to_summary_for(g, spoiler, tz);
+            let mut s = to_summary_for(&board_view(&cfg, g), spoiler, tz);
             s.scrolls = game_scroll_capable(&cfg, g);
             s.queued = true;
             // The app's "Live and Upcoming" section keys off this status to tell
@@ -4319,6 +4340,7 @@ mod tests {
                         championship_option_ids: Vec::new(),
                         dwell_secs: None,
                         leaderboard_rows: None,
+                        show_round: None,
                         spoiler: false,
                         spoiler_team_ids: vec![],
                         name_style: None,
@@ -4330,6 +4352,7 @@ mod tests {
                         championship_option_ids: Vec::new(),
                         dwell_secs: None,
                         leaderboard_rows: None,
+                        show_round: None,
                         spoiler: false,
                         spoiler_team_ids: vec![],
                         name_style: None,
@@ -4341,6 +4364,7 @@ mod tests {
                         championship_option_ids: Vec::new(),
                         dwell_secs: None,
                         leaderboard_rows: None,
+                        show_round: None,
                         spoiler: false,
                         spoiler_team_ids: vec![],
                         name_style: None,
@@ -4390,6 +4414,7 @@ mod tests {
                 ),
                 dwell_secs: None,
                 leaderboard_rows: None,
+                show_round: None,
                 spoiler: false,
                 spoiler_team_ids: vec![],
                 name_style: None,
@@ -4474,6 +4499,7 @@ mod tests {
                 championship_option_ids: vec!["all".into()],
                 dwell_secs: None,
                 leaderboard_rows: None,
+                show_round: None,
                 spoiler: false,
                 spoiler_team_ids: vec![],
                 name_style: None,
@@ -4607,6 +4633,59 @@ mod tests {
             state.finished.lock().unwrap().is_empty(),
             "the expired stamp is swept, not left to accumulate"
         );
+    }
+
+    /// Turning the round off has to reach BOTH surfaces, or the panel and the
+    /// card disagree about the same game on the same board.
+    #[test]
+    fn the_round_indicator_toggle_reaches_the_panel_and_the_card() {
+        let golf = Game {
+            id: "401".into(),
+            sport_id: "pga".into(),
+            away: crate::model::TeamSide::empty("PGA"),
+            home: crate::model::TeamSide::empty(""),
+            status: GameStatus::Active,
+            ordinal: "R3".into(),
+            clock: String::new(),
+            start_time: "2026-08-08T11:00Z".into(),
+            end_time: None,
+            leaderboard: Some(crate::model::Leaderboard {
+                name: "WYNDHAM".into(),
+                rows: vec![crate::model::LeaderRow {
+                    name: "HOSSLER".into(),
+                    value: "-12".into(),
+                    ..Default::default()
+                }],
+            }),
+            champ: None,
+            session: None,
+            situation: None,
+            pregame: None,
+        };
+        let cfg_with = |show: Option<bool>| BoardConfig {
+            sports: vec![SportConfig { sport_id: "pga".into(), show_round: show, ..Default::default() }],
+            ..Default::default()
+        };
+
+        // Default (nothing stored) shows it, as does an explicit yes.
+        for cfg in [BoardConfig::default(), cfg_with(None), cfg_with(Some(true))] {
+            let view = board_view(&cfg, &golf);
+            assert_eq!(view.ordinal, "R3", "shown unless turned off");
+            assert!(to_summary(&view, None).detail.starts_with("R3"), "card leads with the round");
+        }
+
+        // Off: gone from the game the renderer and the card builder both see.
+        let cfg = cfg_with(Some(false));
+        let view = board_view(&cfg, &golf);
+        assert_eq!(view.ordinal, "", "the panel has nothing to draw");
+        let detail = to_summary(&view, None).detail;
+        assert!(!detail.contains("R3"), "the card must not still say it: {detail:?}");
+        assert_eq!(detail, "HOSSLER -12", "and the leader is still there");
+
+        // Per league: a different league on the same board is untouched, and
+        // the common case doesn't clone.
+        let f1 = Game { sport_id: "f1".into(), ordinal: String::new(), ..golf.clone() };
+        assert!(matches!(board_view(&cfg, &f1), std::borrow::Cow::Borrowed(_)), "no needless clone");
     }
 
     /// A team sport gets no end time from ESPN — the scoreboard feed carries
@@ -5902,6 +5981,7 @@ mod tests {
             championship_option_id: Some("conf".into()),
             dwell_secs: None,
             leaderboard_rows: None,
+            show_round: None,
             spoiler: false,
             spoiler_team_ids: vec![],
             name_style: None,
@@ -6127,6 +6207,7 @@ mod tests {
             championship_option_ids: Vec::new(),
             dwell_secs: None,
             leaderboard_rows: None,
+            show_round: None,
             spoiler: false,
             spoiler_team_ids: vec![],
             name_style: None,

@@ -510,6 +510,12 @@ pub struct SportConfig {
     /// top-4 (no scrolling), up to 20 = the full field. None = default (10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leaderboard_rows: Option<u32>,
+    /// Whether a golf tournament shows which round it is on. `None` = the
+    /// default, which is ON: a leaderboard alone looks the same on Thursday as
+    /// on Sunday, so the round is worth its corner of the panel until someone
+    /// says otherwise. Only golf reads this — no other league has rounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_round: Option<bool>,
     /// Per-league team-name display style; None = the league default
     /// ([`default_name_style`]). Location = city/college/country, Name =
     /// mascot, Abbrev = abbreviation.
@@ -1066,6 +1072,9 @@ pub enum Command {
     /// Leaderboard depth for golf/F1 (4 = static top-4 .. 20 = full field);
     /// None reverts to the default (10).
     SetLeagueRows { sport_id: String, rows: Option<u32> },
+    /// Golf's round indicator on/off for one league. `None` reverts to the
+    /// default (shown).
+    SetLeagueShowRound { sport_id: String, show: Option<bool> },
     /// Per-league team-name display style (city/college/country vs mascot vs
     /// abbreviation); None reverts the league to its default
     /// ([`default_name_style`]).

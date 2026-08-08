@@ -757,6 +757,15 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
                     cfg.sports.push(SportConfig { sport_id, leaderboard_rows: rows, ..Default::default() });
                 }
             }
+            // Golf's round indicator. Upserted like the settings above so it
+            // sticks on a league the user has configured nothing else for.
+            Command::SetLeagueShowRound { sport_id, show } => {
+                if let Some(s) = cfg.sports.iter_mut().find(|s| s.sport_id == sport_id) {
+                    s.show_round = show;
+                } else if show.is_some() {
+                    cfg.sports.push(SportConfig { sport_id, show_round: show, ..Default::default() });
+                }
+            }
             // Per-league team-name display style: Some overrides the league
             // default (City/Team name/Abbreviation), None reverts to it. Upsert
             // by sport_id like SetLeagueDwell so a name-style edit on a league
@@ -1208,6 +1217,7 @@ mod tests {
                 championship_option_ids: Vec::new(),
                 dwell_secs: Some(30),
                 leaderboard_rows: None,
+                show_round: None,
                 spoiler: true,
                 spoiler_team_ids: vec!["nhl-tor".into()],
                 name_style: None,

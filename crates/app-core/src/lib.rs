@@ -134,6 +134,8 @@ pub struct UiSportConfig {
     pub dwell_secs: Option<u32>,
     /// Leaderboard depth for golf/F1 (4 = static top-4 .. 20 = full field).
     pub leaderboard_rows: Option<u32>,
+    /// Golf's round indicator; None = the default, which is shown.
+    pub show_round: Option<bool>,
     /// Per-league team-name display style; None = the league default
     /// (`default_name_style`). Location = city/college/country, Name = mascot,
     /// Abbrev = abbreviation.
@@ -679,6 +681,12 @@ impl ScoreboardClient {
         let _ = self.tx.send(Out::Command(board_id, Command::SetLeagueRows { sport_id, rows }));
     }
 
+    /// Golf's round indicator ("R3") on the panel and the card; None reverts to
+    /// the default, which is shown.
+    pub fn set_league_show_round(&self, board_id: String, sport_id: String, show: Option<bool>) {
+        let _ = self.tx.send(Out::Command(board_id, Command::SetLeagueShowRound { sport_id, show }));
+    }
+
     /// Per-league team-name display style (Location/Name/Abbrev); None reverts
     /// to the league default (`default_name_style`). Only meaningful for the
     /// styles a league offers via `name_style_options`.
@@ -1030,6 +1038,7 @@ fn to_ui_configs(sports: Vec<PSportConfig>) -> Vec<UiSportConfig> {
             championship_option_ids: s.championship_option_ids,
             dwell_secs: s.dwell_secs,
             leaderboard_rows: s.leaderboard_rows,
+            show_round: s.show_round,
             name_style: s.name_style.map(UiNameStyle::from),
             spoiler: s.spoiler,
             spoiler_team_ids: s.spoiler_team_ids,
