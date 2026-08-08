@@ -6706,11 +6706,38 @@ mod tests {
     #[test]
     fn league_names_are_unique_within_their_family() {
         let mut seen: std::collections::HashSet<(&str, &str)> = std::collections::HashSet::new();
+        let mut ranks: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for (id, name, category, rank) in crate::espn::LEAGUE_IDENTITY {
             assert!(!name.is_empty(), "{id} has no name");
             assert!(!category.is_empty(), "{id} has no family");
             assert!(*rank >= 1, "{id}: ranks start at 1 so 0 can mean 'old server'");
             assert!(seen.insert((category, name)), "{id}: {name:?} is listed twice under {category:?}");
+            // Ranks order leagues within a sport, so a tie would leave two rows
+            // in an order that depends on the name and nothing else.
+            assert!(ranks.insert(*rank), "{id}: rank {rank} is used twice");
+        }
+    }
+
+    /// A sport's sections must not interleave: every league in one family has to
+    /// rank before every league in the next, or the app — which ranks a section
+    /// by its best-ranked league — would put a league under the wrong heading's
+    /// worth of ordering.
+    #[test]
+    fn each_familys_ranks_form_one_contiguous_block() {
+        let mut order: Vec<(&str, u32)> = crate::espn::LEAGUE_IDENTITY
+            .iter()
+            .map(|(_, _, category, rank)| (*category, *rank))
+            .collect();
+        order.sort_by_key(|(_, rank)| *rank);
+        let mut seen_families: Vec<&str> = Vec::new();
+        for (family, rank) in order {
+            if seen_families.last() != Some(&family) {
+                assert!(
+                    !seen_families.contains(&family),
+                    "{family} reappears at rank {rank} after another family — its ranks are not contiguous"
+                );
+                seen_families.push(family);
+            }
         }
     }
 

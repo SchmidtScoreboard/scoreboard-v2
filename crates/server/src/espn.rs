@@ -49,32 +49,41 @@ struct League {
 /// Olympic" and two share "NCAA": unique within a section, which is the only
 /// place they are ever listed together.
 ///
+/// The rank orders leagues WITHIN a sport as well as the sports themselves —
+/// the app sorts on it before falling back to the name, and ranks a section by
+/// its best-ranked league. Alphabetical order alone put "Men's Olympic" above
+/// "NHL" in Hockey, which reads like a bug: a tournament that runs for two
+/// weeks every four years should not outrank the league that runs all winter.
+/// So the everyday league leads each sport, then the other professional ones,
+/// then college, then the Olympics.
+///
 /// Ranks start at 1. Zero is what serde hands an old server's catalog, and the
-/// app sorts that last rather than first.
+/// app sorts that last rather than first. Gaps are deliberate — a fork can slot
+/// a league in without renumbering.
 pub(crate) const LEAGUE_IDENTITY: &[(&str, &str, &str, u32)] = &[
-    ("nhl", "NHL", "Hockey", 1),
-    ("olyhm", "Men's Olympic", "Hockey", 1),
-    ("olyhw", "Women's Olympic", "Hockey", 1),
-    ("nba", "NBA", "Basketball", 2),
-    ("wnba", "WNBA", "Basketball", 2),
-    ("cbb", "NCAAM", "Basketball", 2),
-    ("wcbb", "NCAAW", "Basketball", 2),
-    ("olybm", "Men's Olympic", "Basketball", 2),
-    ("olybw", "Women's Olympic", "Basketball", 2),
-    ("mlb", "MLB", "Baseball", 3),
-    ("cbase", "NCAA", "Baseball", 3),
-    ("nfl", "NFL", "Football", 4),
-    ("cfb", "NCAA", "Football", 4),
-    ("mls", "MLS", "Soccer", 5),
-    ("epl", "Premier League", "Soccer", 5),
-    ("wc", "Men's World Cup", "Soccer", 5),
-    ("wwc", "Women's World Cup", "Soccer", 5),
-    ("ucl", "UEFA Champions League", "Soccer", 5),
-    ("olysm", "Men's Olympic", "Soccer", 5),
-    ("olysw", "Women's Olympic", "Soccer", 5),
-    ("pga", "PGA Tour", "Golf", 6),
-    ("lpga", "LPGA Tour", "Golf", 6),
-    ("f1", "Formula 1", "Motorsport", 7),
+    ("nhl", "NHL", "Hockey", 10),
+    ("olyhm", "Men's Olympic", "Hockey", 15),
+    ("olyhw", "Women's Olympic", "Hockey", 16),
+    ("nba", "NBA", "Basketball", 20),
+    ("wnba", "WNBA", "Basketball", 21),
+    ("cbb", "NCAAM", "Basketball", 22),
+    ("wcbb", "NCAAW", "Basketball", 23),
+    ("olybm", "Men's Olympic", "Basketball", 25),
+    ("olybw", "Women's Olympic", "Basketball", 26),
+    ("mlb", "MLB", "Baseball", 30),
+    ("cbase", "NCAA", "Baseball", 31),
+    ("nfl", "NFL", "Football", 40),
+    ("cfb", "NCAA", "Football", 41),
+    ("mls", "MLS", "Soccer", 50),
+    ("epl", "Premier League", "Soccer", 51),
+    ("ucl", "UEFA Champions League", "Soccer", 52),
+    ("wc", "Men's World Cup", "Soccer", 55),
+    ("wwc", "Women's World Cup", "Soccer", 56),
+    ("olysm", "Men's Olympic", "Soccer", 57),
+    ("olysw", "Women's Olympic", "Soccer", 58),
+    ("pga", "PGA Tour", "Golf", 60),
+    ("lpga", "LPGA Tour", "Golf", 61),
+    ("f1", "Formula 1", "Motorsport", 70),
 ];
 
 /// `(name, family, family rank)` for a league, or `None` for one this binary
