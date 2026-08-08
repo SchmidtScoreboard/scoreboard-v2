@@ -98,6 +98,12 @@ pub struct UiSport {
     pub championship_options: Vec<UiChampOption>,
     /// The independently selectable rounds — what the app should render.
     pub championship_rounds: Vec<UiChampOption>,
+    /// Sport family section this league is listed under ("Hockey"). A STRING,
+    /// never an enum — see `UiBoardConfig::off_mode`. Empty from a server too
+    /// old to declare one.
+    pub category: String,
+    /// Section sort rank, 1-based. Zero means unranked and sorts last.
+    pub category_rank: u32,
 }
 /// How a league renders team names on the board (protocol `NameStyle`).
 /// Location = city/college/country, Name = mascot/team name, Abbrev = the
@@ -904,6 +910,8 @@ fn to_ui_sports(cat: Catalog) -> Vec<UiSport> {
                 .into_iter()
                 .map(|c| UiChampOption { id: c.id, label: c.label })
                 .collect(),
+            category: s.category,
+            category_rank: s.category_rank,
         })
         .collect()
 }

@@ -3367,18 +3367,65 @@ pub(crate) fn championship_rounds_for(sport_id: &str) -> Vec<ChampionshipOption>
             ("playoffs", "Other postseason"),
             ("all", "Every game"),
         ],
+        // NOT "Conference tournaments": those are regular season to ESPN and
+        // never get a tier at all. What "playoffs" actually catches here is the
+        // rest of the postseason field — the NIT, the WBIT, the Crown.
         "cbb" | "wcbb" => &[
             ("tournament", "March Madness"),
-            ("playoffs", "Conference tournaments"),
+            ("playoffs", "NIT & other postseason"),
             ("all", "Every game"),
         ],
         "mls" => &[("cup", "MLS Cup"), ("playoffs", "Earlier playoff rounds"), ("all", "Every match")],
         "wc" => &[
             ("final", "Final"),
+            ("third", "Third-place match"),
             ("semi", "Semifinals"),
             ("quarter", "Quarterfinals"),
             ("knockout", "Round of 16"),
             ("all", "Every match"),
+        ],
+        "wwc" => &[
+            ("final", "Final"),
+            ("third", "Third-place match"),
+            ("semi", "Semifinals"),
+            ("quarter", "Quarterfinals"),
+            ("knockout", "Round of 16"),
+            ("all", "Every match"),
+        ],
+        // The Champions League has no third-place match; its "knockout" also
+        // covers the knockout-round playoffs that feed the round of 16.
+        "ucl" => &[
+            ("final", "Final"),
+            ("semi", "Semifinals"),
+            ("quarter", "Quarterfinals"),
+            ("knockout", "Knockout rounds"),
+            ("all", "Every match"),
+        ],
+        // The Olympics award medals rather than lifting a trophy, and the medal
+        // games are exactly what "big games" means for them. This replaces a
+        // "Postseason" checkbox that could never match: ESPN files every
+        // Olympic game, gold medal game included, as regular season.
+        "olyhm" | "olyhw" | "olybm" | "olybw" => &[
+            ("gold", "Gold medal game"),
+            ("bronze", "Bronze medal game"),
+            ("semi", "Semifinals"),
+            ("quarter", "Quarterfinals"),
+            ("all", "Every game"),
+        ],
+        "olysm" | "olysw" => &[
+            ("gold", "Gold medal match"),
+            ("bronze", "Bronze medal match"),
+            ("semi", "Semifinals"),
+            ("quarter", "Quarterfinals"),
+            ("all", "Every match"),
+        ],
+        // Regionals, super regionals, the College World Series and its
+        // championship series are four different ESPN season types; "playoffs"
+        // is the road to Omaha and "cws" is Omaha itself.
+        "cbase" => &[
+            ("cws", "College World Series"),
+            ("playoffs", "Regionals & supers"),
+            ("all", "Every game"),
         ],
         "pga" | "lpga" => &[("major", "Majors"), ("all", "All events")],
         // F1 subscribes to session kinds, which never nested in the first place.
@@ -3388,9 +3435,12 @@ pub(crate) fn championship_rounds_for(sport_id: &str) -> Vec<ChampionshipOption>
             ("sprint", "Sprints"),
             ("sprint-quali", "Sprint qualifying"),
         ],
-        // Leagues with no championship tiers of their own, including the nine
-        // seasonal ones — the generic classifier only ever tags "playoffs".
+        // The Premier League has no postseason at all: eng.1 has exactly one
+        // season type, so nothing here can ever be tagged and the blanket is
+        // the only honest subscription. A lone option renders as a toggle.
         "epl" => &[("all", "Every match")],
+        // A fork's league, about which we know only that the generic
+        // postseason gate is the one tier the classifier could tag.
         _ => &[("playoffs", "Postseason"), ("all", "Every game")],
     };
     opts.iter().map(|(id, label)| ChampionshipOption { id: (*id).into(), label: (*label).into() }).collect()
@@ -3449,6 +3499,20 @@ pub(crate) fn championship_options_for(sport_id: &str) -> Vec<ChampionshipOption
         ],
         // EPL has no playoffs, so the only league-wide subscription is all of it.
         "epl" => &[("none", "Only selected teams"), ("all", "Every match")],
+        // The seasonal tournaments' real subscriptions are medal games and
+        // knockout rounds, which this single-select ladder cannot express — an
+        // app old enough to be reading it predates those ids entirely. Offer it
+        // the two rungs it can honour rather than a middle tier that would
+        // expand to something it never showed the user.
+        "olyhm" | "olyhw" | "olybm" | "olybw" | "olysm" | "olysw" | "wwc" | "ucl" => {
+            &[("none", "Only selected teams"), ("all", "Every match")]
+        }
+        "cbase" => &[
+            ("none", "Only selected teams"),
+            ("cws", "Selected + CWS"),
+            ("playoffs", "Selected + postseason"),
+            ("all", "Every match"),
+        ],
         // The league IS the World Cup, so "the Final" needs no further naming;
         // the tiers nest downward from it (semis pull the final along, etc.).
         "wc" => &[
@@ -3479,14 +3543,23 @@ pub(crate) fn championship_options_for(sport_id: &str) -> Vec<ChampionshipOption
 /// The leaderboard "leagues" (PGA / LPGA / F1) have no teams — they're
 /// subscribed via their event-kind options above.
 pub(crate) fn leaderboard_sports() -> Vec<SportDescriptor> {
-    let sport = |id: &str, name: &str| SportDescriptor {
-        id: id.into(),
-        name: name.into(),
-        teams: vec![],
-        championship_options: Vec::new(),
-        championship_rounds: Vec::new(),
+    // Name and family come from LEAGUE_IDENTITY rather than being repeated
+    // here, so these three can't drift from the leagues fetched off ESPN.
+    // `with_binary_owned` stamps them again anyway; this just keeps a catalog
+    // meaningful before it reaches that step.
+    let sport = |id: &str| {
+        let (name, category, rank) = espn::league_identity(id).unwrap_or((id, "", 0));
+        SportDescriptor {
+            id: id.into(),
+            name: name.into(),
+            teams: vec![],
+            championship_options: Vec::new(),
+            championship_rounds: Vec::new(),
+            category: category.into(),
+            category_rank: rank,
+        }
     };
-    vec![sport("pga", "PGA Tour"), sport("lpga", "LPGA Tour"), sport("f1", "Formula 1")]
+    vec![sport("pga"), sport("lpga"), sport("f1")]
 }
 
 /// Where the last-good live catalog is cached (alongside the SQLite DB, so it
@@ -3523,6 +3596,16 @@ fn with_binary_owned(mut c: Catalog) -> Catalog {
     for s in c.sports.iter_mut() {
         s.championship_options = championship_options_for(&s.id);
         s.championship_rounds = championship_rounds_for(&s.id);
+        // Display name and sport family belong here for the same reason the
+        // lists do: a cached catalog written before a rename would otherwise
+        // keep serving the old names, and an empty family would leave the app
+        // with nothing to group by. A league this binary doesn't know keeps
+        // whatever the catalog carried.
+        if let Some((name, category, rank)) = espn::league_identity(&s.id) {
+            s.name = name.into();
+            s.category = category.into();
+            s.category_rank = rank;
+        }
     }
     c
 }
@@ -3547,8 +3630,13 @@ fn mock_catalog() -> Catalog {
         id: id.into(),
         name: name.into(),
         teams,
+        // Empty for the same reason as the lists: `with_binary_owned` is the
+        // single owner, and filling it here would hide a missing assembly step
+        // in the tests written to catch one.
         championship_options: Vec::new(),
         championship_rounds: Vec::new(),
+        category: String::new(),
+        category_rank: 0,
     };
     Catalog {
         // Empty, like every other construction site — `with_off_modes` is the
@@ -5524,7 +5612,6 @@ mod tests {
         }
     }
 
-    #[test]
     /// The headline requirement: the toggle swaps the GAMES and nothing else.
     #[test]
     fn demo_board_keeps_every_other_setting() {
@@ -5762,7 +5849,10 @@ mod tests {
     fn championship_labels_read_as_additions_not_a_master_switch() {
         // Trailing entry: an unknown sport falls through to the generic set,
         // which has to read the same way.
-        for sport in ["nhl", "nba", "wnba", "mlb", "nfl", "cfb", "cbb", "wcbb", "mls", "epl", "wc", "khl"] {
+        // Trailing "khl" is deliberately unknown: a fork's league falls through
+        // to the generic set, which has to read the same way.
+        for sport in ["nhl", "nba", "wnba", "mlb", "nfl", "cfb", "cbb", "wcbb", "mls", "epl", "wc", "wwc",
+                      "ucl", "cbase", "olyhm", "olyhw", "olybm", "olybw", "olysm", "olysw", "khl"] {
             let opts = championship_options_for(sport);
             let none = opts.iter().find(|o| o.id == "none").expect("every league can opt out");
             assert_eq!(none.label, "Only selected teams", "{sport}: opting out still shows your teams");
@@ -5797,7 +5887,8 @@ mod tests {
 
         // Menu rows are one line on a phone; keep every label short enough to
         // land there instead of truncating to "Selected + March Madn…".
-        for sport in ["nhl", "nba", "wnba", "mlb", "nfl", "cfb", "cbb", "wcbb", "mls", "epl", "wc", "pga", "lpga", "f1"] {
+        for sport in ["nhl", "nba", "wnba", "mlb", "nfl", "cfb", "cbb", "wcbb", "mls", "epl", "wc", "wwc",
+                      "ucl", "cbase", "olyhm", "olysw", "pga", "lpga", "f1"] {
             for o in championship_options_for(sport) {
                 assert!(o.label.chars().count() <= 26, "{sport}/{}: {:?} is too long for a menu row", o.id, o.label);
             }
@@ -6448,7 +6539,11 @@ mod tests {
     /// or the checkbox is a control that does nothing.
     #[test]
     fn every_round_is_reachable_or_is_the_blanket() {
-        for sport in ["nhl", "nba", "wnba", "mlb", "nfl", "cfb", "cbb", "wcbb", "mls", "wc", "pga", "f1", "olyhm"] {
+        // EVERY league this binary knows, not a hand-kept subset — the seasonal
+        // ones were the leagues whose options were broken, and a subset is how
+        // that went unnoticed. (Reachability itself is proven against real feed
+        // strings by `every_offered_round_is_proven_by_a_real_feed_string`.)
+        for (sport, ..) in crate::espn::LEAGUE_IDENTITY {
             let rounds = championship_rounds_for(sport);
             assert!(!rounds.is_empty(), "{sport} offers nothing");
             for r in &rounds {
@@ -6457,7 +6552,7 @@ mod tests {
                 // each row is one round rather than a cumulative ladder.
                 assert!(!r.label.contains("Selected"), "{sport}/{}: {:?}", r.id, r.label);
             }
-            assert!(rounds.iter().any(|r| r.id == "all") || sport == "f1", "{sport} needs a blanket");
+            assert!(rounds.iter().any(|r| r.id == "all") || *sport == "f1", "{sport} needs a blanket");
         }
     }
 
@@ -6561,6 +6656,61 @@ mod tests {
         );
         for m in offmode::off_modes() {
             assert!(served.off_modes.iter().any(|d| d.id == m.id), "missing {}", m.id);
+        }
+    }
+
+    /// The same trap, for the two fields the league reorganisation added.
+    ///
+    /// The blob below is shaped like a REAL cache file written by an older
+    /// binary: no `category`, no `category_rank`, and a `name` from before the
+    /// renames. On Railway the cache is a normal path, not an edge case — an
+    /// ESPN outage at startup serves it verbatim — so a rename that isn't
+    /// re-stamped here keeps shipping last month's names, and an unstamped
+    /// category leaves the app with nothing to group by.
+    #[test]
+    fn a_cached_catalog_is_restamped_with_this_binarys_names_and_families() {
+        let cached: Catalog = serde_json::from_str(
+            r#"{"sports":[
+                 {"id":"cbb","name":"Men's College Basketball","teams":[],"championship_options":[]},
+                 {"id":"olyhm","name":"Olympic Hockey (M)","teams":[],"championship_options":[]},
+                 {"id":"khl","name":"A Fork's League","teams":[],"championship_options":[]}
+               ]}"#,
+        )
+        .unwrap();
+        assert_eq!(cached.sports[0].category, "", "precondition: the cache carries no family");
+        assert_eq!(cached.sports[0].category_rank, 0);
+
+        let served = with_binary_owned(cached);
+        let by_id = |id: &str| served.sports.iter().find(|s| s.id == id).expect(id).clone();
+
+        let cbb = by_id("cbb");
+        assert_eq!(cbb.name, "NCAAM", "the stale cached name must not survive");
+        assert_eq!(cbb.category, "Basketball");
+        assert!(cbb.category_rank >= 1, "real ranks are 1-based so serde's 0 can mean 'unranked'");
+
+        let oly = by_id("olyhm");
+        assert_eq!(oly.name, "Men's Olympic");
+        assert_eq!(oly.category, "Hockey");
+
+        // A league this binary has never heard of keeps its name and stays
+        // unranked rather than being dropped or renamed to its id.
+        let fork = by_id("khl");
+        assert_eq!(fork.name, "A Fork's League");
+        assert_eq!(fork.category, "");
+        assert_eq!(fork.category_rank, 0);
+    }
+
+    /// Two leagues may share a display name (three share "Men's Olympic"), but
+    /// never two in the same section — that is the only place they are listed
+    /// together, and the app has nothing else to tell them apart by.
+    #[test]
+    fn league_names_are_unique_within_their_family() {
+        let mut seen: std::collections::HashSet<(&str, &str)> = std::collections::HashSet::new();
+        for (id, name, category, rank) in crate::espn::LEAGUE_IDENTITY {
+            assert!(!name.is_empty(), "{id} has no name");
+            assert!(!category.is_empty(), "{id} has no family");
+            assert!(*rank >= 1, "{id}: ranks start at 1 so 0 can mean 'old server'");
+            assert!(seen.insert((category, name)), "{id}: {name:?} is listed twice under {category:?}");
         }
     }
 

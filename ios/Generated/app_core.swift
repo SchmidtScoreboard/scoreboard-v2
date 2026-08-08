@@ -2523,6 +2523,16 @@ public struct UiSport {
      * The independently selectable rounds — what the app should render.
      */
     public var championshipRounds: [UiChampOption]
+    /**
+     * Sport family section this league is listed under ("Hockey"). A STRING,
+     * never an enum — see `UiBoardConfig::off_mode`. Empty from a server too
+     * old to declare one.
+     */
+    public var category: String
+    /**
+     * Section sort rank, 1-based. Zero means unranked and sorts last.
+     */
+    public var categoryRank: UInt32
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -2532,13 +2542,23 @@ public struct UiSport {
                     */ championshipOptions: [UiChampOption],
                 /**
                     * The independently selectable rounds — what the app should render.
-                    */ championshipRounds: [UiChampOption])
+                    */ championshipRounds: [UiChampOption],
+                /**
+                    * Sport family section this league is listed under ("Hockey"). A STRING,
+                    * never an enum — see `UiBoardConfig::off_mode`. Empty from a server too
+                    * old to declare one.
+                    */ category: String,
+                /**
+                    * Section sort rank, 1-based. Zero means unranked and sorts last.
+                    */ categoryRank: UInt32)
     {
         self.id = id
         self.name = name
         self.teams = teams
         self.championshipOptions = championshipOptions
         self.championshipRounds = championshipRounds
+        self.category = category
+        self.categoryRank = categoryRank
     }
 }
 
@@ -2559,6 +2579,12 @@ extension UiSport: Equatable, Hashable {
         if lhs.championshipRounds != rhs.championshipRounds {
             return false
         }
+        if lhs.category != rhs.category {
+            return false
+        }
+        if lhs.categoryRank != rhs.categoryRank {
+            return false
+        }
         return true
     }
 
@@ -2568,6 +2594,8 @@ extension UiSport: Equatable, Hashable {
         hasher.combine(teams)
         hasher.combine(championshipOptions)
         hasher.combine(championshipRounds)
+        hasher.combine(category)
+        hasher.combine(categoryRank)
     }
 }
 
@@ -2582,7 +2610,9 @@ public struct FfiConverterTypeUiSport: FfiConverterRustBuffer {
                 name: FfiConverterString.read(from: &buf),
                 teams: FfiConverterSequenceTypeUiTeam.read(from: &buf),
                 championshipOptions: FfiConverterSequenceTypeUiChampOption.read(from: &buf),
-                championshipRounds: FfiConverterSequenceTypeUiChampOption.read(from: &buf)
+                championshipRounds: FfiConverterSequenceTypeUiChampOption.read(from: &buf),
+                category: FfiConverterString.read(from: &buf),
+                categoryRank: FfiConverterUInt32.read(from: &buf)
             )
     }
 
@@ -2592,6 +2622,8 @@ public struct FfiConverterTypeUiSport: FfiConverterRustBuffer {
         FfiConverterSequenceTypeUiTeam.write(value.teams, into: &buf)
         FfiConverterSequenceTypeUiChampOption.write(value.championshipOptions, into: &buf)
         FfiConverterSequenceTypeUiChampOption.write(value.championshipRounds, into: &buf)
+        FfiConverterString.write(value.category, into: &buf)
+        FfiConverterUInt32.write(value.categoryRank, into: &buf)
     }
 }
 

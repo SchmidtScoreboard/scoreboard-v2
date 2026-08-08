@@ -30,8 +30,64 @@ struct League {
     sport_id: &'static str,
     sport: &'static str,
     league: &'static str,
-    name: &'static str,        // catalog display name
     games_query: &'static str, // appended to the scoreboard URL (e.g. "?groups=50")
+}
+
+/// Display name and sport family for every league this binary knows:
+/// `(sport_id, name, family, family rank)`.
+///
+/// The single owner of both strings. `League` above carries only ESPN routing —
+/// its `sport` field ("hockey", "basketball") is a URL path segment, not a
+/// label — and `with_binary_owned` stamps the name and family from here onto
+/// whichever catalog we ended up serving. That matters because the disk cache
+/// is a normal path, not an edge case: a rename would otherwise keep shipping
+/// last month's league names for as long as ESPN stayed unreachable.
+///
+/// The names deliberately DON'T repeat their family, because the app renders
+/// them grouped under it — "Men's Olympic" under Hockey, not "Olympic Hockey
+/// (M)" under Hockey. That also means three leagues share the name "Men's
+/// Olympic" and two share "NCAA": unique within a section, which is the only
+/// place they are ever listed together.
+///
+/// Ranks start at 1. Zero is what serde hands an old server's catalog, and the
+/// app sorts that last rather than first.
+pub(crate) const LEAGUE_IDENTITY: &[(&str, &str, &str, u32)] = &[
+    ("nhl", "NHL", "Hockey", 1),
+    ("olyhm", "Men's Olympic", "Hockey", 1),
+    ("olyhw", "Women's Olympic", "Hockey", 1),
+    ("nba", "NBA", "Basketball", 2),
+    ("wnba", "WNBA", "Basketball", 2),
+    ("cbb", "NCAAM", "Basketball", 2),
+    ("wcbb", "NCAAW", "Basketball", 2),
+    ("olybm", "Men's Olympic", "Basketball", 2),
+    ("olybw", "Women's Olympic", "Basketball", 2),
+    ("mlb", "MLB", "Baseball", 3),
+    ("cbase", "NCAA", "Baseball", 3),
+    ("nfl", "NFL", "Football", 4),
+    ("cfb", "NCAA", "Football", 4),
+    ("mls", "MLS", "Soccer", 5),
+    ("epl", "Premier League", "Soccer", 5),
+    ("wc", "Men's World Cup", "Soccer", 5),
+    ("wwc", "Women's World Cup", "Soccer", 5),
+    ("ucl", "UEFA Champions League", "Soccer", 5),
+    ("olysm", "Men's Olympic", "Soccer", 5),
+    ("olysw", "Women's Olympic", "Soccer", 5),
+    ("pga", "PGA Tour", "Golf", 6),
+    ("lpga", "LPGA Tour", "Golf", 6),
+    ("f1", "Formula 1", "Motorsport", 7),
+];
+
+/// `(name, family, family rank)` for a league, or `None` for one this binary
+/// has never heard of (a fork's). Unknown leagues keep whatever name the
+/// catalog carried and get no family — the app buckets those on their own
+/// rather than dropping them.
+pub(crate) fn league_identity(sport_id: &str) -> Option<(&'static str, &'static str, u32)> {
+    LEAGUE_IDENTITY.iter().find(|(id, ..)| *id == sport_id).map(|(_, n, c, r)| (*n, *c, *r))
+}
+
+/// The league display name, falling back to the id for a fork's league.
+pub(crate) fn league_name(sport_id: &'static str) -> &'static str {
+    league_identity(sport_id).map(|(n, _, _)| n).unwrap_or(sport_id)
 }
 
 pub struct EspnSource {
@@ -59,14 +115,14 @@ impl EspnSource {
                 .build()
                 .expect("reqwest client"),
             leagues: vec![
-                League { sport_id: "nhl", sport: "hockey", league: "nhl", name: "NHL", games_query: "" },
-                League { sport_id: "nba", sport: "basketball", league: "nba", name: "NBA", games_query: "" },
-                League { sport_id: "mlb", sport: "baseball", league: "mlb", name: "MLB", games_query: "" },
-                League { sport_id: "nfl", sport: "football", league: "nfl", name: "NFL", games_query: "" },
-                League { sport_id: "cfb", sport: "football", league: "college-football", name: "College Football", games_query: "" },
-                League { sport_id: "cbb", sport: "basketball", league: "mens-college-basketball", name: "Men's College Basketball", games_query: "?groups=50" },
-                League { sport_id: "wcbb", sport: "basketball", league: "womens-college-basketball", name: "Women's College Basketball", games_query: "?groups=50" },
-                League { sport_id: "wnba", sport: "basketball", league: "wnba", name: "WNBA", games_query: "" },
+                League { sport_id: "nhl", sport: "hockey", league: "nhl", games_query: "" },
+                League { sport_id: "nba", sport: "basketball", league: "nba", games_query: "" },
+                League { sport_id: "mlb", sport: "baseball", league: "mlb", games_query: "" },
+                League { sport_id: "nfl", sport: "football", league: "nfl", games_query: "" },
+                League { sport_id: "cfb", sport: "football", league: "college-football", games_query: "" },
+                League { sport_id: "cbb", sport: "basketball", league: "mens-college-basketball", games_query: "?groups=50" },
+                League { sport_id: "wcbb", sport: "basketball", league: "womens-college-basketball", games_query: "?groups=50" },
+                League { sport_id: "wnba", sport: "basketball", league: "wnba", games_query: "" },
                 // Tournaments that only exist some of the time. They cost one
                 // request each per poll and sit dormant out of season — the
                 // ingestion filter drops anything more than 24h out, so an
@@ -74,20 +130,20 @@ impl EspnSource {
                 //
                 // Every slug here was verified against ESPN before being added;
                 // a wrong one is a warning line every poll forever.
-                League { sport_id: "olyhm", sport: "hockey", league: "olympics-mens-ice-hockey", name: "Olympic Hockey (M)", games_query: "" },
-                League { sport_id: "olyhw", sport: "hockey", league: "olympics-womens-ice-hockey", name: "Olympic Hockey (W)", games_query: "" },
-                League { sport_id: "olybm", sport: "basketball", league: "mens-olympics-basketball", name: "Olympic Basketball (M)", games_query: "" },
-                League { sport_id: "olybw", sport: "basketball", league: "womens-olympics-basketball", name: "Olympic Basketball (W)", games_query: "" },
-                League { sport_id: "olysm", sport: "soccer", league: "fifa.olympics", name: "Olympic Soccer (M)", games_query: "" },
-                League { sport_id: "olysw", sport: "soccer", league: "fifa.w.olympics", name: "Olympic Soccer (W)", games_query: "" },
-                League { sport_id: "wwc", sport: "soccer", league: "fifa.wwc", name: "Women's World Cup", games_query: "" },
-                League { sport_id: "ucl", sport: "soccer", league: "uefa.champions", name: "UEFA Champions League", games_query: "" },
-                League { sport_id: "cbase", sport: "baseball", league: "college-baseball", name: "NCAA Baseball", games_query: "" },
-                League { sport_id: "mls", sport: "soccer", league: "usa.1", name: "MLS", games_query: "" },
-                League { sport_id: "epl", sport: "soccer", league: "eng.1", name: "Premier League", games_query: "" },
+                League { sport_id: "olyhm", sport: "hockey", league: "olympics-mens-ice-hockey", games_query: "" },
+                League { sport_id: "olyhw", sport: "hockey", league: "olympics-womens-ice-hockey", games_query: "" },
+                League { sport_id: "olybm", sport: "basketball", league: "mens-olympics-basketball", games_query: "" },
+                League { sport_id: "olybw", sport: "basketball", league: "womens-olympics-basketball", games_query: "" },
+                League { sport_id: "olysm", sport: "soccer", league: "fifa.olympics", games_query: "" },
+                League { sport_id: "olysw", sport: "soccer", league: "fifa.w.olympics", games_query: "" },
+                League { sport_id: "wwc", sport: "soccer", league: "fifa.wwc", games_query: "" },
+                League { sport_id: "ucl", sport: "soccer", league: "uefa.champions", games_query: "" },
+                League { sport_id: "cbase", sport: "baseball", league: "college-baseball", games_query: "" },
+                League { sport_id: "mls", sport: "soccer", league: "usa.1", games_query: "" },
+                League { sport_id: "epl", sport: "soccer", league: "eng.1", games_query: "" },
                 // The World Cup is its own ESPN "league" of national teams;
                 // favoriting a country works exactly like favoriting a club.
-                League { sport_id: "wc", sport: "soccer", league: "fifa.world", name: "World Cup", games_query: "" },
+                League { sport_id: "wc", sport: "soccer", league: "fifa.world", games_query: "" },
             ],
         }
     }
@@ -143,13 +199,13 @@ pub(crate) const FEEDS: &[(&str, &str)] = &[
     ("nba", "NBA"),
     ("mlb", "MLB"),
     ("nfl", "NFL"),
-    ("cfb", "College Football"),
-    ("cbb", "Men's College Basketball"),
-    ("wcbb", "Women's College Basketball"),
+    ("cfb", "NCAA Football"),
+    ("cbb", "NCAAM"),
+    ("wcbb", "NCAAW"),
     ("wnba", "WNBA"),
     ("mls", "MLS"),
     ("epl", "Premier League"),
-    ("wc", "World Cup"),
+    ("wc", "Men's World Cup"),
     ("pga", "PGA Tour"),
     ("lpga", "LPGA"),
     ("f1", "Formula 1"),
@@ -297,13 +353,16 @@ impl SportsDataSource for EspnSource {
             tracing::info!("espn teams {}: {}", lg.league, teams.len());
             sports.push(SportDescriptor {
                 id: lg.sport_id.into(),
-                name: lg.name.into(),
+                // Left empty, like the lists below: `with_binary_owned` stamps
+                // the name and family from LEAGUE_IDENTITY at startup, so none
+                // of them can depend on whether the catalog came from here or
+                // from the disk cache.
+                name: String::new(),
                 teams,
-                // Left empty: `with_binary_owned` stamps both lists at startup,
-                // so their contents cannot depend on whether the catalog came
-                // from here or from the disk cache.
                 championship_options: Vec::new(),
                 championship_rounds: Vec::new(),
+                category: String::new(),
+                category_rank: 0,
             });
         }
         if sports.is_empty() {
@@ -372,7 +431,7 @@ impl EspnSource {
                     Vec::new()
                 }
             };
-            out.push((lg.sport_id, lg.name, teams));
+            out.push((lg.sport_id, league_name(lg.sport_id), teams));
         }
         out
     }
@@ -1798,12 +1857,20 @@ fn classify_champ(sport_id: &str, season: Option<&EventSeason>, headline: &str) 
     let h = headline.to_lowercase();
     let tag = |tier: &str, label: &str| Some(Champ { tier: tier.into(), label: label.into() });
 
+    let slug = season.map(|s| s.slug.as_str()).unwrap_or("");
+
     match sport_id {
         "nhl" => {
             if h.contains("stanley cup final") {
                 return tag("final", "Stanley Cup Final");
             }
-            if h.contains("conference final") {
+            // ESPN does not write "conference final" — the feed says "East
+            // Final - Game 3" / "West Final - Game 1". Matching only the formal
+            // name made this checkbox dead for four straight postseasons: every
+            // conference final fell through to the generic "playoffs" tier, so
+            // a user who asked for conference finals got nothing and a user who
+            // asked for earlier rounds got them anyway.
+            if h.contains("conference final") || h.contains("east final") || h.contains("west final") {
                 return tag("conf", "Conference Finals");
             }
         }
@@ -1817,29 +1884,57 @@ fn classify_champ(sport_id: &str, season: Option<&EventSeason>, headline: &str) 
                 return tag("final", "WNBA Finals");
             }
         }
+        // MLS never reports a postseason season type and never writes "MLS Cup"
+        // in a headline: the round is in the SLUG ("mls-cup",
+        // "eastern-conference-playoffs---semifinals"). Both of this league's
+        // checkboxes were therefore dead. Order matters — the conference finals
+        // are ".…playoffs---final", so the cup has to be settled first.
         "mls" => {
-            if h.contains("mls cup") {
+            if h.contains("mls cup") || slug.contains("mls-cup") {
                 return tag("cup", "MLS Cup");
             }
+            if slug.contains("playoffs") {
+                return tag("playoffs", "MLS Playoffs");
+            }
         }
-        // World Cup rounds arrive via the season slug ("round-of-16",
-        // "quarterfinals", …) rather than headlines. Group-stage games get no
-        // champ tag — the "Every match" option covers them separately.
-        "wc" => {
-            let slug = season.map(|s| s.slug.as_str()).unwrap_or("");
-            if slug.contains("semifinal") {
-                return tag("semi", "World Cup Semifinal");
+        // The soccer tournaments all put the round in the season slug rather
+        // than a headline, and they share one vocabulary.
+        "wc" | "wwc" | "ucl" | "olysm" | "olysw" => {
+            // Group stage / league phase gets no tag; "every match" covers it.
+            return soccer_round(slug).map(|(tier, label)| Champ { tier: tier.into(), label: label.into() });
+        }
+        // Olympic hockey and basketball report EVERY game as season type 2,
+        // "regular-season" — including the Gold Medal Game. The round exists
+        // only in the headline ("Milano Cortina 2026 Men's Hockey - Gold Medal
+        // Game"), which is why the generic "Postseason" checkbox these leagues
+        // used to offer could never match a single game.
+        "olyhm" | "olyhw" | "olybm" | "olybw" => {
+            if h.contains("gold medal") {
+                return tag("gold", "Gold Medal Game");
             }
-            if slug.contains("quarterfinal") {
-                return tag("quarter", "World Cup Quarterfinal");
+            if h.contains("bronze medal") {
+                return tag("bronze", "Bronze Medal Game");
             }
-            if slug.contains("third-place") || slug.contains("round-of") || slug.contains("knockout") {
-                return tag("knockout", "World Cup Knockout");
+            if h.contains("semifinal") {
+                return tag("semi", "Semifinal");
             }
-            if slug.contains("final") {
-                return tag("final", "World Cup Final");
+            if h.contains("quarterfinal") {
+                return tag("quarter", "Quarterfinal");
             }
-            return None; // group stage / unknown: never generic-postseason
+            return None; // preliminary round / qualifications
+        }
+        // College baseball's postseason runs across FOUR season types: regionals
+        // (3), super regionals (4), the College World Series (5) and the CWS
+        // championship series (6). Only type 3 passes the generic postseason
+        // gate, so "Postseason" used to mean "regionals" and silently dropped
+        // the College World Series itself.
+        "cbase" => {
+            if slug.contains("world-series") || slug.contains("championship-series") {
+                return tag("cws", "College World Series");
+            }
+            if slug.contains("regional") {
+                return tag("playoffs", "NCAA Regionals");
+            }
         }
         "mlb" => {
             if h.contains("world series") {
@@ -1850,6 +1945,14 @@ fn classify_champ(sport_id: &str, season: Option<&EventSeason>, headline: &str) 
             if h.contains("super bowl") {
                 return tag("sb", "Super Bowl");
             }
+            // ESPN files the Pro Bowl as season type 3, so the postseason
+            // fallback below would call an all-star exhibition a playoff game
+            // and put AFC vs NFC in front of anyone following "earlier playoff
+            // rounds". Untagged, it still reaches a board via "Every game",
+            // which is the honest subscription for a game that decides nothing.
+            if h.contains("pro bowl") {
+                return None;
+            }
         }
         "cfb" => {
             if h.contains("college football playoff") || h.contains("cfp") {
@@ -1859,8 +1962,23 @@ fn classify_champ(sport_id: &str, season: Option<&EventSeason>, headline: &str) 
                 return tag("bowl", "Bowl Game");
             }
         }
+        // ESPN writes the NCAA tournament as "Men's Basketball Championship -
+        // South Region - 1st Round" and (through 2025) "NCAA Women's
+        // Championship - Regional 1 in Spokane - 1st Round". Neither contains
+        // the word "tournament", so requiring it made March Madness — the
+        // single most likely thing anyone subscribes to — unmatchable: 0 of 626
+        // events in 2026, and none in any season checked back to 2019.
+        //
+        // Both halves of the test are load-bearing:
+        //  * the postseason gate excludes the CONFERENCE tournaments, whose
+        //    headlines also say "Championship" ("Phillips 66 Big 12
+        //    Championship") but which ESPN files as regular season;
+        //  * the wording excludes the NIT, WBIT and "College Basketball Crown
+        //    Championship Game", which do share season type 3.
         "cbb" | "wcbb" => {
-            if h.contains("ncaa") && h.contains("tournament") {
+            let ncaa_tournament = h.contains("basketball championship")
+                || (h.contains("ncaa") && h.contains("championship"));
+            if postseason && ncaa_tournament {
                 return tag("tournament", "March Madness");
             }
         }
@@ -1868,6 +1986,41 @@ fn classify_champ(sport_id: &str, season: Option<&EventSeason>, headline: &str) 
     }
     if postseason {
         return tag("playoffs", "Playoffs");
+    }
+    None
+}
+
+/// The round a soccer tournament's season slug names, shared by the World Cup,
+/// the Women's World Cup, the Champions League and Olympic soccer.
+///
+/// Order is not stylistic: "quarterfinals" and "semifinals" both END in
+/// "final", so the specific rounds have to be settled before the Final is.
+fn soccer_round(slug: &str) -> Option<(&'static str, &'static str)> {
+    // Olympic soccer decides medals rather than a trophy.
+    if slug.contains("gold-medal") {
+        return Some(("gold", "Gold Medal Match"));
+    }
+    if slug.contains("bronze-medal") {
+        return Some(("bronze", "Bronze Medal Match"));
+    }
+    // ESPN spells this "3rd-place" (World Cup) and "3rd-place-match" (2022).
+    // The old code tested for "third-place" and matched neither, so the
+    // bronze-medal game of a World Cup went untagged.
+    if slug.contains("3rd-place") || slug.contains("third-place") {
+        return Some(("third", "Third-Place Match"));
+    }
+    if slug.contains("semifinal") {
+        return Some(("semi", "Semifinal"));
+    }
+    if slug.contains("quarterfinal") {
+        return Some(("quarter", "Quarterfinal"));
+    }
+    // "round-of-16" plus the Champions League's "knockout-round-playoffs".
+    if slug.contains("round-of") || slug.contains("knockout") {
+        return Some(("knockout", "Knockout Round"));
+    }
+    if slug.contains("final") {
+        return Some(("final", "Final"));
     }
     None
 }
@@ -2100,12 +2253,186 @@ mod champ_tests {
         assert_eq!(classify_champ("nhl", None, ""), None);
     }
 
+    /// VERBATIM strings from ESPN's live feeds, each with the tier it must
+    /// produce. `None` means "no tier — only the blanket option catches it".
+    ///
+    /// Everything here is copied out of a real response, not written by hand,
+    /// because hand-written fixtures are what let five checkboxes ship dead.
+    /// The NHL test below used to assert on "West Conference Finals - Game 5",
+    /// a headline ESPN has never sent; the real feed says "West Final - Game 1",
+    /// so the Conference Finals option matched nothing for four straight
+    /// postseasons while its test stayed green.
+    ///
+    /// (sport_id, season type, season slug, notes headline, expected tier)
+    const REAL_FEED_CASES: &[(&str, i64, &str, &str, Option<&str>)] = &[
+        // --- NHL: the feed names the conference by side, not by "conference".
+        ("nhl", 3, "post-season", "West Final - Game 1", Some("conf")),
+        ("nhl", 3, "post-season", "East Final - Game 3", Some("conf")),
+        ("nhl", 3, "post-season", "East 2nd Round - Game 5", Some("playoffs")),
+        ("nhl", 3, "post-season", "Stanley Cup Final - Game 3", Some("final")),
+        // --- The leagues that already worked, pinned so they keep working.
+        ("nba", 3, "post-season", "NBA Finals - Game 7", Some("final")),
+        ("nba", 3, "post-season", "West Finals - Game 1", Some("playoffs")),
+        ("nba", 2, "regular-season", "", None),
+        ("wnba", 3, "post-season", "WNBA Finals - Game 4", Some("final")),
+        ("wnba", 3, "post-season", "WNBA Semifinals - Game 2", Some("playoffs")),
+        ("mlb", 3, "post-season", "World Series - Game 5", Some("ws")),
+        ("mlb", 3, "post-season", "ALWC - Game 1", Some("playoffs")),
+        ("nfl", 3, "post-season", "Super Bowl LIX", Some("sb")),
+        ("nfl", 3, "post-season", "AFC Wild Card Playoffs", Some("playoffs")),
+        // Season type 3, but an exhibition — the one NFL type-3 event that is
+        // not a playoff game.
+        ("nfl", 3, "post-season", "Pro Bowl Games", None),
+        ("cfb", 3, "post-season", "College Football Playoff First Round Presented by Allstate", Some("playoff")),
+        ("cfb", 3, "post-season", "IS4S Salute to Veterans Bowl", Some("bowl")),
+        ("cfb", 3, "post-season", "FCS Championship - Semifinals", Some("playoffs")),
+        // Conference championship games are regular season to ESPN, so only the
+        // blanket option ever catches them.
+        ("cfb", 2, "regular-season", "Big Ten Championship", None),
+        // The Premier League has no postseason season type at all.
+        ("epl", 12654, "2024-25-english-premier-league", "", None),
+        // --- College basketball: the NCAA tournament never says "tournament",
+        // and three other type-3 events must NOT be mistaken for it.
+        ("cbb", 3, "post-season", "Men's Basketball Championship - South Region - 1st Round", Some("tournament")),
+        ("cbb", 3, "post-season", "Men's Basketball Championship - Final Four", Some("tournament")),
+        ("cbb", 3, "post-season", "Men's Basketball Championship - National Championship", Some("tournament")),
+        ("cbb", 3, "post-season", "NIT - 1st Round", Some("playoffs")),
+        ("cbb", 3, "post-season", "College Basketball Crown - 1st Round", Some("playoffs")),
+        // Says "Championship", is not the NCAA tournament.
+        ("cbb", 3, "post-season", "College Basketball Crown Championship Game", Some("playoffs")),
+        // Conference tournaments are REGULAR season and also say "Championship".
+        ("cbb", 2, "regular-season", "Phillips 66 Big 12 Championship - 1st Round", None),
+        ("cbb", 2, "regular-season", "T. Rowe Price ACC Tournament - 2nd Round", None),
+        ("cbb", 2, "regular-season", "MAAC Championship - Quarterfinal", None),
+        // Women's wording changed in 2026; both spellings must land.
+        ("wcbb", 3, "post-season", "NCAA Women's Championship - Regional 1 in Spokane - 1st Round", Some("tournament")),
+        ("wcbb", 3, "post-season", "NCAA Women's Basketball Championship - Final Four", Some("tournament")),
+        ("wcbb", 3, "post-season", "Women's NIT - Semifinal", Some("playoffs")),
+        ("wcbb", 3, "post-season", "WBIT - Quarterfinal", Some("playoffs")),
+        // --- MLS: no postseason season type, no "MLS Cup" headline. All slug.
+        ("mls", 13119, "mls-cup", "", Some("cup")),
+        ("mls", 13121, "eastern-conference-playoffs---final", "", Some("playoffs")),
+        ("mls", 13122, "western-conference-playoffs---semifinals", "", Some("playoffs")),
+        ("mls", 13133, "eastern-conference-playoffs---wild-card", "", Some("playoffs")),
+        ("mls", 13481, "2025-mls-regular-season", "", None),
+        // --- Men's World Cup: "3rd-place-match", which "third-place" missed.
+        ("wc", 10948, "final", "", Some("final")),
+        ("wc", 10949, "3rd-place-match", "", Some("third")),
+        ("wc", 10950, "semifinals", "", Some("semi")),
+        ("wc", 10951, "quarterfinals", "", Some("quarter")),
+        ("wc", 10952, "round-of-16", "", Some("knockout")),
+        ("wc", 10953, "group-stage", "", None),
+        // --- Women's World Cup: same vocabulary, "3rd-place" without "-match".
+        ("wwc", 10632, "final", "", Some("final")),
+        ("wwc", 10633, "3rd-place", "", Some("third")),
+        ("wwc", 10634, "semifinals", "", Some("semi")),
+        ("wwc", 10635, "quarterfinals", "", Some("quarter")),
+        ("wwc", 10636, "round-of-16", "", Some("knockout")),
+        ("wwc", 10637, "group-stage", "", None),
+        // --- Champions League: league phase untagged, two knockout spellings.
+        ("ucl", 12881, "final", "", Some("final")),
+        ("ucl", 12882, "semifinals", "", Some("semi")),
+        ("ucl", 12883, "quarterfinals", "", Some("quarter")),
+        ("ucl", 12884, "round-of-16", "", Some("knockout")),
+        ("ucl", 12886, "knockout-round-playoffs", "", Some("knockout")),
+        ("ucl", 12885, "league-phase", "", None),
+        // --- Olympic soccer: medals live in the slug.
+        ("olysm", 12488, "gold-medal-match", "", Some("gold")),
+        ("olysm", 12489, "bronze-medal-match", "", Some("bronze")),
+        ("olysm", 12490, "semifinals", "", Some("semi")),
+        ("olysm", 12491, "quarterfinals", "", Some("quarter")),
+        ("olysm", 12492, "group-stage", "", None),
+        ("olysw", 12483, "gold-medal-match", "", Some("gold")),
+        ("olysw", 12484, "bronze-medal-match", "", Some("bronze")),
+        ("olysw", 12485, "semifinals", "", Some("semi")),
+        ("olysw", 12486, "quarterfinals", "", Some("quarter")),
+        ("olysw", 12487, "group-stage", "", None),
+        // --- Olympic hockey / basketball: EVERY game is "regular-season", so
+        // the round is only ever in the headline.
+        ("olyhm", 2, "regular-season", "Milano Cortina 2026 Men's Hockey - Gold Medal Game", Some("gold")),
+        ("olyhm", 2, "regular-season", "Milano Cortina 2026 Men's Hockey - Bronze Medal Game", Some("bronze")),
+        ("olyhm", 2, "regular-season", "Milano Cortina 2026 Men's Hockey - Semifinal", Some("semi")),
+        ("olyhm", 2, "regular-season", "Milano Cortina 2026 Men's Hockey - Quarterfinal", Some("quarter")),
+        ("olyhm", 2, "regular-season", "Milano Cortina 2026 Men's Hockey - Preliminary Round - Group A", None),
+        ("olyhm", 2, "regular-season", "Milano Cortina 2026 Men's Hockey - Qualifications", None),
+        ("olyhw", 2, "regular-season", "Milano Cortina 2026 Women's Hockey - Gold Medal Game", Some("gold")),
+        ("olyhw", 2, "regular-season", "Milano Cortina 2026 Women's Hockey - Bronze Medal Game", Some("bronze")),
+        ("olyhw", 2, "regular-season", "Milano Cortina 2026 Women's Hockey - Semifinal", Some("semi")),
+        ("olyhw", 2, "regular-season", "Milano Cortina 2026 Women's Hockey - Quarterfinal", Some("quarter")),
+        ("olyhw", 2, "regular-season", "Milano Cortina 2026 Women's Hockey - Preliminary Round - Group B", None),
+        ("olybm", 2, "regular-season", "2024 Olympic Men's Basketball - Gold Medal Game", Some("gold")),
+        ("olybm", 2, "regular-season", "2024 Olympic Men's Basketball - Bronze Medal Game", Some("bronze")),
+        ("olybm", 2, "regular-season", "2024 Olympic Men's Basketball - Semifinal", Some("semi")),
+        ("olybm", 2, "regular-season", "2024 Olympic Men's Basketball - Quarterfinal", Some("quarter")),
+        ("olybm", 2, "regular-season", "2024 Olympic Men's Basketball - Group B", None),
+        ("olybw", 2, "regular-season", "2024 Olympic Women's Basketball - Gold Medal Game", Some("gold")),
+        ("olybw", 2, "regular-season", "2024 Olympic Women's Basketball - Bronze Medal Game", Some("bronze")),
+        ("olybw", 2, "regular-season", "2024 Olympic Women's Basketball - Semifinal", Some("semi")),
+        ("olybw", 2, "regular-season", "2024 Olympic Women's Basketball - Quarterfinal", Some("quarter")),
+        ("olybw", 2, "regular-season", "2024 Olympic Women's Basketball - Group C", None),
+        // --- College baseball: four season types, only one of them type 3.
+        ("cbase", 3, "regionals", "", Some("playoffs")),
+        ("cbase", 4, "super-regionals", "", Some("playoffs")),
+        ("cbase", 5, "world-series", "", Some("cws")),
+        ("cbase", 6, "championship-series", "", Some("cws")),
+        ("cbase", 2, "regular-season", "", None),
+    ];
+
+    /// Every captured string classifies the way the option list promises.
+    #[test]
+    fn real_feed_strings_classify_as_advertised() {
+        for (sport, type_, slug, headline, want) in REAL_FEED_CASES {
+            let s = EventSeason { type_: *type_, slug: (*slug).into() };
+            let got = classify_champ(sport, Some(&s), headline);
+            let got_tier = got.as_ref().map(|c| c.tier.as_str());
+            assert_eq!(
+                got_tier, *want,
+                "{sport} / season {type_} {slug:?} / {headline:?}: got {got_tier:?}, want {want:?}"
+            );
+        }
+    }
+
+    /// The invariant that actually bites: a league may not OFFER a round the
+    /// classifier has never been shown producing from a real feed string.
+    ///
+    /// The old version of this check only inspected labels, so every dead
+    /// control passed it. Adding an option now requires adding the feed string
+    /// that proves it fires — which is the only evidence that matters.
+    #[test]
+    fn every_offered_round_is_proven_by_a_real_feed_string() {
+        for (sport_id, ..) in crate::espn::LEAGUE_IDENTITY {
+            // Golf tiers come from tournament names and F1 from session ids;
+            // neither goes through classify_champ.
+            if matches!(*sport_id, "pga" | "lpga" | "f1") {
+                continue;
+            }
+            let proven: std::collections::HashSet<&str> = REAL_FEED_CASES
+                .iter()
+                .filter(|(s, ..)| s == sport_id)
+                .filter_map(|(_, _, _, _, tier)| *tier)
+                .collect();
+            for round in crate::championship_rounds_for(sport_id) {
+                if round.id == "all" {
+                    continue; // the blanket matches by definition, not by tier
+                }
+                assert!(
+                    proven.contains(round.id.as_str()),
+                    "{sport_id} offers {:?} ({:?}) but no real feed string in \
+                     REAL_FEED_CASES produces that tier — either the classifier \
+                     cannot emit it (a dead checkbox) or the case is missing",
+                    round.id,
+                    round.label
+                );
+            }
+        }
+    }
+
     #[test]
     fn nhl_headline_refines_tier() {
         let cup = classify_champ("nhl", Some(&season(3)), "Stanley Cup Final - Game 3").unwrap();
         assert_eq!((cup.tier.as_str(), cup.label.as_str()), ("final", "Stanley Cup Final"));
 
-        let conf = classify_champ("nhl", Some(&season(3)), "West Conference Finals - Game 5").unwrap();
+        let conf = classify_champ("nhl", Some(&season(3)), "West Final - Game 5").unwrap();
         assert_eq!((conf.tier.as_str(), conf.label.as_str()), ("conf", "Conference Finals"));
 
         // Postseason with an unrecognized round headline -> broadest tier.

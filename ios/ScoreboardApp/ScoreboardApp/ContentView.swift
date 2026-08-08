@@ -816,41 +816,68 @@ final class BoardViewModel: ObservableObject {
                 prefs.append(LeaguePref(sport: sport, teams: teams, bigGames: big))
             }
         }
-        // Same order as the Add League sheet: category first, then name.
-        return prefs.sorted {
-            let a = Self.categoryOrder.firstIndex(of: Self.leagueCategory($0.sport.id)) ?? .max
-            let b = Self.categoryOrder.firstIndex(of: Self.leagueCategory($1.sport.id)) ?? .max
-            return a != b ? a < b : $0.sport.name < $1.sport.name
-        }
+        // Same order as the Add League sheet: sport section, then name.
+        return prefs.sorted { Self.leagueOrder($0.sport, $1.sport) }
     }
 
-    /// Leagues without a card yet — offered by the "Add League" menu.
-    /// Sport-category grouping for the league picker sheet.
-    static func leagueCategory(_ id: String) -> String {
-        switch id {
-        case "nhl": return "Hockey"
-        case "nba", "wnba", "cbb", "wcbb": return "Basketball"
-        case "mlb": return "Baseball"
-        case "nfl", "cfb": return "Football"
-        case "mls", "epl", "wc": return "Soccer"
-        case "pga", "lpga": return "Golf"
-        case "f1": return "Motorsport"
-        default: return "Other"
-        }
+    /// The sport section a league is listed under.
+    ///
+    /// The server declares this (`UiSport.category`), so a fork can add a league
+    /// and have it land in the right section without shipping a new app. An
+    /// empty string means the server is older than the field — those leagues
+    /// gather under one heading rather than vanishing.
+    static func leagueCategory(_ sport: UiSport) -> String {
+        sport.category.isEmpty ? "Other leagues" : sport.category
     }
-    private static let categoryOrder = [
-        "Hockey", "Basketball", "Baseball", "Football", "Soccer", "Golf", "Motorsport", "Other",
-    ]
 
-    /// Every catalog league grouped by sport category, in a fixed category order.
+    /// Section rank, then league name. Rank 0 is what an older server's catalog
+    /// decodes to, and sorts last rather than first.
+    private static func leagueOrder(_ a: UiSport, _ b: UiSport) -> Bool {
+        let ra = a.categoryRank == 0 ? UInt32.max : a.categoryRank
+        let rb = b.categoryRank == 0 ? UInt32.max : b.categoryRank
+        if ra != rb { return ra < rb }
+        if a.category != b.category { return a.category < b.category }
+        return a.name < b.name
+    }
+
+    /// Every catalog league grouped into its sport section, sections in the
+    /// server's declared order.
+    ///
+    /// Built from the groups that actually EXIST rather than by intersecting
+    /// with a list of sections this build knows. The old version walked a
+    /// hardcoded `categoryOrder` and `compactMap`ped it, which silently dropped
+    /// any league whose section wasn't in the array — harmless while the array
+    /// and the switch were the same table, but a league-losing bug the moment
+    /// the section became a server string.
     var leaguesByCategory: [(String, [UiSport])] {
         var groups: [String: [UiSport]] = [:]
         for sport in sports {
-            groups[Self.leagueCategory(sport.id), default: []].append(sport)
+            groups[Self.leagueCategory(sport), default: []].append(sport)
         }
-        return Self.categoryOrder.compactMap { cat in
-            groups[cat].map { (cat, $0.sorted { $0.name < $1.name }) }
+        return groups
+            .map { ($0.key, $0.value.sorted { Self.leagueOrder($0, $1) }) }
+            .sorted { a, b in
+                // Rank a section by its best-ranked league, so section order
+                // comes from the same declaration as league order.
+                let ra = a.1.map { $0.categoryRank == 0 ? UInt32.max : $0.categoryRank }.min() ?? .max
+                let rb = b.1.map { $0.categoryRank == 0 ? UInt32.max : $0.categoryRank }.min() ?? .max
+                return ra != rb ? ra < rb : a.0 < b.0
+            }
+    }
+
+    /// The league preferences the dashboard shows, grouped the same way.
+    var leaguePrefsByCategory: [(String, [LeaguePref])] {
+        var groups: [String: [LeaguePref]] = [:]
+        for pref in leaguePrefs {
+            groups[Self.leagueCategory(pref.sport), default: []].append(pref)
         }
+        return groups
+            .map { ($0.key, $0.value.sorted { Self.leagueOrder($0.sport, $1.sport) }) }
+            .sorted { a, b in
+                let ra = a.1.map { $0.sport.categoryRank == 0 ? UInt32.max : $0.sport.categoryRank }.min() ?? .max
+                let rb = b.1.map { $0.sport.categoryRank == 0 ? UInt32.max : $0.sport.categoryRank }.min() ?? .max
+                return ra != rb ? ra < rb : a.0 < b.0
+            }
     }
 
     /// Short summary of a league's current subscription ("2 teams · MLS Cup"),
@@ -922,13 +949,6 @@ final class BoardViewModel: ObservableObject {
         let st = current
         let currentTeams = Set(st.favorites[sportId] ?? [])
         return teamIds != currentTeams || championshipOptionIds != (st.championship[sportId] ?? [])
-    }
-
-    /// Turn a league's big-games selection back off (swipe on the trophy row).
-    func clearBigGames(_ sportId: String) {
-        guard let id = selectedBoardId else { return }
-        mutate(id) { $0.championship[sportId] = [] }
-        pushSport(id, sportId)
     }
 
     private func pushSport(_ boardId: String, _ sportId: String) {
@@ -2179,8 +2199,11 @@ struct DashboardView: View {
             if model.leaguePrefs.isEmpty {
                 leaguePreferencesHeader
             }
-            ForEach(Array(model.leaguePrefs.enumerated()), id: \.element.id) { index, pref in
-                leagueCard(pref, showsAreaHeader: index == 0)
+            // One section per SPORT, mirroring the Add League sheet. The first
+            // section carries the "League Preferences" title so the header→card
+            // gap matches the sections above it.
+            ForEach(Array(model.leaguePrefsByCategory.enumerated()), id: \.element.0) { index, group in
+                sportSection(group.0, group.1, showsAreaHeader: index == 0)
             }
             // Board settings, spoilers, and transfer live in the Settings
             // sheet (gear) — the dashboard is for what's ON the board now.
@@ -2437,37 +2460,68 @@ struct DashboardView: View {
         }
     }
 
-    /// One league's card: league name + Edit as the card's first row (not a section
-    /// header, which visually competed with the "League Preferences" title), then
-    /// the favorite teams (reorderable, swipe-to-delete) and the big-games row
-    /// (tap to change, swipe to turn off). The first card carries the area's
-    /// "League Preferences" header.
-    private func leagueCard(_ pref: BoardViewModel.LeaguePref, showsAreaHeader: Bool) -> some View {
+    /// One SPORT's section: every league the user follows in it, each as its own
+    /// block. Mirrors the Add League sheet's grouping so the two screens read
+    /// the same way, and the first section carries the area's title.
+    ///
+    /// Three nested levels need three different gaps, which is the whole point
+    /// of the layout: sports are separated by the section gap, leagues within a
+    /// sport by explicit padding above each block after the first, and a
+    /// league's teams only by the list's own hairline separators — indented, so
+    /// they read as belonging to the league above them rather than as peers.
+    private func sportSection(
+        _ category: String,
+        _ prefs: [BoardViewModel.LeaguePref],
+        showsAreaHeader: Bool
+    ) -> some View {
         Section {
-            HStack {
-                Text(pref.sport.name)
-                    .font(.headline)
-                Spacer()
-                Button("Edit") { editingSport = pref.sport }
-                    .font(.subheadline.weight(.semibold))
+            ForEach(Array(prefs.enumerated()), id: \.element.id) { index, pref in
+                leagueBlock(pref, isFirstInSection: index == 0)
             }
-            ForEach(pref.teams, id: \.id) { team in
-                let hidden = model.teamSpoiled(pref.sport.id, team.id)
-                HStack(spacing: 12) {
-                    TeamBadge(team: team, sportId: pref.sport.id)
-                    Text(team.name)
-                    Spacer()
-                    SpoilerChip(hidden: hidden) {
-                        model.setTeamSpoiler(pref.sport.id, team.id, !hidden)
-                    }
+        } header: {
+            VStack(alignment: .leading, spacing: 6) {
+                if showsAreaHeader { leaguePrefsHeaderContent }
+                Text(category)
+            }
+        }
+        // One uniform gap between sports. The first section keeps the standard
+        // top-level gap because its header is the area title.
+        .listSectionSpacing(20)
+    }
+
+    /// One league inside a sport section: the header row (name, what it's
+    /// subscribed to, Edit), then its favorite teams as indented sub-rows.
+    @ViewBuilder
+    private func leagueBlock(
+        _ pref: BoardViewModel.LeaguePref,
+        isFirstInSection: Bool
+    ) -> some View {
+        leagueHeaderRow(pref)
+            // Leagues in the same sport are one list with breathing room
+            // between them — more than the team separators, less than a
+            // section break.
+            .padding(.top, isFirstInSection ? 0 : 10)
+
+        ForEach(pref.teams, id: \.id) { team in
+            let hidden = model.teamSpoiled(pref.sport.id, team.id)
+            HStack(spacing: 12) {
+                TeamBadge(team: team, sportId: pref.sport.id)
+                Text(team.name)
+                Spacer()
+                SpoilerChip(hidden: hidden) {
+                    model.setTeamSpoiler(pref.sport.id, team.id, !hidden)
                 }
             }
-            .onDelete { offsets in
-                for i in offsets { model.removeFavorite(pref.sport.id, pref.teams[i].id) }
-            }
-            .onMove { source, destination in
-                model.moveFavorite(pref.sport.id, from: source, to: destination)
-            }
+            // The indent is what makes a team read as a child of its league
+            // rather than a sibling of it.
+            .padding(.leading, 12)
+        }
+        .onDelete { offsets in
+            for i in offsets { model.removeFavorite(pref.sport.id, pref.teams[i].id) }
+        }
+        .onMove { source, destination in
+            model.moveFavorite(pref.sport.id, from: source, to: destination)
+        }
 
             // Spoiler-protected teams that AREN'T favorites — without these
             // rows, unfavoriting a protected team would leave an invisible,
@@ -2491,72 +2545,9 @@ struct DashboardView: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(.tint)
                 }
+                .padding(.leading, 12)
             }
 
-            if !pref.bigGames.isEmpty {
-                HStack(spacing: 8) {
-                Menu {
-                    // Multi-select: every round is its own toggle, and the menu
-                    // stays open-ended rather than committing one choice.
-                    ForEach(pref.sport.championshipRounds, id: \.id) { opt in
-                        Button {
-                            model.toggleChampionship(pref.sport.id, opt.id)
-                        } label: {
-                            if pref.bigGames.contains(where: { $0.id == opt.id }) {
-                                Label(opt.label, systemImage: "checkmark")
-                            } else {
-                                Text(opt.label)
-                            }
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: "trophy.fill")
-                            .foregroundStyle(.yellow)
-                            .frame(width: 24)
-                        Text(model.championshipLabel(pref.sport.id) ?? "")
-                            .foregroundStyle(.primary)
-                        Spacer()
-                        Image(systemName: "chevron.up.chevron.down")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                // The Menu paints its label with the accent color; retint so the
-                // row reads like the team rows above (chevron still hints at it).
-                .tint(.primary)
-
-                // League spoiler state rides on the same row as the big-game
-                // subscription (a Menu label can't host a tappable chip, so
-                // the chip sits beside the menu).
-                SpoilerChip(hidden: model.leagueSpoiler(pref.sport.id)) {
-                    model.setLeagueSpoiler(pref.sport.id, !model.leagueSpoiler(pref.sport.id))
-                }
-                }
-                .swipeActions(edge: .trailing) {
-                    Button(role: .destructive) {
-                        model.clearBigGames(pref.sport.id)
-                    } label: {
-                        Label("Turn off", systemImage: "trophy.slash")
-                    }
-                }
-            }
-
-            // League-wide spoiler state for leagues with no big-game row (the
-            // trophy row carries the chip otherwise) — shown only when hidden.
-            if pref.bigGames.isEmpty && model.leagueSpoiler(pref.sport.id) {
-                HStack(spacing: 12) {
-                    Image(systemName: "eye.slash")
-                        .foregroundStyle(.secondary)
-                        .frame(width: 24)
-                    Text("League spoilers")
-                        .foregroundStyle(.primary)
-                    Spacer()
-                    SpoilerChip(hidden: true) {
-                        model.setLeagueSpoiler(pref.sport.id, false)
-                    }
-                }
-            }
 
             // Leaderboard depth override (golf/F1) — shown only when set.
             if let rows = model.leagueRows(pref.sport.id) {
@@ -2578,6 +2569,7 @@ struct DashboardView: View {
                     }
                 }
                 .tint(.primary)
+                .padding(.leading, 12)
                 .swipeActions(edge: .trailing) {
                     Button(role: .destructive) {
                         model.setLeagueRows(pref.sport.id, nil)
@@ -2619,6 +2611,7 @@ struct DashboardView: View {
                     }
                 }
                 .tint(.primary)
+                .padding(.leading, 12)
                 .swipeActions(edge: .trailing) {
                     Button(role: .destructive) {
                         model.setLeagueDwell(pref.sport.id, nil)
@@ -2627,14 +2620,36 @@ struct DashboardView: View {
                     }
                 }
             }
-        } header: {
-            if showsAreaHeader {
-                leaguePrefsHeaderContent
+    }
+
+    /// A league's title row: name, what it is subscribed to, and Edit.
+    ///
+    /// The subscription is a LABEL, not a control. It used to be a menu on its
+    /// own row, which meant the set of big games could be changed from two
+    /// places with different affordances; now the header states what is on and
+    /// the edit screen is the single place that changes it.
+    ///
+    /// The eye stays a control, because it is about this screen's own job —
+    /// hiding results you haven't watched yet — and it is the only way to reach
+    /// that state for a league whose games aren't currently listed.
+    private func leagueHeaderRow(_ pref: BoardViewModel.LeaguePref) -> some View {
+        HStack(spacing: 10) {
+            Text(pref.sport.name)
+                .font(.headline)
+            Spacer(minLength: 8)
+            if let events = model.championshipLabel(pref.sport.id) {
+                Text(events)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
+            SpoilerChip(hidden: model.leagueSpoiler(pref.sport.id)) {
+                model.setLeagueSpoiler(pref.sport.id, !model.leagueSpoiler(pref.sport.id))
+            }
+            Button("Edit") { editingSport = pref.sport }
+                .font(.subheadline.weight(.semibold))
         }
-        // First card keeps the uniform top-level gap (its header is the area
-        // title); the rest sit close together — one group, not separate areas.
-        .listSectionSpacing(showsAreaHeader ? 20 : 12)
     }
 }
 
@@ -2656,6 +2671,12 @@ enum AppNotes {
         - Weather is one entry with four layouts, instead of four separate entries.
         - Quiet hours: pick a window and the scoreboard sleeps through it every night. Turn on "Wake for live events" and a game that is actually on will still show.
         - Patch notes for the app and the scoreboard now live behind the buttons next to their version numbers.
+        - League Preferences is grouped by sport now, the same way Add League is. Each league shows what it is following right in its title row; tap Edit to change it.
+        - There is no "Other" section any more — the Olympics, the Champions League and college baseball sit under their own sports.
+        - Some leagues were renamed to read better in those groups: NCAAM, NCAAW, NCAA, and Men's World Cup.
+        - The Olympics offer the gold and bronze medal games instead of a "Postseason" option that could never match anything.
+        - Conference Finals, March Madness and MLS Cup were quietly matching no games at all. Fixed — those options work now.
+        - Following everything now ticks every round in the list, so the screen shows what it is actually doing.
         """,
     ]
 
@@ -3730,6 +3751,56 @@ struct LeagueEditorView: View {
         ["pga", "lpga", "f1"].contains(sport.id)
     }
 
+    /// Check or uncheck one round.
+    ///
+    /// "Follow everything" is the one row that isn't independent of the others:
+    /// it already includes every round beneath it, so checking it now checks
+    /// them all and unchecking it clears the list. Leaving the others dark while
+    /// the blanket was on made the screen claim those rounds weren't being
+    /// shown, when in fact they were.
+    ///
+    /// The rounds are kept selected alongside the blanket rather than being
+    /// swallowed by it, so unchecking a single round leaves the rest — which is
+    /// what the checkmarks now say.
+    ///
+    /// The implication runs ONE WAY ONLY. Following everything does include
+    /// every round, so checking the blanket checks them all. The converse is
+    /// false and must never be inferred: the listed rounds are the tiers
+    /// `classify_champ` can emit, while "all" is a wildcard that also claims
+    /// every UNTAGGED game (`game_option_priority`, main.rs). Ticking every
+    /// round is therefore "the whole postseason", not "the whole schedule".
+    ///
+    /// Inferring it cost real subscriptions: on a two-round league it turned one
+    /// tap into the entire season — "Majors" on the PGA Tour silently became
+    /// every tour event — skipped the volume warning, and left "majors only" and
+    /// "postseason only" impossible to express at all.
+    private func toggleRound(_ id: String) {
+        let allIds = Set(sport.championshipRounds.map(\.id))
+        guard id == Self.wholeLeagueOptionId else {
+            // A normal round. Turning one off also drops the blanket, since
+            // "everything" would no longer be true — but turning one ON never
+            // adds it, however many are already ticked.
+            if champ.contains(id) {
+                champ.remove(id)
+                champ.remove(Self.wholeLeagueOptionId)
+            } else {
+                champ.insert(id)
+            }
+            return
+        }
+        if champ.contains(id) {
+            champ.removeAll()
+        } else if isLeaderboardLeague {
+            // Leaderboard leagues run ONE event at a time, so their blanket
+            // option can't swamp the rotation — warning there would be noise.
+            champ = allIds
+        } else {
+            // Confirm first; `pendingWholeLeague`'s Continue does the filling in
+            // so Cancel has no visible selection to undo.
+            pendingWholeLeague = id
+        }
+    }
+
     /// The name-style choices this league offers (empty for leaderboard sports,
     /// which hides the "Names" picker) and the style it defaults to.
     private var nameStyleChoices: [UiNameStyleOption] { nameStyleOptions(sportId: sport.id) }
@@ -3768,36 +3839,50 @@ struct LeagueEditorView: View {
     private var editorList: some View {
         List {
             if !sport.championshipOptions.isEmpty {
-                Section {
-                    ForEach(sport.championshipRounds, id: \.id) { opt in
-                        Button {
-                            if opt.id == Self.wholeLeagueOptionId, !champ.contains(opt.id), !isLeaderboardLeague {
-                                // Leaderboard leagues run ONE event at a time, so
-                                // their blanket option can't swamp the rotation —
-                                // warning there would just be noise.
-                                pendingWholeLeague = opt.id
-                            } else if champ.contains(opt.id) {
-                                champ.remove(opt.id)
-                            } else {
-                                champ.insert(opt.id)
+                // A league with nothing to choose between — the Premier League
+                // has no postseason, so "every match" is its only honest
+                // subscription — gets a switch instead of a one-item checklist,
+                // which reads like a choice that hasn't been made.
+                if let only = sport.championshipRounds.first, sport.championshipRounds.count == 1 {
+                    Section {
+                        Toggle(only.label, isOn: Binding(
+                            get: { champ.contains(only.id) },
+                            set: { on in
+                                if on, only.id == Self.wholeLeagueOptionId, !isLeaderboardLeague {
+                                    pendingWholeLeague = only.id
+                                } else if on {
+                                    champ.insert(only.id)
+                                } else {
+                                    champ.remove(only.id)
+                                }
                             }
-                        } label: {
-                            HStack(spacing: 12) {
-                                Image(systemName: champ.contains(opt.id) ? "checkmark.circle.fill" : "circle")
-                                    .foregroundStyle(champ.contains(opt.id) ? Color.accentColor : Color.secondary)
-                                Text(opt.label).foregroundStyle(Color.primary)
-                                Spacer()
-                            }
-                        }
-                        .buttonStyle(.plain)
+                        ))
+                    } header: {
+                        Text(optionsTitle)
+                    } footer: {
+                        Text("This league has no separate rounds to follow.")
                     }
-                } header: {
-                    Text(optionsTitle)
-                } footer: {
-                    // The honesty requirement. The old picker was a ladder where
-                    // one choice quietly included the rounds beyond it; these are
-                    // separate, and saying so is the point of the change.
-                    Text("Each of these is separate. Checking one does not add the others.")
+                } else {
+                    Section {
+                        ForEach(sport.championshipRounds, id: \.id) { opt in
+                            Button { toggleRound(opt.id) } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: champ.contains(opt.id) ? "checkmark.circle.fill" : "circle")
+                                        .foregroundStyle(champ.contains(opt.id) ? Color.accentColor : Color.secondary)
+                                    Text(opt.label).foregroundStyle(Color.primary)
+                                    Spacer()
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    } header: {
+                        Text(optionsTitle)
+                    } footer: {
+                        // The honesty requirement. The old picker was a ladder where
+                        // one choice quietly included the rounds beyond it; these are
+                        // separate, and saying so is the point of the change.
+                        Text("Each of these is separate, except the last — following everything covers them all.")
+                    }
                 }
 
                 Section {
@@ -3912,10 +3997,10 @@ struct LeagueEditorView: View {
             // Hardcoded rather than read back from `pendingWholeLeague`: the
             // dismissal clears that state, and the two orderings shouldn't
             // decide whether the user's Continue actually took.
-            // Inserts rather than replaces: the blanket is now one checkbox
-            // among several, and confirming it should not silently uncheck the
-            // rounds someone already picked.
-            Button("Continue") { champ.insert(Self.wholeLeagueOptionId) }
+            //
+            // Selects every round, not just the blanket: following everything
+            // does include each of them, so the checkmarks should say so.
+            Button("Continue") { champ = Set(sport.championshipRounds.map(\.id)) }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Every match can be a lot of games — on a busy night the scoreboard shows the first 20 and lists the rest as bumped. You can always pick a narrower option.")

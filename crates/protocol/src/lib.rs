@@ -257,6 +257,24 @@ pub struct SportDescriptor {
     /// implies another.
     #[serde(default)]
     pub championship_rounds: Vec<ChampionshipOption>,
+    /// Sport family this league is listed under ("Hockey", "Soccer"), as a
+    /// DISPLAY string.
+    ///
+    /// A STRING, never an enum — the same rule as `OffModeField::kind`, for the
+    /// same reason: the generated Swift decodes an unknown enum case into
+    /// `unexpectedEnumCase`, and that read happens inside the single lift for
+    /// the WHOLE league catalog. One family a fork invented would blank every
+    /// league in the app rather than just its own.
+    ///
+    /// The server declares this so a fork can add a league and have it land in
+    /// the right section without shipping a new app.
+    #[serde(default)]
+    pub category: String,
+    /// Sort rank for the family section; ties break on league name. Real ranks
+    /// start at 1, so the serde default of 0 marks "a server too old to say"
+    /// and sorts last instead of first.
+    #[serde(default)]
+    pub category_rank: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -744,10 +762,36 @@ pub fn expand_legacy_champ(sport_id: &str, legacy: Option<&str>) -> Vec<String> 
         ("cbb" | "wcbb", Some("playoffs")) => &["tournament", "playoffs"],
         ("mls", Some("cup")) => &["cup"],
         ("mls", Some("playoffs")) => &["cup", "playoffs"],
-        ("wc", Some("final")) => &["final"],
-        ("wc", Some("semi")) => &["semi", "final"],
-        ("wc", Some("knockout")) | ("wc", Some("playoffs")) => {
+        // The Women's World Cup runs the same rounds as the men's, so it shares
+        // the ladder; the Champions League has no third-place match.
+        ("wc" | "wwc", Some("final")) => &["final"],
+        ("wc" | "wwc", Some("semi")) => &["semi", "final"],
+        // "third" joined the ladder when the classifier learned ESPN spells the
+        // bronze-medal game "3rd-place"; the old knockout rung covered every
+        // match after the group stage, so it covers that one too.
+        ("wc" | "wwc", Some("knockout")) | ("wc" | "wwc", Some("playoffs")) => {
+            &["knockout", "quarter", "semi", "third", "final"]
+        }
+        ("ucl", Some("final")) => &["final"],
+        ("ucl", Some("semi")) => &["semi", "final"],
+        ("ucl", Some("knockout")) | ("ucl", Some("playoffs")) => {
             &["knockout", "quarter", "semi", "final"]
+        }
+        ("cbase", Some("cws")) => &["cws"],
+        ("cbase", Some("playoffs")) => &["cws", "playoffs"],
+        // The Olympic medal ladder, in the same order `legacy_champ_projection`
+        // ranks it, so projecting a set and expanding it again returns the set
+        // rather than dropping half of it. Wanting the bronze game implies
+        // wanting the gold one.
+        ("olyhm" | "olyhw" | "olybm" | "olybw" | "olysm" | "olysw", Some("gold")) => &["gold"],
+        ("olyhm" | "olyhw" | "olybm" | "olybw" | "olysm" | "olysw", Some("bronze")) => {
+            &["bronze", "gold"]
+        }
+        ("olyhm" | "olyhw" | "olybm" | "olybw" | "olysm" | "olysw", Some("semi")) => {
+            &["semi", "bronze", "gold"]
+        }
+        ("olyhm" | "olyhw" | "olybm" | "olybw" | "olysm" | "olysw", Some("quarter")) => {
+            &["quarter", "semi", "bronze", "gold"]
         }
         // The option id was "majors"; the tier is "major". They never matched,
         // so the old option only ever worked through the wildcard.
@@ -783,10 +827,17 @@ pub fn legacy_champ_projection(sport_id: &str, ids: &[String]) -> Option<String>
     // Broadest first: the inverse of the expansion above.
     let broadest: &[&str] = match sport_id {
         "nhl" => &["playoffs", "conf", "final"],
-        "wc" => &["knockout", "quarter", "semi", "final"],
+        "wc" | "wwc" => &["knockout", "quarter", "semi", "third", "final"],
+        "ucl" => &["knockout", "quarter", "semi", "final"],
         "f1" => &["sprint", "quali", "race"],
         "cfb" => &["playoff", "bowl"],
         "pga" | "lpga" => &["major"],
+        "cbase" => &["playoffs", "cws"],
+        // The Olympic tournaments: bronze is the broader of the two medal
+        // games, since a viewer who wants it wants the gold one as well.
+        "olyhm" | "olyhw" | "olybm" | "olybw" | "olysm" | "olysw" => {
+            &["quarter", "semi", "bronze", "gold"]
+        }
         _ => &["playoffs", "final", "ws", "sb", "cup", "tournament"],
     };
     let pick = broadest.iter().find(|x| has(x)).copied();
@@ -795,7 +846,17 @@ pub fn legacy_champ_projection(sport_id: &str, ids: &[String]) -> Option<String>
         ("f1", Some("sprint")) => "gp-quali-sprint".to_string(),
         ("f1", Some("quali")) => "gp-quali".to_string(),
         ("f1", Some("race")) => "gp".to_string(),
-        ("wc", Some("quarter")) => "knockout".to_string(),
+        ("wc", Some("quarter")) | ("wc", Some("third")) => "knockout".to_string(),
+        // NOTHING may project a narrow round set onto "all". These leagues only
+        // ever offer an old app "none" or "all", and projecting to the blanket
+        // looks harmless — until you follow what an old app DOES with the value:
+        // it echoes the legacy field back on the next favourites edit, `ws.rs`
+        // finds no `championship_option_ids`, and `expand_legacy_champ` turns
+        // "all" into the whole league. Someone following only the gold medal
+        // game would have had every Olympic game pushed onto their board by
+        // swiping away a favourite team. Falling through to the generic arm
+        // below names the round instead, which round-trips through the
+        // `(_, Some(other))` wildcard untouched.
         (_, Some(p)) => p.to_string(),
         // A set of only forked/unknown ids: name the first, so a non-empty set
         // never projects to None and break the invariant above.
@@ -1744,6 +1805,73 @@ mod fw_channel_tests {
         assert!(version_newer("2026.8.0", "2026.7.23"));
         assert!(!version_newer("2026.7.24", "2026.8.0"));
         assert!(version_newer("2027.1.0", "2026.12.9"), "and a year rollover too");
+    }
+
+    /// Every league whose rounds this repo knows, for the two invariants below.
+    const CHAMP_LEAGUES: &[&str] = &[
+        "nhl", "nba", "wnba", "mlb", "nfl", "cfb", "cbb", "wcbb", "mls", "epl", "wc", "wwc", "ucl",
+        "cbase", "olyhm", "olyhw", "olybm", "olybw", "olysm", "olysw", "pga", "lpga", "f1", "khl",
+    ];
+
+    /// The one that bit: a NARROW round set must never project onto the blanket.
+    ///
+    /// An old app is handed this projection in every board push and echoes it
+    /// back on the next favourites edit, at which point `expand_legacy_champ`
+    /// turns it into a subscription. Projecting "gold medal game" to "all"
+    /// therefore meant swiping away a favourite team could put every game in the
+    /// league on the board — a one-way trip, since the old app never knew the
+    /// narrow set existed.
+    #[test]
+    fn no_narrow_round_set_projects_onto_the_blanket() {
+        for sport in CHAMP_LEAGUES {
+            for round in ["gold", "bronze", "semi", "quarter", "third", "final", "cws", "playoffs", "conf"] {
+                let set = vec![round.to_string()];
+                let projected = legacy_champ_projection(sport, &set);
+                assert_ne!(
+                    projected.as_deref(),
+                    Some("all"),
+                    "{sport}: following only {round:?} must not read as the whole league to an old app"
+                );
+                assert!(projected.is_some(), "{sport}/{round}: a non-empty set must project to something");
+            }
+        }
+        // The blanket itself still projects to the blanket.
+        assert_eq!(legacy_champ_projection("olyhm", &["all".to_string()]).as_deref(), Some("all"));
+    }
+
+    /// Expanding a projection must not quietly drop rounds the user picked.
+    ///
+    /// `expand(project(set))` is allowed to be BROADER than `set` — the legacy
+    /// ladder is coarser than the checkboxes, and that widening is the old
+    /// design's documented cost — but it may never lose a round, which would
+    /// silently unsubscribe someone.
+    #[test]
+    fn expanding_a_projection_never_loses_a_round() {
+        let cases: &[(&str, &[&str])] = &[
+            ("olyhm", &["gold"]),
+            ("olyhm", &["gold", "bronze"]),
+            ("olyhm", &["gold", "bronze", "semi", "quarter"]),
+            ("olysw", &["bronze", "gold"]),
+            ("cbase", &["cws"]),
+            ("cbase", &["cws", "playoffs"]),
+            ("wc", &["third"]),
+            ("wc", &["knockout", "quarter", "semi", "third", "final"]),
+            ("wwc", &["final"]),
+            ("ucl", &["semi", "final"]),
+            ("nhl", &["final"]),
+            ("f1", &["race"]),
+        ];
+        for (sport, ids) in cases {
+            let set: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
+            let projected = legacy_champ_projection(sport, &set).expect("non-empty projects");
+            let back = expand_legacy_champ(sport, Some(&projected));
+            for id in ids.iter() {
+                assert!(
+                    back.iter().any(|b| b == id),
+                    "{sport}: {set:?} projected to {projected:?} and expanded to {back:?}, losing {id:?}"
+                );
+            }
+        }
     }
 
     /// A config written before off modes existed must keep behaving exactly as
