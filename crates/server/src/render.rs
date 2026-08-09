@@ -104,7 +104,7 @@ fn advance(ch: char, big: bool) -> i32 {
 
 /// Total advance of `s` with optical kerning — sum of the kerned pair-advances plus
 /// the final glyph's own cell (so right-alignment lands correctly).
-fn text_width(s: &str, big: bool) -> i32 {
+pub(crate) fn text_width(s: &str, big: bool) -> i32 {
     let mut w = 0;
     let mut prev: Option<char> = None;
     for ch in s.chars() {

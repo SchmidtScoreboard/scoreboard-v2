@@ -487,6 +487,13 @@ async fn device(
         link_bufs.bytes()
     );
 
+    // How long a join may keep failing before the panel stops saying "JOINING
+    // WI-FI" and starts offering a way out. Long enough to cover a slow DHCP
+    // lease or an AP still coming up after a power cut; short enough that
+    // nobody stares at a spinner wondering whether the board is broken.
+    const WIFI_STUCK_AFTER: Duration = Duration::from_secs(45);
+    let mut wifi_down_since: Option<Instant> = None;
+
     loop {
         Timer::after(Duration::from_secs(1)).await;
         // Report the Wi-Fi/DHCP leg every pass — board-core's connect screen
@@ -494,8 +501,17 @@ async fn device(
         let wifi_up = stack.config_v4().is_some();
         board.lock().await.set_wifi(wifi_up);
         if !wifi_up {
+            // A wrong password looks EXACTLY like a slow join: the radio finds
+            // the AP, fails the handshake, and retries forever behind an
+            // identical screen. After the timeout, offer re-provisioning —
+            // `set_wifi(true)` retires the offer if the network comes back.
+            let since = *wifi_down_since.get_or_insert(Instant::now());
+            if since.elapsed() >= WIFI_STUCK_AFTER {
+                board.lock().await.set_wifi_stuck(true);
+            }
             continue;
         }
+        wifi_down_since = None;
         // NOTHING runs between Wi-Fi coming up and the server connection below.
         // This is where the boot path used to IP-geolocate the board's timezone
         // off a cleartext GET to a third party, up to three times, each capped
@@ -830,10 +846,24 @@ async fn flash_task(flash: &'static ota::SharedFlash, board: &'static SharedBoar
     let mut dirty_at: Option<Instant> = None;
     loop {
         Timer::after(Duration::from_millis(400)).await;
-        let (cur, reset) = {
+        let (cur, reset, reprovision) = {
             let b = board.lock().await;
-            (b.brightness(), b.reset_triggered())
+            (b.brightness(), b.reset_triggered(), b.reprovision_triggered())
         };
+        // The Wi-Fi escape hatch: forget the NETWORK and come back up in BLE
+        // provisioning, keeping the identity and therefore the pairing. A
+        // factory reset would also work, but it un-pairs the board from every
+        // phone to fix a mistyped password, which is not a trade anyone would
+        // choose if the panel offered them the choice.
+        if reprovision {
+            println!("[wifi] user asked to re-provision; clearing creds and rebooting");
+            {
+                let mut f = flash.lock().await;
+                creds::clear(&mut *f);
+            }
+            Timer::after(Duration::from_millis(200)).await;
+            esp_hal::system::software_reset();
+        }
         // Hold-to-reset: let the "reset complete" checkmark show for a beat, then
         // wipe creds + reboot — which comes back up in BLE provisioning mode.
         if reset {

@@ -4371,6 +4371,7 @@ struct BluetoothSetupView: View {
     @FocusState private var ssidFocused: Bool
     @FocusState private var pinFocused: Bool
     @State private var password = ""
+    @State private var passwordVisible = false
     /// ws URL of the server this board should connect to (written over BLE).
     var server: String = ""
     /// The self-hosted server's TLS pin, if one is already stored for `server`.
@@ -4422,7 +4423,30 @@ struct BluetoothSetupView: View {
                             .autocorrectionDisabled()
                             .focused($ssidFocused)
                     }
-                    SecureField("Password", text: $password)
+                    // Reveal toggle. A Wi-Fi password is typed once, blind, and
+                    // a wrong one fails in a way that looks like a broken board:
+                    // the panel just retries forever with no visible complaint.
+                    // Being able to read it back before sending is the cheapest
+                    // possible fix for that.
+                    HStack {
+                        Group {
+                            if passwordVisible {
+                                TextField("Password", text: $password)
+                                    .textInputAutocapitalization(.never)
+                                    .autocorrectionDisabled()
+                            } else {
+                                SecureField("Password", text: $password)
+                            }
+                        }
+                        Button {
+                            passwordVisible.toggle()
+                        } label: {
+                            Image(systemName: passwordVisible ? "eye.slash" : "eye")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(passwordVisible ? "Hide password" : "Show password")
+                    }
                 } header: {
                     Text("Wi-Fi")
                 } footer: {

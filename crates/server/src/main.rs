@@ -2101,7 +2101,17 @@ fn game_priority(g: &Game, cfg: &BoardConfig, favs: &HashSet<String>, unconfigur
     if let Some(p) = game_option_priority(g, cfg) {
         return Some(p);
     }
-    if unconfigured {
+    // A board with NOTHING chosen used to claim the entire slate. It reads as a
+    // friendly default and is actually the opposite: a freshly paired board lit
+    // up with twenty games the owner never asked for, every league at once, and
+    // no way to tell that from a board they had configured. Nothing selected now
+    // means nothing selected — `manifest_for_board` answers with the setup screen
+    // instead, which says what to do about it.
+    //
+    // Demo data is the one exception: its whole job is to fill a panel that has
+    // no preferences yet, and a demo board showing "add teams in the app" would
+    // be a toggle that appears broken.
+    if unconfigured && cfg.demo_data {
         return Some(4);
     }
     None
@@ -2322,10 +2332,40 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
         }
     }
 
-    // Priority 3: idle / asleep — the configured off-state (server-rendered clock
+    // Priority 3: a paired board nobody has told what to follow.
+    //
+    // This is the resting state, not a timed notice — it stays until the board
+    // has something to show, because the thing it is asking for is the thing
+    // that ends it. Below the notice block so a SLEEPING splash still gets its
+    // moment, and gated on `power` so turning the board off still turns it off.
+    if cfg.power && board_prefs(&cfg).unconfigured {
+        let (id, px) = render::render_notice(&SETUP_LINES, None);
+        state.cache_frame(id.clone(), px);
+        return Manifest {
+            clock_hour24: false,
+            local_clock: false,
+            rotation: vec![RotationEntry { frame_id: id, dwell_ms: 60_000, scroll: false }],
+            display_on: true,
+            off_state: cfg.off_state,
+            brightness: cfg.brightness,
+            epoch: 0,
+            countdown_ms: None,
+        };
+    }
+
+    // Priority 4: idle / asleep — the configured off-state (server-rendered clock
     // or a blank panel). Applies both to power-off and powered-on-but-no-games.
     idle_manifest(state, &cfg, tz)
 }
+
+/// What a board with no preferences shows. Kept beside the notice colours it
+/// borrows, and short enough to fit 64px in the fonts `render_notice` uses —
+/// `the_setup_screen_fits_the_panel` measures it rather than trusting the count.
+const SETUP_LINES: [(&str, bool, embedded_graphics::pixelcolor::Rgb888); 3] = [
+    ("ADD TEAMS", true, NOTICE_WHITE),
+    ("IN THE APP", false, NOTICE_GREY),
+    ("TO GET STARTED", false, NOTICE_GREY),
+];
 
 /// A deliberately dark panel. Distinct from `idle_manifest`, which draws the
 /// configured off mode — during quiet hours there is nothing to draw.
@@ -3944,6 +3984,7 @@ mod tests {
     #[test]
     fn button_sleep_wake_cycle() {
         let state = AppState::new_ephemeral(); // mock games incl. live ones
+        configure_all(&state, "b1");
         handle_button(&state, "b1");
         let cfg = state.config_for("b1");
         assert!(!cfg.power, "press while showing games should sleep");
@@ -3994,6 +4035,7 @@ mod tests {
     #[test]
     fn manifest_scrolls_deep_leaderboards() {
         let state = AppState::new_ephemeral();
+        configure_all(&state, "b1");
         *state.games.lock().unwrap() = espn::demo_games(0, 0);
         let m = manifest_for_board(&state, "b1");
         let dwell = state.config_for("b1").dwell_secs * 1000;
@@ -4017,6 +4059,7 @@ mod tests {
     #[test]
     fn board_scrolls_the_demo_leaderboard_through_the_wire() {
         let state = AppState::new_ephemeral();
+        configure_all(&state, "b1");
         *state.games.lock().unwrap() = espn::demo_games(0, 0);
         push_board(&state, "b1");
         let json = state.last_manifest.lock().unwrap().get("b1").cloned().unwrap();
@@ -4132,6 +4175,7 @@ mod tests {
     #[test]
     fn league_dwell_override_retimes_that_league_only() {
         let state = AppState::new_ephemeral();
+        configure_all(&state, "b1");
         *state.games.lock().unwrap() = espn::demo_games(0, 0);
         crate::ws::apply_command(&state, "b1", Command::SetLeagueDwell {
             sport_id: "f1".into(),
@@ -4169,6 +4213,7 @@ mod tests {
     #[test]
     fn league_rows_control_leaderboard_depth() {
         let state = AppState::new_ephemeral();
+        configure_all(&state, "b1");
         *state.games.lock().unwrap() = espn::demo_games(0, 0);
         let f1_entry = |m: &Manifest, state: &AppState| {
             let cfg = state.config_for("b1");
@@ -4212,6 +4257,7 @@ mod tests {
     #[test]
     fn stale_frames_are_evicted_after_grace() {
         let state = AppState::new_ephemeral();
+        configure_all(&state, "b1");
         push_board(&state, "b1"); // renders + caches the current rotation
         evict_stale_frames(&state); // grace <- current ids
         let old_ids: Vec<FrameId> = state.frames.lock().unwrap().keys().cloned().collect();
@@ -4460,6 +4506,7 @@ mod tests {
     #[test]
     fn rotation_cap_prioritizes_and_reports_bumped() {
         let state = AppState::new_ephemeral();
+        configure_all(&state, "b1");
         let side = |abbrev: &str| TeamSide {
             abbrev: abbrev.into(),
             name: abbrev.into(),
@@ -4523,9 +4570,11 @@ mod tests {
         assert_eq!(now_showing.iter().filter(|g| g.bumped).count(), 7);
         assert!(now_showing.iter().filter(|g| g.bumped).all(|g| g.frame_id.is_empty()));
 
-        // Unconfigured boards sample the slate silently — no bump reports.
+        // A board following NOTHING chooses nothing — so there is nothing to
+        // bump either. (It used to sample the whole slate silently, which is
+        // what put twenty unasked-for games on a freshly paired panel.)
         let (shown, bumped) = candidates_with_bumped(&state, &BoardConfig::default());
-        assert_eq!(shown.len(), 20);
+        assert!(shown.is_empty(), "nothing selected means nothing selected");
         assert!(bumped.is_empty(), "nothing was chosen, so nothing was lost");
     }
 
@@ -4560,7 +4609,7 @@ mod tests {
         record_finished_transitions(&state, &slate, prev_poll);
         *state.games.lock().unwrap() = slate;
 
-        let cfg = BoardConfig::default(); // unconfigured -> whole slate
+        let cfg = watch_all(); // unconfigured -> whole slate
         let ids: Vec<String> = candidate_games(&state, &cfg).iter().map(|g| g.id.clone()).collect();
         assert!(ids.contains(&"g1".to_string()), "observed final lingers");
         assert!(!ids.contains(&"g2".to_string()), "arrived-final never lingers");
@@ -4576,6 +4625,54 @@ mod tests {
             });
         let ids: Vec<String> = candidate_games(&state, &cfg).iter().map(|g| g.id.clone()).collect();
         assert!(!ids.contains(&"g1".to_string()), "linger expires after 30m");
+    }
+
+    /// A board that follows every league.
+    ///
+    /// `BoardConfig::default()` used to mean this implicitly: an unconfigured
+    /// board sampled the whole slate, so any test about rotation mechanics got
+    /// its games for free. Nothing selected now means nothing selected, so a
+    /// test that wants games has to say so — which is also more honest about
+    /// what it is exercising.
+    fn watch_all() -> BoardConfig {
+        let leagues = [
+            "nhl", "nba", "wnba", "mlb", "nfl", "cfb", "cbb", "wcbb", "mls", "epl", "wc", "wwc",
+            "ucl", "cbase", "olyhm", "olyhw", "olybm", "olybw", "olysm", "olysw", "pga", "lpga",
+        ];
+        BoardConfig {
+            sports: leagues
+                .iter()
+                .map(|id| SportConfig {
+                    sport_id: (*id).into(),
+                    championship_option_ids: vec!["all".into()],
+                    ..Default::default()
+                })
+                .chain(std::iter::once(SportConfig {
+                    // F1 has no blanket option; its four session kinds ARE the
+                    // whole schedule.
+                    sport_id: "f1".into(),
+                    championship_option_ids: vec![
+                        "race".into(),
+                        "quali".into(),
+                        "sprint".into(),
+                        "sprint-quali".into(),
+                    ],
+                    ..Default::default()
+                }))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// Make a board follow every league, LEAVING its other settings alone.
+    ///
+    /// Merges rather than replaces: these tests set timezones, dwell overrides
+    /// and off modes on the same board, and a helper that clobbered them would
+    /// quietly turn the test into a different test.
+    fn configure_all(state: &AppState, board_id: &str) {
+        let mut cfg = state.config_for(board_id);
+        cfg.sports = watch_all().sports;
+        state.configs.lock().unwrap().insert(board_id.to_string(), cfg);
     }
 
     /// A live game (in whatever state the previous slate left it) for the
@@ -4632,6 +4729,65 @@ mod tests {
         assert!(
             state.finished.lock().unwrap().is_empty(),
             "the expired stamp is swept, not left to accumulate"
+        );
+    }
+
+    /// The setup screen is centered by measurement, so a line wider than the
+    /// panel doesn't wrap or truncate — it silently draws off both edges.
+    #[test]
+    fn the_setup_screen_fits_the_panel() {
+        for (text, big, _) in SETUP_LINES {
+            let w = render::text_width(text, big);
+            assert!(
+                w <= scoreboard_protocol::FRAME_WIDTH as i32,
+                "{text:?} is {w}px wide, the panel is {}px",
+                scoreboard_protocol::FRAME_WIDTH
+            );
+        }
+    }
+
+    /// A freshly paired board must claim NOTHING. It used to claim the whole
+    /// slate, so someone who had just finished pairing got twenty games across
+    /// every league they had never asked for.
+    #[test]
+    fn a_board_with_no_preferences_shows_the_setup_screen_not_every_game() {
+        let state = AppState::new_ephemeral();
+        *state.games.lock().unwrap() =
+            vec![live_game("g1"), live_game("g2"), live_game("g3")];
+        let cfg = BoardConfig::default();
+        assert!(board_prefs(&cfg).unconfigured, "precondition: nothing configured");
+        assert!(
+            candidate_games(&state, &cfg).is_empty(),
+            "nothing selected means nothing selected"
+        );
+
+        // And the panel says what to do about it rather than going dark.
+        state.configs.lock().unwrap().insert("b1".into(), cfg);
+        let m = manifest_for_board(&state, "b1");
+        assert!(m.display_on, "the setup screen is lit");
+        assert_eq!(m.rotation.len(), 1, "one screen, not a rotation of games");
+
+        // Favoriting one team ends it: real games, no setup screen.
+        let mut cfg = BoardConfig::default();
+        cfg.sports = vec![SportConfig {
+            sport_id: "nhl".into(),
+            favorite_team_ids: vec!["nhl-bos".into()],
+            ..Default::default()
+        }];
+        assert!(!board_prefs(&cfg).unconfigured, "one favorite is configured");
+    }
+
+    /// Demo data is the deliberate exception — it exists to fill a panel that
+    /// has no preferences yet, so it must keep sampling the slate.
+    #[test]
+    fn demo_data_still_fills_an_unconfigured_board() {
+        let state = AppState::new_ephemeral();
+        *state.demo.lock().unwrap() = vec![live_game("d1"), live_game("d2")];
+        let cfg = BoardConfig { demo_data: true, ..Default::default() };
+        assert!(board_prefs(&cfg).unconfigured);
+        assert!(
+            !candidate_games(&state, &cfg).is_empty(),
+            "a demo toggle that shows nothing looks broken"
         );
     }
 
@@ -4997,6 +5153,7 @@ mod tests {
     #[test]
     fn finished_games_never_appear_as_upcoming() {
         let state = AppState::new_ephemeral();
+        configure_all(&state, "b1");
         let mut done = live_game("done");
         done.status = GameStatus::Final;
         done.away.score = 4;
@@ -5376,8 +5533,12 @@ mod tests {
     /// adding it back un-excludes; ResetRotation restores everything at once.
     #[test]
     fn exclusion_add_and_reset_cycle() {
-        let state = AppState::new_ephemeral(); // unconfigured -> whole live slate
-        let all = candidate_games(&state, &BoardConfig::default());
+        let state = AppState::new_ephemeral();
+        // The board must already CLAIM these games: AddGame on a game the board
+        // does not follow is a manual EXTRA, which is a different assertion than
+        // the un-exclude this test is about.
+        configure_all(&state, "b1");
+        let all = candidate_games(&state, &watch_all());
         assert!(all.len() >= 2);
         let victim = all[0].id.clone();
 
@@ -5407,10 +5568,10 @@ mod tests {
     #[test]
     fn pinned_board_still_reports_full_rotation_to_app() {
         let state = AppState::new_ephemeral(); // unconfigured -> whole live slate
-        let all = candidate_games(&state, &BoardConfig::default());
+        let all = candidate_games(&state, &watch_all());
         assert!(all.len() >= 2, "mock slate should have several live games");
 
-        let cfg = BoardConfig { focused_game_id: Some(all[0].id.clone()), ..Default::default() };
+        let cfg = BoardConfig { focused_game_id: Some(all[0].id.clone()), ..watch_all() };
         state.configs.lock().unwrap().insert("b1".into(), cfg);
 
         let m = manifest_for_board(&state, "b1");
@@ -5509,6 +5670,7 @@ mod tests {
     #[test]
     fn short_splash_is_one_frame_with_a_device_countdown() {
         let state = AppState::new_ephemeral();
+        configure_all(&state, "b1");
         handle_button(&state, "b1"); // games showing -> sleep + 4s splash
         let m = manifest_for_board(&state, "b1");
         assert_eq!(m.rotation.len(), 1);
@@ -5623,6 +5785,10 @@ mod tests {
     fn per_board_timezone_drives_the_clock() {
         let state = AppState::new_ephemeral();
         state.games.lock().unwrap().clear(); // idle -> off-state clock
+        // Both boards must be configured: an unconfigured board answers with the
+        // setup screen, and two setup screens are identical no matter the zone.
+        configure_all(&state, "b1");
+        configure_all(&state, "b2");
 
         crate::ws::apply_command(&state, "b1", Command::SetTimezone { tz: "America/New_York".into() });
         crate::ws::apply_command(&state, "b2", Command::SetTimezone { tz: "Asia/Tokyo".into() });
@@ -5667,6 +5833,7 @@ mod tests {
     #[test]
     fn league_depth_is_the_scroll_toggle() {
         let state = AppState::new_ephemeral();
+        configure_all(&state, "b1");
         *state.games.lock().unwrap() = espn::demo_games(0, 0);
         let entry_for = |m: &Manifest, id: &str| {
             let cfg = state.config_for("b1");
@@ -5790,6 +5957,7 @@ mod tests {
         // Each now-showing game must carry a frame id whose frame is cached, so the
         // controller can pull it over the WS (the no-HTTP "now showing" path).
         let s = AppState::new_ephemeral();
+        configure_all(&s, "board-x");
         let ServerMsg::BoardState { now_showing, .. } = board_state_msg(&s, "board-x") else {
             panic!("expected BoardState");
         };
@@ -6195,10 +6363,14 @@ mod tests {
             chosen_games(&s, c).iter().map(|g| g.id.clone()).collect()
         };
 
-        // No favorites, no extras -> the whole live slate.
-        assert_eq!(ids(&BoardConfig::default()).len(), 3);
+        // Following every league -> the whole live slate.
+        assert_eq!(ids(&watch_all()).len(), 3);
+        // Following nothing -> nothing. (This used to be the whole slate too,
+        // which is what made a freshly paired board light up with every game.)
+        assert!(ids(&BoardConfig::default()).is_empty());
 
-        // Favorites: only matching games (BOS nhl -> g1).
+        // Favorites: only matching games (BOS nhl -> g1). Starts from an EMPTY
+        // config, not `watch_all()` — the point is what the favorite claims.
         let mut cfg = BoardConfig::default();
         cfg.sports.push(SportConfig {
             sport_id: "nhl".into(),

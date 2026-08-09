@@ -226,6 +226,14 @@ pub struct Board {
     /// connect screen and never asks.
     wall: Option<WallClock>,
     wifi_up: bool,        // host-reported Wi-Fi link/DHCP state (connect screen)
+    /// Wi-Fi has been failing long enough that waiting is no longer the answer.
+    /// Set by the host after its join attempts pass a timeout; turns the connect
+    /// screen's bottom line into an offer to re-provision.
+    wifi_stuck: bool,
+    /// The user accepted that offer. The host clears the stored credentials and
+    /// reboots into BLE provisioning — a LATCH, like `reset_done`, because the
+    /// board cannot do either of those things itself.
+    reprovision: bool,
     setup_phase: SetupPhase, // which BLE-provisioning stage the setup screen shows
     brightness_changed_at: Option<u64>, // transient brightness-bar overlay window
     brightness_pending: bool, // a turn the server hasn't heard yet (see `encoder`)
@@ -298,6 +306,8 @@ impl Board {
             offline_since: None,
             wall: None,
             wifi_up: false,
+            wifi_stuck: false,
+            reprovision: false,
             setup_phase: SetupPhase::WaitingBluetooth,
             brightness_changed_at: None,
             brightness_pending: false,
@@ -417,6 +427,28 @@ impl Board {
     /// (which leg — Wi-Fi or server — is still coming up). Default false.
     pub fn set_wifi(&mut self, up: bool) {
         self.wifi_up = up;
+        // Any successful join retires the offer — the prompt must not outlive
+        // the problem it describes.
+        if up {
+            self.wifi_stuck = false;
+        }
+    }
+
+    /// Host reports that joining Wi-Fi has been failing past its timeout.
+    ///
+    /// The board otherwise retries forever behind a "JOINING WI-FI" screen that
+    /// looks identical at ten seconds and ten minutes, which is exactly what a
+    /// wrong password looks like — and the only escape was knowing to hold the
+    /// knob for ten seconds to factory reset.
+    pub fn set_wifi_stuck(&mut self, stuck: bool) {
+        self.wifi_stuck = stuck;
+    }
+
+    /// The user pressed the knob on that offer: clear Wi-Fi credentials and come
+    /// back up in BLE provisioning. Identity is NOT part of this — the board
+    /// stays the same board, still paired, and only forgets the network.
+    pub fn reprovision_triggered(&self) -> bool {
+        self.reprovision
     }
 
     /// Rendering hint for `Mode::Setup` (BLE provisioning). Default WaitingBluetooth.
@@ -995,6 +1027,14 @@ impl Board {
             // manifest change the screen. Offline (or on a setup/sync screen) fall
             // back to the local toggle so the knob is never a dead end.
             Gesture::Single => {
+                // The Wi-Fi escape hatch outranks everything else a press can
+                // mean: a board that cannot join a network has no server to ask
+                // and nothing to sleep from, so the press can only mean the one
+                // thing the panel is offering.
+                if self.wifi_stuck && !self.wifi_up {
+                    self.reprovision = true;
+                    return;
+                }
                 if self.online && matches!(self.mode, Mode::Running) {
                     self.outbox.push(ClientMsg::ButtonPress);
                 } else if matches!(self.mode, Mode::Running | Mode::Asleep) {
@@ -1200,6 +1240,16 @@ impl Board {
         // is standing there reading. Those screens already report the level by
         // dimming whole (`scale_buf` below), which is feedback enough.
         let mut server_content = false;
+        // A board that cannot join Wi-Fi never reaches a server, so it never
+        // leaves `Booting` and would sit on the SCOREBOARD splash forever —
+        // indistinguishable from a slow boot, with the only escape a ten-second
+        // hold nobody knows about. Once the host gives up waiting, say so and
+        // offer the way out, whichever mode we were nominally in.
+        if self.wifi_stuck && !self.wifi_up && matches!(self.mode, Mode::Booting | Mode::Running) {
+            let mut buf = self.screen_connecting();
+            scale_buf(&mut buf, self.brightness());
+            return buf;
+        }
         let mut buf = match self.mode {
             Mode::Booting => self.screen_boot(),
             Mode::Setup => self.screen_setup(),
@@ -1434,6 +1484,13 @@ impl Board {
             draw_leg(&mut c, 14, green, None);
             draw_leg(&mut c, 37, dim, Some(self.anim % 5));
             center_text(&mut c, "FINDING SERVER", 27, &FONT_4X6, amber);
+        } else if self.wifi_stuck {
+            // Past the point where waiting is the answer. "JOINING WI-FI" looks
+            // the same at ten seconds and ten minutes, so say what to do instead
+            // of animating patience at someone whose password is wrong.
+            draw_leg(&mut c, 14, dim, None);
+            draw_leg(&mut c, 37, dim, None);
+            center_text(&mut c, "PRESS TO SET UP", 27, &FONT_4X6, Rgb888::new(0xFF, 0x55, 0x55));
         } else {
             draw_leg(&mut c, 14, dim, Some(self.anim % 5));
             draw_leg(&mut c, 37, dim, None);
@@ -3367,6 +3424,54 @@ mod tests {
     /// moment there's a socket again — otherwise the board is dark while
     /// `cfg.power` reads true and the app's toggle is a confirmed no-op.
     #[test]
+    /// A board that cannot join Wi-Fi retried forever behind a screen that looked
+    /// the same at ten seconds and ten minutes — which is exactly what a WRONG
+    /// PASSWORD looks like. The only way out was knowing to hold the knob for ten
+    /// seconds, which also wiped the board's identity.
+    #[test]
+    fn a_stuck_wifi_join_offers_re_provisioning_to_a_single_press() {
+        let mut b = Board::new();
+        b.set_wifi(false);
+
+        // Before the timeout a press must NOT re-provision — it is the ordinary
+        // sleep toggle, and losing your network by tapping the knob during a
+        // slow boot would be its own bug.
+        b.button_down(0);
+        b.button_up(50);
+        b.tick(500);
+        assert!(!b.reprovision_triggered(), "no offer has been made yet");
+
+        // Past the timeout the panel offers, and the press accepts.
+        b.set_wifi_stuck(true);
+        b.button_down(1_000);
+        b.button_up(1_050);
+        b.tick(1_500);
+        assert!(b.reprovision_triggered(), "the press takes the offer on screen");
+
+        // The screen says so, and differs from the one that just waits.
+        let stuck = b.framebuffer();
+        let mut waiting = Board::new();
+        waiting.set_wifi(false);
+        waiting.tick(1_500);
+        assert_ne!(stuck, waiting.framebuffer(), "the offer must be visible, not implied");
+    }
+
+    /// The offer must not outlive the problem: joining a network retires it, so a
+    /// later press is an ordinary press again rather than a network wipe.
+    #[test]
+    fn joining_wifi_retires_the_re_provision_offer() {
+        let mut b = Board::new();
+        b.set_wifi(false);
+        b.set_wifi_stuck(true);
+        b.set_wifi(true); // DHCP came up
+        b.mode = Mode::Running;
+        b.button_down(0);
+        b.button_up(50);
+        b.tick(500);
+        assert!(!b.reprovision_triggered(), "a working network is not a setup request");
+        assert_eq!(b.mode(), Mode::Asleep, "it is the normal sleep toggle again");
+    }
+
     fn offline_press_sleeps_locally_and_still_reports() {
         let mut b = Board::new();
         b.mode = Mode::Running;
