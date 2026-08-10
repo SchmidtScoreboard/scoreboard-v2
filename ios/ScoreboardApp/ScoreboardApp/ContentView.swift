@@ -5011,11 +5011,25 @@ struct SettingsView: View {
                 ))
                 if model.debugLogOn, let path = model.debugLogPath,
                    let url = URL(string: model.httpBase + path) {
-                    Link(destination: url) {
-                        Label("Open log", systemImage: "doc.text.magnifyingglass")
+                    // In-app rather than a browser hop: the log is the thing you
+                    // came for, and bouncing out to Safari loses the refresh and
+                    // both share targets.
+                    NavigationLink {
+                        DebugLogView(url: url)
+                    } label: {
+                        Label("View log", systemImage: "doc.text.magnifyingglass")
                     }
                     ShareLink(item: url) {
-                        Label("Share link", systemImage: "square.and.arrow.up")
+                        Label("Share link", systemImage: "link")
+                    }
+                } else if model.debugLogOn {
+                    // Streaming is on but the server has not answered yet — say
+                    // so, rather than showing a row that does nothing.
+                    HStack {
+                        Text("Waiting for the server…")
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        ProgressView()
                     }
                 }
             } header: {
@@ -5816,6 +5830,125 @@ struct FirmwareNotesSheet: View {
             // Same lifecycle event, URLSession's spelling of it.
         } catch {
             notes = .unavailable
+        }
+    }
+}
+
+/// The board's console, read from the server over the tokenized URL.
+///
+/// Deliberately a plain text dump rather than a parsed, filtered, prettified
+/// log view: the value here is seeing exactly what the device printed, in
+/// order, including the parts nothing knows how to categorise. Anything
+/// cleverer would eventually hide the line that mattered.
+struct DebugLogView: View {
+    let url: URL
+
+    @State private var text = ""
+    @State private var loading = false
+    @State private var failure: String?
+    @State private var loadedAt: Date?
+
+    var body: some View {
+        Group {
+            if text.isEmpty && loading {
+                ProgressView("Loading…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let failure {
+                ContentUnavailableView(
+                    "Couldn't load",
+                    systemImage: "exclamationmark.triangle",
+                    description: Text(failure)
+                )
+            } else if text.isEmpty {
+                ContentUnavailableView(
+                    "Nothing yet",
+                    systemImage: "doc.text",
+                    description: Text("The board sends warnings as soon as streaming starts, and the rest as it happens. Pull to refresh.")
+                )
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        Text(text)
+                            .font(.system(.footnote, design: .monospaced))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal)
+                            .id("log")
+                        // Newest is last, so land at the bottom — that is the
+                        // part you came to read.
+                        Color.clear.frame(height: 1).id("end")
+                    }
+                    .onChange(of: text) { _, _ in
+                        withAnimation { proxy.scrollTo("end", anchor: .bottom) }
+                    }
+                }
+            }
+        }
+        // Pull-to-refresh AND a button: the gesture is the one people reach for,
+        // the button is the one people find.
+        .refreshable { await load() }
+        .navigationTitle("Device log")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                Button { Task { await load() } } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .disabled(loading)
+                Menu {
+                    if !text.isEmpty {
+                        ShareLink(item: text) {
+                            Label("Share log text", systemImage: "doc.on.doc")
+                        }
+                    }
+                    ShareLink(item: url) {
+                        Label("Share link", systemImage: "link")
+                    }
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                }
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            if let loadedAt, !text.isEmpty {
+                Text("Updated \(loadedAt.formatted(date: .omitted, time: .standard))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background(.bar)
+            }
+        }
+        .task { await load() }
+    }
+
+    private func load() async {
+        loading = true
+        defer { loading = false }
+        do {
+            // No caching: the whole point is what the board said just now, and
+            // a 200 served from URLCache would quietly show a stale window.
+            var req = URLRequest(url: url)
+            req.cachePolicy = .reloadIgnoringLocalCacheData
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 404 {
+                // The token died with the window — say what that means rather
+                // than reporting a bare status code.
+                failure = "This debug session has ended. Turn streaming on again for a fresh link."
+                return
+            }
+            guard code == 200, let body = String(data: data, encoding: .utf8) else {
+                failure = "Server returned \(code)."
+                return
+            }
+            failure = nil
+            text = body
+            loadedAt = Date()
+        } catch is CancellationError {
+        } catch let e as URLError where e.code == .cancelled {
+        } catch {
+            failure = error.localizedDescription
         }
     }
 }

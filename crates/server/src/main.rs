@@ -4861,6 +4861,37 @@ mod tests {
         );
     }
 
+    /// End to end through the handler the app calls: mint, record, read, revoke.
+    #[tokio::test]
+    async fn the_debug_endpoint_serves_a_live_token_and_404s_a_dead_one() {
+        use axum::extract::Path;
+        let state = AppState::new_ephemeral();
+        record_debug_log(&state, "b1", vec!["! [ws] reconnecting".into(), "[panel] stalled 90ms".into()]);
+        let token = mint_debug_token(&state, "b1", 60).rsplit('/').next().unwrap().to_string();
+
+        let resp = get_debug_log(State(state.clone()), Path(token.clone())).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            "text/plain; charset=utf-8"
+        );
+        // Never cached: a log read from URLCache would quietly show a stale window.
+        assert_eq!(resp.headers().get(axum::http::header::CACHE_CONTROL).unwrap(), "no-store");
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("[panel] stalled 90ms"), "serves what the board sent: {text:?}");
+        assert!(text.starts_with("! [ws] reconnecting"), "oldest first, warnings marked");
+
+        // The board id is not a key, however well-known it is.
+        let resp = get_debug_log(State(state.clone()), Path("b1".into())).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+
+        // Revoking (streaming off) kills the URL that was already handed out.
+        state.debug_tokens.lock().unwrap().clear();
+        let resp = get_debug_log(State(state), Path(token)).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
     /// The console can carry a board's SSID and — worse — its pairing code, so
     /// the read endpoint is a capability, not a guessable address.
     ///
