@@ -4881,6 +4881,34 @@ mod tests {
         );
     }
 
+    /// A board that reboots mid-session must be put back to work, or the app
+    /// shows a live link onto a board that has gone quiet.
+    #[test]
+    fn a_live_session_re_arms_a_board_that_comes_back() {
+        let state = AppState::new_ephemeral();
+        assert_eq!(debug_session_remaining(&state, "b1"), None, "no session, nothing to re-arm");
+
+        mint_debug_token(&state, "b1", 600);
+        let left = debug_session_remaining(&state, "b1").expect("session is live");
+        assert!(left > 500 && left <= 600, "reports the time REMAINING, got {left}");
+
+        // Scoped to its own board.
+        assert_eq!(debug_session_remaining(&state, "b2"), None);
+
+        // Expired sessions do not re-arm anything.
+        state
+            .debug_tokens
+            .lock()
+            .unwrap()
+            .insert("old".into(), ("b2".into(), std::time::Instant::now()));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert_eq!(debug_session_remaining(&state, "b2"), None, "an expired window is over");
+
+        // Switching off revokes, so a later reconnect stays quiet.
+        state.debug_tokens.lock().unwrap().retain(|_, (b, _)| b != "b1");
+        assert_eq!(debug_session_remaining(&state, "b1"), None);
+    }
+
     /// End to end through the handler the app calls: mint, record, read, revoke.
     #[tokio::test]
     async fn the_debug_endpoint_serves_a_live_token_and_404s_a_dead_one() {
