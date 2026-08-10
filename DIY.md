@@ -125,7 +125,8 @@ Configuration, all optional:
 | `FIRMWARE_DIR` | `./firmware-dist` | Where OTA release channels live, if you host your own updates. |
 
 For hot-reload while hacking, `scripts/dev-server.sh` mints a dev certificate on
-first run, exports it, and prints the pin to paste into `firmware-rs/local.env`.
+first run, exports it, and writes its pin into `firmware-rs/local.env` for you —
+so step 3's build already has the pin it needs.
 
 ### 2.4 Reachable from your board
 
@@ -151,9 +152,10 @@ SCOREBOARD_DEV_TLS_PIN=<the 64-hex pin from step 2.2>
 Then, with the board plugged in over USB-C:
 
 ```sh
-set -a; source firmware-rs/local.env; set +a
 bash scripts/flash.sh
 ```
+
+(`flash.sh` reads `local.env` itself; anything you export by hand still wins.)
 
 It reboots into the new image on its own (`espflash` hard-resets after
 flashing). If the panel stays dark, tap **RESET** — most likely if you had to
