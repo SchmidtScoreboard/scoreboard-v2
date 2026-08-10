@@ -337,14 +337,21 @@ typedef void (*UniffiCallbackInterfaceClientListenerMethod11)(uint64_t, RustBuff
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD12
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD12
-typedef void (*UniffiCallbackInterfaceClientListenerMethod12)(uint64_t, RustBuffer, RustBuffer, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceClientListenerMethod12)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD13
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD13
-typedef void (*UniffiCallbackInterfaceClientListenerMethod13)(uint64_t, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceClientListenerMethod13)(uint64_t, RustBuffer, RustBuffer, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD14
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CLIENT_LISTENER_METHOD14
+typedef void (*UniffiCallbackInterfaceClientListenerMethod14)(uint64_t, RustBuffer, void* _Nonnull, 
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
@@ -362,10 +369,11 @@ typedef struct UniffiVTableCallbackInterfaceClientListener {
     UniffiCallbackInterfaceClientListenerMethod7 _Nonnull onFrame;
     UniffiCallbackInterfaceClientListenerMethod8 _Nonnull onPaired;
     UniffiCallbackInterfaceClientListenerMethod9 _Nonnull onPairFailed;
-    UniffiCallbackInterfaceClientListenerMethod10 _Nonnull onSettingsExport;
-    UniffiCallbackInterfaceClientListenerMethod11 _Nonnull onImportResult;
-    UniffiCallbackInterfaceClientListenerMethod12 _Nonnull onBoardVersion;
-    UniffiCallbackInterfaceClientListenerMethod13 _Nonnull onFirmwareList;
+    UniffiCallbackInterfaceClientListenerMethod10 _Nonnull onDebugUrl;
+    UniffiCallbackInterfaceClientListenerMethod11 _Nonnull onSettingsExport;
+    UniffiCallbackInterfaceClientListenerMethod12 _Nonnull onImportResult;
+    UniffiCallbackInterfaceClientListenerMethod13 _Nonnull onBoardVersion;
+    UniffiCallbackInterfaceClientListenerMethod14 _Nonnull onFirmwareList;
     UniffiCallbackInterfaceFree _Nonnull uniffiFree;
 } UniffiVTableCallbackInterfaceClientListener;
 
@@ -492,7 +500,7 @@ void uniffi_app_core_fn_method_scoreboardclient_set_brightness(void*_Nonnull ptr
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_DEBUG_LOG
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_DEBUG_LOG
-void uniffi_app_core_fn_method_scoreboardclient_set_debug_log(void*_Nonnull ptr, RustBuffer board_id, int8_t on, RustCallStatus *_Nonnull out_status
+void uniffi_app_core_fn_method_scoreboardclient_set_debug_log(void*_Nonnull ptr, RustBuffer board_id, int8_t on, uint32_t minutes, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_DEMO_DATA
@@ -1250,6 +1258,12 @@ uint16_t uniffi_app_core_checksum_method_clientlistener_on_paired(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_PAIR_FAILED
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_PAIR_FAILED
 uint16_t uniffi_app_core_checksum_method_clientlistener_on_pair_failed(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_DEBUG_URL
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_CLIENTLISTENER_ON_DEBUG_URL
+uint16_t uniffi_app_core_checksum_method_clientlistener_on_debug_url(void
     
 );
 #endif

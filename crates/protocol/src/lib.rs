@@ -1075,9 +1075,10 @@ pub enum Command {
     /// Golf's round indicator on/off for one league. `None` reverts to the
     /// default (shown).
     SetLeagueShowRound { sport_id: String, show: Option<bool> },
-    /// Ask the board to stream (or stop streaming) its console to the server.
-    /// DEBUG builds of the app only — see `ServerMsg::SetDebugLog`.
-    SetDebugLog { on: bool },
+    /// Ask the board to stream (or stop streaming) its console to the server
+    /// for `minutes`. DEBUG builds of the app only — see
+    /// `ServerMsg::SetDebugLog`.
+    SetDebugLog { on: bool, minutes: u32 },
     /// Per-league team-name display style (city/college/country vs mascot vs
     /// abbreviation); None reverts the league to its default
     /// ([`default_name_style`]).
@@ -1268,6 +1269,12 @@ pub enum ServerMsg {
         req_id: u64,
         ok: bool,
         error: Option<String>,
+        /// Where to read this board's console, for a `SetDebugLog` that turned
+        /// it on. Carries a single-use-window token rather than the board id —
+        /// see `debug_tokens` — so the URL is the capability and it expires
+        /// with the window. Absent for every other command.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        debug_url: Option<String>,
     },
     // pairing results (to a controller)
     Paired { board_id: String },
@@ -1326,12 +1333,13 @@ pub enum ServerMsg {
     // switch changes the answer for a connected board. Old firmware fails to
     // parse the unknown variant and drops the message — that must remain
     // harmless, so the server never waits on any reaction to it.
-    /// Start or stop streaming the device console to the server.
+    /// Start or stop streaming the device console to the server, for `secs`.
     ///
-    /// Off by default and never persisted: a board that reboots comes back
-    /// quiet, so an app left on the debug screen cannot leave a fleet
-    /// chattering forever.
-    SetDebugLog { on: bool },
+    /// Off by default, never persisted, and self-limiting: the board switches
+    /// itself off when the window passes. Indefinite streaming would cost a
+    /// board work nobody is reading and hold a window open on the server for no
+    /// reason — so the window is required, not optional.
+    SetDebugLog { on: bool, secs: u32 },
     UpdateAvailable {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         version: Option<String>,

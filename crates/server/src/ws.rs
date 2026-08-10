@@ -449,13 +449,19 @@ async fn controller_loop(
                             req_id,
                             ok: false,
                             error: Some("not paired with this board".into()),
+                            debug_url: None,
                         };
                         let _ = out.send(Message::Text(serde_json::to_string(&ack).unwrap()));
                     } else {
-                        apply_command(&state, &board_id, cmd);
+                        let debug_url = apply_command(&state, &board_id, cmd);
                         let _ = out.send(Message::Text(
-                            serde_json::to_string(&ServerMsg::CommandAck { req_id, ok: true, error: None })
-                                .unwrap(),
+                            serde_json::to_string(&ServerMsg::CommandAck {
+                                req_id,
+                                ok: true,
+                                error: None,
+                                debug_url,
+                            })
+                            .unwrap(),
                         ));
                         // Reflect the updated config back to the app.
                         let _ = out.send(Message::Text(
@@ -566,20 +572,22 @@ pub(crate) fn apply_settings_import(state: &AppState, board_id: &str, json: &str
     Ok(())
 }
 
-pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
+/// Apply one app command. Returns a capability URL when the command minted one
+/// (only `SetDebugLog` does); callers that don't care can ignore it.
+pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) -> Option<String> {
     // Firmware update touches no config at all: relay the hosted dist to the
     // board's device socket (no dist / offline board = logged no-op) and skip
     // the fold-persist-push cycle below entirely.
     if matches!(cmd, Command::UpdateFirmware) {
         crate::handle_update_firmware(state, board_id);
-        return;
+        return None;
     }
     // Same short-circuit as UpdateFirmware: InstallFirmware relays a named
     // channel's dist to the device and touches no config. Borrow `cmd` (don't
     // move it) so the exhaustive fold below still compiles.
     if let Command::InstallFirmware { channel } = &cmd {
         crate::handle_install_firmware(state, board_id, *channel);
-        return;
+        return None;
     }
     // Set when the app toggles power, so the board gets the same "SLEEPING" splash
     // (or notice cancel) the physical button produces. Handled outside the config
@@ -767,15 +775,23 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
             // Relayed straight through to the board rather than stored: this
             // is a live diagnostic, and a setting that survived a reboot would
             // leave boards streaming that nobody is watching.
-            Command::SetDebugLog { on } => {
-                let msg = serde_json::to_string(&ServerMsg::SetDebugLog { on }).unwrap();
+            Command::SetDebugLog { on, minutes } => {
+                // Clamp rather than trust: the window bounds how long a board
+                // works for nobody and how long the read window stays open, and
+                // both of those are ours to bound, not the caller's.
+                let secs = minutes.clamp(1, 240) * 60;
+                let msg = serde_json::to_string(&ServerMsg::SetDebugLog { on, secs }).unwrap();
                 if let Some(tx) = state.devices.lock().unwrap().get(board_id) {
                     let _ = tx.send(Message::Text(msg));
                 }
+                // Off revokes everything at once: the board stops sending, the
+                // buffer goes, and any URL handed out stops resolving.
+                state.debug_tokens.lock().unwrap().retain(|_, (b, _)| b != board_id);
                 if !on {
                     state.debug_logs.lock().unwrap().remove(board_id);
+                    return None;
                 }
-                return;
+                return Some(crate::mint_debug_token(state, board_id, secs));
             }
             // Golf's round indicator. Upserted like the settings above so it
             // sticks on a league the user has configured nothing else for.
@@ -923,6 +939,7 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
         crate::push_update_available(state, board_id);
     }
     state.persist_config(board_id, &updated);
+    None
 }
 
 #[cfg(test)]

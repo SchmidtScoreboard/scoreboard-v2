@@ -660,7 +660,7 @@ public protocol ScoreboardClientProtocol: AnyObject {
      * Ask the board to stream its console to the server, readable at
      * `GET /debug/{board_id}`. DEBUG app builds only; never persisted.
      */
-    func setDebugLog(boardId: String, on: Bool)
+    func setDebugLog(boardId: String, on: Bool, minutes: UInt32)
 
     /**
      * Serve this board synthetic demo games instead of live ones. Persisted
@@ -1062,10 +1062,11 @@ open class ScoreboardClient:
      * Ask the board to stream its console to the server, readable at
      * `GET /debug/{board_id}`. DEBUG app builds only; never persisted.
      */
-    open func setDebugLog(boardId: String, on: Bool) { try! rustCall {
+    open func setDebugLog(boardId: String, on: Bool, minutes: UInt32) { try! rustCall {
         uniffi_app_core_fn_method_scoreboardclient_set_debug_log(self.uniffiClonePointer(),
                                                                  FfiConverterString.lower(boardId),
-                                                                 FfiConverterBool.lower(on), $0)
+                                                                 FfiConverterBool.lower(on),
+                                                                 FfiConverterUInt32.lower(minutes), $0)
     }
     }
 
@@ -3104,6 +3105,14 @@ public protocol ClientListener: AnyObject {
     func onPairFailed(reason: String)
 
     /**
+     * Where to read a board's console, after `set_debug_log` turned it on.
+     * Path only (the app joins it to the server it is already talking to).
+     * Carries a token that dies with the debug window, so it is a capability
+     * and not a permanent address.
+     */
+    func onDebugUrl(boardId: String, url: String)
+
+    /**
      * A board's exported settings arrived (the reply to `export_settings`);
      * `json` is the portable blob to share/copy.
      */
@@ -3375,6 +3384,31 @@ private enum UniffiCallbackInterfaceClientListener {
                 }
                 return try uniffiObj.onPairFailed(
                     reason: FfiConverterString.lift(reason)
+                )
+            }
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        onDebugUrl: { (
+            uniffiHandle: UInt64,
+            boardId: RustBuffer,
+            url: RustBuffer,
+            _: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws in
+                guard let uniffiObj = try? FfiConverterCallbackInterfaceClientListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.onDebugUrl(
+                    boardId: FfiConverterString.lift(boardId),
+                    url: FfiConverterString.lift(url)
                 )
             }
 
@@ -4124,7 +4158,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_method_scoreboardclient_set_brightness() != 13017 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_method_scoreboardclient_set_debug_log() != 54226 {
+    if uniffi_app_core_checksum_method_scoreboardclient_set_debug_log() != 16441 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_demo_data() != 38827 {
@@ -4229,16 +4263,19 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_method_clientlistener_on_pair_failed() != 58861 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_method_clientlistener_on_settings_export() != 30107 {
+    if uniffi_app_core_checksum_method_clientlistener_on_debug_url() != 23243 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_method_clientlistener_on_import_result() != 43830 {
+    if uniffi_app_core_checksum_method_clientlistener_on_settings_export() != 51507 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_method_clientlistener_on_board_version() != 41990 {
+    if uniffi_app_core_checksum_method_clientlistener_on_import_result() != 13814 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_method_clientlistener_on_firmware_list() != 40766 {
+    if uniffi_app_core_checksum_method_clientlistener_on_board_version() != 29287 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_clientlistener_on_firmware_list() != 37959 {
         return InitializationResult.apiChecksumMismatch
     }
 

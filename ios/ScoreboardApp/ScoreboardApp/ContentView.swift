@@ -91,6 +91,11 @@ final class ListenerAdapter: ClientListener {
     func onPairFailed(reason: String) {
         Task { @MainActor in self.model?.handlePairFailed(reason) }
     }
+    func onDebugUrl(boardId: String, url: String) {
+        // The ack names no board — it answers the command this app just sent.
+        Task { @MainActor in self.model?.debugLogPath = url }
+    }
+
     func onSettingsExport(boardId: String, json: String) {
         Task { @MainActor in self.model?.handleSettingsExport(boardId, json) }
     }
@@ -1307,9 +1312,15 @@ final class BoardViewModel: ObservableObject {
     /// Whether this app asked the board to stream its console. Session-only,
     /// like the setting itself — nothing persists it on either side.
     @Published var debugLogOn = false
+    /// Minutes the board keeps streaming before switching itself off.
+    @Published var debugLogMinutes: UInt32 = 5
+    /// Where to read it, handed back by the server when streaming starts. A
+    /// token that dies with the window, so there is nothing to leak afterwards.
+    @Published var debugLogPath: String?
     func setDebugLog(_ boardId: String, _ on: Bool) {
         debugLogOn = on
-        client?.setDebugLog(boardId: boardId, on: on)
+        if !on { debugLogPath = nil }
+        client?.setDebugLog(boardId: boardId, on: on, minutes: debugLogMinutes)
     }
 
     /// Golf's round indicator. Defaults to SHOWN — a leaderboard looks the same
@@ -4977,19 +4988,33 @@ struct SettingsView: View {
     @ViewBuilder private var debugLogSection: some View {
         if let boardId {
             Section {
+                Picker("For", selection: Binding(
+                    get: { model.debugLogMinutes },
+                    set: { model.debugLogMinutes = $0 }
+                )) {
+                    Text("5 minutes").tag(UInt32(5))
+                    Text("30 minutes").tag(UInt32(30))
+                    Text("1 hour").tag(UInt32(60))
+                    Text("2 hours").tag(UInt32(120))
+                }
+                .disabled(model.debugLogOn)
                 Toggle("Stream device logs", isOn: Binding(
                     get: { model.debugLogOn },
                     set: { model.setDebugLog(boardId, $0) }
                 ))
-                if model.debugLogOn {
-                    Link(destination: URL(string: "\(model.httpBase)/debug/\(boardId)")!) {
+                if model.debugLogOn, let path = model.debugLogPath,
+                   let url = URL(string: model.httpBase + path) {
+                    Link(destination: url) {
                         Label("Open log", systemImage: "doc.text.magnifyingglass")
+                    }
+                    ShareLink(item: url) {
+                        Label("Share link", systemImage: "square.and.arrow.up")
                     }
                 }
             } header: {
                 Text("Developer")
             } footer: {
-                Text("The board's console, sent to the server instead of only to USB. Readable at /debug/\(boardId.prefix(8))… while this is on. Stops at the next reboot.")
+                Text("The board's console, sent to the server instead of only to USB. Warnings are always kept and arrive as soon as you turn this on; the chatty stuff starts now. The board stops on its own when the window ends, and the link stops working with it.")
             }
         }
     }

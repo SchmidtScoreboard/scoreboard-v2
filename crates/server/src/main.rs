@@ -158,6 +158,14 @@ pub struct AppState {
     /// — this is a debugging window, not a log service, and a board left
     /// streaming must not grow the server without limit.
     pub debug_logs: Arc<Mutex<HashMap<String, std::collections::VecDeque<String>>>>,
+    /// Capability tokens for reading those logs: nonce -> (board_id, expiry).
+    ///
+    /// The log endpoint is unauthenticated HTTP — there is no session to check —
+    /// so the URL itself has to be the credential. A board id would be a poor
+    /// one: it is long-lived, it is printed on the device's own console, and it
+    /// is the board's PUBLIC KEY, which is not a secret in any other context.
+    /// A nonce that dies with the debug window is.
+    pub debug_tokens: Arc<Mutex<HashMap<String, (String, std::time::Instant)>>>,
     /// The OTA firmware images this server hosts, one per release channel
     /// (loaded once from FIRMWARE_DIR/{stable,beta,dev} at startup, each
     /// integrity-checked). An absent channel is simply off: its routes 404 and
@@ -401,6 +409,7 @@ impl AppState {
             frame_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             finished: Arc::new(Mutex::new(HashMap::new())),
             debug_logs: Arc::new(Mutex::new(HashMap::new())),
+            debug_tokens: Arc::new(Mutex::new(HashMap::new())),
             firmware: HashMap::new(),
             device_versions: Arc::new(Mutex::new(HashMap::new())),
             fw_download_tokens: Arc::new(Mutex::new(HashMap::new())),
@@ -892,7 +901,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/health", get(get_health))
-        .route("/debug/:board_id", get(get_debug_log))
+        .route("/debug/:token", get(get_debug_log))
         .route("/catalog", get(get_catalog))
         .route("/render/:id", get(get_render))
         .route("/game/:id", get(get_game))
@@ -2126,6 +2135,33 @@ fn game_priority(g: &Game, cfg: &BoardConfig, favs: &HashSet<String>, unconfigur
 /// a fault at the rate the firmware prints; past that the oldest go.
 const DEBUG_LOG_CAP: usize = 400;
 
+/// Mint a capability URL for reading one board's console, good for `secs`.
+///
+/// Random nonce from the same generator the pairing challenge uses, so guessing
+/// one is not a realistic attack. Expires with the debug window rather than
+/// living until someone remembers to revoke it.
+pub fn mint_debug_token(state: &AppState, board_id: &str, secs: u32) -> String {
+    let nonce: String = {
+        use rand::RngCore;
+        let mut b = [0u8; 16];
+        rand::rngs::OsRng.fill_bytes(&mut b);
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    };
+    let expiry = std::time::Instant::now() + Duration::from_secs(u64::from(secs));
+    let mut tokens = state.debug_tokens.lock().unwrap();
+    tokens.retain(|_, (_, exp)| *exp > std::time::Instant::now());
+    tokens.insert(nonce.clone(), (board_id.to_string(), expiry));
+    format!("/debug/{nonce}")
+}
+
+/// The board a token reads, or None when it is unknown or expired.
+fn resolve_debug_token(state: &AppState, nonce: &str) -> Option<String> {
+    let mut tokens = state.debug_tokens.lock().unwrap();
+    let now = std::time::Instant::now();
+    tokens.retain(|_, (_, exp)| *exp > now);
+    tokens.get(nonce).map(|(board, _)| board.clone())
+}
+
 /// Record console lines from a board, oldest-out past the cap.
 pub fn record_debug_log(state: &AppState, board_id: &str, lines: Vec<String>) {
     let mut logs = state.debug_logs.lock().unwrap();
@@ -2523,9 +2559,19 @@ pub fn health_report(state: &AppState) -> (bool, serde_json::Value) {
 /// someone waiting for a fault to reproduce.
 async fn get_debug_log(
     State(s): State<AppState>,
-    axum::extract::Path(board_id): axum::extract::Path<String>,
+    axum::extract::Path(token): axum::extract::Path<String>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
+    let Some(board_id) = resolve_debug_token(&s, &token) else {
+        // Same answer for expired and never-existed: a distinguishable "expired"
+        // would confirm which tokens were once real.
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            "no such debug session\n",
+        )
+            .into_response();
+    };
     let body = s
         .debug_logs
         .lock()
@@ -4813,6 +4859,42 @@ mod tests {
             state.finished.lock().unwrap().is_empty(),
             "the expired stamp is swept, not left to accumulate"
         );
+    }
+
+    /// The console can carry a board's SSID and — worse — its pairing code, so
+    /// the read endpoint is a capability, not a guessable address.
+    ///
+    /// A board id would have been the obvious path segment and the wrong one:
+    /// it is long-lived, the board prints it on its own console, and it is the
+    /// board's PUBLIC KEY, which nothing else treats as secret.
+    #[test]
+    fn a_debug_log_is_only_readable_through_a_live_token() {
+        let state = AppState::new_ephemeral();
+        record_debug_log(&state, "board-1", vec!["[ws] connected".into()]);
+
+        // A token resolves to exactly its board, and only while it lives.
+        let url = mint_debug_token(&state, "board-1", 60);
+        let token = url.rsplit('/').next().unwrap().to_string();
+        assert_eq!(resolve_debug_token(&state, &token).as_deref(), Some("board-1"));
+        assert_eq!(token.len(), 32, "128 bits of nonce, hex-encoded");
+
+        // The board id itself is NOT a key.
+        assert_eq!(resolve_debug_token(&state, "board-1"), None);
+        assert_eq!(resolve_debug_token(&state, "not-a-token"), None);
+
+        // A second board's token cannot read the first board's console.
+        let other = mint_debug_token(&state, "board-2", 60);
+        let other_token = other.rsplit('/').next().unwrap().to_string();
+        assert_eq!(resolve_debug_token(&state, &other_token).as_deref(), Some("board-2"));
+
+        // Expiry is enforced on read, not by a sweeper that might not have run.
+        state
+            .debug_tokens
+            .lock()
+            .unwrap()
+            .insert("stale".into(), ("board-1".into(), std::time::Instant::now()));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert_eq!(resolve_debug_token(&state, "stale"), None, "an expired token is no token");
     }
 
     /// Connecting must never reach ESPN. Enforced structurally: nothing outside

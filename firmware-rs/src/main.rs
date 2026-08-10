@@ -580,7 +580,7 @@ async fn device(
             // Never retry a possibly-stale address forever: dropping the
             // cache makes the next pass re-resolve, which is what recovers
             // when a Railway redeploy hands the server a new IP.
-            println!("[ws] tcp connect failed; retry");
+            crate::dwarn!("[ws] tcp connect failed; retry");
             cached_ip = None;
             Timer::after(Duration::from_secs(2)).await;
             continue;
@@ -616,7 +616,7 @@ async fn device(
                 // longer) our server — a recycled IP can accept connections
                 // yet fail here, so this must invalidate the cache too or
                 // we'd loop on it.
-                println!("[ws] handshake failed; retry");
+                crate::dwarn!("[ws] handshake failed; retry");
                 break 'session false;
             }
             println!("[ws] connected");
@@ -654,7 +654,7 @@ async fn device(
                     .await;
                     match event {
                         Err(_) => {
-                            println!("[ws] silent for 30s; reconnecting");
+                            crate::dwarn!("[ws] silent for 30s; reconnecting");
                             board.lock().await.set_online(false);
                             break;
                         }
@@ -668,7 +668,13 @@ async fn device(
                     // Ship whatever the console produced while we were waiting.
                     // Here, not on a timer: this is the one point in the loop
                     // where nothing is half-read and a write is safe.
-                    if crate::debuglog::enabled() {
+                    // The window is the board's to enforce: a server that
+                    // forgets to switch it off, or an app that goes away
+                    // mid-session, must not leave it running.
+                    if crate::debuglog::expire_if_due(Instant::now().as_millis()) {
+                        println!("[dbg] remote logging window ended");
+                    }
+                    if crate::debuglog::enabled() && crate::debuglog::pending() {
                         let (mut lines, dropped) = crate::debuglog::drain();
                         if dropped > 0 {
                             lines.insert(0, alloc::format!("[dbg] ... {dropped} line(s) dropped"));
@@ -726,9 +732,16 @@ async fn device(
                         }
                         // Debug logging on/off. Deliberately not persisted:
                         // a board that reboots comes back quiet.
-                        Ok(ServerMsg::SetDebugLog { on }) => {
-                            crate::debuglog::set_enabled(on);
-                            println!("[dbg] remote logging {}", if on { "ON" } else { "off" });
+                        Ok(ServerMsg::SetDebugLog { on, secs }) => {
+                            crate::debuglog::set_enabled(
+                                on,
+                                secs,
+                                Instant::now().as_millis(),
+                            );
+                            println!(
+                                "[dbg] remote logging {}",
+                                if on { "ON" } else { "off" }
+                            );
                         }
                         Ok(ServerMsg::SetupDone) => {
                             // Paired: leave the pairing screen if it's up.
@@ -998,10 +1011,12 @@ async fn connection(mut controller: WifiController<'static>) {
                 // A stale reading would lie on the diagnostics screen right
                 // when someone's debugging a drop — unknown beats wrong.
                 RSSI_DBM.store(RSSI_UNKNOWN, Ordering::Relaxed);
-                println!("[wifi] disconnected; retrying");
+                crate::dwarn!("[wifi] disconnected; retrying");
             }
             Err(e) => {
                 println!("[wifi] connect failed: {:?}", e);
+                // The Debug payload names the network; the remote twin does not.
+                crate::dwarn!("[wifi] connect failed (see console for detail)");
                 Timer::after(Duration::from_secs(3)).await;
             }
         }

@@ -267,6 +267,11 @@ pub trait ClientListener: Send + Sync {
     fn on_frame(&self, frame_id: String, rgba: Vec<u8>);
     fn on_paired(&self, board_id: String);
     fn on_pair_failed(&self, reason: String);
+    /// Where to read a board's console, after `set_debug_log` turned it on.
+    /// Path only (the app joins it to the server it is already talking to).
+    /// Carries a token that dies with the debug window, so it is a capability
+    /// and not a permanent address.
+    fn on_debug_url(&self, board_id: String, url: String);
     /// A board's exported settings arrived (the reply to `export_settings`);
     /// `json` is the portable blob to share/copy.
     fn on_settings_export(&self, board_id: String, json: String);
@@ -486,6 +491,18 @@ impl ScoreboardClient {
                                                 l.on_board_version(bid, firmware_version, firmware_update);
                                             }
                                         }
+                                        // The only ack the app acts on: a
+                                        // SetDebugLog that turned streaming on
+                                        // comes back with where to read it.
+                                        ServerMsg::CommandAck { debug_url: Some(url), .. } => {
+                                            // The ack carries no board id — it
+                                            // answers a command the app just
+                                            // sent, so the app already knows
+                                            // which board it asked about.
+                                            if let Some(l) = listener.lock().unwrap().as_ref() {
+                                                l.on_debug_url(String::new(), url);
+                                            }
+                                        }
                                         ServerMsg::SettingsExport { board_id: bid, json } => {
                                             if let Some(l) = listener.lock().unwrap().as_ref() { l.on_settings_export(bid, json); }
                                         }
@@ -683,8 +700,10 @@ impl ScoreboardClient {
 
     /// Ask the board to stream its console to the server, readable at
     /// `GET /debug/{board_id}`. DEBUG app builds only; never persisted.
-    pub fn set_debug_log(&self, board_id: String, on: bool) {
-        let _ = self.tx.send(Out::Command(board_id, Command::SetDebugLog { on }));
+    pub fn set_debug_log(&self, board_id: String, on: bool, minutes: u32) {
+        let _ = self
+            .tx
+            .send(Out::Command(board_id, Command::SetDebugLog { on, minutes }));
     }
 
     /// Golf's round indicator ("R3") on the panel and the card; None reverts to
