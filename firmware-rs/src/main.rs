@@ -556,7 +556,7 @@ async fn device(
                             embassy_net::IpAddress::Ipv4(v4) => v4,
                         },
                         _ => {
-                            println!("[ws] dns failed for {server_host}; retry");
+                            crate::dwarn!("[ws] dns failed; retry");
                             Timer::after(Duration::from_secs(5)).await;
                             continue;
                         }
@@ -619,7 +619,7 @@ async fn device(
                 crate::dwarn!("[ws] handshake failed; retry");
                 break 'session false;
             }
-            println!("[ws] connected");
+            crate::dlog!("[ws] connected");
             board.lock().await.set_online(true);
             // Parse state lives OUTSIDE the read call so a frame that arrives in
             // pieces resumes mid-frame instead of desyncing the stream.
@@ -795,7 +795,7 @@ async fn device(
                     }
                     Ok(_) => {}
                     Err(_) => {
-                        println!("[ws] disconnected; reconnecting");
+                        crate::dwarn!("[ws] disconnected; reconnecting");
                         board.lock().await.set_online(false);
                         break;
                     }
@@ -984,6 +984,7 @@ async fn connection(mut controller: WifiController<'static>) {
         match controller.connect_async().await {
             Ok(info) => {
                 println!("[wifi] connected: {:?}", info);
+                crate::dlog!("[wifi] associated");
                 // While associated, publish the RSSI every ~5s for the WIFI
                 // INFO screen (esp-radio's `WifiController::rssi`, valid only
                 // in station mode after connect — exactly this window). The

@@ -158,14 +158,15 @@ pub struct AppState {
     /// — this is a debugging window, not a log service, and a board left
     /// streaming must not grow the server without limit.
     pub debug_logs: Arc<Mutex<HashMap<String, std::collections::VecDeque<String>>>>,
-    /// Capability tokens for reading those logs: nonce -> (board_id, expiry).
+    /// Capability tokens for reading those logs:
+    /// nonce -> (board_id, session_ends, readable_until).
     ///
     /// The log endpoint is unauthenticated HTTP — there is no session to check —
     /// so the URL itself has to be the credential. A board id would be a poor
     /// one: it is long-lived, it is printed on the device's own console, and it
     /// is the board's PUBLIC KEY, which is not a secret in any other context.
     /// A nonce that dies with the debug window is.
-    pub debug_tokens: Arc<Mutex<HashMap<String, (String, std::time::Instant)>>>,
+    pub debug_tokens: Arc<Mutex<HashMap<String, (String, std::time::Instant, std::time::Instant)>>>,
     /// The OTA firmware images this server hosts, one per release channel
     /// (loaded once from FIRMWARE_DIR/{stable,beta,dev} at startup, each
     /// integrity-checked). An absent channel is simply off: its routes 404 and
@@ -2140,6 +2141,15 @@ const DEBUG_LOG_CAP: usize = 400;
 /// Random nonce from the same generator the pairing challenge uses, so guessing
 /// one is not a realistic attack. Expires with the debug window rather than
 /// living until someone remembers to revoke it.
+/// How long a link keeps working after the board stops streaming.
+///
+/// The end of a window is exactly when you want to read it: the last thing the
+/// board said before it went quiet is usually the thing you were waiting for.
+/// A link that died with the session would throw that away at the worst moment.
+/// The board is already silent by then, so this grace costs nothing but a
+/// readable buffer.
+const DEBUG_READ_GRACE: Duration = Duration::from_secs(10 * 60);
+
 pub fn mint_debug_token(state: &AppState, board_id: &str, secs: u32) -> String {
     let nonce: String = {
         use rand::RngCore;
@@ -2147,10 +2157,12 @@ pub fn mint_debug_token(state: &AppState, board_id: &str, secs: u32) -> String {
         rand::rngs::OsRng.fill_bytes(&mut b);
         b.iter().map(|x| format!("{x:02x}")).collect()
     };
-    let expiry = std::time::Instant::now() + Duration::from_secs(u64::from(secs));
+    let now = std::time::Instant::now();
+    let session_ends = now + Duration::from_secs(u64::from(secs));
+    let readable_until = session_ends + DEBUG_READ_GRACE;
     let mut tokens = state.debug_tokens.lock().unwrap();
-    tokens.retain(|_, (_, exp)| *exp > std::time::Instant::now());
-    tokens.insert(nonce.clone(), (board_id.to_string(), expiry));
+    tokens.retain(|_, (_, _, readable)| *readable > now);
+    tokens.insert(nonce.clone(), (board_id.to_string(), session_ends, readable_until));
     format!("/debug/{nonce}")
 }
 
@@ -2169,8 +2181,10 @@ pub fn debug_session_remaining(state: &AppState, board_id: &str) -> Option<u32> 
         .lock()
         .unwrap()
         .values()
-        .filter(|(b, exp)| b == board_id && *exp > now)
-        .map(|(_, exp)| exp.duration_since(now).as_secs() as u32)
+        // SESSION end, not the readable-until: the grace exists so a link
+        // outlives the stream, not so the board keeps talking into it.
+        .filter(|(b, ends, _)| b == board_id && *ends > now)
+        .map(|(_, ends, _)| ends.duration_since(now).as_secs() as u32)
         .max()
 }
 
@@ -2178,8 +2192,8 @@ pub fn debug_session_remaining(state: &AppState, board_id: &str) -> Option<u32> 
 fn resolve_debug_token(state: &AppState, nonce: &str) -> Option<String> {
     let mut tokens = state.debug_tokens.lock().unwrap();
     let now = std::time::Instant::now();
-    tokens.retain(|_, (_, exp)| *exp > now);
-    tokens.get(nonce).map(|(board, _)| board.clone())
+    tokens.retain(|_, (_, _, readable)| *readable > now);
+    tokens.get(nonce).map(|(board, _, _)| board.clone())
 }
 
 /// Record console lines from a board, oldest-out past the cap.
@@ -4896,16 +4910,29 @@ mod tests {
         assert_eq!(debug_session_remaining(&state, "b2"), None);
 
         // Expired sessions do not re-arm anything.
+        let past = std::time::Instant::now();
         state
             .debug_tokens
             .lock()
             .unwrap()
-            .insert("old".into(), ("b2".into(), std::time::Instant::now()));
+            .insert("old".into(), ("b2".into(), past, past));
         std::thread::sleep(std::time::Duration::from_millis(5));
         assert_eq!(debug_session_remaining(&state, "b2"), None, "an expired window is over");
 
+        // The LINK outlives the stream: once the session ends the board stops
+        // being asked for more, but what it already said stays readable.
+        let url = mint_debug_token(&state, "b3", 1);
+        let token = url.rsplit('/').next().unwrap().to_string();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert_eq!(debug_session_remaining(&state, "b3"), None, "the window is over");
+        assert_eq!(
+            resolve_debug_token(&state, &token).as_deref(),
+            Some("b3"),
+            "but the link still reads — the end of a window is when you want it"
+        );
+
         // Switching off revokes, so a later reconnect stays quiet.
-        state.debug_tokens.lock().unwrap().retain(|_, (b, _)| b != "b1");
+        state.debug_tokens.lock().unwrap().retain(|_, (b, _, _)| b != "b1");
         assert_eq!(debug_session_remaining(&state, "b1"), None);
     }
 
@@ -4967,11 +4994,12 @@ mod tests {
         assert_eq!(resolve_debug_token(&state, &other_token).as_deref(), Some("board-2"));
 
         // Expiry is enforced on read, not by a sweeper that might not have run.
+        let past = std::time::Instant::now();
         state
             .debug_tokens
             .lock()
             .unwrap()
-            .insert("stale".into(), ("board-1".into(), std::time::Instant::now()));
+            .insert("stale".into(), ("board-1".into(), past, past));
         std::thread::sleep(std::time::Duration::from_millis(5));
         assert_eq!(resolve_debug_token(&state, "stale"), None, "an expired token is no token");
     }

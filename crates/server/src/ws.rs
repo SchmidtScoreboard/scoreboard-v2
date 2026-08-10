@@ -805,7 +805,7 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) -> O
                 );
                 // Off revokes everything at once: the board stops sending, the
                 // buffer goes, and any URL handed out stops resolving.
-                state.debug_tokens.lock().unwrap().retain(|_, (b, _)| b != board_id);
+                state.debug_tokens.lock().unwrap().retain(|_, (b, _, _)| b != board_id);
                 if !on {
                     state.debug_logs.lock().unwrap().remove(board_id);
                     return None;

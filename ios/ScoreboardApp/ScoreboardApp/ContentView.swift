@@ -1317,9 +1317,37 @@ final class BoardViewModel: ObservableObject {
     /// Where to read it, handed back by the server when streaming starts. A
     /// token that dies with the window, so there is nothing to leak afterwards.
     @Published var debugLogPath: String?
+    /// When the board stops streaming. The toggle follows this rather than
+    /// staying on forever — a switch that says ON while the board has gone
+    /// quiet is worse than no switch.
+    @Published var debugLogEndsAt: Date?
+    private var debugLogTimer: Task<Void, Never>?
+
     func setDebugLog(_ boardId: String, _ on: Bool) {
         debugLogOn = on
-        if !on { debugLogPath = nil }
+        debugLogTimer?.cancel()
+        debugLogTimer = nil
+        if on {
+            let ends = Date().addingTimeInterval(Double(debugLogMinutes) * 60)
+            debugLogEndsAt = ends
+            // The board enforces the real deadline; this only keeps the UI
+            // honest about it. The LINK deliberately outlives both, so the
+            // tail of the session stays readable after the switch flips.
+            debugLogTimer = Task { [weak self] in
+                let seconds = ends.timeIntervalSinceNow
+                if seconds > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                }
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    self?.debugLogOn = false
+                    self?.debugLogEndsAt = nil
+                }
+            }
+        } else {
+            debugLogEndsAt = nil
+            debugLogPath = nil
+        }
         client?.setDebugLog(boardId: boardId, on: on, minutes: debugLogMinutes)
     }
 
@@ -5019,8 +5047,20 @@ struct SettingsView: View {
                     } label: {
                         Label("View log", systemImage: "doc.text.magnifyingglass")
                     }
-                    ShareLink(item: url) {
-                        Label("Share link", systemImage: "link")
+                    Button {
+                        UIPasteboard.general.string = url.absoluteString
+                    } label: {
+                        Label("Copy link", systemImage: "doc.on.doc")
+                    }
+                    if let ends = model.debugLogEndsAt {
+                        HStack {
+                            Text("Stops")
+                            Spacer()
+                            Text(ends, style: .relative)
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        .font(.footnote)
                     }
                 } else if model.debugLogOn {
                     // Streaming is on but the server has not answered yet — say
@@ -5901,8 +5941,10 @@ struct DebugLogView: View {
                             Label("Share log text", systemImage: "doc.on.doc")
                         }
                     }
-                    ShareLink(item: url) {
-                        Label("Share link", systemImage: "link")
+                    Button {
+                        UIPasteboard.general.string = url.absoluteString
+                    } label: {
+                        Label("Copy link", systemImage: "link")
                     }
                 } label: {
                     Image(systemName: "square.and.arrow.up")
