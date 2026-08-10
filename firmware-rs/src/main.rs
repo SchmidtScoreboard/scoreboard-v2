@@ -47,6 +47,7 @@ mod ble;
 mod brightness;
 mod config;
 mod creds;
+mod debuglog;
 mod fw_pubkey;
 mod identity;
 mod link;
@@ -390,6 +391,10 @@ async fn render(
 ) {
     let mut last_update = Instant::now();
     let mut buf = alloc::vec![0u32; FRAME_PIXELS];
+    // Anything longer than this between panel passes is user-visible as a flash.
+    // Two frame intervals: one missed pass is noise, a run of them is the bug.
+    const STALL_REPORT: Duration = Duration::from_millis(66);
+    let mut last_pass = Instant::now();
     loop {
         // Kick off the DMA for `front`; it streams to the panel for the whole loop.
         let mut xfer = match hub75.render(&*front) {
@@ -401,9 +406,27 @@ async fn render(
             }
         };
 
+        // A HUB75 panel emits light ONLY while this loop is driving it — there
+        // is no framebuffer holding the image between passes. So any gap here is
+        // a visibly black panel, and a gap is exactly what a cooperative
+        // executor produces when some other task runs long without yielding.
+        // Report them: a stall is invisible in a log that only prints events.
+        let since_pass = last_pass.elapsed();
+        if since_pass > STALL_REPORT {
+            crate::dlog!("[panel] refresh stalled {}ms", since_pass.as_millis());
+        }
+        last_pass = Instant::now();
+
         // Re-sample board-core at ~30fps into the cached frame.
         if last_update.elapsed() >= Duration::from_millis(33) {
+            let lock_wait = Instant::now();
             let mut b = board.lock().await;
+            let waited = lock_wait.elapsed();
+            if waited > STALL_REPORT {
+                // Distinguishes "someone held the board mutex" from "the
+                // executor was busy elsewhere" — different fixes.
+                crate::dlog!("[panel] waited {}ms for the board lock", waited.as_millis());
+            }
             b.tick(Instant::now().as_millis());
             buf.copy_from_slice(&b.framebuffer());
             let outgoing = b.take_outgoing();
@@ -642,6 +665,21 @@ async fn device(
                             continue;
                         }
                     }
+                    // Ship whatever the console produced while we were waiting.
+                    // Here, not on a timer: this is the one point in the loop
+                    // where nothing is half-read and a write is safe.
+                    if crate::debuglog::enabled() {
+                        let (mut lines, dropped) = crate::debuglog::drain();
+                        if dropped > 0 {
+                            lines.insert(0, alloc::format!("[dbg] ... {dropped} line(s) dropped"));
+                        }
+                        if !lines.is_empty() {
+                            let msg = ClientMsg::DebugLog { lines };
+                            let _ = ws::write_text(&mut link, &serde_json::to_vec(&msg).unwrap()).await;
+                        }
+                    }
+                    {
+                    }
                 }
                 match reader.read(&mut link, &mut frame).await {
                     Ok((ws::OP_TEXT, n)) => match serde_json::from_slice::<ServerMsg>(&frame[..n]) {
@@ -685,6 +723,12 @@ async fn device(
                             if fw_unconfirmed {
                                 ota::confirm_running_image(flash).await;
                             }
+                        }
+                        // Debug logging on/off. Deliberately not persisted:
+                        // a board that reboots comes back quiet.
+                        Ok(ServerMsg::SetDebugLog { on }) => {
+                            crate::debuglog::set_enabled(on);
+                            println!("[dbg] remote logging {}", if on { "ON" } else { "off" });
                         }
                         Ok(ServerMsg::SetupDone) => {
                             // Paired: leave the pairing screen if it's up.

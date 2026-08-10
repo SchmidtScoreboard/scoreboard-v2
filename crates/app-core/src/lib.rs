@@ -681,6 +681,12 @@ impl ScoreboardClient {
         let _ = self.tx.send(Out::Command(board_id, Command::SetLeagueRows { sport_id, rows }));
     }
 
+    /// Ask the board to stream its console to the server, readable at
+    /// `GET /debug/{board_id}`. DEBUG app builds only; never persisted.
+    pub fn set_debug_log(&self, board_id: String, on: bool) {
+        let _ = self.tx.send(Out::Command(board_id, Command::SetDebugLog { on }));
+    }
+
     /// Golf's round indicator ("R3") on the panel and the card; None reverts to
     /// the default, which is shown.
     pub fn set_league_show_round(&self, board_id: String, sport_id: String, show: Option<bool>) {

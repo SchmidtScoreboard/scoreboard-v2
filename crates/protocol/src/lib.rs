@@ -1075,6 +1075,9 @@ pub enum Command {
     /// Golf's round indicator on/off for one league. `None` reverts to the
     /// default (shown).
     SetLeagueShowRound { sport_id: String, show: Option<bool> },
+    /// Ask the board to stream (or stop streaming) its console to the server.
+    /// DEBUG builds of the app only — see `ServerMsg::SetDebugLog`.
+    SetDebugLog { on: bool },
     /// Per-league team-name display style (city/college/country vs mascot vs
     /// abbreviation); None reverts the league to its default
     /// ([`default_name_style`]).
@@ -1211,6 +1214,11 @@ pub enum ClientMsg {
     // server hosts, across ALL channels regardless of board enrollment —
     // answered by `ServerMsg::FirmwareList`
     ListFirmware,
+    /// Device console lines, batched, sent only while the server has asked for
+    /// them (`ServerMsg::SetDebugLog`). The board prints these to its UART
+    /// regardless; this is the same text taking the socket instead, so a board
+    /// nowhere near a USB cable can still be read.
+    DebugLog { lines: Vec<String> },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -1318,6 +1326,12 @@ pub enum ServerMsg {
     // switch changes the answer for a connected board. Old firmware fails to
     // parse the unknown variant and drops the message — that must remain
     // harmless, so the server never waits on any reaction to it.
+    /// Start or stop streaming the device console to the server.
+    ///
+    /// Off by default and never persisted: a board that reboots comes back
+    /// quiet, so an app left on the debug screen cannot leave a fleet
+    /// chattering forever.
+    SetDebugLog { on: bool },
     UpdateAvailable {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         version: Option<String>,

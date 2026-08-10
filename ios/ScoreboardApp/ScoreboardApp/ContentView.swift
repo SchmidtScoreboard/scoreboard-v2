@@ -1304,6 +1304,14 @@ final class BoardViewModel: ObservableObject {
         client?.setLeagueRows(boardId: id, sportId: sportId, rows: rows)
     }
 
+    /// Whether this app asked the board to stream its console. Session-only,
+    /// like the setting itself — nothing persists it on either side.
+    @Published var debugLogOn = false
+    func setDebugLog(_ boardId: String, _ on: Bool) {
+        debugLogOn = on
+        client?.setDebugLog(boardId: boardId, on: on)
+    }
+
     /// Golf's round indicator. Defaults to SHOWN — a leaderboard looks the same
     /// on Thursday as on Sunday, so the round earns its corner until turned off.
     func leagueShowRound(_ sportId: String) -> Bool { current.leagueShowRound[sportId] ?? true }
@@ -4809,6 +4817,7 @@ struct SettingsView: View {
                     helpSection
                     #if DEBUG
                     firmwareDeveloperSection
+                    debugLogSection
                     #endif
                     removeSection
                 }
@@ -4955,6 +4964,33 @@ struct SettingsView: View {
             #else
             Text("The hosted server needs no setup. Pick “My own server” only if you run the scoreboard server yourself — you'll need its address and the TLS pin it printed on first run.")
             #endif
+        }
+    }
+
+    /// DEBUG only: have the board stream its console to the server, so a board
+    /// on a shelf can be read without carrying it to a laptop and plugging in a
+    /// cable — which reboots it, destroying the state you wanted to look at.
+    ///
+    /// Deliberately not persisted anywhere. It lives until the board reboots or
+    /// this is switched off, because a fleet quietly streaming logs nobody reads
+    /// is a bug of its own.
+    @ViewBuilder private var debugLogSection: some View {
+        if let boardId {
+            Section {
+                Toggle("Stream device logs", isOn: Binding(
+                    get: { model.debugLogOn },
+                    set: { model.setDebugLog(boardId, $0) }
+                ))
+                if model.debugLogOn {
+                    Link(destination: URL(string: "\(model.httpBase)/debug/\(boardId)")!) {
+                        Label("Open log", systemImage: "doc.text.magnifyingglass")
+                    }
+                }
+            } header: {
+                Text("Developer")
+            } footer: {
+                Text("The board's console, sent to the server instead of only to USB. Readable at /debug/\(boardId.prefix(8))… while this is on. Stops at the next reboot.")
+            }
         }
     }
 

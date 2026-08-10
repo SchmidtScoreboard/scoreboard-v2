@@ -657,6 +657,12 @@ public protocol ScoreboardClientProtocol: AnyObject {
     func setBrightness(boardId: String, level: UInt8)
 
     /**
+     * Ask the board to stream its console to the server, readable at
+     * `GET /debug/{board_id}`. DEBUG app builds only; never persisted.
+     */
+    func setDebugLog(boardId: String, on: Bool)
+
+    /**
      * Serve this board synthetic demo games instead of live ones. Persisted
      * server-side and per-board, so it survives a restart and can be cleared
      * from any paired phone even while the board is offline.
@@ -1049,6 +1055,17 @@ open class ScoreboardClient:
         uniffi_app_core_fn_method_scoreboardclient_set_brightness(self.uniffiClonePointer(),
                                                                   FfiConverterString.lower(boardId),
                                                                   FfiConverterUInt8.lower(level), $0)
+    }
+    }
+
+    /**
+     * Ask the board to stream its console to the server, readable at
+     * `GET /debug/{board_id}`. DEBUG app builds only; never persisted.
+     */
+    open func setDebugLog(boardId: String, on: Bool) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_set_debug_log(self.uniffiClonePointer(),
+                                                                 FfiConverterString.lower(boardId),
+                                                                 FfiConverterBool.lower(on), $0)
     }
     }
 
@@ -4105,6 +4122,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_brightness() != 13017 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_scoreboardclient_set_debug_log() != 54226 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_demo_data() != 38827 {

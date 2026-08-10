@@ -187,6 +187,15 @@ async fn device_loop(
                     tracing::info!("device '{board_id}' factory reset — forgetting the board");
                     state.forget_board(&board_id);
                 }
+                Ok(ClientMsg::DebugLog { lines }) => {
+                    // Logged at debug level as well as buffered: a `railway
+                    // logs` tail is often the fastest way to watch a board that
+                    // is misbehaving right now.
+                    for l in &lines {
+                        tracing::debug!("board '{board_id}' | {l}");
+                    }
+                    crate::record_debug_log(&state, &board_id, lines);
+                }
                 Ok(ClientMsg::RequestUpdate) => {
                     // The on-device menu's UPDATE row was selected: run the
                     // exact pick+relay the app's Update button runs. Nothing
@@ -754,6 +763,19 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) {
                 } else if rows.is_some() {
                     cfg.sports.push(SportConfig { sport_id, leaderboard_rows: rows, ..Default::default() });
                 }
+            }
+            // Relayed straight through to the board rather than stored: this
+            // is a live diagnostic, and a setting that survived a reboot would
+            // leave boards streaming that nobody is watching.
+            Command::SetDebugLog { on } => {
+                let msg = serde_json::to_string(&ServerMsg::SetDebugLog { on }).unwrap();
+                if let Some(tx) = state.devices.lock().unwrap().get(board_id) {
+                    let _ = tx.send(Message::Text(msg));
+                }
+                if !on {
+                    state.debug_logs.lock().unwrap().remove(board_id);
+                }
+                return;
             }
             // Golf's round indicator. Upserted like the settings above so it
             // sticks on a league the user has configured nothing else for.

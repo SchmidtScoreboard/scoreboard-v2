@@ -153,6 +153,11 @@ pub struct AppState {
     /// observe it at poll granularity). Drives the post-game linger; memory-only —
     /// a restart mid-linger just ends the linger early.
     pub finished: Arc<Mutex<HashMap<String, Finish>>>,
+    /// Recent device console lines per board, newest last. Only populated while
+    /// a board has been asked to stream (`ServerMsg::SetDebugLog`), and bounded
+    /// — this is a debugging window, not a log service, and a board left
+    /// streaming must not grow the server without limit.
+    pub debug_logs: Arc<Mutex<HashMap<String, std::collections::VecDeque<String>>>>,
     /// The OTA firmware images this server hosts, one per release channel
     /// (loaded once from FIRMWARE_DIR/{stable,beta,dev} at startup, each
     /// integrity-checked). An absent channel is simply off: its routes 404 and
@@ -395,6 +400,7 @@ impl AppState {
             frame_grace: Arc::new(Mutex::new(HashSet::new())),
             frame_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             finished: Arc::new(Mutex::new(HashMap::new())),
+            debug_logs: Arc::new(Mutex::new(HashMap::new())),
             firmware: HashMap::new(),
             device_versions: Arc::new(Mutex::new(HashMap::new())),
             fw_download_tokens: Arc::new(Mutex::new(HashMap::new())),
@@ -886,6 +892,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/health", get(get_health))
+        .route("/debug/:board_id", get(get_debug_log))
         .route("/catalog", get(get_catalog))
         .route("/render/:id", get(get_render))
         .route("/game/:id", get(get_game))
@@ -2115,6 +2122,22 @@ fn game_priority(g: &Game, cfg: &BoardConfig, favs: &HashSet<String>, unconfigur
     None
 }
 
+/// Device console lines kept per board. A few hundred covers the minutes around
+/// a fault at the rate the firmware prints; past that the oldest go.
+const DEBUG_LOG_CAP: usize = 400;
+
+/// Record console lines from a board, oldest-out past the cap.
+pub fn record_debug_log(state: &AppState, board_id: &str, lines: Vec<String>) {
+    let mut logs = state.debug_logs.lock().unwrap();
+    let buf = logs.entry(board_id.to_string()).or_default();
+    for l in lines {
+        if buf.len() >= DEBUG_LOG_CAP {
+            buf.pop_front();
+        }
+        buf.push_back(l);
+    }
+}
+
 /// How many games fit in the board's rotation.
 const ROTATION_CAP: usize = 20;
 
@@ -2488,6 +2511,37 @@ pub fn health_report(state: &AppState) -> (bool, serde_json::Value) {
         "version": env!("CARGO_PKG_VERSION"),
     });
     (ok, report)
+}
+
+/// GET /debug/{board_id} — the device console this board has streamed, oldest
+/// first, as plain text.
+///
+/// Plain text and not JSON because the only thing anyone does with it is read
+/// it, usually through `curl`. Empty until the board is asked to stream (the
+/// app's Debug logging toggle); a board that was never asked returns nothing
+/// rather than 404, since "no lines yet" and "unknown board" look the same to
+/// someone waiting for a fault to reproduce.
+async fn get_debug_log(
+    State(s): State<AppState>,
+    axum::extract::Path(board_id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let body = s
+        .debug_logs
+        .lock()
+        .unwrap()
+        .get(&board_id)
+        .map(|b| b.iter().cloned().collect::<Vec<_>>().join("\n"))
+        .unwrap_or_default();
+    (
+        axum::http::StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 /// GET /health — liveness for an uptime monitor, and the few numbers worth
