@@ -127,6 +127,16 @@ async fn device_loop(
     // Initial per-board manifest.
     push_board(&state, &board_id);
 
+    // Re-arm debug streaming if a session is still live. A board forgets it
+    // across a reboot (by design), and this one reboots for an OTA and
+    // reconnects on a flaky link — without this, the app shows a working link
+    // onto a board that stopped talking, which is the worst of both.
+    if let Some(secs) = crate::debug_session_remaining(&state, &board_id) {
+        tracing::info!("device '{board_id}' re-armed debug logging ({secs}s left)");
+        let msg = serde_json::to_string(&ServerMsg::SetDebugLog { on: true, secs }).unwrap();
+        let _ = tx.send(Message::Text(msg));
+    }
+
     while let Some(Ok(msg)) = receiver.next().await {
         if let Message::Text(t) = msg {
             match serde_json::from_str::<ClientMsg>(&t) {
@@ -781,9 +791,18 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) -> O
                 // both of those are ours to bound, not the caller's.
                 let secs = minutes.clamp(1, 240) * 60;
                 let msg = serde_json::to_string(&ServerMsg::SetDebugLog { on, secs }).unwrap();
-                if let Some(tx) = state.devices.lock().unwrap().get(board_id) {
-                    let _ = tx.send(Message::Text(msg));
-                }
+                let delivered = match state.devices.lock().unwrap().get(board_id) {
+                    Some(tx) => tx.send(Message::Text(msg)).is_ok(),
+                    None => false,
+                };
+                // Logged because the failure is silent otherwise: the app gets
+                // its link either way, and an offline board looks exactly like
+                // a board with nothing to say.
+                tracing::info!(
+                    "board '{board_id}': debug logging {} for {secs}s ({})",
+                    if on { "ON" } else { "off" },
+                    if delivered { "delivered" } else { "board offline — will re-arm on connect" }
+                );
                 // Off revokes everything at once: the board stops sending, the
                 // buffer goes, and any URL handed out stops resolving.
                 state.debug_tokens.lock().unwrap().retain(|_, (b, _)| b != board_id);

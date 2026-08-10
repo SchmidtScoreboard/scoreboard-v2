@@ -684,8 +684,6 @@ async fn device(
                             let _ = ws::write_text(&mut link, &serde_json::to_vec(&msg).unwrap()).await;
                         }
                     }
-                    {
-                    }
                 }
                 match reader.read(&mut link, &mut frame).await {
                     Ok((ws::OP_TEXT, n)) => match serde_json::from_slice::<ServerMsg>(&frame[..n]) {

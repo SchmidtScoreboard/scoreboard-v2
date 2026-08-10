@@ -2154,6 +2154,26 @@ pub fn mint_debug_token(state: &AppState, board_id: &str, secs: u32) -> String {
     format!("/debug/{nonce}")
 }
 
+/// Seconds left on this board's debug session, if one is live.
+///
+/// The board deliberately forgets streaming when it reboots — a setting that
+/// survived a power cycle could leave a board chattering forever. But the
+/// SESSION outlives the board's memory of it: the window was requested from the
+/// server and the token is still good, so a board that comes back mid-session
+/// should be put back to work rather than quietly staying silent while the app
+/// shows a live link. `device_loop` re-arms on every connect for exactly that.
+pub fn debug_session_remaining(state: &AppState, board_id: &str) -> Option<u32> {
+    let now = std::time::Instant::now();
+    state
+        .debug_tokens
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|(b, exp)| b == board_id && *exp > now)
+        .map(|(_, exp)| exp.duration_since(now).as_secs() as u32)
+        .max()
+}
+
 /// The board a token reads, or None when it is unknown or expired.
 fn resolve_debug_token(state: &AppState, nonce: &str) -> Option<String> {
     let mut tokens = state.debug_tokens.lock().unwrap();
