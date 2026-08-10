@@ -4804,9 +4804,14 @@ struct SettingsView: View {
                 if boardId == nil && !openServerDirectly {
                     Section {
                         NavigationLink {
-                            Form { serverSection }
-                                .navigationTitle("Advanced")
-                                .navigationBarTitleDisplayMode(.inline)
+                            Form {
+                                serverSection
+                                #if DEBUG
+                                debugLogSection
+                                #endif
+                            }
+                            .navigationTitle("Advanced")
+                            .navigationBarTitleDisplayMode(.inline)
                         } label: {
                             Label("Advanced", systemImage: "gearshape.2")
                         }
@@ -4828,7 +4833,6 @@ struct SettingsView: View {
                     helpSection
                     #if DEBUG
                     firmwareDeveloperSection
-                    debugLogSection
                     #endif
                     removeSection
                 }
@@ -4986,7 +4990,10 @@ struct SettingsView: View {
     /// this is switched off, because a fleet quietly streaming logs nobody reads
     /// is a bug of its own.
     @ViewBuilder private var debugLogSection: some View {
-        if let boardId {
+        // `model.selectedBoardId`, NOT this sheet's `boardId` — that parameter
+        // scopes the sheet to a server (the dead-server recovery screen) and is
+        // nil in ordinary settings, which is why this rendered nothing at all.
+        if let boardId = model.selectedBoardId {
             Section {
                 Picker("For", selection: Binding(
                     get: { model.debugLogMinutes },
@@ -5015,6 +5022,14 @@ struct SettingsView: View {
                 Text("Developer")
             } footer: {
                 Text("The board's console, sent to the server instead of only to USB. Warnings are always kept and arrive as soon as you turn this on; the chatty stuff starts now. The board stops on its own when the window ends, and the link stops working with it.")
+            }
+        } else {
+            // Never render nothing: a section that silently vanishes is
+            // indistinguishable from one that was never built, which is exactly
+            // how this shipped hidden the first time.
+            Section("Developer") {
+                Text("Select a scoreboard to stream its logs.")
+                    .foregroundStyle(.secondary)
             }
         }
     }
