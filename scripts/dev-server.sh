@@ -27,13 +27,17 @@ fi
 DEV_PIN="$(cat "$DEV_TLS_DIR/pin.txt")"
 export TLS_CERT_PEM="$(cat "$DEV_TLS_DIR/cert.pem")"
 export TLS_KEY_PEM="$(cat "$DEV_TLS_DIR/key.pem")"
-if ! grep -q "$DEV_PIN" firmware-rs/local.env 2>/dev/null; then
-    cat >&2 <<EOF
-
-  Dev TLS pin (put this in firmware-rs/local.env, then re-flash):
-
-      SCOREBOARD_DEV_TLS_PIN=$DEV_PIN
-
-EOF
+# Write the pin into local.env rather than printing it and hoping. Forgetting
+# the copy-paste doesn't fail here — it fails much later, as a compile-time
+# panic out of `config.rs` during a flash, which reads like the firmware is
+# broken rather than like a step was skipped.
+if ! grep -q "^SCOREBOARD_DEV_TLS_PIN=$DEV_PIN$" firmware-rs/local.env 2>/dev/null; then
+    touch firmware-rs/local.env
+    # Drop any stale pin line first (a re-minted cert changes it).
+    tmp="$(mktemp)"
+    grep -v '^SCOREBOARD_DEV_TLS_PIN=' firmware-rs/local.env > "$tmp" || true
+    printf '\n# Written by scripts/dev-server.sh — the pin of .dev-tls/cert.pem.\nSCOREBOARD_DEV_TLS_PIN=%s\n' "$DEV_PIN" >> "$tmp"
+    mv "$tmp" firmware-rs/local.env
+    echo "==> wrote SCOREBOARD_DEV_TLS_PIN to firmware-rs/local.env (re-flash to pick it up)" >&2
 fi
 exec cargo watch -w crates -x "run -p server -- $*"

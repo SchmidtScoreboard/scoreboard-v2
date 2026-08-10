@@ -32,6 +32,18 @@ cd "$(dirname "$0")/../firmware-rs"
 
 FEATURES="${FEATURES:-}"
 
+# Pick up machine-local settings (SCOREBOARD_DEV_HOST, SCOREBOARD_DEV_TLS_PIN)
+# without making the caller remember `set -a; source ...; set +a`. Anything
+# already exported wins, so `SCOREBOARD_TLS_PIN=… FEATURES=prod scripts/flash.sh`
+# is unaffected.
+if [[ -f local.env ]]; then
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*# || -z "${line// }" ]] && continue
+        name="${line%%=*}"
+        [[ -n "${!name:-}" ]] || export "${line?}"
+    done < local.env
+fi
+
 PORT="${1:-$(ls /dev/cu.usbmodem* 2>/dev/null | head -1)}"
 if [[ -z "$PORT" ]]; then
     echo "No /dev/cu.usbmodem* port found — is the board plugged in?" >&2
