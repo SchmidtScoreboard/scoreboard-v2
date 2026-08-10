@@ -138,7 +138,6 @@ pub struct AppState {
     pair_limiter: Arc<Mutex<RateLimiter>>,
     /// Wakes the poll loop when a client connects, so it fetches fresh games promptly
     /// instead of up to POLL_SECS later (the idle-skip otherwise leaves games stale).
-    poll_wake: Arc<tokio::sync::Notify>,
     /// Transient full-screen notices per board ("SLEEPING…", "NO GAMES…"). Memory
     /// only — they're seconds-to-minutes long and don't need to survive a restart.
     pub notices: Arc<Mutex<HashMap<String, Notice>>>,
@@ -391,7 +390,6 @@ impl AppState {
                 PAIR_GLOBAL_BURST,
                 PAIR_GLOBAL_REFILL_PER_SEC,
             ))),
-            poll_wake: Arc::new(tokio::sync::Notify::new()),
             notices: Arc::new(Mutex::new(HashMap::new())),
             last_manifest: Arc::new(Mutex::new(HashMap::new())),
             frame_grace: Arc::new(Mutex::new(HashSet::new())),
@@ -3339,20 +3337,32 @@ async fn poll_loop(state: AppState, source: Arc<dyn SportsDataSource>) {
     // (state.games is empty, so no transition can be observed anyway).
     let mut prev_poll: Option<Instant> = None;
     loop {
-        // Wake on the timer OR as soon as a client connects (fresh games promptly).
-        let woke_on_connect = tokio::select! {
-            _ = interval.tick() => false,
-            _ = state.poll_wake.notified() => true,
-        };
-        // A plain timer tick skips while idle; a just-connected client ALWAYS triggers
-        // a fetch — it isn't in the registries yet (it may be browsing before/without
-        // ever subscribing), so the idle check would wrongly skip it.
-        if !woke_on_connect {
+        // THE TIMER IS THE ONLY TRIGGER. Connecting does not fetch.
+        //
+        // It used to: a client connect notified this loop and it swept ESPN
+        // immediately, so that a new arrival never looked at data up to
+        // POLL_SECS old. That turns client churn into upstream load one for one.
+        // A board reconnecting every ~40s on a flaky link had the server
+        // sweeping twenty leagues each time — a 24s median against the
+        // configured 180s, with a 2.7s floor — which is a good way to get 403'd,
+        // and self-feeding besides: every extra sweep made the server slower to
+        // answer the next reconnect.
+        //
+        // Nothing is lost by dropping it. A connecting board is handed the
+        // current manifest by `push_board` before this loop would have heard
+        // anything, so the fetch was never what put its screen up; it only ever
+        // made the numbers fresher, and the next tick does that anyway.
+        interval.tick().await;
+        // Skip entirely while nothing is listening — no client, no reason to
+        // pull. The tick still fires, so a client that arrives mid-gap gets the
+        // next one.
+        let idle = {
             let no_devices = state.devices.lock().unwrap().is_empty();
             let no_controllers = state.controllers.lock().unwrap().is_empty();
-            if no_devices && no_controllers {
-                continue;
-            }
+            no_devices && no_controllers
+        };
+        if idle {
+            continue;
         }
         beat(&state, "poll");
         let fetched_at = Instant::now();
@@ -4729,6 +4739,52 @@ mod tests {
         assert!(
             state.finished.lock().unwrap().is_empty(),
             "the expired stamp is swept, not left to accumulate"
+        );
+    }
+
+    /// Connecting must never reach ESPN. Enforced structurally: nothing outside
+    /// the poll loop's own timer may start a fetch.
+    ///
+    /// The old wake-on-connect made client churn into upstream load one for one
+    /// — a board reconnecting every ~40s had the server sweeping twenty leagues
+    /// each time. This is a source check rather than a behavioural one because
+    /// the failure is a *reintroduction*: someone adding a "refresh now" path
+    /// would not break any existing assertion, and the symptom (a 403 from ESPN,
+    /// eventually) shows up nowhere near the change.
+    #[test]
+    fn nothing_but_the_timer_can_trigger_a_fetch() {
+        let main_rs = include_str!("main.rs");
+        let ws_rs = include_str!("ws.rs");
+
+        // The notify handle that used to carry connect -> fetch is gone. Split
+        // so this assertion doesn't match its own source.
+        let gone = concat!("poll_", "wake");
+        for (name, src) in [("main.rs", main_rs), ("ws.rs", ws_rs)] {
+            assert!(
+                !src.contains(gone),
+                "{name} still references {gone} — connecting must not trigger a fetch"
+            );
+        }
+        // And the loop awaits its interval directly, rather than selecting over
+        // the timer and something else that could fire on demand.
+        assert!(
+            main_rs.contains("THE TIMER IS THE ONLY TRIGGER"),
+            "the poll loop's trigger rule lost its marker comment"
+        );
+        let loop_body = main_rs
+            .split("THE TIMER IS THE ONLY TRIGGER")
+            .nth(1)
+            .expect("marker present")
+            .split("let fetched_at")
+            .next()
+            .expect("fetch follows the wait");
+        assert!(
+            loop_body.contains("interval.tick().await"),
+            "the poll loop should await its timer directly"
+        );
+        assert!(
+            !loop_body.contains("select!"),
+            "the poll loop selects over something besides its timer again: {loop_body}"
         );
     }
 

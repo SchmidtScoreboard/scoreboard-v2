@@ -102,7 +102,6 @@ async fn device_loop(
     // A (re)connecting board has no manifest — drop the dedup entry so the
     // initial push below always goes out.
     state.forget_last_manifest(&board_id);
-    state.poll_wake.notify_one(); // pull fresh games now, not at the next poll tick
     // Tell subscribed apps immediately that the board is online (they'd otherwise
     // wait for the next games refresh to learn it).
     push_board_state(&state, &board_id);
@@ -252,7 +251,6 @@ async fn controller_loop(
     // Same idle-flow reaping applies to apps sitting on a quiet screen.
     let keepalive = spawn_keepalive(out.clone());
     let mut subscribed: Vec<String> = Vec::new();
-    state.poll_wake.notify_one(); // fetch fresh games now (covers browse before subscribe)
 
     while let Some(Ok(msg)) = receiver.next().await {
         if let Message::Text(t) = msg {
