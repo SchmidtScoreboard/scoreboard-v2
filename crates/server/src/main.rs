@@ -3330,7 +3330,13 @@ async fn poll_loop(state: AppState, source: Arc<dyn SportsDataSource>) {
         .filter(|&s| s > 0)
         .unwrap_or(180);
     tracing::info!("poll loop: every {secs}s, skipped while nothing is connected");
-    let mut interval = tokio::time::interval(Duration::from_secs(secs));
+    // Sampled far faster than the poll period; see the due-check in the loop.
+    const POLL_SAMPLE: Duration = Duration::from_secs(5);
+    let mut interval = tokio::time::interval(POLL_SAMPLE);
+    // When ESPN was last actually hit. `None` = never, so the first tick with a
+    // client connected fetches immediately rather than waiting out a full period
+    // (which is what an empty slate after a restart looked like).
+    let mut last_fetch: Option<Instant> = None;
     // When the slate we're about to compare against was fetched. The idle skip
     // means this can be hours or days back, and `record_finished_transitions`
     // needs it to date an end it only just noticed. None = nothing fetched yet
@@ -3353,9 +3359,7 @@ async fn poll_loop(state: AppState, source: Arc<dyn SportsDataSource>) {
         // anything, so the fetch was never what put its screen up; it only ever
         // made the numbers fresher, and the next tick does that anyway.
         interval.tick().await;
-        // Skip entirely while nothing is listening — no client, no reason to
-        // pull. The tick still fires, so a client that arrives mid-gap gets the
-        // next one.
+        // Skip while nothing is listening — no client, no reason to pull.
         let idle = {
             let no_devices = state.devices.lock().unwrap().is_empty();
             let no_controllers = state.controllers.lock().unwrap().is_empty();
@@ -3364,8 +3368,23 @@ async fn poll_loop(state: AppState, source: Arc<dyn SportsDataSource>) {
         if idle {
             continue;
         }
+        // Due yet? The gate is ELAPSED TIME since the last fetch, never a client
+        // event, which is what keeps a reconnect from buying anyone a sweep.
+        //
+        // The check runs often and the gate is slow, deliberately. Ticking at
+        // the poll period instead made fetching depend on a 180s-spaced instant
+        // happening to land while a client was connected — and a board on a
+        // flaky link is disconnected a good fraction of the time, so ticks fell
+        // in the gaps and the slate went empty for minutes at a stretch. Sampling
+        // often and fetching slowly decouples the two: the cadence is still one
+        // sweep per `secs`, and a client present for any moment of that window
+        // gets it.
+        if last_fetch.is_some_and(|t| t.elapsed() < Duration::from_secs(secs)) {
+            continue;
+        }
         beat(&state, "poll");
         let fetched_at = Instant::now();
+        last_fetch = Some(fetched_at);
         let mut games = source.fetch().await;
         // Ingestion filter: far-future scheduled games (a GP two weeks out,
         // week-one CFB) never enter state — no render work, no browse clutter.
