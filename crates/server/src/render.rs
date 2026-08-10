@@ -214,6 +214,71 @@ fn kerned_advance(prev: char, cur: char, big: bool) -> i32 {
     advance(prev, big) - kern(prev, cur, big, advance(prev, big))
 }
 
+/// The columns a string actually PAINTS, relative to its draw x, as
+/// `(leftmost, rightmost + 1)` — its ink box, not its advance box. `None` when
+/// nothing would be drawn (empty string, all spaces).
+///
+/// `kern` gets the same answer for a PAIR inside one font, but it cannot help
+/// across a boundary: a clock draws its digits in the big font at scale 2 and
+/// its meridiem in the small font at scale 1, as two separate calls. Spacing
+/// them by `text_width` then measures the last digit's whole 5px cell, so "1:05"
+/// pushed AM three columns further out than "12:45" did — the narrower the last
+/// digit, the wider the apparent gap, which is exactly backwards.
+fn ink_span(s: &str, big: bool, scale: i32) -> Option<(i32, i32)> {
+    let font = if big { crate::bdf::font_5x8() } else { crate::bdf::font_4x6() };
+    let mut cx = 0;
+    let mut prev: Option<char> = None;
+    let (mut lo, mut hi): (Option<i32>, Option<i32>) = (None, None);
+    for ch in s.chars() {
+        if let Some(p) = prev {
+            cx += kerned_advance(p, ch, big);
+        }
+        if let Some(g) = font.glyph(ch) {
+            // Same row window `kern` scans, so the two agree about what "ink" is.
+            for rrel in -8..=2 {
+                if let Some((l, r)) = glyph_ink_row(g, rrel) {
+                    lo = Some(lo.map_or(cx + l, |m: i32| m.min(cx + l)));
+                    hi = Some(hi.map_or(cx + r, |m: i32| m.max(cx + r)));
+                }
+            }
+        }
+        prev = Some(ch);
+    }
+    Some((lo? * scale, (hi? + 1) * scale))
+}
+
+/// Empty columns between the digits and their meridiem.
+///
+/// Derived, not chosen: `TARGET_GAP` is what the kerner leaves between adjacent
+/// glyph ink, and scaled digits carry it with them — so 2px between scale-2
+/// digits. Matching that is what makes AM read as part of the clock rather than
+/// as something parked beside it. The old spacing worked off the advance box and
+/// landed on 5px, more than twice the digits' own rhythm.
+fn meridiem_gap(scale: i32) -> i32 {
+    TARGET_GAP * scale
+}
+
+/// Place a time and its meridiem side by side, one `meridiem_gap` of EMPTY
+/// COLUMNS between their ink, and the pair optically centered on the panel.
+///
+/// Returns `(time_x, meridiem_x)` to draw at. Centering on the ink rather than
+/// on the advance boxes matters for the same reason the gap does: the reserved
+/// cells are not what anyone sees.
+fn meridiem_layout(time: &str, time_big: bool, time_scale: i32, meridiem: &str) -> (i32, i32) {
+    let gap = meridiem_gap(time_scale);
+    let t = ink_span(time, time_big, time_scale);
+    let m = ink_span(meridiem, false, 1);
+    let (Some((tl, tr)), Some((ml, mr))) = (t, m) else {
+        // Nothing measurable (missing glyphs): fall back to the advance boxes.
+        let w = wx_w(time, time_big, time_scale);
+        let x0 = (FRAME_WIDTH as i32 - (w + gap + text_width(meridiem, false))) / 2;
+        return (x0, x0 + w + gap);
+    };
+    let total = (tr - tl) + gap + (mr - ml);
+    let start = (FRAME_WIDTH as i32 - total) / 2;
+    (start - tl, start + (tr - tl) + gap - ml)
+}
+
 /// Draw text on its alphabetic baseline at `by`, left edge at `x`, with optical
 /// kerning between adjacent glyphs. Uses the ORIGINAL BDF glyphs.
 fn draw_text(c: &mut Canvas, s: &str, x: i32, by: i32, big: bool, color: Rgb888) {
@@ -964,13 +1029,13 @@ pub fn render_clock_styled(hour24: u32, minute: u32, style: &str, h24: bool) -> 
         // there it reads as part of the number.
         "large" => {
             let mut c = Canvas::new();
-            let gap = 3;
-            let ampm_w = ampm.map(|a| gap + text_width(a, false)).unwrap_or(0);
-            let width = wx_w(&time, true, 2) + ampm_w;
-            let x0 = (FRAME_WIDTH as i32 - width) / 2;
-            let span = wx_text(&mut c, &time, x0, 15, true, 2, WHITE);
+            let (tx, mx) = match ampm {
+                Some(a) => meridiem_layout(&time, true, 2, a),
+                None => ((FRAME_WIDTH as i32 - wx_w(&time, true, 2)) / 2, 0),
+            };
+            let span = wx_text(&mut c, &time, tx, 15, true, 2, WHITE);
             if let Some(a) = ampm {
-                wx_text(&mut c, a, x0 + wx_w(&time, true, 2) + gap, span.1 - 2, false, 1, GREY);
+                wx_text(&mut c, a, mx, span.1 - 2, false, 1, GREY);
             }
             let px = c.to_rgb565();
             (frame_id(&px), px)
@@ -979,13 +1044,13 @@ pub fn render_clock_styled(hour24: u32, minute: u32, style: &str, h24: bool) -> 
         // whole reason to pick it.
         "compact" => {
             let mut c = Canvas::new();
-            let gap = 2;
-            let ampm_w = ampm.map(|a| gap + text_width(a, false)).unwrap_or(0);
-            let width = text_width(&time, false) + ampm_w;
-            let x0 = (FRAME_WIDTH as i32 - width) / 2;
-            wx_text(&mut c, &time, x0, 16, false, 1, WHITE);
+            let (tx, mx) = match ampm {
+                Some(a) => meridiem_layout(&time, false, 1, a),
+                None => ((FRAME_WIDTH as i32 - text_width(&time, false)) / 2, 0),
+            };
+            wx_text(&mut c, &time, tx, 16, false, 1, WHITE);
             if let Some(a) = ampm {
-                wx_text(&mut c, a, x0 + text_width(&time, false) + gap, 16, false, 1, GREY);
+                wx_text(&mut c, a, mx, 16, false, 1, GREY);
             }
             let px = c.to_rgb565();
             (frame_id(&px), px)
@@ -1005,6 +1070,46 @@ pub const CLOCK_STYLES: [(&str, &str); 3] =
 #[cfg(test)]
 mod kern_tests {
     use super::*;
+
+    /// The gap between the time and its AM/PM must be the SAME on every clock,
+    /// and it must be a gap between the ink rather than between the cells.
+    ///
+    /// It was neither. Spacing off `text_width` charged the last digit its whole
+    /// 5px cell, so a narrow one ("1:05") left visibly more air than a wide one
+    /// ("12:48") — the meridiem drifted with the digits instead of tracking them.
+    #[test]
+    fn the_meridiem_keeps_one_gap_whatever_the_time() {
+        let times = [(1, 5), (12, 48), (13, 0), (10, 11), (23, 59), (0, 0)];
+        for (big, scale, old_gap) in [(true, 2, 3), (false, 1, 2)] {
+            let want = meridiem_gap(scale);
+            for (h, m) in times {
+                let (time, ampm) = clock_parts(h, m, false);
+                let a = ampm.expect("a 12-hour clock has a meridiem");
+                let (_, tr) = ink_span(&time, big, scale).unwrap();
+                let (ml, _) = ink_span(a, false, 1).unwrap();
+
+                // Shipped: the empty columns between the facing INK edges.
+                let (tx, mx) = meridiem_layout(&time, big, scale, a);
+                let got = (mx + ml) - (tx + tr);
+                assert_eq!(got, want, "{h}:{m:02} (big={big}) sits {got}px out, wanted {want}");
+
+                // The gap the digits keep from EACH OTHER, at this scale. The
+                // meridiem matching it is the whole point of the change.
+                assert_eq!(want, TARGET_GAP * scale, "the rule is the kerner's, not a taste call");
+
+                // And it really did move closer: the old spacing worked off the
+                // advance box, so the last digit's unused cell columns counted
+                // as air.
+                let w = wx_w(&time, big, scale);
+                let x0 = (FRAME_WIDTH as i32 - (w + old_gap + text_width(a, false))) / 2;
+                let before = ((x0 + w + old_gap) + ml) - (x0 + tr);
+                assert!(
+                    got < before,
+                    "{h}:{m:02} (big={big}) should be tighter than the old {before}px, got {got}"
+                );
+            }
+        }
+    }
 
     /// The round marker draws in the title row's right edge, and gives that
     /// space back to a long tournament name rather than overprinting it.
@@ -2185,15 +2290,15 @@ pub fn render_weather_clock(
 ) -> (FrameId, Vec<u8>) {
     let mut c = Canvas::new();
     let (time, meridiem) = clock_parts(hour24, minute, h24);
-    let gap = 3;
-    let meridiem_w = meridiem.map(|m| gap + text_width(m, false)).unwrap_or(0);
-    let width = wx_w(&time, true, 2) + meridiem_w;
-    let x0 = (FRAME_WIDTH as i32 - width) / 2;
-    let clock_span = wx_text(&mut c, &time, x0, 9, true, 2, WHITE);
+    let (tx, mx) = match meridiem {
+        Some(m) => meridiem_layout(&time, true, 2, m),
+        None => ((FRAME_WIDTH as i32 - wx_w(&time, true, 2)) / 2, 0),
+    };
+    let clock_span = wx_text(&mut c, &time, tx, 9, true, 2, WHITE);
     // The meridiem rides the BOTTOM of the digits: floating at mid-height it
     // reads as part of the number rather than as an annotation.
     if let Some(m) = meridiem {
-        wx_text(&mut c, m, x0 + wx_w(&time, true, 2) + gap, clock_span.1 - 2, false, 1, WX_DIM);
+        wx_text(&mut c, m, mx, clock_span.1 - 2, false, 1, WX_DIM);
     }
 
     let art = wx_art(crate::weather::icon_for(w.code, w.is_day), true);
@@ -2326,3 +2431,4 @@ mod wx_dump {
         }
     }
 }
+
