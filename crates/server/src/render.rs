@@ -1021,6 +1021,116 @@ fn clock_parts(hour24: u32, minute: u32, h24: bool) -> (String, Option<&'static 
 /// `style` is one of `classic`, `large`, `compact`; anything else falls back to
 /// `classic` rather than to a blank panel, for the same reason an unknown off
 /// mode does.
+/// The word-clock letter grid: 16 columns x 6 rows, which is what a 64x32 panel
+/// holds at this font's 4px advance and a 5px row pitch.
+///
+/// The reference design is an 11x11 grid — that needs eleven rows and we have
+/// six, so this is a layout built for the panel rather than a copy of one. Two
+/// constraints drove it:
+///
+/// * It has to READ. Highlighted words are scanned as a sentence, so every word
+///   sits at a later position than the one before it: IT IS, then the minutes,
+///   then PAST/TO, then the hour. A grid that packs tighter but scatters the
+///   phrase is a word search, not a clock.
+/// * The minute FIVE and the hour FIVE are DIFFERENT cells (likewise TEN).
+///   Sharing them saves seven cells and makes "five past five" light one word.
+///
+/// Filler letters are arbitrary; nothing matches against them, because every
+/// word is addressed by position (`WORD_*` below), never searched for.
+const WORD_GRID: [&str; 6] = [
+    "ITLISHALFQUARTER",
+    "TWENTYFIVETENKDR",
+    "PASTONETWOTHREEZ",
+    "FOURFIVESIXSEVEN",
+    "EIGHTNINETENBQJU",
+    "ELEVENTWELVEMXPV",
+];
+
+/// One highlightable word: (row, column, length).
+type Cell = (usize, usize, usize);
+
+const W_IT: Cell = (0, 0, 2);
+const W_IS: Cell = (0, 3, 2);
+const W_HALF: Cell = (0, 5, 4);
+const W_QUARTER: Cell = (0, 9, 7);
+const W_TWENTY: Cell = (1, 0, 6);
+const W_FIVE_MIN: Cell = (1, 6, 4);
+const W_TEN_MIN: Cell = (1, 10, 3);
+const W_PAST: Cell = (2, 0, 4);
+const W_TO: Cell = (2, 3, 2);
+/// Hours 1..=12, in order.
+const W_HOURS: [Cell; 12] = [
+    (2, 4, 3),   // ONE
+    (2, 7, 3),   // TWO
+    (2, 10, 5),  // THREE
+    (3, 0, 4),   // FOUR
+    (3, 4, 4),   // FIVE
+    (3, 8, 3),   // SIX
+    (3, 11, 5),  // SEVEN
+    (4, 0, 5),   // EIGHT
+    (4, 5, 4),   // NINE
+    (4, 9, 3),   // TEN
+    (5, 0, 6),   // ELEVEN
+    (5, 6, 6),   // TWELVE
+];
+
+/// Which cells light up for a given time, at five-minute granularity.
+///
+/// Returned rather than drawn so the phrase is testable without pixels — the
+/// interesting bugs here are "twenty five to four" lighting the wrong hour, not
+/// anything about rendering.
+fn word_clock_cells(hour24: u32, minute: u32) -> Vec<Cell> {
+    let mut lit = vec![W_IT, W_IS];
+    let step = minute / 5; // 0..=11
+    // Past the half hour the phrase flips to "... TO" the NEXT hour.
+    let to_next = step >= 7;
+    match step {
+        0 => {}
+        1 | 11 => lit.push(W_FIVE_MIN),
+        2 | 10 => lit.push(W_TEN_MIN),
+        3 | 9 => lit.push(W_QUARTER),
+        4 | 8 => lit.push(W_TWENTY),
+        5 | 7 => {
+            lit.push(W_TWENTY);
+            lit.push(W_FIVE_MIN);
+        }
+        _ => lit.push(W_HALF), // 6
+    }
+    if step != 0 {
+        lit.push(if to_next { W_TO } else { W_PAST });
+    }
+    // 12-hour, 1..=12, rolling forward for the "to" half.
+    let h24 = if to_next { (hour24 + 1) % 24 } else { hour24 };
+    let h12 = match h24 % 12 {
+        0 => 12,
+        h => h,
+    };
+    lit.push(W_HOURS[(h12 - 1) as usize]);
+    lit
+}
+
+/// The word clock: the whole grid faintly lit, the words that spell the time
+/// bright. Unlit letters are drawn rather than blanked — the grid IS the design,
+/// and a panel showing only the live words is just a text clock.
+pub fn render_word_clock(hour24: u32, minute: u32) -> (FrameId, Vec<u8>) {
+    let mut c = Canvas::new();
+    let lit = word_clock_cells(hour24, minute);
+    // 6 rows at a 5px pitch fills 30 of the panel's 32 rows; baselines at 5..30
+    // leave a row of margin top and bottom.
+    for (r, row) in WORD_GRID.iter().enumerate() {
+        for (col, ch) in row.chars().enumerate() {
+            let on = lit.iter().any(|(lr, lc, len)| *lr == r && col >= *lc && col < lc + len);
+            let color = if on { WHITE } else { Rgb888::new(0x22, 0x22, 0x28) };
+            // Drawn per character at a fixed 4px pitch: `draw_text` would kern
+            // the row and the grid would stop being a grid.
+            let mut buf = [0u8; 4];
+            draw_text(&mut c, ch.encode_utf8(&mut buf), col as i32 * 4, 5 + r as i32 * 5, false, color);
+        }
+    }
+    let px = c.to_rgb565();
+    (frame_id(&px), px)
+}
+
 pub fn render_clock_styled(hour24: u32, minute: u32, style: &str, h24: bool) -> (FrameId, Vec<u8>) {
     let (time, ampm) = clock_parts(hour24, minute, h24);
     match style {
@@ -1070,6 +1180,72 @@ pub const CLOCK_STYLES: [(&str, &str); 3] =
 #[cfg(test)]
 mod kern_tests {
     use super::*;
+
+    /// Every word must actually BE where the layout says it is.
+    ///
+    /// The grid is hand-packed and addressed by coordinate, so a one-character
+    /// slip anywhere shifts a word without breaking anything visible — the panel
+    /// would light four letters that are not "FIVE" and look, at a glance, fine.
+    #[test]
+    fn every_word_sits_where_the_layout_claims() {
+        let at = |(r, c, len): Cell| -> String {
+            WORD_GRID[r].chars().skip(c).take(len).collect()
+        };
+        assert_eq!(at(W_IT), "IT");
+        assert_eq!(at(W_IS), "IS");
+        assert_eq!(at(W_HALF), "HALF");
+        assert_eq!(at(W_QUARTER), "QUARTER");
+        assert_eq!(at(W_TWENTY), "TWENTY");
+        assert_eq!(at(W_FIVE_MIN), "FIVE");
+        assert_eq!(at(W_TEN_MIN), "TEN");
+        assert_eq!(at(W_PAST), "PAST");
+        assert_eq!(at(W_TO), "TO");
+        let hours = ["ONE","TWO","THREE","FOUR","FIVE","SIX","SEVEN","EIGHT","NINE","TEN","ELEVEN","TWELVE"];
+        for (i, want) in hours.iter().enumerate() {
+            assert_eq!(&at(W_HOURS[i]), want, "hour {}", i + 1);
+        }
+        // The grid must fit the panel exactly: 16 columns at 4px is 64.
+        for (i, row) in WORD_GRID.iter().enumerate() {
+            assert_eq!(row.chars().count(), 16, "row {i} is not 16 columns");
+        }
+        // The minute and hour FIVE/TEN are different cells, or "five past five"
+        // lights one word and reads as nonsense.
+        assert_ne!(W_FIVE_MIN, W_HOURS[4], "minute FIVE and hour FIVE must differ");
+        assert_ne!(W_TEN_MIN, W_HOURS[9], "minute TEN and hour TEN must differ");
+    }
+
+    /// The phrase, at the level that actually goes wrong: which hour "to" picks.
+    #[test]
+    fn the_phrase_reads_correctly_around_the_hour() {
+        let say = |h: u32, m: u32| -> String {
+            let lit = word_clock_cells(h, m);
+            let mut words: Vec<(usize, usize, String)> = lit
+                .iter()
+                .map(|(r, c, len)| {
+                    (*r, *c, WORD_GRID[*r].chars().skip(*c).take(*len).collect::<String>())
+                })
+                .collect();
+            // Reading order IS the phrase — that is the whole design.
+            words.sort_by_key(|(r, c, _)| (*r, *c));
+            words.into_iter().map(|(_, _, w)| w).collect::<Vec<_>>().join(" ")
+        };
+        assert_eq!(say(15, 0), "IT IS THREE");
+        assert_eq!(say(15, 4), "IT IS THREE", "rounds down to the five-minute step");
+        assert_eq!(say(15, 5), "IT IS FIVE PAST THREE");
+        assert_eq!(say(15, 15), "IT IS QUARTER PAST THREE");
+        assert_eq!(say(15, 25), "IT IS TWENTY FIVE PAST THREE");
+        assert_eq!(say(15, 30), "IT IS HALF PAST THREE");
+        // Past the half hour it counts down to the NEXT hour.
+        assert_eq!(say(15, 35), "IT IS TWENTY FIVE TO FOUR");
+        assert_eq!(say(15, 45), "IT IS QUARTER TO FOUR");
+        assert_eq!(say(15, 55), "IT IS FIVE TO FOUR");
+        // Wrap: noon and midnight are TWELVE, and 12:45 is a quarter to ONE.
+        assert_eq!(say(0, 0), "IT IS TWELVE");
+        assert_eq!(say(12, 0), "IT IS TWELVE");
+        assert_eq!(say(12, 45), "IT IS QUARTER TO ONE");
+        assert_eq!(say(23, 45), "IT IS QUARTER TO TWELVE");
+        assert_eq!(say(11, 45), "IT IS QUARTER TO TWELVE");
+    }
 
     /// The gap between the time and its AM/PM must be the SAME on every clock,
     /// and it must be a gap between the ink rather than between the cells.

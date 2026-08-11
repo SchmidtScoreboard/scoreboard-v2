@@ -2757,7 +2757,7 @@ enum SettingsInfoTopic: String, Identifiable {
 
     var title: String {
         switch self {
-        case .whenOff: "When off"
+        case .whenOff: "When there are no games"
         case .sleep: "Sleep duration"
         case .dwell: "Time per event"
         case .spoilers: "Spoilers"
@@ -2769,8 +2769,12 @@ enum SettingsInfoTopic: String, Identifiable {
         switch self {
         case .whenOff:
             """
-            What the panel shows while the scoreboard is off, dimmed to \
-            whatever brightness you have set.
+            What the panel shows when it is on but there is nothing to show — \
+            no games running, or none you follow. Dimmed to whatever \
+            brightness you have set.
+
+            Not the same as asleep. Putting the scoreboard to sleep, with the \
+            button or the toggle, turns the panel off entirely.
 
             The choices come from your server, so a server running custom \
             screens will offer them here too.
@@ -2779,7 +2783,8 @@ enum SettingsInfoTopic: String, Identifiable {
             """
             Pressing the scoreboard's button puts it to sleep for this long. \
             It wakes on its own when the timer ends; press again to wake it \
-            early. While asleep, the panel shows your "When off" choice.
+            early. Asleep, the panel is dark — it goes back to games, or to \
+            your no-games screen, when it wakes.
             """
         case .dwell:
             """
@@ -5256,7 +5261,7 @@ struct SettingsView: View {
             }
         } header: {
             HStack {
-                Text("When off")
+                Text("When there are no games")
                 Spacer()
                 infoButton(.whenOff)
             }

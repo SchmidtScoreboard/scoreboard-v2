@@ -174,6 +174,16 @@ pub fn off_modes() -> Vec<OffModeDescriptor> {
             ],
         },
         OffModeDescriptor {
+            id: "wordclock".into(),
+            label: "Word clock".into(),
+            description: "The time spelled out, the rest of the grid dimmed.".into(),
+            preview: Some("/offmode/wordclock.png".into()),
+            input: None,
+            // No 24-hour option: the phrase is "quarter past ten", which has no
+            // 24-hour reading. Nothing to configure is the honest answer here.
+            fields: vec![],
+        },
+        OffModeDescriptor {
             id: "weather".into(),
             label: "Weather".into(),
             description: "Conditions where the scoreboard lives.".into(),
@@ -272,6 +282,13 @@ pub fn render_off_mode(id: &str, cx: &OffCtx) -> Vec<OffFrame> {
                 // default rather than nothing.
                 _ => render::render_weather_detailed(&w),
             };
+            vec![OffFrame { id: fid, px, dwell_ms: 60_000 }]
+        }
+        "wordclock" => {
+            let (h, m) = if cx.preview { PREVIEW_TIME } else { now_hm(cx.tz) };
+            let (fid, px) = render::render_word_clock(h, m);
+            // A minute is the smallest thing it can say, so re-pushing faster
+            // would be frames nobody can tell apart.
             vec![OffFrame { id: fid, px, dwell_ms: 60_000 }]
         }
         // Anything else is the clock — an unknown id must still light the

@@ -2444,8 +2444,23 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
         };
     }
 
-    // Priority 4: idle / asleep — the configured off-state (server-rendered clock
-    // or a blank panel). Applies both to power-off and powered-on-but-no-games.
+    // Priority 4: ASLEEP. Dark, not the off mode.
+    //
+    // These were one state and should never have been: "what the panel shows
+    // when there are no games" and "what it shows when you turned it off" are
+    // different answers to different questions. Sharing them meant pressing the
+    // knob at bedtime lit a clock, which is not what off means to anyone — and
+    // it made the off-mode setting unexplainable, since it governed both.
+    //
+    // Quiet hours already drew this distinction (`dark_manifest` above); this
+    // applies the same decision to the other way a board goes dark. The SLEEPING
+    // splash still runs first — it is priority 3, and it is the only feedback
+    // that a press registered — and expires into darkness rather than the clock.
+    if !cfg.power {
+        return dark_manifest(&cfg);
+    }
+
+    // Priority 5: awake with nothing to show — the configured off mode.
     idle_manifest(state, &cfg, tz)
 }
 
@@ -4893,6 +4908,35 @@ mod tests {
             state.finished.lock().unwrap().is_empty(),
             "the expired stamp is swept, not left to accumulate"
         );
+    }
+
+    /// Sleep and "nothing on" are different states and must draw differently.
+    ///
+    /// They shared one path, so pressing the knob at bedtime lit the clock you
+    /// had configured for the no-games case. Off has to mean off.
+    #[test]
+    fn a_sleeping_board_is_dark_and_an_idle_one_is_not() {
+        let state = AppState::new_ephemeral();
+        state.games.lock().unwrap().clear(); // nothing to show either way
+        let mut cfg = watch_all();
+        cfg.off_mode = Some("clock".into());
+
+        // Awake with nothing on: the configured off mode lights the panel.
+        cfg.power = true;
+        state.configs.lock().unwrap().insert("b1".into(), cfg.clone());
+        let awake = manifest_for_board(&state, "b1");
+        assert!(awake.display_on, "an idle board still draws its off mode");
+        assert!(!awake.rotation.is_empty(), "and has something to draw");
+
+        // Asleep: dark, whatever the off mode says.
+        cfg.power = false;
+        state.configs.lock().unwrap().insert("b1".into(), cfg);
+        // Clear the SLEEPING splash so this tests the resting state, not the
+        // notice that (deliberately) precedes it.
+        state.notices.lock().unwrap().remove("b1");
+        let asleep = manifest_for_board(&state, "b1");
+        assert!(!asleep.display_on, "off means off");
+        assert!(asleep.rotation.is_empty(), "nothing to draw while asleep");
     }
 
     /// A board that reboots mid-session must be put back to work, or the app
