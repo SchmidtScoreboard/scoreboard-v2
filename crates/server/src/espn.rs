@@ -1834,8 +1834,11 @@ fn parse_event(sport_id: &str, ev: Event) -> Option<Game> {
         (GameStatus::Active, "nfl" | "cfb") => {
             let s = comp.situation.as_ref().unwrap_or(&empty_situation);
             Some(Situation::Football {
-                // "&" → "+" like the original (the 4x6 font has no ampersand).
-                down_string: s.short_down_distance_text.replace('&', "+"),
+                // The original rewrote "&" to "+" because its 4x6 font had no
+                // ampersand. Ours does — both BDFs ship an inked `ampersand`
+                // glyph at the same 4px advance as the "+" that replaced it, so
+                // the substitution cost a correct character and bought nothing.
+                down_string: s.short_down_distance_text.clone(),
                 ball_position: s.possession_text.clone(),
                 home_possession: s.possession.as_ref().map(|p| *p == home_id),
             })
@@ -2549,7 +2552,7 @@ mod champ_tests {
         assert_eq!(
             g.situation,
             Some(Situation::Football {
-                down_string: "3rd + 4".into(), // "&" replaced like the original
+                down_string: "3rd & 4".into(), // ESPN's own text, ampersand and all
                 ball_position: "SEA 25".into(),
                 home_possession: Some(true),
             })
