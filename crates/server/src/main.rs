@@ -1184,6 +1184,10 @@ fn sample_game() -> model::Game {
     let team = |abbrev: &str, name: &str, score: u32, p: &str, sec: &str| model::TeamSide {
         abbrev: abbrev.into(),
         name: name.into(),
+        hits: None,
+        errors: None,
+        shots: None,
+        shootout: None,
         // Sample spoiler frame renders NHL (default Name style), so location is
         // unused; left empty. (Render agent: populate to preview Location here.)
         location: String::new(),
@@ -4003,6 +4007,10 @@ fn preview() {
     let mk = |abbrev: &str, name: &str, score: u32, p: &str, s: &str| TeamSide {
         abbrev: abbrev.into(),
         name: name.into(),
+        hits: None,
+        errors: None,
+        shots: None,
+        shootout: None,
         // --preview sample frames; location unused by default styles. (Render
         // agent: populate to eyeball the Location style.)
         location: String::new(),
@@ -4695,7 +4703,7 @@ mod tests {
             location: String::new(),
             score: 0,
             primary: model::hex_to_rgb("111111"),
-            secondary: model::hex_to_rgb("ffffff"),
+            secondary: model::hex_to_rgb("ffffff"), hits: None, errors: None, shots: None, shootout: None,
         };
         // 25 blanket-covered NHL games, then one favorite game and one manual add
         // at the END of the feed (weakest feed position, strongest claims).
@@ -6471,7 +6479,7 @@ mod tests {
             location: String::new(),
             score: 0,
             primary: model::hex_to_rgb("000000"),
-            secondary: model::hex_to_rgb("FFFFFF"),
+            secondary: model::hex_to_rgb("FFFFFF"), hits: None, errors: None, shots: None, shootout: None,
         }
     }
     fn game(sport: &str, away: &str, home: &str) -> Game {

@@ -522,13 +522,6 @@ pub fn leaderboard_name_metrics(name: &str, value: &str, has_rank: bool) -> (i32
     (width, name_max_right - name_x)
 }
 
-/// Soccer, by the league registry rather than a hand-kept list of ids — a
-/// competition added to `LEAGUE_IDENTITY` gets the same treatment without a
-/// second edit somewhere else remembering to agree.
-fn is_soccer(sport_id: &str) -> bool {
-    crate::espn::league_identity(sport_id).is_some_and(|(_, family, _)| family == "Soccer")
-}
-
 /// `tz` is the BOARD's timezone for start-time labels (None = server-local).
 ///
 /// # The game clock is deliberately not here
@@ -560,10 +553,27 @@ fn is_soccer(sport_id: &str) -> bool {
 /// clock is. People say "the 67th minute"; nobody says "the 8:12 of the third".
 /// And stoppage arrives already in the string as `90'+8'`, which no period label
 /// can express.
+/// Whether an ordinal is one of the past-regulation labels rather than a plain
+/// period — the set `espn::ordinal_for` produces: OT, 2OT, SO, ET, PENS.
+fn is_overtime_label(ordinal: &str) -> bool {
+    matches!(ordinal, "OT" | "SO" | "ET" | "PENS")
+        || ordinal.strip_suffix("OT").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
 fn status_for(g: &Game, tz: Option<chrono_tz::Tz>) -> (String, Rgb888) {
     match g.status {
+        // A final that needed extra time says so. This is where most overtime
+        // is ever seen — a game is live in OT for minutes and final in OT
+        // forever — and "FINAL" alone throws away the most interesting thing
+        // about the result. Skipped for a shootout, where the second strip line
+        // is already spelling out PENS and the score that decided it.
+        GameStatus::Final
+            if is_overtime_label(&g.ordinal) && g.away.shootout.is_none() =>
+        {
+            (format!("FINAL {}", g.ordinal), YELLOW)
+        }
         GameStatus::Final => ("FINAL".to_string(), YELLOW),
-        GameStatus::Active if is_soccer(&g.sport_id) => {
+        GameStatus::Active if crate::espn::is_soccer(&g.sport_id) => {
             (format!("{} {}", g.ordinal, g.clock).trim().to_string(), WHITE)
         }
         GameStatus::Active => (g.ordinal.clone(), WHITE),
@@ -727,20 +737,25 @@ pub fn render_game(g: &Game, tz: Option<chrono_tz::Tz>, style: NameStyle) -> (Fr
             draw_baseball_situation(&mut c, g, sit);
         }
         Some(sit @ Situation::Hockey { .. })
-            if g.status == GameStatus::Active && hockey_badge(g, sit).is_some() =>
+            if g.status == GameStatus::Active
+                && (hockey_badge(g, sit).is_some() || g.away.shots.is_some()) =>
         {
-            draw_hockey_situation(&mut c, g, &hockey_badge(g, sit).unwrap());
+            draw_hockey_situation(&mut c, g, hockey_badge(g, sit).as_deref());
+        }
+        // Shots without a situation. The two arrive by different routes — shots
+        // ride the NHL score feed we fetch anyway, while the power-play state
+        // costs a per-game boxscore request — so a boxscore that fails or a game
+        // the NHL has not marked live yet still has shots worth drawing. Only
+        // hockey ever sets them, so this arm cannot catch another sport.
+        _ if g.status == GameStatus::Active && g.away.shots.is_some() => {
+            draw_hockey_situation(&mut c, g, None);
         }
         _ => {
             let (s, color) = status_for(g, tz);
             let strip_top = 2 * box_h(&lay);
             let strip_h = FRAME_HEIGHT as i32 - strip_top;
-            let broadcast = g
-                .pregame
-                .as_ref()
-                .filter(|_| g.status == GameStatus::Pregame)
-                .map(|p| p.broadcast.as_str())
-                .unwrap_or("");
+            let sub = strip_sub_line(g);
+            let broadcast = sub.as_deref().unwrap_or("");
             if broadcast.is_empty() {
                 // Status line centered (both axes) in the strip below the team rows.
                 let by = centered_baseline(strip_top, strip_h, lay.status_big);
@@ -967,12 +982,57 @@ fn hockey_badge(g: &Game, sit: &Situation) -> Option<String> {
     }
 }
 
+/// The second line of the strip, under the status — `None` for the great
+/// majority of frames, which keep the single centered line they always had.
+///
+/// Everything here is a number the server already downloaded and threw away.
+/// They share a slot because they are the same kind of fact — the rest of the
+/// box score — and because only one of them can ever apply to a given game.
+fn strip_sub_line(g: &Game) -> Option<String> {
+    // Scheduled with a national broadcast: the channel, as before.
+    if g.status == GameStatus::Pregame {
+        let b = g.pregame.as_ref().map(|p| p.broadcast.as_str()).unwrap_or("");
+        return (!b.is_empty()).then(|| b.to_string());
+    }
+    if g.status != GameStatus::Final {
+        return None;
+    }
+    // A shootout final is a draw on the scoreline. Without this the board
+    // reports the 1-1 and never says who went through.
+    if let (Some(a), Some(h)) = (g.away.shootout, g.home.shootout) {
+        return Some(format!("PENS {a}-{h}"));
+    }
+    // Baseball's other two columns. The runs are already the score, so this
+    // completes the R-H-E line the sport has printed for a century. Errors
+    // join only when there were some — "E 0-0" is a fact nobody wanted.
+    if let (Some(ah), Some(hh)) = (g.away.hits, g.home.hits) {
+        let (ae, he) = (g.away.errors.unwrap_or(0), g.home.errors.unwrap_or(0));
+        return Some(if ae + he > 0 {
+            format!("H {ah}-{hh}  E {ae}-{he}")
+        } else {
+            format!("H {ah}-{hh}")
+        });
+    }
+    None
+}
+
 /// Original hockey.rs power-play layout: period ordinal left-aligned at x=5 and
 /// a yellow badge with black text hugging the right edge (rows 21..=30).
-fn draw_hockey_situation(c: &mut Canvas, g: &Game, msg: &str) {
+///
+/// With no badge the right side carries shots on goal instead, grey and small
+/// so the badge still owns that corner whenever there is one. Shots are the one
+/// hockey number that survives a three-minute-old poll — they only ever go up,
+/// a handful per period — which is why they can sit where the clock could not.
+fn draw_hockey_situation(c: &mut Canvas, g: &Game, msg: Option<&str>) {
     // Original baseline 29 with ink above it -> ours is 28 (ink rows 23..=28,
     // centered in the badge rows 21..=30 with a 2px margin each side).
     draw_text(c, &g.ordinal, 5, 28, true, WHITE);
+    let Some(msg) = msg else {
+        if let (Some(a), Some(h)) = (g.away.shots, g.home.shots) {
+            draw_text_right(c, &format!("SOG {a}-{h}"), 62, 28, false, GREY);
+        }
+        return;
+    };
     let w = text_width(msg, true);
     let right_point = FRAME_WIDTH as i32 - w - 4;
     fill(c, right_point, 21, (w + 3) as u32, 10, YELLOW);
@@ -1760,7 +1820,7 @@ mod kern_tests {
             location: name.into(),
             score: 0,
             primary: Rgb888::new(0, 0, 0),
-            secondary: Rgb888::WHITE,
+            secondary: Rgb888::WHITE, hits: None, errors: None, shots: None, shootout: None,
         };
         // One short name that fits, one long one that cannot.
         let short = side("BEARS", "CHI");
@@ -1826,7 +1886,7 @@ mod kern_tests {
             location: String::new(),
             score: 0,
             primary: crate::model::hex_to_rgb("003087"),
-            secondary: crate::model::hex_to_rgb("ffffff"),
+            secondary: crate::model::hex_to_rgb("ffffff"), hits: None, errors: None, shots: None, shootout: None,
         };
         let g = Game {
             id: "t".into(),
@@ -1931,7 +1991,7 @@ mod kern_tests {
             location: String::new(),
             score: 3,
             primary: hex_to_rgb(p),
-            secondary: hex_to_rgb(s),
+            secondary: hex_to_rgb(s), hits: None, errors: None, shots: None, shootout: None,
         };
         Game {
             id: "t".into(),
@@ -2056,6 +2116,144 @@ mod kern_tests {
         }
     }
 
+    /// The rest of the box score, on the frames that have one.
+    ///
+    /// Four numbers that shipped in payloads the server already downloaded and
+    /// that nothing ever drew. They share the strip's second line because only
+    /// one can apply to any given game, and because a line that is usually
+    /// absent costs nothing when it is.
+    #[test]
+    fn the_second_strip_line_carries_what_the_feed_was_throwing_away() {
+        let base = |sport: &str, status: GameStatus| {
+            let mut g = sit_game(sport, "", "", Situation::Baseball {
+                balls: 0, strikes: 0, outs: 0,
+                on_first: false, on_second: false, on_third: false, is_inning_top: true,
+            });
+            g.situation = None;
+            g.status = status;
+            g
+        };
+        // A shootout final is a draw on the scoreline; this is the only place
+        // the board can say who actually went through.
+        let mut pens = base("ucl", GameStatus::Final);
+        pens.away.shootout = Some(3);
+        pens.home.shootout = Some(4);
+        assert_eq!(strip_sub_line(&pens).as_deref(), Some("PENS 3-4"));
+
+        // Baseball completes R-H-E; the runs are already the score.
+        let mut mlb = base("mlb", GameStatus::Final);
+        mlb.away.hits = Some(6);
+        mlb.home.hits = Some(9);
+        assert_eq!(strip_sub_line(&mlb).as_deref(), Some("H 6-9"), "no errors, no E");
+        mlb.home.errors = Some(1);
+        assert_eq!(strip_sub_line(&mlb).as_deref(), Some("H 6-9  E 0-1"));
+        mlb.away.errors = Some(0);
+        mlb.home.errors = Some(0);
+        assert_eq!(strip_sub_line(&mlb).as_deref(), Some("H 6-9"), "a clean game says nothing");
+        // A no-hitter is a real 0, and absent is not zero.
+        mlb.away.hits = Some(0);
+        assert_eq!(strip_sub_line(&mlb).as_deref(), Some("H 0-9"));
+        mlb.away.hits = None;
+        assert_eq!(strip_sub_line(&mlb), None, "one side missing means no line");
+
+        // Only on finals: a live game's strip belongs to the situation layout.
+        let mut live = base("mlb", GameStatus::Active);
+        live.away.hits = Some(6);
+        live.home.hits = Some(9);
+        assert_eq!(strip_sub_line(&live), None);
+
+        // A final that needed extra time keeps saying so. Most overtime is only
+        // ever seen on a finished game, so "FINAL" alone was where the label
+        // actually mattered.
+        let mut ot = base("nhl", GameStatus::Final);
+        ot.ordinal = "OT".into();
+        assert_eq!(status_for(&ot, None).0, "FINAL OT");
+        ot.ordinal = "2OT".into();
+        assert_eq!(status_for(&ot, None).0, "FINAL 2OT");
+        ot.ordinal = "SO".into();
+        assert_eq!(status_for(&ot, None).0, "FINAL SO");
+        ot.ordinal = "3rd".into();
+        assert_eq!(status_for(&ot, None).0, "FINAL", "regulation stays plain");
+        // A shootout says it once, on the line that also carries the score.
+        let mut so = base("ucl", GameStatus::Final);
+        so.ordinal = "PENS".into();
+        so.away.shootout = Some(3);
+        so.home.shootout = Some(4);
+        assert_eq!(status_for(&so, None).0, "FINAL", "not FINAL PENS over PENS 3-4");
+        assert_eq!(strip_sub_line(&so).as_deref(), Some("PENS 3-4"));
+        // The label test itself, including things that only look like one.
+        for s in ["OT", "2OT", "10OT", "SO", "ET", "PENS"] {
+            assert!(is_overtime_label(s), "{s}");
+        }
+        for s in ["", "OTHER", "3rd", "HALF", "OT2", "xOT"] {
+            assert!(!is_overtime_label(s), "{s}");
+        }
+
+        // And the broadcast line it shares the slot with still works.
+        let mut pre = base("nhl", GameStatus::Pregame);
+        assert_eq!(strip_sub_line(&pre), None);
+        pre.pregame = Some(crate::model::Pregame {
+            away_record: String::new(), home_record: String::new(), broadcast: "ESPN".into(),
+        });
+        assert_eq!(strip_sub_line(&pre).as_deref(), Some("ESPN"));
+    }
+
+    /// Shots on goal take the hockey strip's right side, and give it back the
+    /// moment there is a power play to announce.
+    ///
+    /// Shots are the one hockey number that survives the three-minute poll —
+    /// they only go up, a handful a period — which is why they can sit where
+    /// the clock could not.
+    #[test]
+    fn shots_on_goal_yield_to_the_power_play_badge() {
+        let nhl = |shots: Option<(u32, u32)>, pp: bool| {
+            let mut g = sit_game("nhl", "1st", "8:12", Situation::Hockey {
+                away_powerplay: pp,
+                home_powerplay: false,
+                away_players: if pp { 5 } else { 5 },
+                home_players: if pp { 4 } else { 5 },
+            });
+            if let Some((a, h)) = shots {
+                g.away.shots = Some(a);
+                g.home.shots = Some(h);
+            }
+            render_game(&g, None, NameStyle::Name).1
+        };
+        let grey = c565(GREY);
+        let yellow = c565(YELLOW);
+        let any = |px: &[u8], want: u16| {
+            (20..32).any(|y| (0..64).any(|x| px565(px, x, y) == want))
+        };
+        // Even strength: shots on the right, no badge.
+        let px = nhl(Some((12, 9)), false);
+        assert!(any(&px, grey), "shots should be drawn");
+        assert!(!any(&px, yellow), "no power play, no badge");
+        // Power play: the badge takes the corner and the shots stand down,
+        // rather than the two overprinting each other.
+        let px = nhl(Some((12, 9)), true);
+        assert!(any(&px, yellow), "the badge should be drawn");
+        assert!(!any(&px, grey), "shots must yield to it");
+        // No shots and no badge: the frame falls back to the centred period,
+        // exactly as before any of this.
+        let px = nhl(None, false);
+        assert!(!any(&px, grey) && !any(&px, yellow));
+        assert!(
+            (20..32).any(|y| (0..64).any(|x| px565(&px, x, y) == c565(WHITE))),
+            "the period is still there",
+        );
+        // Shots survive a missing situation. They ride the score feed; the
+        // power-play state costs a separate per-game boxscore request, so the
+        // two can and do arrive apart.
+        let mut orphan = sit_game("nhl", "1st", "8:12", Situation::Hockey {
+            away_powerplay: false, home_powerplay: false, away_players: 5, home_players: 5,
+        });
+        orphan.situation = None;
+        orphan.away.shots = Some(12);
+        orphan.home.shots = Some(9);
+        let px = render_game(&orphan, None, NameStyle::Name).1;
+        assert!(any(&px, grey), "shots drawn without any situation attached");
+    }
+
     /// A live game's status line is the period and nothing else.
     ///
     /// The clock is parsed, stored, sent to the app and shown in the operator
@@ -2095,10 +2293,10 @@ mod kern_tests {
         assert_eq!(status_for(&s, None).0, "2ND 90'+8'", "stoppage survives");
         // Every registered soccer competition, not just the one spelled here.
         for id in ["mls", "epl", "ucl", "wc", "wwc", "olysm", "olysw"] {
-            assert!(is_soccer(id), "{id} should count as soccer");
+            assert!(crate::espn::is_soccer(id), "{id} should count as soccer");
         }
         for id in ["nhl", "nba", "nfl", "mlb", "pga", "f1", "made-up"] {
-            assert!(!is_soccer(id), "{id} should not");
+            assert!(!crate::espn::is_soccer(id), "{id} should not");
         }
         // And a soccer game with no clock yet does not leave a trailing space.
         s.clock = String::new();
@@ -2448,7 +2646,7 @@ mod kern_tests {
             location: loc.into(),
             score: 1,
             primary: hex_to_rgb("003087"),
-            secondary: hex_to_rgb("ffffff"),
+            secondary: hex_to_rgb("ffffff"), hits: None, errors: None, shots: None, shootout: None,
         };
         let game = |sport: &str| Game {
             id: "t".into(),
@@ -3187,6 +3385,7 @@ mod wx_dump {
         }
     }
 }
+
 
 
 

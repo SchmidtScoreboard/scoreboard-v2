@@ -40,6 +40,23 @@ pub struct TeamSide {
     pub primary: Rgb888, // row background
     #[serde(serialize_with = "ser_rgb")]
     pub secondary: Rgb888, // accent bar + text
+    /// The other numbers a box score keeps beside the score, for the sports
+    /// that keep them. All four ride in payloads the server already downloads
+    /// and were parsed by nobody until now.
+    ///
+    /// `Option` rather than 0 throughout, because absent and zero are different
+    /// facts and the difference is the interesting one: a game yet to start has
+    /// no hit count, and a no-hitter has a real one worth drawing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hits: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub errors: Option<u32>,
+    /// Shots on goal (NHL), from `api-web.nhle.com`'s score feed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shots: Option<u32>,
+    /// Penalty-shootout goals (soccer knockouts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shootout: Option<u32>,
 }
 
 impl TeamSide {
@@ -53,6 +70,10 @@ impl TeamSide {
             score: 0,
             primary: Rgb888::BLACK,
             secondary: Rgb888::WHITE,
+            hits: None,
+            errors: None,
+            shots: None,
+            shootout: None,
         }
     }
 }

@@ -94,6 +94,13 @@ pub(crate) fn league_identity(sport_id: &str) -> Option<(&'static str, &'static 
     LEAGUE_IDENTITY.iter().find(|(id, ..)| *id == sport_id).map(|(_, n, c, r)| (*n, *c, *r))
 }
 
+/// Soccer, by the league registry rather than a hand-kept list of ids — a
+/// competition added to `LEAGUE_IDENTITY` is covered without a second edit
+/// somewhere else remembering to agree.
+pub(crate) fn is_soccer(sport_id: &str) -> bool {
+    league_identity(sport_id).is_some_and(|(_, family, _)| family == "Soccer")
+}
+
 /// The league display name, falling back to the id for a fork's league.
 pub(crate) fn league_name(sport_id: &'static str) -> &'static str {
     league_identity(sport_id).map(|(n, _, _)| n).unwrap_or(sport_id)
@@ -965,19 +972,19 @@ struct LeaderStat {
 pub fn mock_games() -> Vec<Game> {
     let bruins = TeamSide {
         abbrev: "BOS".into(), name: "BRUINS".into(), location: "BOSTON".into(), score: 2,
-        primary: hex_to_rgb("FFB81C"), secondary: hex_to_rgb("000000"),
+        primary: hex_to_rgb("FFB81C"), secondary: hex_to_rgb("000000"), hits: None, errors: None, shots: None, shootout: None,
     };
     let leafs = TeamSide {
         abbrev: "TOR".into(), name: "LEAFS".into(), location: "TORONTO".into(), score: 1,
-        primary: hex_to_rgb("00205B"), secondary: hex_to_rgb("FFFFFF"),
+        primary: hex_to_rgb("00205B"), secondary: hex_to_rgb("FFFFFF"), hits: None, errors: None, shots: None, shootout: None,
     };
     let celtics = TeamSide {
         abbrev: "BOS".into(), name: "CELTICS".into(), location: "BOSTON".into(), score: 88,
-        primary: hex_to_rgb("007A33"), secondary: hex_to_rgb("FFFFFF"),
+        primary: hex_to_rgb("007A33"), secondary: hex_to_rgb("FFFFFF"), hits: None, errors: None, shots: None, shootout: None,
     };
     let lakers = TeamSide {
         abbrev: "LAL".into(), name: "LAKERS".into(), location: "LOS ANGELES".into(), score: 84,
-        primary: hex_to_rgb("552583"), secondary: hex_to_rgb("FDB927"),
+        primary: hex_to_rgb("552583"), secondary: hex_to_rgb("FDB927"), hits: None, errors: None, shots: None, shootout: None,
     };
     vec![
         Game {
@@ -1086,6 +1093,10 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
         abbrev: abbrev.into(),
         name: name.into(),
         location: demo_location(abbrev).into(),
+        hits: None,
+        errors: None,
+        shots: None,
+        shootout: None,
         score,
         primary: hex_to_rgb(p),
         secondary: ensure_contrast(hex_to_rgb(p), hex_to_rgb(s)),
@@ -1549,6 +1560,17 @@ struct StatusType {
     /// this ("Top" substring check), so we do too.
     #[serde(default, rename = "shortDetail")]
     short_detail: String,
+    /// ESPN's own short name for a period past regulation: "OT", "2OT", "SO".
+    /// Absent on every game that ended in regulation, so its presence IS the
+    /// signal.
+    ///
+    /// Worth having rather than deriving from the period number, because the
+    /// period number is ambiguous exactly where it matters. An NHL game at
+    /// period 5 is a shootout in the regular season and double overtime in the
+    /// playoffs — over five sampled dates that is 7 games ESPN calls "SO" that
+    /// arithmetic would have called "2OT".
+    #[serde(default, rename = "altDetail")]
+    alt_detail: Option<String>,
 }
 #[derive(Deserialize)]
 struct Competitor {
@@ -1563,6 +1585,18 @@ struct Competitor {
     /// Season records; the overall one has type "total" (summary "47-42").
     #[serde(default)]
     records: Vec<EspnRecord>,
+    /// Baseball's other two box-score columns, sitting beside `score` in every
+    /// payload we already download. Optional because absent is not zero: a game
+    /// that has not started has no hit count, and a no-hitter has a real one.
+    #[serde(default)]
+    hits: Option<u32>,
+    #[serde(default)]
+    errors: Option<u32>,
+    /// Penalty shootout, on soccer knockouts only. Without it a shootout final
+    /// renders as the draw it was after 120 minutes and never says who went
+    /// through.
+    #[serde(default, rename = "shootoutScore")]
+    shootout_score: Option<u32>,
 }
 #[derive(Deserialize)]
 struct EspnRecord {
@@ -1633,6 +1667,11 @@ struct NhlTeamRef {
     /// to u8 range on use (the original clamped negatives to 0 the same way).
     #[serde(default, rename = "numSkaters")]
     num_skaters: i64,
+    /// Shots on goal, which sits next to `score` in the score feed and needed
+    /// nothing but this line to reach the panel. Absent before puck drop, which
+    /// is why it is optional rather than a defaulted 0.
+    #[serde(default)]
+    sog: Option<u32>,
 }
 #[derive(Deserialize)]
 struct NhlBoxscore {
@@ -1682,6 +1721,16 @@ impl EspnSource {
                 return;
             }
         };
+        // Shots come off the score feed itself, so every game in it has them
+        // for free — no per-game boxscore fetch, unlike the power-play state
+        // below.
+        let mut shots_by_teams = std::collections::HashMap::new();
+        for g in score_now.games.iter() {
+            shots_by_teams.insert(
+                (nhl_abbrev(&g.away_team.abbrev), nhl_abbrev(&g.home_team.abbrev)),
+                (g.away_team.sog, g.home_team.sog),
+            );
+        }
         // (away, home) abbrev pair -> hockey situation, for live games only.
         let mut by_teams = std::collections::HashMap::new();
         for g in score_now.games.iter().filter(|g| matches!(g.game_state.as_str(), "LIVE" | "CRIT")) {
@@ -1713,6 +1762,10 @@ impl EspnSource {
             let key = (nhl_abbrev(&g.away.abbrev), nhl_abbrev(&g.home.abbrev));
             if let Some(sit) = by_teams.get(&key) {
                 g.situation = Some(sit.clone());
+            }
+            if let Some((away, home)) = shots_by_teams.get(&key) {
+                g.away.shots = *away;
+                g.home.shots = *home;
             }
         }
     }
@@ -1800,6 +1853,11 @@ fn parse_event(sport_id: &str, ev: Event) -> Option<Game> {
             score: c.score.parse().unwrap_or(0),
             primary,
             secondary,
+            hits: c.hits,
+            errors: c.errors,
+            // Filled in later from the NHL's own feed; ESPN has no shot count.
+            shots: None,
+            shootout: c.shootout_score,
         };
         match c.home_away.as_str() {
             "home" => {
@@ -1815,7 +1873,7 @@ fn parse_event(sport_id: &str, ev: Event) -> Option<Game> {
         }
     }
 
-    let mut ordinal = ordinal_for(&comp.status, status);
+    let mut ordinal = ordinal_for(&comp.status, status, sport_id);
     // The original called every extra NHL period "OT" (never "4th"/"5th").
     if sport_id == "nhl" && comp.status.period > 3 {
         ordinal = if status == GameStatus::Intermission { "OT INT".into() } else { "OT".into() };
@@ -2116,14 +2174,58 @@ fn ordinal(n: i64) -> String {
     format!("{n}{suffix}")
 }
 
-fn ordinal_for(status: &Status, gs: GameStatus) -> String {
+/// The label for a period past regulation, from the period number alone.
+///
+/// Only used when ESPN does not send `altDetail`, which so far means live games
+/// — every final that went past regulation carries it. `None` means "no idea,
+/// print the plain ordinal", and NHL past the first overtime is deliberately
+/// one of those: period 5 is a shootout in the regular season and 2OT in the
+/// playoffs, and the period number cannot tell you which.
+fn overtime_label(sport_id: &str, period: i64) -> Option<String> {
+    let regulation = match sport_id {
+        "nhl" | "olyhm" | "olyhw" => 3,
+        "nba" | "wnba" | "olybm" | "olybw" | "nfl" | "cfb" => 4,
+        "cbb" | "wcbb" => 2, // halves
+        // Baseball counts innings forever: a 12th is a 12th, not a 3rd OT.
+        _ if is_soccer(sport_id) => 2,
+        _ => return None,
+    };
+    let extra = period - regulation;
+    if extra <= 0 {
+        return None;
+    }
+    if is_soccer(sport_id) {
+        // Two extra-time halves, then the shootout.
+        return Some(if extra >= 3 { "PENS".into() } else { "ET".into() });
+    }
+    match (sport_id, extra) {
+        ("nhl" | "olyhm" | "olyhw", 1) => Some("OT".into()),
+        // Ambiguous: SO or 2OT depending on the season. Let `altDetail` say.
+        ("nhl" | "olyhm" | "olyhw", _) => None,
+        (_, 1) => Some("OT".into()),
+        (_, n) => Some(format!("{n}OT")),
+    }
+}
+
+fn ordinal_for(status: &Status, gs: GameStatus, sport_id: &str) -> String {
     if status.type_.name == "STATUS_HALFTIME" {
         return "HALF".into();
     }
     if status.period <= 0 {
         return String::new();
     }
-    let o = ordinal(status.period);
+    // A game past regulation used to print the raw period: NBA overtime read
+    // "5TH", college basketball "3RD", and a soccer shootout "5TH". ESPN's own
+    // label first, then the period arithmetic, then the ordinal it always was.
+    let o = status
+        .type_
+        .alt_detail
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_uppercase())
+        .or_else(|| overtime_label(sport_id, status.period))
+        .unwrap_or_else(|| ordinal(status.period));
     if gs == GameStatus::Intermission {
         format!("{o} INT")
     } else {
@@ -2726,6 +2828,65 @@ mod champ_tests {
         assert!(parse_golf("pga", ev).is_none(), "play is done for the day — the panel must drop it");
     }
 
+    /// A period past regulation says so, instead of counting.
+    ///
+    /// The board printed the raw period number, so NBA overtime read "5TH",
+    /// college basketball "3RD" (it plays halves), NHL overtime "4TH", and a
+    /// soccer penalty shootout "5TH" — a label that is not wrong so much as
+    /// meaningless, since nobody calls it that.
+    ///
+    /// ESPN's own `altDetail` leads because the period number is genuinely
+    /// ambiguous where it matters most: an NHL game at period 5 is a shootout
+    /// in the regular season and double overtime in the playoffs. Over five
+    /// sampled 2025-26 dates that is 7 games ESPN calls "SO" that arithmetic
+    /// would have called "2OT". So arithmetic is the FALLBACK, for the live
+    /// games where `altDetail` has not been observed, and it declines to answer
+    /// exactly where it cannot know.
+    #[test]
+    fn overtime_says_overtime_instead_of_counting_periods() {
+        let st = |period: i64, alt: Option<&str>| Status {
+            type_: StatusType {
+                name: "STATUS_FINAL".into(),
+                state: "post".into(),
+                short_detail: String::new(),
+                alt_detail: alt.map(|s| s.to_string()),
+            },
+            period,
+            display_clock: String::new(),
+        };
+        let say = |sport: &str, period: i64, alt: Option<&str>| {
+            ordinal_for(&st(period, alt), GameStatus::Final, sport)
+        };
+        // ESPN's label wins wherever it is present — including the one case
+        // arithmetic gets backwards.
+        assert_eq!(say("nhl", 5, Some("SO")), "SO", "a regular-season shootout");
+        assert_eq!(say("nhl", 5, Some("2OT")), "2OT", "the same period in the playoffs");
+        assert_eq!(say("nhl", 4, Some("OT")), "OT");
+        assert_eq!(say("nba", 5, Some("OT")), "OT");
+        // Without it, the period number answers where it safely can.
+        assert_eq!(say("nba", 5, None), "OT");
+        assert_eq!(say("nba", 6, None), "2OT");
+        assert_eq!(say("cbb", 3, None), "OT", "college basketball plays halves");
+        assert_eq!(say("nfl", 5, None), "OT");
+        assert_eq!(say("nhl", 4, None), "OT", "the first NHL overtime is unambiguous");
+        assert_eq!(say("nhl", 5, None), "5th", "SO or 2OT — refuses to guess");
+        // Soccer: two extra-time halves, then the shootout.
+        assert_eq!(say("epl", 3, None), "ET");
+        assert_eq!(say("ucl", 4, None), "ET");
+        assert_eq!(say("ucl", 5, None), "PENS");
+        // Regulation is untouched, and baseball counts innings forever.
+        for (sport, period, want) in
+            [("nba", 4, "4th"), ("nhl", 3, "3rd"), ("cbb", 2, "2nd"), ("mlb", 12, "12th")]
+        {
+            assert_eq!(say(sport, period, None), want, "{sport} period {period}");
+        }
+        // Intermission still appends, and halftime still wins outright.
+        assert_eq!(ordinal_for(&st(4, Some("OT")), GameStatus::Intermission, "nhl"), "OT INT");
+        let mut half = st(2, None);
+        half.type_.name = "STATUS_HALFTIME".into();
+        assert_eq!(ordinal_for(&half, GameStatus::Active, "cbb"), "HALF");
+    }
+
     /// The other half of that: a pause ESPN keeps at `state: "in"` is a delay
     /// *within* the game. Those still belong on the board — dropping a rain
     /// delay would blank the panel mid-game and bring it back minutes later.
@@ -2735,6 +2896,7 @@ mod champ_tests {
             name: name.into(),
             state: state.into(),
             short_detail: String::new(),
+            alt_detail: None,
         };
         assert_eq!(map_status(&t("STATUS_DELAYED", "in")), Some(GameStatus::Intermission));
         assert_eq!(map_status(&t("STATUS_HALFTIME", "in")), Some(GameStatus::Intermission));
