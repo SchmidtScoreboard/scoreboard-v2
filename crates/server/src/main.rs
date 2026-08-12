@@ -2515,7 +2515,11 @@ fn idle_manifest(state: &AppState, cfg: &BoardConfig, tz: Option<chrono_tz::Tz>)
     Manifest {
         // Only the idle path can be a local clock, and only when it drew
         // something. The rendered frame still ships alongside it.
-        local_clock: !rotation.is_empty() && offmode::is_local_clock(cfg.off_mode_id()),
+        // Always false. The board used to draw its own clock from this, which
+        // meant two renderers for one screen; it has one now. Kept on the wire
+        // because firmware that predates the change still reads the field, and
+        // false is exactly what we want to tell it.
+        local_clock: false,
         // So the offline clock keeps the format the app chose.
         clock_hour24: cfg.off_mode_params.get(offmode::HOUR24).map(String::as_str) == Some("1"),
         display_on: !rotation.is_empty(),
@@ -6290,7 +6294,11 @@ mod tests {
     fn off_state_clock_vs_blank() {
         let state = AppState::new_ephemeral();
         state.games.lock().unwrap().clear();
-        let mut cfg = BoardConfig { power: false, ..Default::default() }; // default off_state = Clock
+        // POWERED ON with nothing to show — the state the off mode is actually
+        // for. Sleep is dark now (see `a_sleeping_board_is_dark_and_an_idle_one_is_not`),
+        // so `power: false` no longer reaches this path at all. `watch_all` because
+        // an unconfigured board answers with the setup screen instead.
+        let mut cfg = BoardConfig { power: true, ..watch_all() }; // default off_state = Clock
         state.configs.lock().unwrap().insert("b1".into(), cfg.clone());
         let m = manifest_for_board(&state, "b1");
         assert!(m.display_on && m.rotation.len() == 1, "clock frame while off");

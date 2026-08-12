@@ -961,6 +961,7 @@ mod wss_tests {
         fn on_connection(&self, connected: bool) {
             let _ = self.tx.lock().unwrap().send(format!("conn={connected}"));
         }
+        fn on_debug_url(&self, _: String, _: String) {}
         fn on_board_state(&self, _: String, _: Vec<UiGame>, _: bool) {}
         fn on_catalog(&self, _: Vec<UiSport>) {}
         fn on_off_modes(&self, _: Vec<UiOffMode>) {}

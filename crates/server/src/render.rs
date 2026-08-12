@@ -1165,6 +1165,9 @@ pub fn render_clock_styled(hour24: u32, minute: u32, style: &str, h24: bool) -> 
             let px = c.to_rgb565();
             (frame_id(&px), px)
         }
+        // Spelled out on a letter grid. Ignores `h24` — "quarter past ten" has
+        // no 24-hour reading, and the field is hidden for this style anyway.
+        "word" => render_word_clock(hour24, minute),
         _ => match ampm {
             Some(a) => render_notice(&[(&time, true, WHITE), (a, false, GREY)], None),
             None => render_notice(&[(&time, true, WHITE)], None),
@@ -1174,8 +1177,12 @@ pub fn render_clock_styled(hour24: u32, minute: u32, style: &str, h24: bool) -> 
 
 /// The styles this binary draws, in menu order — the descriptor is built from
 /// this, so a style can never be offered that `render_clock_styled` cannot draw.
-pub const CLOCK_STYLES: [(&str, &str); 3] =
-    [("classic", "Classic"), ("large", "Large"), ("compact", "Compact")];
+pub const CLOCK_STYLES: [(&str, &str); 4] = [
+    ("classic", "Classic"),
+    ("large", "Large"),
+    ("compact", "Compact"),
+    ("word", "Word"),
+];
 
 #[cfg(test)]
 mod kern_tests {

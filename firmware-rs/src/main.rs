@@ -750,11 +750,12 @@ async fn device(
                             // unprompted (sticky until paired or dismissed).
                             board.lock().await.needs_pairing();
                         }
-                        // The board has no RTC. This is its only clock source:
-                        // anchor it, then advance it from the monotonic timer.
-                        Ok(ServerMsg::Time { local_epoch_ms }) => {
-                            board.lock().await.set_time(local_epoch_ms);
-                        }
+                        // The board no longer draws anything from a clock of
+                        // its own — the server renders every frame — so this is
+                        // accepted and ignored. Still SENT by the server, and
+                        // still parsed here, because refusing it would break
+                        // nothing and log noise on every connect.
+                        Ok(ServerMsg::Time { .. }) => {}
                         Ok(ServerMsg::Manifest(m)) => {
                             let need = board.lock().await.on_manifest(m);
                             if let Some(req) = need {

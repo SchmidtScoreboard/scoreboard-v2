@@ -533,8 +533,8 @@ async fn run_client(
                                         }
                                         // Without this the simulator never
                                         // exercises the local clock path.
-                                        ServerMsg::Time { local_epoch_ms } => {
-                                            board.lock().unwrap().set_time(local_epoch_ms);
+                                        ServerMsg::Time { .. } => {
+                            // The board draws no clock of its own now; time is ignored.
                                         }
                                         ServerMsg::Manifest(m) => {
                                             let need = board.lock().unwrap().on_manifest(m);

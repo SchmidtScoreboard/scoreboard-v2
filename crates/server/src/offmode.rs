@@ -37,19 +37,6 @@ pub struct OffFrame {
     pub dwell_ms: u32,
 }
 
-/// True ONLY for the plain clock, which the board can draw itself once it has
-/// been told the time. The server still renders and ships the frame — old
-/// firmware blits it, and so does a board that hasn't received a `Time` yet —
-/// but a board that can draw it locally keeps ticking through an outage
-/// instead of freezing on a picture of a minute that has passed.
-///
-/// Deliberately an EXACT match, not "anything that isn't blank". The
-/// clock+weather screen also shows a time, but the board has no weather and
-/// would draw a bare clock straight over it.
-pub fn is_local_clock(id: &str) -> bool {
-    id == "clock"
-}
-
 /// Everything a mode is allowed to depend on. Add fields here rather than
 /// reaching into `AppState` — it is what keeps modes renderable from the
 /// preview route, which has no board and no config.
@@ -157,7 +144,20 @@ pub fn off_modes() -> Vec<OffModeDescriptor> {
             preview: Some("/offmode/clock.png".into()),
             input: None,
             fields: vec![
-                toggle_field(HOUR24, "24-hour time", false),
+                // Declared once per style that HAS a 24-hour reading, rather
+                // than once with a "not word" condition — the condition
+                // vocabulary is equality only, and inventing a negation would
+                // be a protocol change plus an app release to render one
+                // checkbox. Exactly one of these survives the visibility filter,
+                // so the app never sees two fields sharing a key.
+                //
+                // The point is that the toggle disappears for Word rather than
+                // sitting there doing nothing: "quarter past ten" has no
+                // 24-hour form, and a control that silently does nothing is
+                // worse than an absent one.
+                only_when(toggle_field(HOUR24, "24-hour time", false), STYLE, "classic"),
+                only_when(toggle_field(HOUR24, "24-hour time", false), STYLE, "large"),
+                only_when(toggle_field(HOUR24, "24-hour time", false), STYLE, "compact"),
                 choice_field(
                     STYLE,
                     "Style",
@@ -172,16 +172,6 @@ pub fn off_modes() -> Vec<OffModeDescriptor> {
                         .collect(),
                 ),
             ],
-        },
-        OffModeDescriptor {
-            id: "wordclock".into(),
-            label: "Word clock".into(),
-            description: "The time spelled out, the rest of the grid dimmed.".into(),
-            preview: Some("/offmode/wordclock.png".into()),
-            input: None,
-            // No 24-hour option: the phrase is "quarter past ten", which has no
-            // 24-hour reading. Nothing to configure is the honest answer here.
-            fields: vec![],
         },
         OffModeDescriptor {
             id: "weather".into(),
@@ -282,13 +272,6 @@ pub fn render_off_mode(id: &str, cx: &OffCtx) -> Vec<OffFrame> {
                 // default rather than nothing.
                 _ => render::render_weather_detailed(&w),
             };
-            vec![OffFrame { id: fid, px, dwell_ms: 60_000 }]
-        }
-        "wordclock" => {
-            let (h, m) = if cx.preview { PREVIEW_TIME } else { now_hm(cx.tz) };
-            let (fid, px) = render::render_word_clock(h, m);
-            // A minute is the smallest thing it can say, so re-pushing faster
-            // would be frames nobody can tell apart.
             vec![OffFrame { id: fid, px, dwell_ms: 60_000 }]
         }
         // Anything else is the clock — an unknown id must still light the
