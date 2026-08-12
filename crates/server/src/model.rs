@@ -98,10 +98,13 @@ pub struct Champ {
 pub enum Situation {
     /// NFL/CFB: down & distance + yardline + which side has the ball.
     Football {
-        /// e.g. "3rd + 4" — ESPN shortDownDistanceText with "&" → "+" like the
-        /// original server did (the 4x6 font has no ampersand glyph).
+        /// e.g. "3rd & 4" — ESPN's shortDownDistanceText, unmodified. The
+        /// original server rewrote "&" to "+" because its 4x6 font had no
+        /// ampersand; both of ours ship one.
         down_string: String,
-        /// e.g. "SEA 25" — ESPN possessionText, drawn verbatim.
+        /// e.g. "SEA 25" — ESPN possessionText. No longer drawn verbatim: it is
+        /// the ball's position on the field bar, resolved against whoever has
+        /// possession. See `render::yards_from_own_goal`.
         ball_position: String,
         /// Some(true)=home ball, Some(false)=away, None=unknown (no indicator).
         home_possession: Option<bool>,

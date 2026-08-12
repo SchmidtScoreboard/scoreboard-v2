@@ -1241,8 +1241,11 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             champ: None,
             session: None,
             situation: Some(Situation::Football {
+                // Ampersands, like the feed sends and the panel now draws — the
+                // demo is what the app previews, so a "+" here would show a
+                // frame no real game produces.
                 down_string: match n % 4 {
-                    0 => "1st + 10", 1 => "2nd + 7", 2 => "3rd + 4", _ => "4th + 1",
+                    0 => "1st & 10", 1 => "2nd & 7", 2 => "3rd & 4", _ => "4th & 1",
                 }.into(),
                 ball_position: if (n / 8) % 2 == 0 {
                     format!("NE {}", 20 + n % 30)
@@ -1263,7 +1266,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             session: None,
             situation: Some(Situation::Football {
                 down_string: match (n / 2) % 4 {
-                    0 => "1st + 10", 1 => "2nd + 6", 2 => "3rd + 2", _ => "4th + 8",
+                    0 => "1st & 10", 1 => "2nd & 6", 2 => "3rd & 2", _ => "4th & 8",
                 }.into(),
                 ball_position: if (n / 5) % 2 == 0 {
                     format!("OSU {}", 15 + n % 35)

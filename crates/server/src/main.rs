@@ -4039,7 +4039,7 @@ fn preview() {
         ("nfl_situation", {
             let mut game = g("s1", "nfl", mk("SF", "49ERS", 14, "AA0000", "B3995D"), mk("SEA", "SEAHAWKS", 17, "002244", "69BE28"), GameStatus::Active, "3rd", "8:12");
             game.situation = Some(model::Situation::Football {
-                down_string: "3rd + 4".into(),
+                down_string: "3rd & 4".into(),
                 ball_position: "SEA 25".into(),
                 home_possession: Some(false),
             });
