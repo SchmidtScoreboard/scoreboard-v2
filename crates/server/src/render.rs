@@ -1021,110 +1021,120 @@ fn clock_parts(hour24: u32, minute: u32, h24: bool) -> (String, Option<&'static 
 /// `style` is one of `classic`, `large`, `compact`; anything else falls back to
 /// `classic` rather than to a blank panel, for the same reason an unknown off
 /// mode does.
-/// The word-clock letter grid: 16 columns x 6 rows, which is what a 64x32 panel
-/// holds at this font's 4px advance and a 5px row pitch.
+/// The word clock's text.
 ///
-/// The reference design is an 11x11 grid — that needs eleven rows and we have
-/// six, so this is a layout built for the panel rather than a copy of one. Two
-/// constraints drove it:
+/// Five rows, kerned and centred rather than dropped on a fixed cell grid. The
+/// grid version needed six rows to fit, which left no gap between them, and it
+/// only fitted at all by padding with filler letters. Kerning buys about 15
+/// characters a row instead of a rigid 16, and every character here belongs to
+/// a word — nothing is filler.
 ///
-/// * It has to READ. Highlighted words are scanned as a sentence, so every word
-///   sits at a later position than the one before it: IT IS, then the minutes,
-///   then PAST/TO, then the hour. A grid that packs tighter but scatters the
-///   phrase is a word search, not a clock.
-/// * The minute FIVE and the hour FIVE are DIFFERENT cells (likewise TEN).
-///   Sharing them saves seven cells and makes "five past five" light one word.
-///
-/// Filler letters are arbitrary; nothing matches against them, because every
-/// word is addressed by position (`WORD_*` below), never searched for.
-const WORD_GRID: [&str; 6] = [
-    "ITLISHALFQUARTER",
-    "TWENTYFIVETENKDR",
-    "PASTONETWOTHREEZ",
-    "FOURFIVESIXSEVEN",
-    "EIGHTNINETENBQJU",
-    "ELEVENTWELVEMXPV",
+/// **The hour block changes; nothing else does.** Twelve hours plus the minute
+/// vocabulary plus AM/PM is ~86 characters, and five kerned rows hold ~75, so a
+/// wholly static face is not possible on a 64x32 panel. Rather than shrink the
+/// vocabulary or crowd the rows, the two hour rows swap between the first six
+/// hours and the last six — twice in twelve hours, and never while you are
+/// looking at a given hour. Everything above them is fixed, so the part that
+/// reads as the clock's face stays still.
+const WC_HEAD: [&str; 3] = ["ITISQUARTERAMPM", "TWENTYFIVETEN", "HALFPASTO"];
+/// Hours 1..6 and 7..12. Exactly one pair is on screen at a time.
+const WC_HOURS_LO: [&str; 2] = ["ONETWOTHREE", "FOURFIVESIX"];
+const WC_HOURS_HI: [&str; 2] = ["SEVENEIGHTNINE", "TENELEVENTWELVE"];
+
+/// A highlightable span: (row, first character, length). Rows 0..2 index
+/// `WC_HEAD`; rows 3..4 index whichever hour pair is showing.
+type Span = (usize, usize, usize);
+
+const W_IT: Span = (0, 0, 2);
+const W_IS: Span = (0, 2, 2);
+const W_QUARTER: Span = (0, 4, 7);
+// Far right of the top row, so it reads as a corner indicator rather than as a
+// word wedged into the phrase — which is where the reference clock puts it too.
+const W_AM: Span = (0, 11, 2);
+const W_PM: Span = (0, 13, 2);
+const W_TWENTY: Span = (1, 0, 6);
+const W_FIVE: Span = (1, 6, 4);
+const W_TEN: Span = (1, 10, 3);
+const W_HALF: Span = (2, 0, 4);
+const W_PAST: Span = (2, 4, 4);
+const W_TO: Span = (2, 7, 2);
+
+/// Where each hour sits inside its own pair of rows, 1..=12.
+const W_HOURS: [Span; 12] = [
+    (3, 0, 3),   // ONE
+    (3, 3, 3),   // TWO
+    (3, 6, 5),   // THREE
+    (4, 0, 4),   // FOUR
+    (4, 4, 4),   // FIVE
+    (4, 8, 3),   // SIX
+    (3, 0, 5),   // SEVEN
+    (3, 5, 5),   // EIGHT
+    (3, 10, 4),  // NINE
+    (4, 0, 3),   // TEN
+    (4, 3, 6),   // ELEVEN
+    (4, 9, 6),   // TWELVE
 ];
 
-/// One highlightable word: (row, column, length).
-type Cell = (usize, usize, usize);
-
-const W_IT: Cell = (0, 0, 2);
-const W_IS: Cell = (0, 3, 2);
-const W_HALF: Cell = (0, 5, 4);
-const W_QUARTER: Cell = (0, 9, 7);
-const W_TWENTY: Cell = (1, 0, 6);
-const W_FIVE_MIN: Cell = (1, 6, 4);
-const W_TEN_MIN: Cell = (1, 10, 3);
-const W_PAST: Cell = (2, 0, 4);
-const W_TO: Cell = (2, 3, 2);
-/// Hours 1..=12, in order.
-const W_HOURS: [Cell; 12] = [
-    (2, 4, 3),   // ONE
-    (2, 7, 3),   // TWO
-    (2, 10, 5),  // THREE
-    (3, 0, 4),   // FOUR
-    (3, 4, 4),   // FIVE
-    (3, 8, 3),   // SIX
-    (3, 11, 5),  // SEVEN
-    (4, 0, 5),   // EIGHT
-    (4, 5, 4),   // NINE
-    (4, 9, 3),   // TEN
-    (5, 0, 6),   // ELEVEN
-    (5, 6, 6),   // TWELVE
-];
-
-/// Which cells light up for a given time, at five-minute granularity.
-///
-/// Returned rather than drawn so the phrase is testable without pixels — the
-/// interesting bugs here are "twenty five to four" lighting the wrong hour, not
-/// anything about rendering.
-fn word_clock_cells(hour24: u32, minute: u32) -> Vec<Cell> {
+/// The five rows to draw for a given time, and which spans are lit.
+fn word_clock_face(hour24: u32, minute: u32) -> ([&'static str; 5], Vec<Span>) {
     let mut lit = vec![W_IT, W_IS];
     let step = minute / 5; // 0..=11
-    // Past the half hour the phrase flips to "... TO" the NEXT hour.
     let to_next = step >= 7;
     match step {
         0 => {}
-        1 | 11 => lit.push(W_FIVE_MIN),
-        2 | 10 => lit.push(W_TEN_MIN),
+        1 | 11 => lit.push(W_FIVE),
+        2 | 10 => lit.push(W_TEN),
         3 | 9 => lit.push(W_QUARTER),
         4 | 8 => lit.push(W_TWENTY),
         5 | 7 => {
             lit.push(W_TWENTY);
-            lit.push(W_FIVE_MIN);
+            lit.push(W_FIVE);
         }
         _ => lit.push(W_HALF), // 6
     }
     if step != 0 {
         lit.push(if to_next { W_TO } else { W_PAST });
     }
-    // 12-hour, 1..=12, rolling forward for the "to" half.
-    let h24 = if to_next { (hour24 + 1) % 24 } else { hour24 };
-    let h12 = match h24 % 12 {
+    // The hour the face SAYS, which past the half hour is the next one — and it
+    // is that hour, not the current one, that decides AM or PM. At 11:45am the
+    // clock reads "quarter to twelve PM".
+    let shown24 = if to_next { (hour24 + 1) % 24 } else { hour24 };
+    lit.push(if shown24 < 12 { W_AM } else { W_PM });
+    let h12 = match shown24 % 12 {
         0 => 12,
         h => h,
     };
     lit.push(W_HOURS[(h12 - 1) as usize]);
-    lit
+    let hours = if h12 <= 6 { WC_HOURS_LO } else { WC_HOURS_HI };
+    ([WC_HEAD[0], WC_HEAD[1], WC_HEAD[2], hours[0], hours[1]], lit)
 }
 
-/// The word clock: the whole grid faintly lit, the words that spell the time
-/// bright. Unlit letters are drawn rather than blanked — the grid IS the design,
-/// and a panel showing only the live words is just a text clock.
+/// The word clock: the whole face faintly lit, the words that spell the time
+/// bright.
+///
+/// Unlit text is drawn rather than blanked — the face IS the design, and a panel
+/// showing only the live words is a text clock with extra steps.
 pub fn render_word_clock(hour24: u32, minute: u32) -> (FrameId, Vec<u8>) {
     let mut c = Canvas::new();
-    let lit = word_clock_cells(hour24, minute);
-    // 6 rows at a 5px pitch fills 30 of the panel's 32 rows; baselines at 5..30
-    // leave a row of margin top and bottom.
-    for (r, row) in WORD_GRID.iter().enumerate() {
-        for (col, ch) in row.chars().enumerate() {
-            let on = lit.iter().any(|(lr, lc, len)| *lr == r && col >= *lc && col < lc + len);
-            let color = if on { WHITE } else { Rgb888::new(0x22, 0x22, 0x28) };
-            // Drawn per character at a fixed 4px pitch: `draw_text` would kern
-            // the row and the grid would stop being a grid.
+    let (rows, lit) = word_clock_face(hour24, minute);
+    let dim = Rgb888::new(0x22, 0x22, 0x28);
+    // Five rows on a 6px pitch: 30 of the panel's 32, so there is a row of gap
+    // between lines instead of the six-row version's none.
+    for (r, row) in rows.iter().enumerate() {
+        let mut x = (FRAME_WIDTH as i32 - text_width(row, false)) / 2;
+        let by = 5 + r as i32 * 6;
+        let mut prev: Option<char> = None;
+        for (i, ch) in row.chars().enumerate() {
+            if let Some(p) = prev {
+                x += kerned_advance(p, ch, false);
+            }
+            let on = lit.iter().any(|(lr, lc, len)| *lr == r && i >= *lc && i < lc + len);
+            // Per character, because a row carries both lit and unlit words and
+            // `draw_text` paints one colour. Advances exactly as `draw_text`
+            // would, so the row is kerned identically.
             let mut buf = [0u8; 4];
-            draw_text(&mut c, ch.encode_utf8(&mut buf), col as i32 * 4, 5 + r as i32 * 5, false, color);
+            draw_text(&mut c, ch.encode_utf8(&mut buf), x, by, false, if on { WHITE } else { dim });
+            prev = Some(ch);
         }
     }
     let px = c.to_rgb565();
@@ -1188,70 +1198,119 @@ pub const CLOCK_STYLES: [(&str, &str); 4] = [
 mod kern_tests {
     use super::*;
 
-    /// Every word must actually BE where the layout says it is.
+    /// Every word must actually BE where the layout says it is, and every row
+    /// must fit the panel.
     ///
-    /// The grid is hand-packed and addressed by coordinate, so a one-character
-    /// slip anywhere shifts a word without breaking anything visible — the panel
-    /// would light four letters that are not "FIVE" and look, at a glance, fine.
+    /// The face is addressed by character offset, so a one-character slip shifts
+    /// a word and still lights four plausible letters. And a row that overflows
+    /// 64px is not clipped — it is centred, so it loses a character off BOTH
+    /// ends and reads as a typo rather than as a layout bug.
     #[test]
-    fn every_word_sits_where_the_layout_claims() {
-        let at = |(r, c, len): Cell| -> String {
-            WORD_GRID[r].chars().skip(c).take(len).collect()
+    fn every_word_sits_where_the_layout_claims_and_every_row_fits() {
+        let span = |rows: &[&str; 5], (r, c, len): Span| -> String {
+            rows[r].chars().skip(c).take(len).collect()
         };
-        assert_eq!(at(W_IT), "IT");
-        assert_eq!(at(W_IS), "IS");
-        assert_eq!(at(W_HALF), "HALF");
-        assert_eq!(at(W_QUARTER), "QUARTER");
-        assert_eq!(at(W_TWENTY), "TWENTY");
-        assert_eq!(at(W_FIVE_MIN), "FIVE");
-        assert_eq!(at(W_TEN_MIN), "TEN");
-        assert_eq!(at(W_PAST), "PAST");
-        assert_eq!(at(W_TO), "TO");
-        let hours = ["ONE","TWO","THREE","FOUR","FIVE","SIX","SEVEN","EIGHT","NINE","TEN","ELEVEN","TWELVE"];
-        for (i, want) in hours.iter().enumerate() {
-            assert_eq!(&at(W_HOURS[i]), want, "hour {}", i + 1);
+        // Rows 0..2 are fixed; take an hour from each half to see both pairs.
+        let (lo, _) = word_clock_face(3, 0);
+        let (hi, _) = word_clock_face(9, 0);
+
+        assert_eq!(span(&lo, W_IT), "IT");
+        assert_eq!(span(&lo, W_IS), "IS");
+        assert_eq!(span(&lo, W_AM), "AM");
+        assert_eq!(span(&lo, W_PM), "PM");
+        assert_eq!(span(&lo, W_QUARTER), "QUARTER");
+        assert_eq!(span(&lo, W_TWENTY), "TWENTY");
+        assert_eq!(span(&lo, W_FIVE), "FIVE");
+        assert_eq!(span(&lo, W_TEN), "TEN");
+        assert_eq!(span(&lo, W_HALF), "HALF");
+        assert_eq!(span(&lo, W_PAST), "PAST");
+        assert_eq!(span(&lo, W_TO), "TO");
+
+        let names = ["ONE","TWO","THREE","FOUR","FIVE","SIX","SEVEN","EIGHT","NINE","TEN","ELEVEN","TWELVE"];
+        for (i, want) in names.iter().enumerate() {
+            let rows = if i < 6 { &lo } else { &hi };
+            assert_eq!(&span(rows, W_HOURS[i]), want, "hour {}", i + 1);
         }
-        // The grid must fit the panel exactly: 16 columns at 4px is 64.
-        for (i, row) in WORD_GRID.iter().enumerate() {
-            assert_eq!(row.chars().count(), 16, "row {i} is not 16 columns");
+
+        // No filler: every character belongs to some word, so the rows are
+        // exactly the words concatenated.
+        assert_eq!(WC_HEAD[0], "ITISQUARTERAMPM");
+        assert_eq!(WC_HEAD[1], "TWENTYFIVETEN");
+        assert_eq!(WC_HEAD[2], "HALFPASTO"); // PAST and TO share a T
+        for row in WC_HEAD.iter().chain(WC_HOURS_LO.iter()).chain(WC_HOURS_HI.iter()) {
+            let w = text_width(row, false);
+            assert!(w <= FRAME_WIDTH as i32, "{row:?} is {w}px, panel is {}", FRAME_WIDTH);
         }
-        // The minute and hour FIVE/TEN are different cells, or "five past five"
-        // lights one word and reads as nonsense.
-        assert_ne!(W_FIVE_MIN, W_HOURS[4], "minute FIVE and hour FIVE must differ");
-        assert_ne!(W_TEN_MIN, W_HOURS[9], "minute TEN and hour TEN must differ");
+        // Five rows on a 6px pitch, so there is a gap between lines.
+        assert_eq!(lo.len(), 5);
     }
 
-    /// The phrase, at the level that actually goes wrong: which hour "to" picks.
+    /// The phrase, and the meridiem, checked separately — because they are
+    /// separate things. AM/PM is a corner indicator on the top row, not a word
+    /// in the sentence, so reading the lit spans in order would interleave it
+    /// ("IT IS QUARTER PM PAST THREE") and prove nothing about either.
     #[test]
     fn the_phrase_reads_correctly_around_the_hour() {
-        let say = |h: u32, m: u32| -> String {
-            let lit = word_clock_cells(h, m);
-            let mut words: Vec<(usize, usize, String)> = lit
-                .iter()
-                .map(|(r, c, len)| {
-                    (*r, *c, WORD_GRID[*r].chars().skip(*c).take(*len).collect::<String>())
-                })
-                .collect();
-            // Reading order IS the phrase — that is the whole design.
+        let read = |h: u32, m: u32| -> (String, String) {
+            let (rows, lit) = word_clock_face(h, m);
+            let mut meridiem = String::new();
+            let mut words: Vec<(usize, usize, String)> = Vec::new();
+            for (r, c, len) in &lit {
+                let w: String = rows[*r].chars().skip(*c).take(*len).collect();
+                if (*r, *c) == (W_AM.0, W_AM.1) || (*r, *c) == (W_PM.0, W_PM.1) {
+                    meridiem = w;
+                } else {
+                    words.push((*r, *c, w));
+                }
+            }
             words.sort_by_key(|(r, c, _)| (*r, *c));
-            words.into_iter().map(|(_, _, w)| w).collect::<Vec<_>>().join(" ")
+            (words.into_iter().map(|(_, _, w)| w).collect::<Vec<_>>().join(" "), meridiem)
         };
-        assert_eq!(say(15, 0), "IT IS THREE");
-        assert_eq!(say(15, 4), "IT IS THREE", "rounds down to the five-minute step");
-        assert_eq!(say(15, 5), "IT IS FIVE PAST THREE");
-        assert_eq!(say(15, 15), "IT IS QUARTER PAST THREE");
-        assert_eq!(say(15, 25), "IT IS TWENTY FIVE PAST THREE");
-        assert_eq!(say(15, 30), "IT IS HALF PAST THREE");
-        // Past the half hour it counts down to the NEXT hour.
-        assert_eq!(say(15, 35), "IT IS TWENTY FIVE TO FOUR");
-        assert_eq!(say(15, 45), "IT IS QUARTER TO FOUR");
-        assert_eq!(say(15, 55), "IT IS FIVE TO FOUR");
-        // Wrap: noon and midnight are TWELVE, and 12:45 is a quarter to ONE.
-        assert_eq!(say(0, 0), "IT IS TWELVE");
-        assert_eq!(say(12, 0), "IT IS TWELVE");
-        assert_eq!(say(12, 45), "IT IS QUARTER TO ONE");
-        assert_eq!(say(23, 45), "IT IS QUARTER TO TWELVE");
-        assert_eq!(say(11, 45), "IT IS QUARTER TO TWELVE");
+        assert_eq!(read(15, 0), ("IT IS THREE".into(), "PM".into()));
+        assert_eq!(read(15, 4), ("IT IS THREE".into(), "PM".into()), "rounds down to the step");
+        assert_eq!(read(15, 5).0, "IT IS FIVE PAST THREE");
+        assert_eq!(read(15, 15).0, "IT IS QUARTER PAST THREE");
+        assert_eq!(read(15, 25).0, "IT IS TWENTY FIVE PAST THREE");
+        assert_eq!(read(15, 30).0, "IT IS HALF PAST THREE");
+        assert_eq!(read(15, 35).0, "IT IS TWENTY FIVE TO FOUR");
+        assert_eq!(read(15, 45).0, "IT IS QUARTER TO FOUR");
+        assert_eq!(read(12, 45).0, "IT IS QUARTER TO ONE");
+
+        // The meridiem follows the hour the face SAYS, not the one it is.
+        assert_eq!(read(11, 45), ("IT IS QUARTER TO TWELVE".into(), "PM".into()),
+            "11:45am reads as 'to twelve', which is PM");
+        assert_eq!(read(23, 45), ("IT IS QUARTER TO TWELVE".into(), "AM".into()),
+            "and 11:45pm rolls into AM");
+        assert_eq!(read(11, 30).1, "AM");
+        assert_eq!(read(0, 0), ("IT IS TWELVE".into(), "AM".into()));
+        assert_eq!(read(12, 0), ("IT IS TWELVE".into(), "PM".into()));
+    }
+
+    /// The hour rows swap halves, and only when the hour crosses six/twelve —
+    /// the face must not be reshuffling under someone who is just watching it.
+    #[test]
+    fn only_the_hour_rows_change_and_only_across_the_halves() {
+        let head = |h: u32| {
+            let (rows, _) = word_clock_face(h, 0);
+            [rows[0], rows[1], rows[2]]
+        };
+        let hours = |h: u32| {
+            let (rows, _) = word_clock_face(h, 0);
+            [rows[3], rows[4]]
+        };
+        // Rows 0..2 never move, at any hour of the day.
+        for h in 0..24 {
+            assert_eq!(head(h), [WC_HEAD[0], WC_HEAD[1], WC_HEAD[2]], "head moved at {h}");
+        }
+        // 1..6 share one pair, 7..12 the other.
+        for h in [1, 2, 3, 4, 5, 6] {
+            assert_eq!(hours(h), WC_HOURS_LO, "{h} should use the low pair");
+        }
+        for h in [7, 8, 9, 10, 11] {
+            assert_eq!(hours(h), WC_HOURS_HI, "{h} should use the high pair");
+        }
+        assert_eq!(hours(0), WC_HOURS_HI, "midnight reads TWELVE");
+        assert_eq!(hours(12), WC_HOURS_HI, "noon reads TWELVE");
     }
 
     /// The gap between the time and its AM/PM must be the SAME on every clock,
