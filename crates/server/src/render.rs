@@ -975,11 +975,27 @@ fn hockey_badge(g: &Game, sit: &Situation) -> Option<String> {
         Some(crate::espn::nhl_abbrev(&g.away.abbrev))
     } else if *home_powerplay {
         Some(crate::espn::nhl_abbrev(&g.home.abbrev))
-    } else if (2..=4).contains(away_players) && (2..=4).contains(home_players) {
+    } else if is_even_strength(*away_players, *home_players) {
+        // Five a side and nobody on the power play: there is nothing to say.
+        None
+    } else if (2..=6).contains(away_players) && (2..=6).contains(home_players) {
         Some(format!("{away_players}-{home_players}"))
     } else {
+        // 0 means the feed did not say, and 7+ is not a thing.
         None
     }
+}
+
+/// Five skaters a side, which is the state that needs no badge.
+///
+/// The old range for the count badge was `2..=4` on BOTH sides, meaning it only
+/// appeared when both teams were short — 4-on-4, or 3-on-3 in overtime. A pulled
+/// goalie is SIX skaters, so it fell outside on one side and the badge vanished
+/// entirely: the most dramatic thirty seconds in hockey rendered as nothing at
+/// all. The range now runs to six and the exclusion is the boring case rather
+/// than the interesting one.
+fn is_even_strength(away: u8, home: u8) -> bool {
+    away == 5 && home == 5
 }
 
 /// The second line of the strip, under the status — `None` for the great
@@ -2114,6 +2130,41 @@ mod kern_tests {
             assert!(!has_turf(&px), "{ball:?}/{poss:?} drew a field it could not place");
             assert!(lit(&px, 2, 30, 25, 29), "{ball:?}/{poss:?} lost the fallback period");
         }
+    }
+
+    /// A pulled goalie shows up, and even strength still says nothing.
+    ///
+    /// The badge only ever appeared when BOTH sides sat in `2..=4` — four on
+    /// four, or three on three in overtime. Six skaters is a pulled goalie, so
+    /// it failed that test on one side and the badge disappeared: the last
+    /// minute of a one-goal game, which is the single most watchable state in
+    /// the sport, drew exactly nothing.
+    #[test]
+    fn a_pulled_goalie_is_not_silence() {
+        let badge = |away: u8, home: u8, app: bool, hpp: bool| {
+            let g = sit_game("nhl", "3rd", "0:42", Situation::Hockey {
+                away_powerplay: app, home_powerplay: hpp,
+                away_players: away, home_players: home,
+            });
+            let sit = g.situation.clone().unwrap();
+            hockey_badge(&g, &sit)
+        };
+        // The case that was missing entirely.
+        assert_eq!(badge(6, 5, false, false).as_deref(), Some("6-5"), "away pulled its goalie");
+        assert_eq!(badge(5, 6, false, false).as_deref(), Some("5-6"), "home pulled its goalie");
+        // Pulled while short-handed, and pulled during a delayed call.
+        assert_eq!(badge(6, 4, false, false).as_deref(), Some("6-4"));
+        // What already worked keeps working.
+        assert_eq!(badge(4, 4, false, false).as_deref(), Some("4-4"));
+        assert_eq!(badge(3, 3, false, false).as_deref(), Some("3-3"), "overtime");
+        // Even strength is still the one state with nothing to report.
+        assert_eq!(badge(5, 5, false, false), None);
+        // A power play still wins the badge outright — it names the team.
+        assert_eq!(badge(5, 4, true, false).as_deref(), Some("SF"));
+        assert_eq!(badge(4, 5, false, true).as_deref(), Some("SEA"));
+        // A feed that said nothing draws nothing, rather than "0-0".
+        assert_eq!(badge(0, 0, false, false), None);
+        assert_eq!(badge(0, 5, false, false), None);
     }
 
     /// The rest of the box score, on the frames that have one.
