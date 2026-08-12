@@ -522,6 +522,13 @@ pub fn leaderboard_name_metrics(name: &str, value: &str, has_rank: bool) -> (i32
     (width, name_max_right - name_x)
 }
 
+/// Soccer, by the league registry rather than a hand-kept list of ids — a
+/// competition added to `LEAGUE_IDENTITY` gets the same treatment without a
+/// second edit somewhere else remembering to agree.
+fn is_soccer(sport_id: &str) -> bool {
+    crate::espn::league_identity(sport_id).is_some_and(|(_, family, _)| family == "Soccer")
+}
+
 /// `tz` is the BOARD's timezone for start-time labels (None = server-local).
 ///
 /// # The game clock is deliberately not here
@@ -540,9 +547,25 @@ pub fn leaderboard_name_metrics(name: &str, value: &str, has_rank: bool) -> (i32
 /// minutes, which is exactly the test. `Intermission` and `Final` never had a
 /// clock, and hockey's power-play layout never drew one either — this brings the
 /// rest in line with them rather than the other way around.
+///
+/// # Except soccer
+///
+/// Soccer's clock counts UP and never stops, so a stale one is a lower bound
+/// rather than a wrong number: `67'` three minutes late still means at least 67
+/// minutes have been played, and it cannot claim the half is nearly over when it
+/// is not. A countdown fails in the opposite direction — `2:14 left` when there
+/// are thirty seconds is wrong about the only thing anybody is watching for.
+///
+/// The minute is also soccer's canonical reference in a way no other sport's
+/// clock is. People say "the 67th minute"; nobody says "the 8:12 of the third".
+/// And stoppage arrives already in the string as `90'+8'`, which no period label
+/// can express.
 fn status_for(g: &Game, tz: Option<chrono_tz::Tz>) -> (String, Rgb888) {
     match g.status {
         GameStatus::Final => ("FINAL".to_string(), YELLOW),
+        GameStatus::Active if is_soccer(&g.sport_id) => {
+            (format!("{} {}", g.ordinal, g.clock).trim().to_string(), WHITE)
+        }
         GameStatus::Active => (g.ordinal.clone(), WHITE),
         GameStatus::Intermission => (
             if g.ordinal.is_empty() { "INT".to_string() } else { g.ordinal.clone() },
@@ -2058,6 +2081,28 @@ mod kern_tests {
         g.status = GameStatus::Active;
         g.ordinal = String::new();
         assert_eq!(status_for(&g, None).0, "");
+
+        // Soccer is the exception: its clock counts up, so a stale one is a
+        // lower bound rather than a wrong number, and the minute is how the
+        // sport refers to time. Stoppage rides along in the same string.
+        let mut s = sit_game("epl", "2ND", "67'", Situation::Hockey {
+            away_powerplay: false, home_powerplay: false,
+            away_players: 5, home_players: 5,
+        });
+        s.situation = None;
+        assert_eq!(status_for(&s, None).0, "2ND 67'");
+        s.clock = "90'+8'".into();
+        assert_eq!(status_for(&s, None).0, "2ND 90'+8'", "stoppage survives");
+        // Every registered soccer competition, not just the one spelled here.
+        for id in ["mls", "epl", "ucl", "wc", "wwc", "olysm", "olysw"] {
+            assert!(is_soccer(id), "{id} should count as soccer");
+        }
+        for id in ["nhl", "nba", "nfl", "mlb", "pga", "f1", "made-up"] {
+            assert!(!is_soccer(id), "{id} should not");
+        }
+        // And a soccer game with no clock yet does not leave a trailing space.
+        s.clock = String::new();
+        assert_eq!(status_for(&s, None).0, "2ND");
     }
 
     /// Football: possession widens the accent stripe to 8 and puts the ball
