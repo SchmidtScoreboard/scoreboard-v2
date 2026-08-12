@@ -57,6 +57,11 @@ pub struct TeamSide {
     /// Penalty-shootout goals (soccer knockouts).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shootout: Option<u32>,
+    /// Aggregate score over both legs of a two-leg tie. On a second leg the
+    /// scoreline alone is the wrong number to read — a 1-0 loss can still put a
+    /// side through — and this is the one that decides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate: Option<u32>,
 }
 
 impl TeamSide {
@@ -74,6 +79,7 @@ impl TeamSide {
             errors: None,
             shots: None,
             shootout: None,
+            aggregate: None,
         }
     }
 }
@@ -89,6 +95,10 @@ pub struct LeaderRow {
     /// Team color for the rank + name (F1 broadcast style); None = white.
     #[serde(serialize_with = "ser_rgb_opt", skip_serializing_if = "Option::is_none")]
     pub color: Option<embedded_graphics::pixelcolor::Rgb888>,
+    /// Holes played this round, for a golfer still on the course. `None` for a
+    /// finished round, which is the common case and the one that should cost no
+    /// pixels — the column appears only while it is telling you something.
+    pub thru: Option<String>,
     /// Tire compound indicator drawn as a colored dot after the name:
     /// 'S'oft, 'M'edium, 'H'ard, 'I'ntermediate, 'W'et. ESPN's feed carries
     /// no tire data, so live rows stay None (the demo shows the treatment).
@@ -181,6 +191,12 @@ pub struct Game {
     /// Set when this is a postseason/championship game — drives the board's
     /// big-games preference and the app's game-card caption.
     pub champ: Option<Champ>,
+    /// A playoff series' state, already shortened for the panel: "WCF 3-2",
+    /// "SERIES 2-1". Formatted at parse time because the two sources disagree
+    /// about almost everything — the NHL keys its win counts by SEED and ESPN
+    /// keys them by home/away — and the renderer should not have to know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub series: Option<String>,
     /// Session kind for multi-session events (F1: "race" / "quali" / "sprint" /
     /// "sprint-quali") — drives the per-league session subscription. `None` for
     /// ordinary games.

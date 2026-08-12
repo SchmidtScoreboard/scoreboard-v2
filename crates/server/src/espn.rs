@@ -588,7 +588,18 @@ fn parse_golf(sport_id: &str, ev: LeaderEvent) -> Option<Game> {
                 .map(|s| s.display_value.clone())
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| "E".into());
-            Some((pos, LeaderRow { name, value: score, ..Default::default() }))
+            // Holes played, but only while that is news. A finished round
+            // reports 18 and every row would read "18" — a column of noise
+            // charged against the golfer's name. Mid-round it is the one thing
+            // the leaderboard cannot otherwise tell you: -4 through 6 and -4
+            // after 18 are not the same afternoon.
+            let thru = c
+                .status
+                .as_ref()
+                .and_then(|s| s.thru)
+                .filter(|t| (1..=17).contains(t))
+                .map(|t| t.to_string());
+            Some((pos, LeaderRow { name, value: score, thru, ..Default::default() }))
         })
         .collect();
     ranked.sort_by_key(|(p, _)| *p);
@@ -618,6 +629,7 @@ fn parse_golf(sport_id: &str, ev: LeaderEvent) -> Option<Game> {
         end_time: (!ev.end_date.is_empty()).then(|| ev.end_date.clone()),
         leaderboard: Some(Leaderboard { name, rows }),
         champ,
+        series: None,
         session: None,
         situation: None,
         pregame: None,
@@ -707,6 +719,7 @@ fn parse_f1(ev: LeaderEvent) -> Vec<Game> {
                         name: code,
                         value,
                         tire: None,
+                        thru: None,
                     }))
                 })
                 .collect();
@@ -729,6 +742,7 @@ fn parse_f1(ev: LeaderEvent) -> Vec<Game> {
                     .then(|| ev.end_date.clone()),
                 leaderboard: Some(Leaderboard { name, rows }),
                 champ: None,
+                series: None,
                 session: Some(session.into()),
                 situation: None,
                 pregame: None,
@@ -935,6 +949,12 @@ struct LeaderAthlete {
 #[derive(Deserialize)]
 struct LeaderCompStatus {
     position: Option<LeaderPosition>,
+    /// Holes played in the current round. 18 for a finished round and 0 before
+    /// a player tees off; the mid-round 1..17 shape is what the panel wants and
+    /// is the one value that could NOT be observed out of season, so the
+    /// renderer treats anything outside 1..=17 as "say nothing".
+    #[serde(default)]
+    thru: Option<i64>,
     /// When this player actually tees off.
     ///
     /// The event's own `date` is NOT a start time for golf: ESPN reports
@@ -972,19 +992,19 @@ struct LeaderStat {
 pub fn mock_games() -> Vec<Game> {
     let bruins = TeamSide {
         abbrev: "BOS".into(), name: "BRUINS".into(), location: "BOSTON".into(), score: 2,
-        primary: hex_to_rgb("FFB81C"), secondary: hex_to_rgb("000000"), hits: None, errors: None, shots: None, shootout: None,
+        primary: hex_to_rgb("FFB81C"), secondary: hex_to_rgb("000000"), hits: None, errors: None, shots: None, shootout: None, aggregate: None,
     };
     let leafs = TeamSide {
         abbrev: "TOR".into(), name: "LEAFS".into(), location: "TORONTO".into(), score: 1,
-        primary: hex_to_rgb("00205B"), secondary: hex_to_rgb("FFFFFF"), hits: None, errors: None, shots: None, shootout: None,
+        primary: hex_to_rgb("00205B"), secondary: hex_to_rgb("FFFFFF"), hits: None, errors: None, shots: None, shootout: None, aggregate: None,
     };
     let celtics = TeamSide {
         abbrev: "BOS".into(), name: "CELTICS".into(), location: "BOSTON".into(), score: 88,
-        primary: hex_to_rgb("007A33"), secondary: hex_to_rgb("FFFFFF"), hits: None, errors: None, shots: None, shootout: None,
+        primary: hex_to_rgb("007A33"), secondary: hex_to_rgb("FFFFFF"), hits: None, errors: None, shots: None, shootout: None, aggregate: None,
     };
     let lakers = TeamSide {
         abbrev: "LAL".into(), name: "LAKERS".into(), location: "LOS ANGELES".into(), score: 84,
-        primary: hex_to_rgb("552583"), secondary: hex_to_rgb("FDB927"), hits: None, errors: None, shots: None, shootout: None,
+        primary: hex_to_rgb("552583"), secondary: hex_to_rgb("FDB927"), hits: None, errors: None, shots: None, shootout: None, aggregate: None,
     };
     vec![
         Game {
@@ -996,6 +1016,7 @@ pub fn mock_games() -> Vec<Game> {
             // offline (outside playoff season there are no live postseason
             // games to test against).
             champ: Some(Champ { tier: "final".into(), label: "Stanley Cup Final".into() }),
+            series: None,
             session: None,
             situation: None,
             pregame: None,
@@ -1006,6 +1027,7 @@ pub fn mock_games() -> Vec<Game> {
             start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
+            series: None,
             session: None,
             situation: None,
             pregame: None,
@@ -1042,6 +1064,7 @@ fn f1_row(rank: u32, code: &str, value: &str, tire: char) -> LeaderRow {
         value: value.into(),
         color: f1_team_color(code),
         tire: Some(tire),
+        thru: None,
     }
 }
 
@@ -1096,7 +1119,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
         hits: None,
         errors: None,
         shots: None,
-        shootout: None,
+        shootout: None, aggregate: None,
         score,
         primary: hex_to_rgb(p),
         secondary: ensure_contrast(hex_to_rgb(p), hex_to_rgb(s)),
@@ -1122,6 +1145,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: period(0), clock: clock.clone(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: Some(Champ { tier: "final".into(), label: "Stanley Cup Final".into() }),
+            series: None,
             session: None,
             // Cycle the strength states so the power-play badge (abbrev or
             // skater counts) is visible in demo mode.
@@ -1140,6 +1164,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: period(2), clock: clock.clone(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: Some(Champ { tier: "conf".into(), label: "Conference Finals".into() }),
+            series: None,
             session: None,
             situation: None,
             pregame: None,
@@ -1153,6 +1178,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: "OT".into(), clock: clock.clone(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
+            series: None,
             session: None,
             situation: Some(match (n / 10) % 3 {
                 0 => Situation::Hockey { away_powerplay: false, home_powerplay: false, away_players: 3, home_players: 3 },
@@ -1168,6 +1194,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: period(1), clock: clock.clone(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
+            series: None,
             session: None,
             situation: None,
             pregame: None,
@@ -1179,6 +1206,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: period(3), clock: clock.clone(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
+            series: None,
             session: None,
             situation: None,
             pregame: None,
@@ -1190,6 +1218,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: period(0), clock: clock.clone(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
+            series: None,
             session: None,
             situation: None,
             pregame: None,
@@ -1201,6 +1230,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: period(2), clock: String::new(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
+            series: None,
             session: None,
             situation: Some(Situation::Baseball {
                 balls: (n % 4) as u8,
@@ -1220,6 +1250,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: period(1), clock: String::new(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
+            series: None,
             session: None,
             // Static max-drama frame next to demo-mlb's animated one: bases
             // loaded, full count, two out (every diamond and square filled).
@@ -1239,6 +1270,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             clock: String::new(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
+            series: None,
             session: None,
             situation: None,
             pregame: None,
@@ -1250,6 +1282,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: period(3), clock: clock.clone(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
+            series: None,
             session: None,
             situation: Some(Situation::Football {
                 // Ampersands, like the feed sends and the panel now draws — the
@@ -1274,6 +1307,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: period(1), clock: clock.clone(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
+            series: None,
             session: None,
             situation: Some(Situation::Football {
                 down_string: match (n / 2) % 4 {
@@ -1295,6 +1329,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: period(2), clock: clock.clone(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
+            series: None,
             session: None,
             situation: None,
             pregame: None,
@@ -1306,6 +1341,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: "2nd".into(), clock: clock.clone(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
+            series: None,
             session: None,
             situation: None,
             pregame: None,
@@ -1317,6 +1353,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: "1st".into(), clock: clock.clone(), start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
+            series: None,
             session: None,
             situation: None,
             pregame: None,
@@ -1328,6 +1365,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: "2nd".into(), clock, start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
+            series: None,
             session: None,
             situation: None,
             pregame: None,
@@ -1350,6 +1388,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
                 LeaderRow { name: "DAY".into(), value: "+2".into(), ..Default::default() },
             ] }),
             champ: Some(Champ { tier: "major".into(), label: "The Masters".into() }),
+            series: None,
             session: None,
             situation: None,
             pregame: None,
@@ -1365,6 +1404,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
                 LeaderRow { name: "SAIGO".into(), value: "-2".into(), ..Default::default() },
             ] }),
             champ: Some(Champ { tier: "major".into(), label: "U.S. Women's Open".into() }),
+            series: None,
             session: None,
             situation: None,
             pregame: None,
@@ -1398,6 +1438,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
                 f1_row(20, "COL", "+1:22", 'W'),
             ] }),
             champ: None,
+            series: None,
             session: Some("race".into()),
             situation: None,
             pregame: None,
@@ -1411,18 +1452,19 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             away: TeamSide::empty("F1"), home: TeamSide::empty(""),
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
             leaderboard: Some(Leaderboard { name: "BRITISH GP Q".into(), rows: vec![
-                LeaderRow { rank: "1".into(), name: "NOR".into(), value: "1:24.8".into(), color: f1_team_color("NOR"), tire: None },
-                LeaderRow { rank: "2".into(), name: "VER".into(), value: "+0.093".into(), color: f1_team_color("VER"), tire: None },
-                LeaderRow { rank: "3".into(), name: "HAM".into(), value: "+0.210".into(), color: f1_team_color("HAM"), tire: None },
-                LeaderRow { rank: "4".into(), name: "RUS".into(), value: "+0.286".into(), color: f1_team_color("RUS"), tire: None },
-                LeaderRow { rank: "5".into(), name: "PIA".into(), value: "+0.334".into(), color: f1_team_color("PIA"), tire: None },
-                LeaderRow { rank: "6".into(), name: "ALO".into(), value: "+0.412".into(), color: f1_team_color("ALO"), tire: None },
-                LeaderRow { rank: "7".into(), name: "LEC".into(), value: "+0.501".into(), color: f1_team_color("LEC"), tire: None },
-                LeaderRow { rank: "8".into(), name: "HUL".into(), value: "+0.688".into(), color: f1_team_color("HUL"), tire: None },
-                LeaderRow { rank: "9".into(), name: "ALB".into(), value: "+0.719".into(), color: f1_team_color("ALB"), tire: None },
-                LeaderRow { rank: "10".into(), name: "GAS".into(), value: "+0.854".into(), color: f1_team_color("GAS"), tire: None },
+                LeaderRow { rank: "1".into(), name: "NOR".into(), value: "1:24.8".into(), color: f1_team_color("NOR"), tire: None, thru: None },
+                LeaderRow { rank: "2".into(), name: "VER".into(), value: "+0.093".into(), color: f1_team_color("VER"), tire: None, thru: None },
+                LeaderRow { rank: "3".into(), name: "HAM".into(), value: "+0.210".into(), color: f1_team_color("HAM"), tire: None, thru: None },
+                LeaderRow { rank: "4".into(), name: "RUS".into(), value: "+0.286".into(), color: f1_team_color("RUS"), tire: None, thru: None },
+                LeaderRow { rank: "5".into(), name: "PIA".into(), value: "+0.334".into(), color: f1_team_color("PIA"), tire: None, thru: None },
+                LeaderRow { rank: "6".into(), name: "ALO".into(), value: "+0.412".into(), color: f1_team_color("ALO"), tire: None, thru: None },
+                LeaderRow { rank: "7".into(), name: "LEC".into(), value: "+0.501".into(), color: f1_team_color("LEC"), tire: None, thru: None },
+                LeaderRow { rank: "8".into(), name: "HUL".into(), value: "+0.688".into(), color: f1_team_color("HUL"), tire: None, thru: None },
+                LeaderRow { rank: "9".into(), name: "ALB".into(), value: "+0.719".into(), color: f1_team_color("ALB"), tire: None, thru: None },
+                LeaderRow { rank: "10".into(), name: "GAS".into(), value: "+0.854".into(), color: f1_team_color("GAS"), tire: None, thru: None },
             ] }),
             champ: None,
+            series: None,
             session: Some("quali".into()),
             situation: None,
             pregame: None,
@@ -1436,6 +1478,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             end_time: None,
             leaderboard: None,
             champ: None,
+            series: None,
             session: None,
             situation: None,
             pregame: Some(Pregame {
@@ -1453,6 +1496,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             end_time: None,
             leaderboard: None,
             champ: None,
+            series: None,
             session: None,
             situation: None,
             // Records with NO national broadcast — exercises the records-only
@@ -1508,6 +1552,23 @@ struct Competition {
     /// feeds differ per viewer, so naming one would usually be wrong).
     #[serde(default)]
     broadcasts: Vec<EspnBroadcast>,
+    /// Playoff series state. The key is ABSENT outside a series — including on
+    /// play-in games, which are postseason but not a series — so its presence
+    /// is the gate, not the season type.
+    #[serde(default)]
+    series: Option<EspnSeries>,
+}
+#[derive(Deserialize)]
+struct EspnSeries {
+    /// Same order as `competitors`: HOME first, away second. Verified across 13
+    /// playoff games; it is NOT sorted leader-first.
+    #[serde(default)]
+    competitors: Vec<EspnSeriesCompetitor>,
+}
+#[derive(Deserialize)]
+struct EspnSeriesCompetitor {
+    #[serde(default)]
+    wins: u32,
 }
 /// ESPN `competitions[0].situation` (subset) — the same fields the original
 /// scoreboard's Python server read (football_v2.py / baseball_v2.py).
@@ -1597,6 +1658,11 @@ struct Competitor {
     /// through.
     #[serde(default, rename = "shootoutScore")]
     shootout_score: Option<u32>,
+    /// Aggregate over both legs of a knockout tie. A JSON FLOAT where the score
+    /// beside it is a JSON STRING, and the key is absent entirely — not null,
+    /// not zero — on first legs and on every league match.
+    #[serde(default, rename = "aggregateScore")]
+    aggregate_score: Option<f64>,
 }
 #[derive(Deserialize)]
 struct EspnRecord {
@@ -1650,10 +1716,28 @@ struct NhlScoreGame {
     id: i64,
     #[serde(default, rename = "gameState")]
     game_state: String,
+    /// Present only on playoff games (gameType 3), absent entirely otherwise.
+    #[serde(default, rename = "seriesStatus")]
+    series_status: Option<NhlSeriesStatus>,
     #[serde(rename = "awayTeam")]
     away_team: NhlTeamRef,
     #[serde(rename = "homeTeam")]
     home_team: NhlTeamRef,
+}
+/// The NHL's series block. Win counts are keyed by SEED rather than by
+/// home/away, so the abbrevs have to be matched to work out which number
+/// belongs to which side of the board — the top seed is frequently the away
+/// team.
+#[derive(Deserialize)]
+struct NhlSeriesStatus {
+    #[serde(default, rename = "seriesAbbrev")]
+    series_abbrev: String,
+    #[serde(default, rename = "topSeedTeamAbbrev")]
+    top_seed_abbrev: String,
+    #[serde(default, rename = "topSeedWins")]
+    top_seed_wins: u32,
+    #[serde(default, rename = "bottomSeedWins")]
+    bottom_seed_wins: u32,
 }
 #[derive(Deserialize)]
 struct NhlTeamRef {
@@ -1725,11 +1809,24 @@ impl EspnSource {
         // for free — no per-game boxscore fetch, unlike the power-play state
         // below.
         let mut shots_by_teams = std::collections::HashMap::new();
+        let mut series_by_teams = std::collections::HashMap::new();
         for g in score_now.games.iter() {
-            shots_by_teams.insert(
-                (nhl_abbrev(&g.away_team.abbrev), nhl_abbrev(&g.home_team.abbrev)),
-                (g.away_team.sog, g.home_team.sog),
-            );
+            let key = (nhl_abbrev(&g.away_team.abbrev), nhl_abbrev(&g.home_team.abbrev));
+            shots_by_teams.insert(key.clone(), (g.away_team.sog, g.home_team.sog));
+            // The wins are keyed by SEED, and the top seed is often the away
+            // team, so they have to be matched by abbrev rather than assumed.
+            if let Some(ss) = &g.series_status {
+                let top = nhl_abbrev(&ss.top_seed_abbrev);
+                let (away_w, home_w) = if top == key.0 {
+                    (ss.top_seed_wins, ss.bottom_seed_wins)
+                } else {
+                    (ss.bottom_seed_wins, ss.top_seed_wins)
+                };
+                if !ss.series_abbrev.is_empty() {
+                    series_by_teams
+                        .insert(key.clone(), format!("{} {away_w}-{home_w}", ss.series_abbrev));
+                }
+            }
         }
         // (away, home) abbrev pair -> hockey situation, for live games only.
         let mut by_teams = std::collections::HashMap::new();
@@ -1766,6 +1863,9 @@ impl EspnSource {
             if let Some((away, home)) = shots_by_teams.get(&key) {
                 g.away.shots = *away;
                 g.home.shots = *home;
+            }
+            if let Some(s) = series_by_teams.get(&key) {
+                g.series = Some(s.clone());
             }
         }
     }
@@ -1855,6 +1955,9 @@ fn parse_event(sport_id: &str, ev: Event) -> Option<Game> {
             secondary,
             hits: c.hits,
             errors: c.errors,
+            // ESPN sends this as a JSON float on a two-leg tie and omits the
+            // key entirely everywhere else.
+            aggregate: c.aggregate_score.map(|v| v.round().max(0.0) as u32),
             // Filled in later from the NHL's own feed; ESPN has no shot count.
             shots: None,
             shootout: c.shootout_score,
@@ -1873,6 +1976,15 @@ fn parse_event(sport_id: &str, ev: Event) -> Option<Game> {
         }
     }
 
+    // Playoff series, from the wins ESPN keeps alongside the game. `series` is
+    // ordered HOME FIRST, matching `competitors`, and is absent outside a
+    // series — including on play-in games, which is why presence is the gate.
+    let series = comp.series.as_ref().and_then(|s| {
+        let (h, a) = (s.competitors.first()?.wins, s.competitors.get(1)?.wins);
+        // Before game one there is nothing to report, and that state was never
+        // observed, so it is excluded rather than rendered as "SERIES 0-0".
+        (h + a > 0).then(|| format!("SERIES {a}-{h}"))
+    });
     let mut ordinal = ordinal_for(&comp.status, status, sport_id);
     // The original called every extra NHL period "OT" (never "4th"/"5th").
     if sport_id == "nhl" && comp.status.period > 3 {
@@ -1948,6 +2060,7 @@ fn parse_event(sport_id: &str, ev: Event) -> Option<Game> {
         end_time: None,
         leaderboard: None,
         champ,
+        series,
         session: None,
         situation,
         pregame,

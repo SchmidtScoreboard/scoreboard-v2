@@ -1010,6 +1010,12 @@ fn strip_sub_line(g: &Game) -> Option<String> {
         let b = g.pregame.as_ref().map(|p| p.broadcast.as_str()).unwrap_or("");
         return (!b.is_empty()).then(|| b.to_string());
     }
+    // A playoff series outlives any one game's state, so unlike the rest of
+    // this it belongs on live frames too — knowing a game is 3-2 in the
+    // conference finals is most of what makes it worth watching.
+    if let Some(series) = &g.series {
+        return Some(series.clone());
+    }
     if g.status != GameStatus::Final {
         return None;
     }
@@ -1017,6 +1023,13 @@ fn strip_sub_line(g: &Game) -> Option<String> {
     // reports the 1-1 and never says who went through.
     if let (Some(a), Some(h)) = (g.away.shootout, g.home.shootout) {
         return Some(format!("PENS {a}-{h}"));
+    }
+    // A two-leg tie is decided on aggregate, so on a second leg the scoreline
+    // is the wrong number to read on its own — a side can lose 1-0 and still go
+    // through. Absent on first legs and on every league match, which is what
+    // keeps it off almost every frame.
+    if let (Some(a), Some(h)) = (g.away.aggregate, g.home.aggregate) {
+        return Some(format!("AGG {a}-{h}"));
     }
     // Baseball's other two columns. The runs are already the score, so this
     // completes the R-H-E line the sport has printed for a century. Errors
@@ -1154,7 +1167,18 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
             } else {
                 63
             };
-            let name_max_right = value_right - text_width(&row.value, false) - 2;
+            // Holes played, between the name and the score and grey so the
+            // score keeps the emphasis. Only a golfer still on the course
+            // carries one, so on a finished round the column is not there at
+            // all and the name gets the width back.
+            let value_w = text_width(&row.value, false);
+            let name_max_right = if let Some(thru) = &row.thru {
+                let thru_right = value_right - value_w - 3;
+                draw_text_right(&mut c, thru, thru_right, by, false, GREY);
+                thru_right - text_width(thru, false) - 2
+            } else {
+                value_right - value_w - 2
+            };
             let name_x = if row.rank.is_empty() {
                 1
             } else {
@@ -1795,6 +1819,7 @@ mod kern_tests {
                 }],
             }),
             champ: None,
+            series: None,
             session: None,
             situation: None,
             pregame: None,
@@ -1836,7 +1861,7 @@ mod kern_tests {
             location: name.into(),
             score: 0,
             primary: Rgb888::new(0, 0, 0),
-            secondary: Rgb888::WHITE, hits: None, errors: None, shots: None, shootout: None,
+            secondary: Rgb888::WHITE, hits: None, errors: None, shots: None, shootout: None, aggregate: None,
         };
         // One short name that fits, one long one that cannot.
         let short = side("BEARS", "CHI");
@@ -1902,7 +1927,7 @@ mod kern_tests {
             location: String::new(),
             score: 0,
             primary: crate::model::hex_to_rgb("003087"),
-            secondary: crate::model::hex_to_rgb("ffffff"), hits: None, errors: None, shots: None, shootout: None,
+            secondary: crate::model::hex_to_rgb("ffffff"), hits: None, errors: None, shots: None, shootout: None, aggregate: None,
         };
         let g = Game {
             id: "t".into(),
@@ -1918,6 +1943,7 @@ mod kern_tests {
             situation: None,
             pregame: None,
             champ: None,
+            series: None,
         };
         let (_, px) = render_game(&g, None, NameStyle::Name);
         // Scan the bottom strip (clear of the two team boxes) for the status text.
@@ -1961,6 +1987,7 @@ mod kern_tests {
                 ],
             }),
             champ: None,
+            series: None,
             session: Some("race".into()),
             situation: None,
             pregame: None,
@@ -2007,7 +2034,7 @@ mod kern_tests {
             location: String::new(),
             score: 3,
             primary: hex_to_rgb(p),
-            secondary: hex_to_rgb(s), hits: None, errors: None, shots: None, shootout: None,
+            secondary: hex_to_rgb(s), hits: None, errors: None, shots: None, shootout: None, aggregate: None,
         };
         Game {
             id: "t".into(),
@@ -2020,6 +2047,7 @@ mod kern_tests {
             start_time: String::new(), end_time: None,
             leaderboard: None,
             champ: None,
+            series: None,
             session: None,
             situation: Some(sit),
             pregame: None,
@@ -2132,6 +2160,44 @@ mod kern_tests {
         }
     }
 
+    /// A golfer still on the course says how far through; a finished one costs
+    /// the name nothing.
+    ///
+    /// The leaderboard reads identically on Thursday morning and Sunday night —
+    /// `-4` after six holes and `-4` after eighteen are not the same afternoon.
+    /// The column only appears for players still out there, so on a completed
+    /// round every name gets its full width back instead of a column of "18"s.
+    #[test]
+    fn the_golf_leaderboard_says_how_far_through_only_while_that_is_news() {
+        let board = |thru: Option<&str>| {
+            let mut g = sit_game("pga", "R2", "", Situation::Football {
+                down_string: String::new(), ball_position: String::new(), home_possession: None,
+            });
+            g.situation = None;
+            g.leaderboard = Some(crate::model::Leaderboard {
+                name: "THE OPEN".into(),
+                rows: vec![crate::model::LeaderRow {
+                    name: "SCHEFFLER".into(),
+                    value: "-12".into(),
+                    thru: thru.map(|t| t.to_string()),
+                    ..Default::default()
+                }],
+            });
+            render_game(&g, None, NameStyle::Name).1
+        };
+        let grey = c565(GREY);
+        let row_has_grey = |px: &[u8]| (8..18).any(|y| (0..64).any(|x| px565(px, x, y) == grey));
+        assert!(row_has_grey(&board(Some("11"))), "mid-round draws the holes played");
+        assert!(!row_has_grey(&board(None)), "a finished round draws no column");
+
+        // The name yields to the column rather than overprinting it, and gets
+        // the room back when the column is gone.
+        let ink = |px: &[u8]| (0..64).filter(|x| (8..18).any(|y| px565(px, *x, y) != 0)).max();
+        let with = ink(&board(Some("11"))).unwrap();
+        let without = ink(&board(None)).unwrap();
+        assert!(with <= 63 && without <= 63, "nothing runs off the panel");
+    }
+
     /// A pulled goalie shows up, and even strength still says nothing.
     ///
     /// The badge only ever appeared when BOTH sides sat in `2..=4` — four on
@@ -2239,6 +2305,26 @@ mod kern_tests {
         for s in ["", "OTHER", "3rd", "HALF", "OT2", "xOT"] {
             assert!(!is_overtime_label(s), "{s}");
         }
+
+        // A playoff series outlives any one game's state, so it shows on live
+        // frames too — 3-2 in the conference finals is most of what makes a
+        // game worth watching, and it is true whether or not it has started.
+        let mut live = base("nhl", GameStatus::Active);
+        live.series = Some("WCF 3-2".into());
+        assert_eq!(strip_sub_line(&live).as_deref(), Some("WCF 3-2"));
+        live.status = GameStatus::Final;
+        assert_eq!(strip_sub_line(&live).as_deref(), Some("WCF 3-2"));
+
+        // A two-leg tie is decided on aggregate, so the scoreline alone is the
+        // wrong number to read on a second leg.
+        let mut agg = base("ucl", GameStatus::Final);
+        agg.away.aggregate = Some(4);
+        agg.home.aggregate = Some(1);
+        assert_eq!(strip_sub_line(&agg).as_deref(), Some("AGG 4-1"));
+        // A shootout still wins the slot — it is what decided the tie.
+        agg.away.shootout = Some(3);
+        agg.home.shootout = Some(4);
+        assert_eq!(strip_sub_line(&agg).as_deref(), Some("PENS 3-4"));
 
         // And the broadcast line it shares the slot with still works.
         let mut pre = base("nhl", GameStatus::Pregame);
@@ -2556,6 +2642,7 @@ mod kern_tests {
             value: "+1.0".into(),
             color: None,
             tire: Some('S'),
+            thru: None,
         };
         let mut g = sit_game("f1", "", "", Situation::Football {
             down_string: String::new(), ball_position: String::new(), home_possession: None,
@@ -2697,7 +2784,7 @@ mod kern_tests {
             location: loc.into(),
             score: 1,
             primary: hex_to_rgb("003087"),
-            secondary: hex_to_rgb("ffffff"), hits: None, errors: None, shots: None, shootout: None,
+            secondary: hex_to_rgb("ffffff"), hits: None, errors: None, shots: None, shootout: None, aggregate: None,
         };
         let game = |sport: &str| Game {
             id: "t".into(),
@@ -2714,6 +2801,7 @@ mod kern_tests {
             situation: None,
             pregame: None,
             champ: None,
+            series: None,
         };
 
         // The three styles yield three different frames — the chosen string
@@ -3436,6 +3524,7 @@ mod wx_dump {
         }
     }
 }
+
 
 
 
