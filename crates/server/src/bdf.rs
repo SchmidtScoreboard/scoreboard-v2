@@ -11,6 +11,15 @@ pub struct Glyph {
     pub h: i32,
     pub xoff: i32,
     pub yoff: i32,
+    /// The glyph's own advance width, straight from `DWIDTH`.
+    ///
+    /// Kept because the renderer needs it and there is nowhere else to get it.
+    /// It used to be dropped here and re-typed as a match arm in `render::advance`
+    /// — which agreed with every one of the 2345 glyphs across both fonts, but
+    /// only because someone kept it agreeing by hand. Nothing enforced it, and
+    /// editing a glyph's width in the BDF changed no pixel until the Rust was
+    /// edited to match.
+    pub dwidth: i32,
     pub rows: Vec<u8>, // one byte per row, MSB = leftmost pixel
 }
 
@@ -33,10 +42,13 @@ fn parse(src: &str) -> BdfFont {
         }
         let mut encoding: i32 = -1;
         let mut bbx = (0i32, 0i32, 0i32, 0i32);
+        let mut dwidth: i32 = 0;
         let mut rows: Vec<u8> = Vec::new();
         for l in lines.by_ref() {
             if let Some(rest) = l.strip_prefix("ENCODING ") {
                 encoding = rest.trim().parse().unwrap_or(-1);
+            } else if let Some(rest) = l.strip_prefix("DWIDTH ") {
+                dwidth = rest.split_whitespace().next().and_then(|s| s.parse().ok()).unwrap_or(0);
             } else if let Some(rest) = l.strip_prefix("BBX ") {
                 let n: Vec<i32> = rest.split_whitespace().filter_map(|s| s.parse().ok()).collect();
                 if n.len() == 4 {
@@ -61,7 +73,8 @@ fn parse(src: &str) -> BdfFont {
         // renderer left a blank where it could not find it.
         if encoding >= 0 {
             if let Some(ch) = char::from_u32(encoding as u32) {
-                glyphs.insert(ch, Glyph { w: bbx.0, h: bbx.1, xoff: bbx.2, yoff: bbx.3, rows });
+                glyphs
+                    .insert(ch, Glyph { w: bbx.0, h: bbx.1, xoff: bbx.2, yoff: bbx.3, dwidth, rows });
             }
         }
     }

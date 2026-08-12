@@ -86,18 +86,30 @@ fn fill(c: &mut Canvas, x: i32, y: i32, w: u32, h: u32, color: Rgb888) {
         .ok();
 }
 
-/// Per-character advance width — replicates Mark's original kerning overrides.
+/// Per-character advance width, from the font's own `DWIDTH`.
+///
+/// These fonts are very nearly monospaced and were once described here as one:
+/// 4px in the small font, 5px in the big one, with a match arm for the handful
+/// that differ — `I` and `T` narrower, `Y` wider, `N` wider in the small font
+/// because it inks a fourth column. That table was correct. It was correct for
+/// all 2345 glyphs in both files, and it was correct only because it was a hand
+/// copy of numbers the BDF loader parsed and threw away, kept in step by hand.
+/// Editing a glyph in the font moved no pixel until someone remembered to edit
+/// Rust as well. Now the font says how wide its glyphs are, which is the only
+/// place that was ever entitled to.
+///
+/// The fallback covers a character the font has no glyph for: nothing is drawn,
+/// so the width only decides how big the hole is.
 fn advance(ch: char, big: bool) -> i32 {
-    if big {
-        match ch {
-            'I' | 'T' => 4,
-            'Y' => 6,
-            _ => 5,
-        }
-    } else {
-        match ch {
-            'N' => 5,
-            _ => 4,
+    let font = if big { crate::bdf::font_5x8() } else { crate::bdf::font_4x6() };
+    match font.glyph(ch) {
+        Some(g) if g.dwidth > 0 => g.dwidth,
+        _ => {
+            if big {
+                5
+            } else {
+                4
+            }
         }
     }
 }
@@ -1364,6 +1376,39 @@ mod kern_tests {
         for (r, c) in filler {
             assert!(c > 0 && c < 15, "filler at ({r},{c}) is on the row's edge");
         }
+    }
+
+    /// Text measures exactly what it measured when `advance` was a hand-written
+    /// table, so moving the widths into the font moved nothing on the panel.
+    ///
+    /// The strings are the shapes the panel actually draws — abbreviations, a
+    /// status line, a player name — chosen dense in `N`, which is the only glyph
+    /// in the small font whose width is not the common one, and therefore the
+    /// only one a bad `DWIDTH` read would show up on. The numbers were measured
+    /// against the old table before it was deleted.
+    #[test]
+    fn the_font_measures_what_the_table_used_to() {
+        for (s, big, want) in [
+            ("MIN 24  DEN 17", false, 58),
+            ("CIN TEN NE NO", false, 56),
+            ("NYY NYM WSH SN", false, 59),
+            ("FINAL  END 3RD", false, 58),
+            ("PENGUINS", false, 34),
+            ("NASHVILLE", false, 37),
+            ("N. Hoerner", false, 40),
+            ("MIN 24 DEN", true, 49),
+            ("7:30 PM", true, 31),
+            ("NINE", true, 19),
+        ] {
+            assert_eq!(text_width(s, big), want, "{s:?} (big={big}) changed width");
+        }
+        // And the widths really do come from the file: N is the small font's one
+        // wide glyph, and I/T/Y are the big font's exceptions.
+        assert_eq!(advance('N', false), 5, "the small N inks four columns");
+        assert_eq!(advance('M', false), 4);
+        assert_eq!((advance('I', true), advance('Y', true), advance('A', true)), (4, 6, 5));
+        // A glyph the font does not have still advances, or text would overprint.
+        assert!(advance('\u{2603}', false) > 0);
     }
 
     /// No letter on the face touches the one beside it.
