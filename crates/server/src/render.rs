@@ -523,10 +523,27 @@ pub fn leaderboard_name_metrics(name: &str, value: &str, has_rank: bool) -> (i32
 }
 
 /// `tz` is the BOARD's timezone for start-time labels (None = server-local).
+///
+/// # The game clock is deliberately not here
+///
+/// A live game used to read `3RD 8:12`. The board cannot keep that promise: the
+/// poll loop runs every three minutes by default, so the seconds figure is up to
+/// a fifth of a quarter stale and is drawn in the same confident white as the
+/// score, which IS current. Precision the data does not have is worse than no
+/// precision — a period alone is never wrong, and `8:12` usually is.
+///
+/// It also made the delay legible. With the game on a TV in the same room, a
+/// clock on the panel is a running comparison between two feeds, and whichever
+/// one is behind, watching it be behind is not what the board is for.
+///
+/// The period survives because it is coarse enough to still be true after three
+/// minutes, which is exactly the test. `Intermission` and `Final` never had a
+/// clock, and hockey's power-play layout never drew one either — this brings the
+/// rest in line with them rather than the other way around.
 fn status_for(g: &Game, tz: Option<chrono_tz::Tz>) -> (String, Rgb888) {
     match g.status {
         GameStatus::Final => ("FINAL".to_string(), YELLOW),
-        GameStatus::Active => (format!("{} {}", g.ordinal, g.clock).trim().to_string(), WHITE),
+        GameStatus::Active => (g.ordinal.clone(), WHITE),
         GameStatus::Intermission => (
             if g.ordinal.is_empty() { "INT".to_string() } else { g.ordinal.clone() },
             WHITE,
@@ -724,9 +741,15 @@ pub fn render_game(g: &Game, tz: Option<chrono_tz::Tz>, style: NameStyle) -> (Fr
     (frame_id(&px), px)
 }
 
-/// Original football.rs bottom layout: two 4x6 rows — clock top-left, down &
-/// distance top-right, period bottom-left, yardline bottom-right — plus the
-/// team-colored football next to the possessing team's row.
+/// Original football.rs bottom layout: two 4x6 rows — down & distance
+/// top-right, period bottom-left, yardline bottom-right — plus the team-colored
+/// football next to the possessing team's row.
+///
+/// The original also put the clock top-left. It is gone for the reason given on
+/// `status_for`: three-minute-old seconds, drawn as confidently as the score.
+/// Down and distance and the yard line survive it — a play clock's worth of
+/// staleness does not usually change `3rd & 4 from the SEA 25`, and when it does
+/// it changes them to another true state rather than to a wrong number.
 fn draw_football_situation(c: &mut Canvas, g: &Game, sit: &Situation) {
     let Situation::Football { down_string, ball_position, home_possession } = sit else {
         return;
@@ -734,7 +757,6 @@ fn draw_football_situation(c: &mut Canvas, g: &Game, sit: &Situation) {
     // Original rows: top at y=17, bottom at y=25. The original's draw_text put
     // cap bottoms at y-1; ours puts them ON the baseline, hence the -1 (ink
     // occupies rows 17..=21 and 25..=29, exactly as before).
-    draw_text(c, &g.clock, 2, 21, false, WHITE);
     draw_text_right(c, down_string, 63, 21, false, WHITE);
     draw_text(c, &g.ordinal, 2, 29, false, WHITE);
     draw_text_right(c, ball_position, 63, 29, false, WHITE);
@@ -1786,9 +1808,37 @@ mod kern_tests {
         }
     }
 
+    /// A live game's status line is the period and nothing else.
+    ///
+    /// The clock is parsed, stored, sent to the app and shown in the operator
+    /// TUI — it is only the BOARD that declines to draw it, so a test that just
+    /// checked the model would pass while the panel went back to lying. This
+    /// asks the function that composes the line.
+    #[test]
+    fn a_live_game_shows_its_period_without_the_clock() {
+        let mut g = sit_game("nhl", "2nd", "8:12", Situation::Hockey {
+            away_powerplay: false,
+            home_powerplay: false,
+            away_players: 5,
+            home_players: 5,
+        });
+        for status in [GameStatus::Active, GameStatus::Intermission] {
+            g.status = status;
+            let (line, _) = status_for(&g, None);
+            assert!(!line.contains("8:12"), "{status:?} drew the clock: {line:?}");
+            assert!(line.contains("2nd"), "{status:?} lost the period: {line:?}");
+        }
+        // Sports whose period IS the whole story keep reading correctly, and a
+        // game with no period yet does not render a stray space.
+        g.status = GameStatus::Active;
+        g.ordinal = String::new();
+        assert_eq!(status_for(&g, None).0, "");
+    }
+
     /// Football: possession widens the accent stripe to 8 and puts the ball
     /// sprite (possessing team's primary) at the original (1, 1)/(1, 8); the
-    /// four text corners occupy the original rows (baselines 22 and 30).
+    /// text corners occupy the original rows (baselines 22 and 30) — three of
+    /// them, with the clock's corner deliberately empty.
     #[test]
     fn football_situation_matches_original_layout() {
         let g = sit_game("nfl", "3rd", "8:12", Situation::Football {
@@ -1817,10 +1867,16 @@ mod kern_tests {
         let lit_white_in = |x0: i32, x1: i32, y0: i32, y1: i32| {
             (y0..=y1).any(|y| (x0..=x1).any(|x| px565(&px, x, y) == white))
         };
-        assert!(lit_white_in(2, 30, 17, 21), "clock top-left");
         assert!(lit_white_in(33, 63, 17, 21), "down & distance top-right");
         assert!(lit_white_in(2, 30, 25, 29), "ordinal bottom-left");
         assert!(lit_white_in(33, 63, 25, 29), "yardline bottom-right");
+        // The clock's corner stays dark. The game is Active with a clock of
+        // "8:12" set on it, so this fails the moment anything draws it again.
+        assert_eq!(g.clock, "8:12", "the fixture still carries a clock to draw");
+        assert!(
+            !lit_white_in(2, 30, 17, 21),
+            "the clock is off the board on purpose — see status_for",
+        );
     }
 
     /// Baseball: bases diamond at the original (29,22)/(34,17)/(39,22), the
