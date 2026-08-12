@@ -214,12 +214,31 @@ pub async fn watchdog(state: AppState, mailer: Mailer) {
     }
 }
 
+/// The durable "already sent today" marker. See `daily_report`.
+const LAST_REPORT_KEY: &str = "daily_report_last_sent";
+
 /// One email a day with the numbers worth glancing at.
+///
+/// # Why the date is persisted
+///
+/// It was a local variable, which made "one a day" mean "one a day PER
+/// PROCESS". Every deploy restarts the process and forgets it, so a day with
+/// six deploys — an ordinary working day here — sent one report per deploy that
+/// happened to land inside the send hour, up to one per five-minute tick. Four
+/// arrived in a 48-minute window on 2026-08-12, all of them saying OK, which is
+/// exactly the noise that teaches you to ignore the channel that is supposed to
+/// wake you up.
+///
+/// The marker lives in the same store as board configs and survives redeploys.
+/// Without a DB it degrades to the old per-process behaviour, which is the right
+/// failure: a server that cannot remember should still report.
 pub async fn daily_report(state: AppState, mailer: Mailer) {
     // Hour of the server's day to send at. UTC, because the server has no one
     // timezone — boards do.
     let hour: u32 = std::env::var("DAILY_REPORT_HOUR").ok().and_then(|h| h.parse().ok()).unwrap_or(14);
-    let mut last_sent: Option<chrono::NaiveDate> = None;
+    let mut last_sent: Option<chrono::NaiveDate> = state
+        .kv_get(LAST_REPORT_KEY)
+        .and_then(|s| s.parse::<chrono::NaiveDate>().ok());
     loop {
         tokio::time::sleep(Duration::from_secs(300)).await;
         use chrono::Timelike;
@@ -228,6 +247,10 @@ pub async fn daily_report(state: AppState, mailer: Mailer) {
             continue;
         }
         last_sent = Some(now.date_naive());
+        // Written BEFORE the send, not after: a mailer failure that retried on
+        // the next tick would be a second email for the same day, which is the
+        // bug this exists to stop. A missed report is quieter than a duplicate.
+        state.kv_set(LAST_REPORT_KEY, &now.date_naive().to_string());
 
         let (ok, report) = crate::health_report(&state);
         let body = format!(

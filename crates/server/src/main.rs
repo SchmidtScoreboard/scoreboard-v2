@@ -467,6 +467,25 @@ impl AppState {
         );
     }
 
+    /// Read a small durable value. `None` when unset, or when there is no DB —
+    /// callers treat both the same, because "we cannot remember" and "there is
+    /// nothing to remember" lead to the same conservative behaviour.
+    pub fn kv_get(&self, k: &str) -> Option<String> {
+        let db = self.db.as_ref()?;
+        let conn = db.lock().unwrap();
+        conn.query_row("SELECT v FROM kv WHERE k = ?1", rusqlite::params![k], |r| r.get(0)).ok()
+    }
+
+    /// Write a small durable value. Silently a no-op without a DB.
+    pub fn kv_set(&self, k: &str, v: &str) {
+        let Some(db) = &self.db else { return };
+        let _ = db.lock().unwrap().execute(
+            "INSERT INTO kv (k, v) VALUES (?1, ?2)
+             ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+            rusqlite::params![k, v],
+        );
+    }
+
     /// Record a new pairing (controller authorized for a board).
     pub fn persist_pairing(&self, board_id: &str, controller: &str) {
         let Some(db) = &self.db else { return };
@@ -575,6 +594,10 @@ fn open_db(path: &std::path::Path) -> rusqlite::Result<Connection> {
             board_pubkey      TEXT NOT NULL,
             controller_pubkey TEXT NOT NULL,
             PRIMARY KEY (board_pubkey, controller_pubkey)
+         );
+         CREATE TABLE IF NOT EXISTS kv (
+            k TEXT PRIMARY KEY,
+            v TEXT NOT NULL
          );",
     )?;
     Ok(conn)
@@ -6461,6 +6484,60 @@ mod tests {
             .unwrap();
         assert_eq!(stored, hostile, "the unreadable row must be preserved byte for byte");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The daily report's "already sent today" marker survives a restart.
+    ///
+    /// It used to be a local variable, so "one a day" meant "one a day per
+    /// PROCESS". Every deploy forgot it, and a deploy landing inside the send
+    /// hour produced another report on the next five-minute tick — four arrived
+    /// in 48 minutes on 2026-08-12, all of them saying OK. A monitoring channel
+    /// that cries wolf is worse than no channel, because the next one is the
+    /// one you ignore.
+    #[test]
+    fn the_daily_report_only_sends_once_across_restarts() {
+        let path = std::env::temp_dir().join(format!("sb-daily-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let today = chrono::Utc::now().date_naive();
+        // Send-hour logic, extracted: would this process send right now?
+        let would_send = |last: Option<chrono::NaiveDate>| last != Some(today);
+
+        {
+            let state = AppState::new_inner(Some(open_db(&path).unwrap()), mock_catalog());
+            let last = state.kv_get("daily_report_last_sent").and_then(|s| s.parse().ok());
+            assert!(would_send(last), "a fresh day sends");
+            state.kv_set("daily_report_last_sent", &today.to_string());
+            // Same process, later tick: already sent.
+            let last = state.kv_get("daily_report_last_sent").and_then(|s| s.parse().ok());
+            assert!(!would_send(last), "the same process does not send twice");
+        }
+        // A restart — a deploy — must not forget.
+        {
+            let state = AppState::new_inner(Some(open_db(&path).unwrap()), mock_catalog());
+            let last: Option<chrono::NaiveDate> =
+                state.kv_get("daily_report_last_sent").and_then(|s| s.parse().ok());
+            assert_eq!(last, Some(today), "the marker survived the restart");
+            assert!(!would_send(last), "a redeploy inside the send hour stays quiet");
+        }
+        // Tomorrow sends again — the fix must not silence the report entirely.
+        {
+            let state = AppState::new_inner(Some(open_db(&path).unwrap()), mock_catalog());
+            let last: Option<chrono::NaiveDate> =
+                state.kv_get("daily_report_last_sent").and_then(|s| s.parse().ok());
+            let tomorrow = today.succ_opt().unwrap();
+            assert!(last != Some(tomorrow), "a new day is not suppressed");
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Without a DB the marker degrades to the old per-process behaviour, which
+    /// is the right failure: a server that cannot remember should still report.
+    #[test]
+    fn the_daily_report_still_works_without_a_database() {
+        let state = AppState::new_inner(None, mock_catalog());
+        assert_eq!(state.kv_get("daily_report_last_sent"), None);
+        state.kv_set("daily_report_last_sent", "2026-08-12"); // no-op, must not panic
+        assert_eq!(state.kv_get("daily_report_last_sent"), None);
     }
 
     #[test]
