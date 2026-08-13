@@ -828,11 +828,47 @@ fn clean_golf_name(short: &str) -> String {
         words.truncate(idx);
     }
     let name = words.join(" ");
-    if words.first() == Some(&"MASTERS") {
+    let name = if words.first() == Some(&"MASTERS") {
         format!("THE {name}")
     } else {
         name
+    };
+    // Fit the panel, the same way F1 already does. Without this a long name was
+    // centered at a NEGATIVE x and clipped at BOTH ends — "The Standard
+    // Portland Classic" shortened to "STANDARD PORTLAND", 17 characters against
+    // a 16-character panel, and drew as "TANDARD PORTLAN". 18 of the 81 events
+    // on the 2026 PGA and LPGA calendars overflowed, so this was the common
+    // case for a long title rather than a rare one.
+    //
+    // Leading words go first because that is where golf keeps its sponsors:
+    // "STANDARD PORTLAND" -> "PORTLAND" names the tournament, and dropping from
+    // the other end would not. `fit_words` keeps a two-word tail whatever
+    // happens, so a name is never reduced to a single sponsor.
+    fit_words_px(&name, crate::protocol_frame_width())
+}
+
+/// Fit `text` to `max_px` by dropping LEADING words, then trimming characters.
+///
+/// Pixel width rather than a character count, because the 4x6 font is NOT
+/// monospaced — `N` is five columns where every other glyph is four — so
+/// sixteen characters is 64px for "PORTLAND CLASSIC" and 65px for "PUERTO RICO
+/// OPEN". Counting characters left four of the eighty-one 2026 events still
+/// overflowing by a single pixel, which is exactly the kind of near-miss that
+/// looks like the bug was never fixed.
+fn fit_words_px(text: &str, max_px: i32) -> String {
+    let up = text.to_uppercase();
+    let mut words: Vec<&str> = up.split_whitespace().collect();
+    while words.len() > 2 && crate::render::text_width(&words.join(" "), false) > max_px {
+        words.remove(0);
     }
+    let mut joined = words.join(" ");
+    // A two-word tail that still does not fit loses characters rather than its
+    // last word: "PUERTO RICO OPEN" reads better one letter short than as
+    // "RICO OPEN", which names a different thing.
+    while !joined.is_empty() && crate::render::text_width(&joined, false) > max_px {
+        joined.pop();
+    }
+    joined.trim_end().to_string()
 }
 
 fn golf_name_map(name: &str) -> Option<&'static str> {
@@ -3197,5 +3233,65 @@ mod champ_tests {
         for same in ["BOS", "TOR", "NJD", "TBL", "VGK"] {
             assert_eq!(nhl_abbrev(same), same);
         }
+    }
+}
+
+#[cfg(test)]
+mod golf_title_tests {
+    use super::*;
+
+    /// No tournament title is ever wider than the panel.
+    ///
+    /// `render_leaderboard_rows` centres the title at `32 - width/2`, so a name
+    /// wider than 64px gets a NEGATIVE x and is clipped at BOTH ends — the panel
+    /// showed "TANDARD PORTLAN" for the Standard Portland Classic. It was not a
+    /// rare case: 18 of the 81 events on the 2026 PGA and LPGA calendars
+    /// overflowed, including two majors.
+    ///
+    /// Names sampled from those calendars, weighted to the ones that broke.
+    #[test]
+    fn a_tournament_title_always_fits_the_panel() {
+        let names = [
+            "The Standard Portland Classic",
+            "The ANNIKA driven by Gainbridge at Pelican",
+            "ISPS HANDA Women's Scottish Open",
+            "Riviera Maya Open at Mayakoba",
+            "VidantaWorld Mexico Open",
+            "Hilton Grand Vacations Tournament of Champions",
+            "Fortinet Founders Cup",
+            "Mizuho Americas Open",
+            "Honda LPGA Thailand",
+            "Walmart NW Arkansas Championship pres. by P&G",
+            "Buick LPGA Shanghai",
+            "HSBC Women's World Championship",
+            "Corales Puntacana Championship",
+            "Kroger Queen City Championship pres by P&G",
+            "CPKC Women's Open",
+            "PGA TOUR Q-School presented by Korn Ferry",
+            "Puerto Rico Open",
+            "U.S. Women's Open pres. by Ally",
+            // And a spread of ones that already fit, which must not change.
+            "Masters Tournament",
+            "FedEx St. Jude Championship",
+            "Genesis Scottish Open",
+            "AT&T Pebble Beach Pro-Am",
+            "3M Open",
+        ];
+        for n in names {
+            let cleaned = clean_golf_name(n);
+            let w = crate::render::text_width(&cleaned, false);
+            assert!(w <= crate::protocol_frame_width(), "{n:?} -> {cleaned:?} is {w}px");
+            assert!(!cleaned.is_empty(), "{n:?} shortened to nothing");
+            assert!(!cleaned.ends_with(' '), "{n:?} -> {cleaned:?} has a trailing space");
+        }
+        // The established shortenings still hold — this must not have quietly
+        // rewritten names that were already right.
+        assert_eq!(clean_golf_name("Masters Tournament"), "THE MASTERS");
+        assert_eq!(clean_golf_name("Genesis Scottish Open"), "SCOTTISH OPEN");
+        assert_eq!(clean_golf_name("AT&T Pebble Beach Pro-Am"), "PEBBLE BEACH");
+        assert_eq!(clean_golf_name("FedEx St. Jude Championship"), "FEDEX ST. JUDE");
+        // Leading words go first, because that is where golf keeps its sponsors.
+        assert_eq!(clean_golf_name("Buick LPGA Shanghai"), "LPGA SHANGHAI");
+        assert_eq!(clean_golf_name("Fortinet Founders Cup"), "FOUNDERS CUP");
     }
 }

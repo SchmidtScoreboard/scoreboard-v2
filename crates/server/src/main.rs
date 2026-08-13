@@ -1762,6 +1762,11 @@ const FINAL_LINGER: Duration = Duration::from_secs(30 * 60);
 /// lock while iterating and a guard can't be returned across two mutexes.
 /// Deadlock-checked: the closures call `board_shows` (locks `finished`) and
 /// pure helpers — none of them re-lock `games` or `demo`.
+/// The panel's width in pixels, for code that must fit text to it.
+pub(crate) fn protocol_frame_width() -> i32 {
+    scoreboard_protocol::FRAME_WIDTH as i32
+}
+
 pub(crate) fn with_slate<R>(state: &AppState, cfg: Option<&BoardConfig>, f: impl FnOnce(&[Game]) -> R) -> R {
     if cfg.is_some_and(|c| c.demo_data) {
         f(&state.demo.lock().unwrap())

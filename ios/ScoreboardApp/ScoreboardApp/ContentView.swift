@@ -2503,7 +2503,15 @@ struct DashboardView: View {
     private var addLeagueButton: some View {
         Section {
             Button { showLeaguePicker = true } label: {
+                // `.titleAndIcon` is load-bearing: inside a List row SwiftUI
+                // draws a Label's icon in the ACCENT colour rather than the
+                // button style's foreground. On a .borderedProminent capsule —
+                // filled with that same accent, and the app ships no
+                // AccentColor asset so both are system blue — the plus came out
+                // invisible while still holding its ~40pt column, which pushed
+                // the words 20pt right of the capsule's centre (MAR-101).
                 Label("Add League", systemImage: "plus")
+                    .labelStyle(.titleAndIcon)
                     .font(.subheadline.weight(.semibold))
                     .frame(maxWidth: .infinity)
             }
@@ -2757,7 +2765,7 @@ enum SettingsInfoTopic: String, Identifiable {
 
     var title: String {
         switch self {
-        case .whenOff: "When there are no games"
+        case .whenOff: "Sleep Screen"
         case .sleep: "Sleep duration"
         case .dwell: "Time per event"
         case .spoilers: "Spoilers"
@@ -2769,12 +2777,12 @@ enum SettingsInfoTopic: String, Identifiable {
         switch self {
         case .whenOff:
             """
-            What the panel shows when it is on but there is nothing to show — \
-            no games running, or none you follow. Dimmed to whatever \
-            brightness you have set.
+            What the panel rests on when there is nothing to show — no games \
+            running, or none you follow. Dimmed to whatever brightness you \
+            have set.
 
-            Not the same as asleep. Putting the scoreboard to sleep, with the \
-            button or the toggle, turns the panel off entirely.
+            The scoreboard is still awake here. Putting it to sleep, with the \
+            button or the toggle, turns the panel off entirely instead.
 
             The choices come from your server, so a server running custom \
             screens will offer them here too.
@@ -2806,11 +2814,11 @@ enum SettingsInfoTopic: String, Identifiable {
             """
         case .demoData:
             """
-            Fills this scoreboard with a made-up slate of games — every sport             and every layout at once — so you can see what it does out of             season or before your teams are playing. The scores are NOT real.
+            Fills this scoreboard with a made-up slate of games — every sport and every layout at once — so you can see what it does out of season or before your teams are playing. The scores are NOT real.
 
-            It stays on until you turn it off; it will not time out on its             own. Nothing else about the scoreboard changes, and your favorites             and settings are waiting when you switch back.
+            It stays on until you turn it off; it will not time out on its own. Nothing else about the scoreboard changes, and your favorites and settings are waiting when you switch back.
 
-            The setting lives on the server, so you can turn it off from any             paired phone even if the scoreboard is unplugged.
+            The setting lives on the server, so you can turn it off from any paired phone even if the scoreboard is unplugged.
             """
         }
     }
@@ -5261,7 +5269,7 @@ struct SettingsView: View {
             }
         } header: {
             HStack {
-                Text("When there are no games")
+                Text("Sleep Screen")
                 Spacer()
                 infoButton(.whenOff)
             }
@@ -5586,7 +5594,7 @@ struct SettingsView: View {
                 }
             }
         } header: {
-            Text("About")
+            Text("Updates")
         } footer: {
             #if DEBUG
             Text("Beta gets updates before everyone else. Dev is for development builds — expect breakage.")
