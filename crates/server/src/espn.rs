@@ -847,28 +847,54 @@ fn clean_golf_name(short: &str) -> String {
     fit_words_px(&name, crate::protocol_frame_width())
 }
 
-/// Fit `text` to `max_px` by dropping LEADING words, then trimming characters.
+/// Fit `text` to `max_px` for the panel, preferring whole words to fragments.
 ///
 /// Pixel width rather than a character count, because the 4x6 font is NOT
 /// monospaced — `N` is five columns where every other glyph is four — so
 /// sixteen characters is 64px for "PORTLAND CLASSIC" and 65px for "PUERTO RICO
-/// OPEN". Counting characters left four of the eighty-one 2026 events still
-/// overflowing by a single pixel, which is exactly the kind of near-miss that
-/// looks like the bug was never fixed.
+/// OPEN".
+///
+/// Three moves, in order, because each is lossier than the one before:
+///
+/// 1. **Drop punctuation.** "U.S. WOMEN'S OPEN" is 65px and "US WOMENS OPEN" is
+///    56px — every word survives and nobody misreads it. This alone rescues
+///    both Women's Opens, which otherwise each collapsed to "WOMEN'S OPEN" and
+///    so named each other.
+/// 2. **Drop leading words**, which is where golf keeps its sponsors:
+///    "STANDARD PORTLAND" -> "PORTLAND". Never leaves a result starting with a
+///    preposition — "RIVIERA MAYA OPEN AT MAYAKOBA" must not become "AT
+///    MAYAKOBA" — and will go down to a single word, because one whole word
+///    names a tournament better than two chopped ones. The first version of
+///    this kept a two-word tail and drew "STANDARD PORTLA".
+/// 3. **Truncate**, only when a lone word is still too wide. Reaching here means
+///    the name was going to be unsatisfying whatever we did.
 fn fit_words_px(text: &str, max_px: i32) -> String {
+    let w = |t: &str| crate::render::text_width(t, false);
     let up = text.to_uppercase();
-    let mut words: Vec<&str> = up.split_whitespace().collect();
-    while words.len() > 2 && crate::render::text_width(&words.join(" "), false) > max_px {
-        words.remove(0);
+    if w(&up) <= max_px {
+        return up;
     }
-    let mut joined = words.join(" ");
-    // A two-word tail that still does not fit loses characters rather than its
-    // last word: "PUERTO RICO OPEN" reads better one letter short than as
-    // "RICO OPEN", which names a different thing.
-    while !joined.is_empty() && crate::render::text_width(&joined, false) > max_px {
-        joined.pop();
+    let stripped: String = up.chars().filter(|c| *c != '.' && *c != '\'').collect();
+    if w(&stripped) <= max_px {
+        return stripped;
     }
-    joined.trim_end().to_string()
+    // A tail starting with a preposition reads as a fragment of a sentence
+    // rather than the name of anything.
+    let leading_junk = |t: &str| {
+        matches!(t.split(' ').next().unwrap_or(""), "AT" | "IN" | "OF" | "BY" | "THE" | "AND")
+    };
+    let words: Vec<&str> = stripped.split_whitespace().collect();
+    for start in 1..words.len() {
+        let cand = words[start..].join(" ");
+        if w(&cand) <= max_px && !leading_junk(&cand) {
+            return cand;
+        }
+    }
+    let mut last = words.last().copied().unwrap_or("").to_string();
+    while !last.is_empty() && w(&last) > max_px {
+        last.pop();
+    }
+    last
 }
 
 fn golf_name_map(name: &str) -> Option<&'static str> {
@@ -888,6 +914,16 @@ fn golf_name_map(name: &str) -> Option<&'static str> {
         "MEXICO OPEN AT VIDANTA" => "MEXICO OPEN",
         "THE CJ CUP BYRON NELSON" => "BYRON NELSON",
         "ONEFLIGHT MYRTLE BEACH CLASSIC" => "MYRTLE BEACH",
+        // These four survive the generic fit but read badly out the other side,
+        // which is what this table is for. Without them: "Puerto Rico Open"
+        // becomes "RICO OPEN" (a different place), the ANNIKA becomes
+        // "PELICAN" (the venue, not the event), and the women's Scottish Open
+        // becomes "SCOTTISH OPEN" — identical to the men's, on a board that can
+        // show both in the same week.
+        "PUERTO RICO OPEN" => "PUERTO RICO",
+        "THE ANNIKA DRIVEN BY GAINBRIDGE AT PELICAN" => "THE ANNIKA",
+        "ISPS HANDA WOMEN'S SCOTTISH OPEN" => "WOMENS SCOTTISH",
+        "CPKC WOMEN'S OPEN" => "CPKC WOMENS",
         _ => return None,
     })
 }
@@ -3293,5 +3329,23 @@ mod golf_title_tests {
         // Leading words go first, because that is where golf keeps its sponsors.
         assert_eq!(clean_golf_name("Buick LPGA Shanghai"), "LPGA SHANGHAI");
         assert_eq!(clean_golf_name("Fortinet Founders Cup"), "FOUNDERS CUP");
+
+        // Whole words, never fragments. The first version of the fit kept a
+        // two-word tail and drew "STANDARD PORTLA".
+        assert_eq!(clean_golf_name("The Standard Portland Classic"), "PORTLAND");
+        assert_eq!(clean_golf_name("Corales Puntacana Championship"), "PUNTACANA");
+        // Punctuation goes before any word does — every word survives here.
+        assert_eq!(clean_golf_name("U.S. Women's Open pres. by Ally"), "US WOMENS OPEN");
+        // A tail may not begin with a preposition: not "AT MAYAKOBA".
+        assert_eq!(clean_golf_name("Riviera Maya Open at Mayakoba"), "MAYAKOBA");
+        // Two tournaments that would otherwise render identically in the same
+        // week must not: the men's Scottish Open and the women's.
+        assert_ne!(
+            clean_golf_name("ISPS HANDA Women's Scottish Open"),
+            clean_golf_name("Genesis Scottish Open"),
+        );
+        // And a place is not renamed to a different place.
+        assert_eq!(clean_golf_name("Puerto Rico Open"), "PUERTO RICO");
     }
 }
+
