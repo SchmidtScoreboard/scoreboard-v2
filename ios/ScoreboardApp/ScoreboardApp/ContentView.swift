@@ -4873,40 +4873,63 @@ struct SettingsView: View {
                 // server is unreachable shows only the connecting splash, and
                 // this is the way back. Burying it behind a submenu would empty
                 // out the one screen that exists to fix the problem.
-                if boardId == nil && !openServerDirectly {
-                    Section {
-                        NavigationLink {
-                            Form {
-                                serverSection
-                                #if DEBUG
-                                debugLogSection
-                                #endif
-                            }
-                            .navigationTitle("Advanced")
-                            .navigationBarTitleDisplayMode(.inline)
-                        } label: {
-                            Label("Advanced", systemImage: "gearshape.2")
-                        }
-                    }
-                } else {
+                // Ordinary settings keep the server behind Advanced, with the
+                // rest of the rarely-touched things — see `advancedPage`.
+                //
+                // Hoisted to the top ONLY for the two entry points that exist to
+                // repoint a board: the dead-server recovery screen (`boardId`)
+                // and Setup's "use my own server". A board whose server is
+                // unreachable shows nothing but the connecting splash, and this
+                // is the way back — burying it would empty the one screen that
+                // exists to fix the problem.
+                if boardId != nil || openServerDirectly {
                     serverSection
                 }
                 // This sheet also opens from the connecting splash and the
                 // pairing screen, where no board may be selected — the
                 // board-scoped sections would just be empty rows there.
                 if model.selectedBoardId != nil {
-                    settingsSection
-                    offModeSection
-                    quietHoursSection
-                    spoilerSection
-                    demoSection
-                    transferSection
-                    aboutSection
+                    // Top level: which board this is, and the one dial people
+                    // actually turn.
+                    Section {
+                        nameRow
+                        dwellRow
+                    }
+                    Section {
+                        NavigationLink { sleepPage } label: {
+                            HStack {
+                                Label("Sleep", systemImage: "moon")
+                                if model.current.quietActive {
+                                    Spacer()
+                                    rowBadge("Sleeping now")
+                                }
+                            }
+                        }
+                        NavigationLink { spoilersPage } label: {
+                            Label("Spoilers", systemImage: "eye.slash")
+                        }
+                        NavigationLink { updatesPage } label: {
+                            HStack {
+                                Label("Updates", systemImage: "arrow.down.circle")
+                                if let (text, tint) = updatesBadge {
+                                    Spacer()
+                                    rowBadge(text, tint)
+                                }
+                            }
+                        }
+                    }
                     helpSection
-                    #if DEBUG
-                    firmwareDeveloperSection
-                    #endif
-                    removeSection
+                    Section {
+                        NavigationLink { advancedPage } label: {
+                            HStack {
+                                Label("Advanced", systemImage: "gearshape.2")
+                                if model.current.demoData {
+                                    Spacer()
+                                    rowBadge("Demo games on", .orange)
+                                }
+                            }
+                        }
+                    }
                 }
             }
             .navigationTitle(boardId == nil ? "Settings" : "Scoreboard server")
@@ -5135,40 +5158,42 @@ struct SettingsView: View {
     /// Board-level settings: off behavior, sleep duration, and rotation pace.
     /// The pickers get little info buttons — what "off" and "sleep" actually
     /// do on the physical board isn't guessable from a one-word menu.
-    private var settingsSection: some View {
-        Section("Settings") {
-            HStack(spacing: 6) {
-                Text("Sleep duration")
-                infoButton(.sleep)
-                Spacer()
-                Picker("Sleep duration", selection: Binding(
-                    get: { model.current.sleepHours },
-                    set: { model.setSleepHours($0) }
-                )) {
-                    ForEach([UInt32(1), 2, 4, 8, 12, 24, 48], id: \.self) { h in
-                        Text(h == 1 ? "1 hour" : "\(h) hours").tag(h)
-                    }
+    /// How long each game holds the panel. Named for the unit rather than the
+    /// thing: "Time per event" had to mean a game, a tournament round and a
+    /// race weekend at once, and "event" was doing all the work.
+    private var dwellRow: some View {
+        HStack(spacing: 6) {
+            Text("Seconds per screen")
+            infoButton(.dwell)
+            Spacer()
+            Picker("Seconds per screen", selection: Binding(
+                get: { model.current.dwellSecs },
+                set: { model.setDwell($0) }
+            )) {
+                ForEach([UInt32(5), 7, 10, 15, 20, 30], id: \.self) { s in
+                    Text("\(s) seconds").tag(s)
                 }
-                .pickerStyle(.menu)
-                .labelsHidden()
             }
+            .pickerStyle(.menu)
+            .labelsHidden()
+        }
+    }
 
-            HStack(spacing: 6) {
-                Text("Time per event")
-                infoButton(.dwell)
-                Spacer()
-                Picker("Time per event", selection: Binding(
-                    get: { model.current.dwellSecs },
-                    set: { model.setDwell($0) }
-                )) {
-                    ForEach([UInt32(5), 7, 10, 15, 20, 30], id: \.self) { s in
-                        Text("\(s) seconds").tag(s)
-                    }
+    private var sleepDurationRow: some View {
+        HStack(spacing: 6) {
+            Text("Sleep duration")
+            infoButton(.sleep)
+            Spacer()
+            Picker("Sleep duration", selection: Binding(
+                get: { model.current.sleepHours },
+                set: { model.setSleepHours($0) }
+            )) {
+                ForEach([UInt32(1), 2, 4, 8, 12, 24, 48], id: \.self) { h in
+                    Text(h == 1 ? "1 hour" : "\(h) hours").tag(h)
                 }
-                .pickerStyle(.menu)
-                .labelsHidden()
             }
-
+            .pickerStyle(.menu)
+            .labelsHidden()
         }
     }
 
@@ -5545,29 +5570,32 @@ struct SettingsView: View {
     /// then a passive "Updating…" hint holds until the board reports back. The
     /// BOARD shows real progress on its own panel, so the app deliberately has
     /// no progress bar.
+    /// The board's name, top level: it is the one thing on this screen that
+    /// identifies WHICH scoreboard you are looking at.
+    private var nameRow: some View {
+        Button {
+            renameText = model.currentName
+            showRename = true
+        } label: {
+            HStack {
+                Text("Name")
+                    .foregroundStyle(.primary)
+                Spacer()
+                Text(model.currentName)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .alert("Name this scoreboard", isPresented: $showRename) {
+            TextField("Name", text: $renameText)
+            Button("Save") { model.rename(renameText) }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Shown in your scoreboard list. Saved to the server.")
+        }
+    }
+
     private var aboutSection: some View {
         Section {
-            // Rename, moved here from the old toolbar menu — a board fact row
-            // like the ones below it, reusing the same rename flow/alert.
-            Button {
-                renameText = model.currentName
-                showRename = true
-            } label: {
-                HStack {
-                    Text("Name")
-                        .foregroundStyle(.primary)
-                    Spacer()
-                    Text(model.currentName)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .alert("Name this scoreboard", isPresented: $showRename) {
-                TextField("Name", text: $renameText)
-                Button("Save") { model.rename(renameText) }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("Shown in your scoreboard list. Saved to the server.")
-            }
             // Both version rows are FACTS, not actions. They used to be Form
             // buttons, which tint their whole label — so a row that only
             // reports a number rendered in accent blue and read as something to
@@ -5635,6 +5663,75 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - Settings subpages
+    //
+    // One screen per topic, reached by NavigationLink, following the shape the
+    // Advanced page already had. The main page keeps only what identifies the
+    // board (its name) and the one dial people actually turn.
+    //
+    // Anything buried here that the flat page used to SHOUT — a waiting update,
+    // a failed one, demo games left on, quiet hours sleeping right now — comes
+    // back as a badge on the row that hides it. Burying a live signal is a
+    // regression, not a reorganisation.
+
+    @ViewBuilder private var sleepPage: some View {
+        Form {
+            Section { sleepDurationRow }
+            offModeSection
+            quietHoursSection
+        }
+        .navigationTitle("Sleep")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    @ViewBuilder private var spoilersPage: some View {
+        Form { spoilerSection }
+            .navigationTitle("Spoilers")
+            .navigationBarTitleDisplayMode(.inline)
+    }
+
+    @ViewBuilder private var updatesPage: some View {
+        Form {
+            aboutSection
+            #if DEBUG
+            firmwareDeveloperSection
+            #endif
+        }
+        .navigationTitle("Updates")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    @ViewBuilder private var advancedPage: some View {
+        Form {
+            serverSection
+            transferSection
+            demoSection
+            #if DEBUG
+            debugLogSection
+            #endif
+            removeSection
+        }
+        .navigationTitle("Advanced")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    /// What a collapsed row still has to say out loud.
+    ///
+    /// `nil` for the quiet majority. Colour carries the urgency: orange for
+    /// something wrong or left on, secondary for merely informative.
+    private func rowBadge(_ text: String, _ tint: Color = .secondary) -> some View {
+        Text(text)
+            .font(.footnote)
+            .foregroundStyle(tint)
+    }
+
+    private var updatesBadge: (String, Color)? {
+        if model.current.updatingFirmware { return ("Updating…", .secondary) }
+        if model.current.updateFailed { return ("Update failed", .orange) }
+        if model.current.firmwareUpdate != nil { return ("Update available", .orange) }
+        return nil
+    }
+
     /// The guide to the board's own screens. It used to open ONLY from the
     /// offline/connecting card's ⓘ — which exists just when the board is already
     /// unreachable — so a user with a merely confusing panel had nowhere to look.
@@ -5646,8 +5743,6 @@ struct SettingsView: View {
             } label: {
                 Label("Scoreboard troubleshooting", systemImage: "questionmark.circle")
             }
-        } footer: {
-            Text("What each screen on the scoreboard means, and what to do when it won't connect.")
         }
     }
 
