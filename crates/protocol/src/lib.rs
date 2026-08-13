@@ -275,6 +275,17 @@ pub struct SportDescriptor {
     /// and sorts last instead of first.
     #[serde(default)]
     pub category_rank: u32,
+    /// What this league's box-score extras are CALLED, or empty when it draws
+    /// none. Doubles as the gate and the label: an empty string means the app
+    /// shows no toggle, and a non-empty one is the toggle's title.
+    ///
+    /// Server-declared and a STRING for the same reason as `category` — a fork
+    /// adding a league gets a correctly-named switch without shipping an app,
+    /// and there is no enum to decode into `unexpectedEnumCase` and blank the
+    /// whole catalog. It also lets the switch say what it hides ("Hits and
+    /// errors") rather than something generic.
+    #[serde(default)]
+    pub extras_label: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -516,6 +527,21 @@ pub struct SportConfig {
     /// says otherwise. Only golf reads this — no other league has rounds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_round: Option<bool>,
+    /// Whether this league draws the box-score extras beside the score: hits
+    /// and errors on a baseball final, shots on goal on a live NHL frame, a
+    /// shootout or aggregate score on a soccer knockout.
+    ///
+    /// `None` = the default, which is ON. Absence meaning "show" is the whole
+    /// compatibility story: an older app never sends the key and gets exactly
+    /// what it has always drawn, and an older server that has never heard of it
+    /// ignores it the same way.
+    ///
+    /// One flag rather than one per kind, because the kinds are already
+    /// partitioned by league — hits reach only baseball, shots only hockey,
+    /// shootouts only soccer — so per-league IS per-kind, and a finer control
+    /// would offer a distinction nobody can act on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_extras: Option<bool>,
     /// Per-league team-name display style; None = the league default
     /// ([`default_name_style`]). Location = city/college/country, Name =
     /// mascot, Abbrev = abbreviation.
@@ -1075,6 +1101,9 @@ pub enum Command {
     /// Golf's round indicator on/off for one league. `None` reverts to the
     /// default (shown).
     SetLeagueShowRound { sport_id: String, show: Option<bool> },
+    /// Box-score extras for a league (baseball H/E, NHL shots, soccer
+    /// shootout/aggregate). `None` reverts to the default, which is shown.
+    SetLeagueShowExtras { sport_id: String, show: Option<bool> },
     /// Ask the board to stream (or stop streaming) its console to the server
     /// for `minutes`. DEBUG builds of the app only — see
     /// `ServerMsg::SetDebugLog`.

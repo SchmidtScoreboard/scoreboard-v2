@@ -702,6 +702,13 @@ public protocol ScoreboardClientProtocol: AnyObject {
     func setLeagueRows(boardId: String, sportId: String, rows: UInt32?)
 
     /**
+     * The box-score extras beside the score — baseball's hits and errors, NHL
+     * shots on goal, a soccer shootout or aggregate. None reverts to the
+     * default, which is shown.
+     */
+    func setLeagueShowExtras(boardId: String, sportId: String, show: Bool?)
+
+    /**
      * Golf's round indicator ("R3") on the panel and the card; None reverts to
      * the default, which is shown.
      */
@@ -1145,6 +1152,19 @@ open class ScoreboardClient:
                                                                    FfiConverterString.lower(boardId),
                                                                    FfiConverterString.lower(sportId),
                                                                    FfiConverterOptionUInt32.lower(rows), $0)
+    }
+    }
+
+    /**
+     * The box-score extras beside the score — baseball's hits and errors, NHL
+     * shots on goal, a soccer shootout or aggregate. None reverts to the
+     * default, which is shown.
+     */
+    open func setLeagueShowExtras(boardId: String, sportId: String, show: Bool?) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_set_league_show_extras(self.uniffiClonePointer(),
+                                                                          FfiConverterString.lower(boardId),
+                                                                          FfiConverterString.lower(sportId),
+                                                                          FfiConverterOptionBool.lower(show), $0)
     }
     }
 
@@ -2569,6 +2589,14 @@ public struct UiSport {
      * Section sort rank, 1-based. Zero means unranked and sorts last.
      */
     public var categoryRank: UInt32
+    /**
+     * What this league's box-score extras are called ("Hits and errors"), or
+     * empty when it draws none — in which case the app offers no switch. A
+     * STRING, never an enum, for the same reason as `category`. Empty from a
+     * server too old to declare one, which is also the right default: no
+     * switch rather than one that does nothing.
+     */
+    public var extrasLabel: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -2586,7 +2614,14 @@ public struct UiSport {
                     */ category: String,
                 /**
                     * Section sort rank, 1-based. Zero means unranked and sorts last.
-                    */ categoryRank: UInt32)
+                    */ categoryRank: UInt32,
+                /**
+                    * What this league's box-score extras are called ("Hits and errors"), or
+                    * empty when it draws none — in which case the app offers no switch. A
+                    * STRING, never an enum, for the same reason as `category`. Empty from a
+                    * server too old to declare one, which is also the right default: no
+                    * switch rather than one that does nothing.
+                    */ extrasLabel: String)
     {
         self.id = id
         self.name = name
@@ -2595,6 +2630,7 @@ public struct UiSport {
         self.championshipRounds = championshipRounds
         self.category = category
         self.categoryRank = categoryRank
+        self.extrasLabel = extrasLabel
     }
 }
 
@@ -2621,6 +2657,9 @@ extension UiSport: Equatable, Hashable {
         if lhs.categoryRank != rhs.categoryRank {
             return false
         }
+        if lhs.extrasLabel != rhs.extrasLabel {
+            return false
+        }
         return true
     }
 
@@ -2632,6 +2671,7 @@ extension UiSport: Equatable, Hashable {
         hasher.combine(championshipRounds)
         hasher.combine(category)
         hasher.combine(categoryRank)
+        hasher.combine(extrasLabel)
     }
 }
 
@@ -2648,7 +2688,8 @@ public struct FfiConverterTypeUiSport: FfiConverterRustBuffer {
                 championshipOptions: FfiConverterSequenceTypeUiChampOption.read(from: &buf),
                 championshipRounds: FfiConverterSequenceTypeUiChampOption.read(from: &buf),
                 category: FfiConverterString.read(from: &buf),
-                categoryRank: FfiConverterUInt32.read(from: &buf)
+                categoryRank: FfiConverterUInt32.read(from: &buf),
+                extrasLabel: FfiConverterString.read(from: &buf)
             )
     }
 
@@ -2660,6 +2701,7 @@ public struct FfiConverterTypeUiSport: FfiConverterRustBuffer {
         FfiConverterSequenceTypeUiChampOption.write(value.championshipRounds, into: &buf)
         FfiConverterString.write(value.category, into: &buf)
         FfiConverterUInt32.write(value.categoryRank, into: &buf)
+        FfiConverterString.write(value.extrasLabel, into: &buf)
     }
 }
 
@@ -2698,6 +2740,11 @@ public struct UiSportConfig {
      */
     public var showRound: Bool?
     /**
+     * Box-score extras (baseball H/E, NHL shots, soccer shootout/aggregate).
+     * None = the default, ON.
+     */
+    public var showExtras: Bool?
+    /**
      * Per-league team-name display style; None = the league default
      * (`default_name_style`). Location = city/college/country, Name = mascot,
      * Abbrev = abbreviation.
@@ -2729,6 +2776,10 @@ public struct UiSportConfig {
                     * Golf's round indicator; None = the default, which is shown.
                     */ showRound: Bool?,
                 /**
+                    * Box-score extras (baseball H/E, NHL shots, soccer shootout/aggregate).
+                    * None = the default, ON.
+                    */ showExtras: Bool?,
+                /**
                     * Per-league team-name display style; None = the league default
                     * (`default_name_style`). Location = city/college/country, Name = mascot,
                     * Abbrev = abbreviation.
@@ -2746,6 +2797,7 @@ public struct UiSportConfig {
         self.dwellSecs = dwellSecs
         self.leaderboardRows = leaderboardRows
         self.showRound = showRound
+        self.showExtras = showExtras
         self.nameStyle = nameStyle
         self.spoiler = spoiler
         self.spoilerTeamIds = spoilerTeamIds
@@ -2772,6 +2824,9 @@ extension UiSportConfig: Equatable, Hashable {
         if lhs.showRound != rhs.showRound {
             return false
         }
+        if lhs.showExtras != rhs.showExtras {
+            return false
+        }
         if lhs.nameStyle != rhs.nameStyle {
             return false
         }
@@ -2791,6 +2846,7 @@ extension UiSportConfig: Equatable, Hashable {
         hasher.combine(dwellSecs)
         hasher.combine(leaderboardRows)
         hasher.combine(showRound)
+        hasher.combine(showExtras)
         hasher.combine(nameStyle)
         hasher.combine(spoiler)
         hasher.combine(spoilerTeamIds)
@@ -2810,6 +2866,7 @@ public struct FfiConverterTypeUiSportConfig: FfiConverterRustBuffer {
                 dwellSecs: FfiConverterOptionUInt32.read(from: &buf),
                 leaderboardRows: FfiConverterOptionUInt32.read(from: &buf),
                 showRound: FfiConverterOptionBool.read(from: &buf),
+                showExtras: FfiConverterOptionBool.read(from: &buf),
                 nameStyle: FfiConverterOptionTypeUiNameStyle.read(from: &buf),
                 spoiler: FfiConverterBool.read(from: &buf),
                 spoilerTeamIds: FfiConverterSequenceString.read(from: &buf)
@@ -2823,6 +2880,7 @@ public struct FfiConverterTypeUiSportConfig: FfiConverterRustBuffer {
         FfiConverterOptionUInt32.write(value.dwellSecs, into: &buf)
         FfiConverterOptionUInt32.write(value.leaderboardRows, into: &buf)
         FfiConverterOptionBool.write(value.showRound, into: &buf)
+        FfiConverterOptionBool.write(value.showExtras, into: &buf)
         FfiConverterOptionTypeUiNameStyle.write(value.nameStyle, into: &buf)
         FfiConverterBool.write(value.spoiler, into: &buf)
         FfiConverterSequenceString.write(value.spoilerTeamIds, into: &buf)
@@ -4180,6 +4238,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_league_rows() != 35011 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_scoreboardclient_set_league_show_extras() != 19918 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_league_show_round() != 59263 {

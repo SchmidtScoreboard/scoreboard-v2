@@ -104,6 +104,12 @@ pub struct UiSport {
     pub category: String,
     /// Section sort rank, 1-based. Zero means unranked and sorts last.
     pub category_rank: u32,
+    /// What this league's box-score extras are called ("Hits and errors"), or
+    /// empty when it draws none — in which case the app offers no switch. A
+    /// STRING, never an enum, for the same reason as `category`. Empty from a
+    /// server too old to declare one, which is also the right default: no
+    /// switch rather than one that does nothing.
+    pub extras_label: String,
 }
 /// How a league renders team names on the board (protocol `NameStyle`).
 /// Location = city/college/country, Name = mascot/team name, Abbrev = the
@@ -136,6 +142,9 @@ pub struct UiSportConfig {
     pub leaderboard_rows: Option<u32>,
     /// Golf's round indicator; None = the default, which is shown.
     pub show_round: Option<bool>,
+    /// Box-score extras (baseball H/E, NHL shots, soccer shootout/aggregate).
+    /// None = the default, ON.
+    pub show_extras: Option<bool>,
     /// Per-league team-name display style; None = the league default
     /// (`default_name_style`). Location = city/college/country, Name = mascot,
     /// Abbrev = abbreviation.
@@ -712,6 +721,13 @@ impl ScoreboardClient {
         let _ = self.tx.send(Out::Command(board_id, Command::SetLeagueShowRound { sport_id, show }));
     }
 
+    /// The box-score extras beside the score — baseball's hits and errors, NHL
+    /// shots on goal, a soccer shootout or aggregate. None reverts to the
+    /// default, which is shown.
+    pub fn set_league_show_extras(&self, board_id: String, sport_id: String, show: Option<bool>) {
+        let _ = self.tx.send(Out::Command(board_id, Command::SetLeagueShowExtras { sport_id, show }));
+    }
+
     /// Per-league team-name display style (Location/Name/Abbrev); None reverts
     /// to the league default (`default_name_style`). Only meaningful for the
     /// styles a league offers via `name_style_options`.
@@ -945,6 +961,7 @@ fn to_ui_sports(cat: Catalog) -> Vec<UiSport> {
                 .collect(),
             category: s.category,
             category_rank: s.category_rank,
+            extras_label: s.extras_label.clone(),
         })
         .collect()
 }
@@ -1065,6 +1082,7 @@ fn to_ui_configs(sports: Vec<PSportConfig>) -> Vec<UiSportConfig> {
             dwell_secs: s.dwell_secs,
             leaderboard_rows: s.leaderboard_rows,
             show_round: s.show_round,
+            show_extras: s.show_extras,
             name_style: s.name_style.map(UiNameStyle::from),
             spoiler: s.spoiler,
             spoiler_team_ids: s.spoiler_team_ids,

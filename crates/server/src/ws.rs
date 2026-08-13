@@ -821,6 +821,16 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) -> O
                     cfg.sports.push(SportConfig { sport_id, show_round: show, ..Default::default() });
                 }
             }
+            // The box-score extras beside the score. Same upsert shape, and the
+            // same default: absent means shown, so a league nobody has touched
+            // draws what it always drew.
+            Command::SetLeagueShowExtras { sport_id, show } => {
+                if let Some(s) = cfg.sports.iter_mut().find(|s| s.sport_id == sport_id) {
+                    s.show_extras = show;
+                } else if show.is_some() {
+                    cfg.sports.push(SportConfig { sport_id, show_extras: show, ..Default::default() });
+                }
+            }
             // Per-league team-name display style: Some overrides the league
             // default (City/Team name/Abbreviation), None reverts to it. Upsert
             // by sport_id like SetLeagueDwell so a name-style edit on a league
@@ -1274,6 +1284,7 @@ mod tests {
                 dwell_secs: Some(30),
                 leaderboard_rows: None,
                 show_round: None,
+                show_extras: None,
                 spoiler: true,
                 spoiler_team_ids: vec!["nhl-tor".into()],
                 name_style: None,

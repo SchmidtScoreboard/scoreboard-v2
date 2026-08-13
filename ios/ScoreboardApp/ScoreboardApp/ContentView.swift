@@ -140,6 +140,7 @@ struct BoardInfo {
     var leagueDwell: [String: UInt32] = [:]     // sportId -> per-league override
     var leagueRows: [String: UInt32] = [:]      // sportId -> leaderboard depth (golf/F1)
     var leagueShowRound: [String: Bool] = [:]   // sportId -> golf round indicator (absent = shown)
+    var leagueShowExtras: [String: Bool] = [:] // sportId -> box-score extras (absent = shown)
     var leagueNameStyle: [String: UiNameStyle] = [:] // sportId -> name-style override (absent = league default)
     var strictSpoilers = false                   // spoiled games: strict vs normal display
     var spoilerAll = false                       // protect every game on this board
@@ -1164,6 +1165,7 @@ final class BoardViewModel: ObservableObject {
         var dwell: [String: UInt32] = [:]
         var rows: [String: UInt32] = [:]
         var showRound: [String: Bool] = [:]
+        var showExtras: [String: Bool] = [:]
         var nameStyle: [String: UiNameStyle] = [:]
         var lspoil: [String: Bool] = [:]
         var tspoil: [String: Set<String>] = [:]
@@ -1173,6 +1175,7 @@ final class BoardViewModel: ObservableObject {
             if let d = s.dwellSecs { dwell[s.sportId] = d }
             if let r = s.leaderboardRows { rows[s.sportId] = r }
             if let sr = s.showRound { showRound[s.sportId] = sr }
+            if let se = s.showExtras { showExtras[s.sportId] = se }
             if let n = s.nameStyle { nameStyle[s.sportId] = n }
             if s.spoiler { lspoil[s.sportId] = true }
             if !s.spoilerTeamIds.isEmpty { tspoil[s.sportId] = Set(s.spoilerTeamIds) }
@@ -1196,6 +1199,7 @@ final class BoardViewModel: ObservableObject {
             $0.leagueDwell = dwell
             $0.leagueRows = rows
             $0.leagueShowRound = showRound
+            $0.leagueShowExtras = showExtras
             $0.leagueNameStyle = nameStyle
             $0.strictSpoilers = c.strictSpoilers
             $0.spoilerAll = c.spoilerAll
@@ -1364,6 +1368,20 @@ final class BoardViewModel: ObservableObject {
             else { $0.leagueShowRound.removeValue(forKey: sportId) }
         }
         client?.setLeagueShowRound(boardId: id, sportId: sportId, show: stored)
+    }
+
+    /// The box-score extras beside the score — baseball's hits and errors, NHL
+    /// shots on goal, a soccer shootout or aggregate. Defaults to SHOWN,
+    /// because that is what the panel drew before the switch existed.
+    func leagueShowExtras(_ sportId: String) -> Bool { current.leagueShowExtras[sportId] ?? true }
+    func setLeagueShowExtras(_ sportId: String, _ show: Bool) {
+        guard let id = selectedBoardId else { return }
+        let stored: Bool? = show ? nil : false
+        mutate(id) {
+            if let stored { $0.leagueShowExtras[sportId] = stored }
+            else { $0.leagueShowExtras.removeValue(forKey: sportId) }
+        }
+        client?.setLeagueShowExtras(boardId: id, sportId: sportId, show: stored)
     }
 
     /// Per-league team-name display style override; nil = the league default.
@@ -4001,6 +4019,19 @@ struct LeagueEditorView: View {
                     ))
                 } footer: {
                     Text("Marks which round a tournament is on, in the corner of the panel and on the card. A leaderboard alone looks the same on Thursday as on Sunday.")
+                }
+            }
+            // Only for leagues that actually draw extras. The server says which,
+            // and names them — an empty label means there is nothing to switch
+            // off, so no row appears at all.
+            if !sport.extrasLabel.isEmpty {
+                Section {
+                    Toggle(sport.extrasLabel, isOn: Binding(
+                        get: { model.leagueShowExtras(sport.id) },
+                        set: { model.setLeagueShowExtras(sport.id, $0) }
+                    ))
+                } footer: {
+                    Text("Shown beside the score once a game is over, or while it is on for shots. Turn it off to keep the panel to the scoreline.")
                 }
             }
             Section {

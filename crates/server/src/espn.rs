@@ -379,6 +379,7 @@ impl SportsDataSource for EspnSource {
                 championship_rounds: Vec::new(),
                 category: String::new(),
                 category_rank: 0,
+                extras_label: String::new(),
             });
         }
         if sports.is_empty() {

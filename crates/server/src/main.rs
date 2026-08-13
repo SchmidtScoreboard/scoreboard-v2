@@ -1609,12 +1609,45 @@ pub(crate) fn board_view<'a>(cfg: &BoardConfig, g: &'a Game) -> std::borrow::Cow
     // Default ON: a leaderboard looks the same on Thursday as on Sunday, so the
     // round earns its corner until someone turns it off.
     let show_round = league.and_then(|s| s.show_round).unwrap_or(true);
-    if !show_round && !g.ordinal.is_empty() {
-        let mut hidden = g.clone();
-        hidden.ordinal.clear();
-        return std::borrow::Cow::Owned(hidden);
+    // Default ON for the same reason: the extras were what the panel drew
+    // before anyone could turn them off, so absence has to mean "as before".
+    let show_extras = league.and_then(|s| s.show_extras).unwrap_or(true);
+    let drop_round = !show_round && !g.ordinal.is_empty();
+    let drop_extras = !show_extras && game_has_extras(g);
+    if !drop_round && !drop_extras {
+        return std::borrow::Cow::Borrowed(g);
     }
-    std::borrow::Cow::Borrowed(g)
+    let mut hidden = g.clone();
+    if drop_round {
+        hidden.ordinal.clear();
+    }
+    if drop_extras {
+        // Clearing the DATA rather than passing a flag down: `strip_sub_line`
+        // and `draw_hockey_situation` already draw nothing when these are None,
+        // so the renderers stay pure functions of the Game and never learn that
+        // a preference exists. It also means the toggle inherits spoiler safety
+        // for free, because this is the same pass redaction runs in.
+        for side in [&mut hidden.away, &mut hidden.home] {
+            side.hits = None;
+            side.errors = None;
+            side.shots = None;
+            side.shootout = None;
+            side.aggregate = None;
+        }
+    }
+    std::borrow::Cow::Owned(hidden)
+}
+
+/// Whether this game would draw any box-score extra, so `board_view` can keep
+/// borrowing in the overwhelmingly common case where there is nothing to strip.
+fn game_has_extras(g: &Game) -> bool {
+    [&g.away, &g.home].into_iter().any(|s| {
+        s.hits.is_some()
+            || s.errors.is_some()
+            || s.shots.is_some()
+            || s.shootout.is_some()
+            || s.aggregate.is_some()
+    })
 }
 
 pub(crate) fn to_summary_for(g: &Game, spoiler: Option<SpoilerMode>, tz: Option<chrono_tz::Tz>) -> GameSummary {
@@ -3889,6 +3922,7 @@ pub(crate) fn leaderboard_sports() -> Vec<SportDescriptor> {
             championship_rounds: Vec::new(),
             category: category.into(),
             category_rank: rank,
+            extras_label: String::new(),
         }
     };
     vec![sport("pga"), sport("lpga"), sport("f1")]
@@ -3937,9 +3971,28 @@ fn with_binary_owned(mut c: Catalog) -> Catalog {
             s.name = name.into();
             s.category = category.into();
             s.category_rank = rank;
+            s.extras_label = extras_label_for(&s.id).into();
         }
     }
     c
+}
+
+/// What a league's box-score extras are called, or "" when it draws none.
+///
+/// Keyed off the family rather than the league id so a new competition inherits
+/// the right switch: every soccer league draws shootouts and aggregates, every
+/// hockey league draws shots. The strings name what disappears, because "Extra
+/// details" would leave the user to discover which.
+fn extras_label_for(sport_id: &str) -> &'static str {
+    match sport_id {
+        "mlb" | "cbase" => "Hits and errors",
+        "nhl" | "olyhm" | "olyhw" => "Shots on goal",
+        _ if espn::is_soccer(sport_id) => "Shootout and aggregate",
+        // Football, basketball, golf and F1 draw no extras today. An empty
+        // label is how the app knows not to offer a switch that would do
+        // nothing — see `SportDescriptor::extras_label`.
+        _ => "",
+    }
 }
 
 fn load_cached_catalog() -> Option<Catalog> {
@@ -3969,6 +4022,7 @@ fn mock_catalog() -> Catalog {
         championship_rounds: Vec::new(),
         category: String::new(),
         category_rank: 0,
+        extras_label: String::new(),
     };
     Catalog {
         // Empty, like every other construction site — `with_off_modes` is the
@@ -4609,6 +4663,7 @@ mod tests {
                         dwell_secs: None,
                         leaderboard_rows: None,
                         show_round: None,
+                        show_extras: None,
                         spoiler: false,
                         spoiler_team_ids: vec![],
                         name_style: None,
@@ -4621,6 +4676,7 @@ mod tests {
                         dwell_secs: None,
                         leaderboard_rows: None,
                         show_round: None,
+                        show_extras: None,
                         spoiler: false,
                         spoiler_team_ids: vec![],
                         name_style: None,
@@ -4633,6 +4689,7 @@ mod tests {
                         dwell_secs: None,
                         leaderboard_rows: None,
                         show_round: None,
+                        show_extras: None,
                         spoiler: false,
                         spoiler_team_ids: vec![],
                         name_style: None,
@@ -4684,6 +4741,7 @@ mod tests {
                 dwell_secs: None,
                 leaderboard_rows: None,
                 show_round: None,
+                show_extras: None,
                 spoiler: false,
                 spoiler_team_ids: vec![],
                 name_style: None,
@@ -4771,6 +4829,7 @@ mod tests {
                 dwell_secs: None,
                 leaderboard_rows: None,
                 show_round: None,
+                show_extras: None,
                 spoiler: false,
                 spoiler_team_ids: vec![],
                 name_style: None,
@@ -5185,6 +5244,110 @@ mod tests {
             ..Default::default()
         }];
         assert!(!board_prefs(&cfg).unconfigured, "one favorite is configured");
+    }
+
+    /// A league can switch off the box-score extras, and only its own.
+    ///
+    /// The switch clears the DATA in `board_view` rather than passing a flag
+    /// into the renderers: `strip_sub_line` and `draw_hockey_situation` already
+    /// draw nothing when these are None, so they stay pure functions of the
+    /// Game and never learn a preference exists. It also inherits spoiler
+    /// safety, because this is the pass redaction already runs in.
+    #[test]
+    fn a_league_can_turn_off_its_box_score_extras() {
+        let mut mlb = Game {
+            id: "g".into(),
+            sport_id: "mlb".into(),
+            away: TeamSide::empty("DET"),
+            home: TeamSide::empty("CLE"),
+            status: GameStatus::Final,
+            ordinal: String::new(),
+            clock: String::new(),
+            start_time: String::new(),
+            end_time: None,
+            leaderboard: None,
+            champ: None,
+            series: None,
+            session: None,
+            situation: None,
+            pregame: None,
+        };
+        mlb.away.hits = Some(6);
+        mlb.home.hits = Some(9);
+        mlb.home.errors = Some(1);
+
+        // Default: nothing configured, everything drawn, and NOT cloned.
+        let bare = BoardConfig::default();
+        let view = board_view(&bare, &mlb);
+        assert!(matches!(view, std::borrow::Cow::Borrowed(_)), "the common case must not clone");
+        assert_eq!(view.away.hits, Some(6));
+
+        // Explicitly on is the same as absent.
+        let on = BoardConfig {
+            sports: vec![SportConfig {
+                sport_id: "mlb".into(),
+                show_extras: Some(true),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(board_view(&on, &mlb).away.hits, Some(6));
+
+        // Off: every extra field cleared, on both sides.
+        let off = BoardConfig {
+            sports: vec![SportConfig {
+                sport_id: "mlb".into(),
+                show_extras: Some(false),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let view = board_view(&off, &mlb);
+        assert_eq!(view.away.hits, None);
+        assert_eq!(view.home.hits, None);
+        assert_eq!(view.home.errors, None);
+        // The score itself is untouched — this hides detail, not results.
+        assert_eq!(view.home.score, mlb.home.score);
+
+        // And it is per league: a hockey game on the same board keeps its shots.
+        let mut nhl = mlb.clone();
+        nhl.sport_id = "nhl".into();
+        nhl.away.shots = Some(21);
+        assert_eq!(board_view(&off, &nhl).away.shots, Some(21), "the mlb switch is mlb's alone");
+
+        // Composes with the round switch rather than fighting it.
+        let mut golf = mlb.clone();
+        golf.sport_id = "pga".into();
+        golf.ordinal = "R2".into();
+        let both = BoardConfig {
+            sports: vec![SportConfig {
+                sport_id: "pga".into(),
+                show_round: Some(false),
+                show_extras: Some(false),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let view = board_view(&both, &golf);
+        assert!(view.ordinal.is_empty());
+        assert_eq!(view.away.hits, None);
+    }
+
+    /// Only leagues that draw extras offer the switch, and the label names what
+    /// disappears — an empty string is how the app knows to show no row.
+    #[test]
+    fn the_extras_label_gates_and_names_the_switch() {
+        assert_eq!(extras_label_for("mlb"), "Hits and errors");
+        assert_eq!(extras_label_for("cbase"), "Hits and errors");
+        assert_eq!(extras_label_for("nhl"), "Shots on goal");
+        assert_eq!(extras_label_for("olyhm"), "Shots on goal");
+        for id in ["mls", "epl", "ucl", "wc", "olysw"] {
+            assert_eq!(extras_label_for(id), "Shootout and aggregate", "{id}");
+        }
+        // Leagues that draw none get no switch at all.
+        for id in ["nfl", "cfb", "nba", "cbb", "pga", "f1", "made-up"] {
+            assert!(extras_label_for(id).is_empty(), "{id} should offer no switch");
+        }
     }
 
     /// Demo data is the deliberate exception — it exists to fill a panel that
@@ -6625,6 +6788,7 @@ mod tests {
             dwell_secs: None,
             leaderboard_rows: None,
             show_round: None,
+            show_extras: None,
             spoiler: false,
             spoiler_team_ids: vec![],
             name_style: None,
@@ -6855,6 +7019,7 @@ mod tests {
             dwell_secs: None,
             leaderboard_rows: None,
             show_round: None,
+            show_extras: None,
             spoiler: false,
             spoiler_team_ids: vec![],
             name_style: None,
