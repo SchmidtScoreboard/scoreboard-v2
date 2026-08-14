@@ -3815,6 +3815,57 @@ struct TeamColorSwatch: View {
 /// One league's editor: pick any number of teams (shown with their brand colors)
 /// plus the big-games option. Edits are buffered locally and committed as a SINGLE
 /// request when the page is dismissed.
+/// A settings choice that shows its own consequence: a radio row with an
+/// example frame, rendered by the server's real pipeline.
+///
+/// The pattern started on the spoiler rows and the off-mode picker, and it beats
+/// a paragraph every time — a label plus two pictures says in a glance what a
+/// sentence has to describe. `sample` carries a `/sample` query, so the example
+/// is the user's OWN league rather than a generic frame: a Location preview
+/// means nothing until you can see a real city in it.
+private struct PreviewChoiceRow: View {
+    let title: String
+    var subtitle: String? = nil
+    /// Everything after `/sample/` — variant plus query.
+    let sample: String
+    let httpBase: String
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    // Concrete Colors, not the hierarchical ones: inside a Form
+                    // button label the accent is the base style, so `.primary`
+                    // resolves to blue.
+                    Text(title).foregroundStyle(Color.primary)
+                    if let subtitle {
+                        Text(subtitle).font(.caption).foregroundStyle(Color.secondary)
+                    }
+                }
+                Spacer(minLength: 8)
+                FetchedFrameImage(url: URL(string: "\(httpBase)/sample/\(sample)"))
+                    .ledPanel(width: 96, height: 48)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// `UiNameStyle` as the `/sample?style=` value. A plain switch rather than
+/// anything derived, so a style added later fails to compile here instead of
+/// silently previewing the league default.
+private func styleParam(_ s: UiNameStyle) -> String {
+    switch s {
+    case .location: return "location"
+    case .name: return "name"
+    case .abbrev: return "abbrev"
+    }
+}
+
 struct LeagueEditorView: View {
     @ObservedObject var model: BoardViewModel
     let sport: UiSport
@@ -3896,6 +3947,33 @@ struct LeagueEditorView: View {
     /// The name-style choices this league offers (empty for leaderboard sports,
     /// which hides the "Names" picker) and the style it defaults to.
     private var nameStyleChoices: [UiNameStyleOption] { nameStyleOptions(sportId: sport.id) }
+
+    /// Whether this league's results are hidden, shown against what each choice
+    /// actually looks like on the panel. The board-wide spoiler rows have used
+    /// example frames for a while; a league is where the choice is usually made,
+    /// so it earns the same treatment — and here the example is the league's own
+    /// game rather than a generic one.
+    private var spoilerChoiceSection: some View {
+        Section {
+            PreviewChoiceRow(
+                title: "Show results",
+                sample: "plain.png?sport=\(sport.id)&live=1",
+                httpBase: model.httpBase,
+                selected: !model.leagueSpoiler(sport.id)
+            ) { model.setLeagueSpoiler(sport.id, false) }
+            PreviewChoiceRow(
+                title: "Hide results",
+                subtitle: "Until you reveal a game.",
+                // `normal`, because that is what a league-level hide does: the
+                // board-wide "hide everything" strictness is a separate setting.
+                sample: "normal.png?sport=\(sport.id)",
+                httpBase: model.httpBase,
+                selected: model.leagueSpoiler(sport.id)
+            ) { model.setLeagueSpoiler(sport.id, true) }
+        } header: {
+            Text("Spoilers")
+        }
+    }
     private var defaultStyle: UiNameStyle { defaultNameStyle(sportId: sport.id) }
 
     /// What the option picker configures varies by league kind.
@@ -3977,23 +4055,9 @@ struct LeagueEditorView: View {
                     }
                 }
 
-                Section {
-                    // Spoilers for this league's games (incl. the subscription
-                    // above) — the same flag the chips on the main page toggle.
-                    Toggle("Hide results (spoilers)", isOn: Binding(
-                        get: { model.leagueSpoiler(sport.id) },
-                        set: { model.setLeagueSpoiler(sport.id, $0) }
-                    ))
-                }
+                spoilerChoiceSection
             } else {
-                Section {
-                    Toggle("Hide results (spoilers)", isOn: Binding(
-                        get: { model.leagueSpoiler(sport.id) },
-                        set: { model.setLeagueSpoiler(sport.id, $0) }
-                    ))
-                } footer: {
-                    Text("Scores in this league stay hidden on the board until revealed per game.")
-                }
+                spoilerChoiceSection
             }
             if isLeaderboardLeague {
                 Section {
@@ -4026,16 +4090,26 @@ struct LeagueEditorView: View {
             // off, so no row appears at all.
             if !sport.extrasLabel.isEmpty {
                 Section {
-                    Toggle(sport.extrasLabel, isOn: Binding(
-                        get: { model.leagueShowExtras(sport.id) },
-                        set: { model.setLeagueShowExtras(sport.id, $0) }
-                    ))
-                } footer: {
-                    Text("Shown beside the score once a game is over, or while it is on for shots. Turn it off to keep the panel to the scoreline.")
+                    PreviewChoiceRow(
+                        title: "Show",
+                        subtitle: sport.extrasLabel,
+                        sample: "plain.png?sport=\(sport.id)&extras=on",
+                        httpBase: model.httpBase,
+                        selected: model.leagueShowExtras(sport.id)
+                    ) { model.setLeagueShowExtras(sport.id, true) }
+                    PreviewChoiceRow(
+                        title: "Hide",
+                        subtitle: "Just the scoreline.",
+                        sample: "plain.png?sport=\(sport.id)&extras=off",
+                        httpBase: model.httpBase,
+                        selected: !model.leagueShowExtras(sport.id)
+                    ) { model.setLeagueShowExtras(sport.id, false) }
+                } header: {
+                    Text(sport.extrasLabel)
                 }
             }
             Section {
-                Picker("Time per event", selection: Binding(
+                Picker("Seconds per screen", selection: Binding(
                     get: { model.leagueDwellSecs(sport.id) ?? 0 },
                     set: { model.setLeagueDwell(sport.id, $0 == 0 ? nil : $0) }
                 )) {
@@ -4045,22 +4119,24 @@ struct LeagueEditorView: View {
                     }
                 }
             } footer: {
-                Text("How long this league's events hold the panel — leaderboards fit a full scroll pass into it.")
+                Text("Overrides the board's setting for this league — leaderboards fit a full scroll pass into it.")
             }
             // Team-name display style — hidden for leaderboard leagues (golf/F1),
             // whose fields are individuals with no per-team style.
             if !nameStyleChoices.isEmpty {
                 Section {
-                    Picker("Names", selection: Binding(
-                        get: { model.leagueNameStyle(sport.id) ?? defaultStyle },
-                        set: { model.setLeagueNameStyle(sport.id, $0 == defaultStyle ? nil : $0) }
-                    )) {
-                        ForEach(nameStyleChoices, id: \.style) { opt in
-                            Text(opt.label).tag(opt.style)
+                    ForEach(nameStyleChoices, id: \.style) { opt in
+                        PreviewChoiceRow(
+                            title: opt.label,
+                            sample: "plain.png?sport=\(sport.id)&style=\(styleParam(opt.style))",
+                            httpBase: model.httpBase,
+                            selected: (model.leagueNameStyle(sport.id) ?? defaultStyle) == opt.style
+                        ) {
+                            model.setLeagueNameStyle(sport.id, opt.style == defaultStyle ? nil : opt.style)
                         }
                     }
-                } footer: {
-                    Text("How team names appear on the board for this league.")
+                } header: {
+                    Text("Names")
                 }
             }
             // Subscription leagues (PGA/LPGA/F1) have no teams — just the picker.

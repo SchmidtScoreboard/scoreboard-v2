@@ -1244,6 +1244,121 @@ fn sample_game() -> model::Game {
     }
 }
 
+/// A demonstration game for ONE league, so a settings preview shows something
+/// the user recognises: hits and errors on a baseball final, shots on a live
+/// NHL frame, a shootout on a soccer knockout.
+///
+/// Locations are populated here where `sample_game`'s are not, because the
+/// name-style preview is exactly the thing that needs them — a Location preview
+/// against an empty location would show a blank row and read as a bug.
+fn sample_game_for(sport_id: &str, extras: bool, live: bool) -> model::Game {
+    let team = |abbrev: &str, name: &str, location: &str, score: u32, p: &str, sec: &str| {
+        model::TeamSide {
+            abbrev: abbrev.into(),
+            name: name.into(),
+            location: location.into(),
+            score,
+            primary: model::hex_to_rgb(p),
+            secondary: model::ensure_contrast(model::hex_to_rgb(p), model::hex_to_rgb(sec)),
+            hits: None,
+            errors: None,
+            shots: None,
+            shootout: None,
+            aggregate: None,
+        }
+    };
+    let mut g = sample_game();
+    g.sport_id = sport_id.into();
+    match sport_id {
+        "mlb" | "cbase" => {
+            g.away = team("DET", "TIGERS", "DETROIT", 6, "0C2340", "FA4616");
+            g.home = team("CLE", "GUARDIANS", "CLEVELAND", 4, "E31937", "0C2340");
+            // Final, because hits and errors are a post-game line.
+            g.status = GameStatus::Final;
+            g.ordinal = String::new();
+            g.clock = String::new();
+            g.situation = None;
+            if extras {
+                g.away.hits = Some(9);
+                g.home.hits = Some(6);
+                g.home.errors = Some(1);
+            }
+        }
+        "nhl" | "olyhm" | "olyhw" => {
+            // Short mascots on purpose. NHL rows use the 5x8 font, and
+            // `pair_style` falls back to the abbreviation when a name does not
+            // fit — with "BLACKHAWKS" the Name and Abbrev previews came out
+            // pixel-identical, which is the exact confusion these previews
+            // exist to remove.
+            g.away = team("BOS", "BRUINS", "BOSTON", 3, "FFB81C", "000000");
+            g.home = team("TOR", "LEAFS", "TORONTO", 3, "00205B", "FFFFFF");
+            // Live and even strength, so the shots have the strip to themselves
+            // rather than losing it to the power-play badge.
+            g.situation = Some(model::Situation::Hockey {
+                away_powerplay: false,
+                home_powerplay: false,
+                away_players: 5,
+                home_players: 5,
+            });
+            if extras {
+                g.away.shots = Some(21);
+                g.home.shots = Some(17);
+            }
+        }
+        _ if espn::is_soccer(sport_id) => {
+            g.away = team("ARS", "ARSENAL", "ARSENAL", 1, "EF0107", "FFFFFF");
+            g.home = team("PSG", "PSG", "PARIS", 1, "004170", "E30613");
+            g.status = GameStatus::Final;
+            g.ordinal = String::new();
+            g.clock = String::new();
+            g.situation = None;
+            if extras {
+                g.away.shootout = Some(3);
+                g.home.shootout = Some(4);
+            }
+        }
+        "nfl" | "cfb" => {
+            g.away = team("GB", "PACKERS", "GREEN BAY", 17, "203731", "FFB612");
+            g.home = team("CHI", "BEARS", "CHICAGO", 24, "0B162A", "C83803");
+            g.status = GameStatus::Final;
+            g.ordinal = String::new();
+            g.clock = String::new();
+            g.situation = None;
+        }
+        _ => {
+            // Basketball and anything else: a plain live game is enough to show
+            // a name style or a spoiler, which is all those previews need.
+            g.away = team("BOS", "CELTICS", "BOSTON", 88, "007A33", "FFFFFF");
+            g.home = team("LAL", "LAKERS", "LOS ANGELES", 84, "552583", "FDB927");
+            g.ordinal = "3RD".into();
+            g.situation = None;
+        }
+    }
+    // A spoiler preview needs a game IN PROGRESS. Normal mode keeps the period
+    // as sanctioned progress and strict hides even that, so on a finished game
+    // the two modes render identically and the choice looks like no choice.
+    // The extras previews want the opposite for baseball and soccer, where the
+    // line only appears once the game is over — so each preview asks for the
+    // state its own setting actually bites in.
+    if live && g.status == GameStatus::Final {
+        g.status = GameStatus::Active;
+        g.ordinal = match sport_id {
+            "mlb" | "cbase" => "5TH".into(),
+            _ if espn::is_soccer(sport_id) => "2ND".into(),
+            _ => "3RD".into(),
+        };
+        g.clock = "7:12".into();
+        // Extras that only draw on a final would be dead weight here.
+        for side in [&mut g.away, &mut g.home] {
+            side.hits = None;
+            side.errors = None;
+            side.shootout = None;
+            side.aggregate = None;
+        }
+    }
+    g
+}
+
 /// GET /demo/games — the synthetic slate as JSON. The discovery route: it is
 /// how you learn the demo ids without owning a board. Deliberately NOT
 /// board-scoped — synthetic games carry no spoiler risk, and accepting `?board=`
@@ -1345,16 +1460,43 @@ async fn get_demo_render(
 
 async fn get_sample(
     axum::extract::Path(variant): axum::extract::Path<String>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     let variant = variant.strip_suffix(".png").unwrap_or(&variant).to_string();
-    let g = sample_game();
+    // `?sport=` makes the example the user's own league rather than a generic
+    // one — a Location preview is meaningless until you can see YOUR team's
+    // city in it. Absent, it stays the original fixed NHL frame, so the
+    // spoiler rows an older app asks for are byte-identical to before.
+    let sport = q.get("sport").cloned();
+    // `?extras=off` renders the same game with the box-score extras stripped,
+    // which is the whole point of that setting's preview: the two frames differ
+    // in exactly the line being switched.
+    let extras = q.get("extras").map(|v| v != "off").unwrap_or(true);
     let spoiler = match variant.as_str() {
         "normal" => Some(SpoilerMode::Normal),
         "strict" => Some(SpoilerMode::Strict),
         _ => None,
     };
-    let (_, px) = render::render_frame(&g, spoiler, None, default_name_style(&g.sport_id));
+    // `?live=1` forces a game in progress. The spoiler rows pass it, because
+    // Normal and Strict only differ while a game is running.
+    let live = spoiler.is_some() || q.get("live").is_some_and(|v| v != "0");
+    let g = match &sport {
+        Some(id) => sample_game_for(id, extras, live),
+        None => sample_game(),
+    };
+    // `?style=` previews a name style without storing it. Falls back to the
+    // league default rather than erroring on a style this binary does not know.
+    let style = q
+        .get("style")
+        .and_then(|s| match s.as_str() {
+            "location" => Some(NameStyle::Location),
+            "name" => Some(NameStyle::Name),
+            "abbrev" => Some(NameStyle::Abbrev),
+            _ => None,
+        })
+        .unwrap_or_else(|| default_name_style(&g.sport_id));
+    let (_, px) = render::render_frame(&g, spoiler, None, style);
     (
         [(axum::http::header::CONTENT_TYPE, "image/png")],
         render_png(&px),
@@ -7971,3 +8113,62 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod sample_preview_tests {
+    use super::*;
+
+    /// The previews must actually DIFFER, or the settings row is showing the
+    /// user two identical pictures and asking them to choose.
+    #[test]
+    fn every_preview_pair_renders_a_different_frame() {
+        let frame = |sport: &str, extras: bool, style: NameStyle, spoiler: Option<SpoilerMode>| {
+            let g = sample_game_for(sport, extras, spoiler.is_some());
+            render::render_frame(&g, spoiler, None, style).1
+        };
+        // Extras on vs off, for each league family that draws them.
+        for sport in ["mlb", "nhl", "ucl"] {
+            let on = frame(sport, true, default_name_style(sport), None);
+            let off = frame(sport, false, default_name_style(sport), None);
+            assert_ne!(on, off, "{sport}: the extras preview shows no difference");
+        }
+        // A league with no extras must render identically either way — the app
+        // shows no switch there, and a difference would mean it should.
+        for sport in ["nfl", "nba"] {
+            let on = frame(sport, true, default_name_style(sport), None);
+            let off = frame(sport, false, default_name_style(sport), None);
+            assert_eq!(on, off, "{sport} draws extras but declares no label");
+        }
+        // The three name styles, per league.
+        for sport in ["mlb", "nhl", "nba", "nfl"] {
+            let loc = frame(sport, true, NameStyle::Location, None);
+            let nam = frame(sport, true, NameStyle::Name, None);
+            let abb = frame(sport, true, NameStyle::Abbrev, None);
+            assert_ne!(loc, nam, "{sport}: Location and Name look the same");
+            assert_ne!(nam, abb, "{sport}: Name and Abbrev look the same");
+            assert_ne!(loc, abb, "{sport}: Location and Abbrev look the same");
+        }
+        // Spoiler modes, per league.
+        for sport in ["mlb", "nhl", "nba"] {
+            let style = default_name_style(sport);
+            let plain = frame(sport, true, style, None);
+            let normal = frame(sport, true, style, Some(SpoilerMode::Normal));
+            let strict = frame(sport, true, style, Some(SpoilerMode::Strict));
+            assert_ne!(plain, normal, "{sport}: normal spoiler shows no difference");
+            assert_ne!(normal, strict, "{sport}: strict looks like normal");
+        }
+    }
+
+    /// Every league gets a sample with a location, or the Location preview
+    /// draws a blank row and reads as a bug rather than a choice.
+    #[test]
+    fn every_sample_league_has_locations() {
+        for (id, ..) in espn::LEAGUE_IDENTITY {
+            let g = sample_game_for(id, true, false);
+            assert!(!g.away.location.is_empty(), "{id} away has no location");
+            assert!(!g.home.location.is_empty(), "{id} home has no location");
+            assert!(!g.away.name.is_empty() && !g.away.abbrev.is_empty(), "{id}");
+        }
+    }
+}
+
