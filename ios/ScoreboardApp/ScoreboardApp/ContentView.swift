@@ -2721,8 +2721,6 @@ struct DashboardView: View {
             SpoilerChip(hidden: model.leagueSpoiler(pref.sport.id)) {
                 model.setLeagueSpoiler(pref.sport.id, !model.leagueSpoiler(pref.sport.id))
             }
-            Button("Edit") { editingSport = pref.sport }
-                .font(.subheadline.weight(.semibold))
         }
     }
 }
@@ -3815,43 +3813,69 @@ struct TeamColorSwatch: View {
 /// One league's editor: pick any number of teams (shown with their brand colors)
 /// plus the big-games option. Edits are buffered locally and committed as a SINGLE
 /// request when the page is dismissed.
-/// A settings choice that shows its own consequence: a radio row with an
-/// example frame, rendered by the server's real pipeline.
+/// A row of choices shown as pictures side by side, one tile each.
 ///
-/// The pattern started on the spoiler rows and the off-mode picker, and it beats
-/// a paragraph every time — a label plus two pictures says in a glance what a
-/// sentence has to describe. `sample` carries a `/sample` query, so the example
-/// is the user's OWN league rather than a generic frame: a Location preview
-/// means nothing until you can see a real city in it.
-private struct PreviewChoiceRow: View {
-    let title: String
-    var subtitle: String? = nil
-    /// Everything after `/sample/` — variant plus query.
-    let sample: String
+/// Horizontal because a vertical list of three rows, each carrying a label, a
+/// sentence and a thumbnail, spends most of a screen saying what one glance at
+/// three frames already says. The frame IS the description, so the tiles carry
+/// a label and nothing else.
+///
+/// `sample` is everything after `/sample/` — variant plus query — so the
+/// example is the user's OWN league. A `nil` sample draws a black panel, which
+/// is what "Nothing" actually looks like and what an all-black PNG could never
+/// be told apart from a failed load.
+private struct PreviewSelector<Choice: Hashable>: View {
+    struct Option: Identifiable {
+        let id: Choice
+        let label: String
+        let sample: String?
+        init(_ id: Choice, _ label: String, _ sample: String?) {
+            self.id = id
+            self.label = label
+            self.sample = sample
+        }
+    }
+
+    let options: [Option]
+    let selected: Choice
     let httpBase: String
-    let selected: Bool
-    let action: () -> Void
+    let onSelect: (Choice) -> Void
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 12) {
-                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    // Concrete Colors, not the hierarchical ones: inside a Form
-                    // button label the accent is the base style, so `.primary`
-                    // resolves to blue.
-                    Text(title).foregroundStyle(Color.primary)
-                    if let subtitle {
-                        Text(subtitle).font(.caption).foregroundStyle(Color.secondary)
+        HStack(alignment: .top, spacing: 10) {
+            ForEach(options) { opt in
+                Button { onSelect(opt.id) } label: {
+                    VStack(spacing: 6) {
+                        Group {
+                            if let sample = opt.sample {
+                                FetchedFrameImage(url: URL(string: "\(httpBase)/sample/\(sample)"))
+                            } else {
+                                Color.black
+                            }
+                        }
+                        .ledPanel(width: 92, height: 46)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 6)
+                                .strokeBorder(
+                                    opt.id == selected ? Color.accentColor : .clear,
+                                    lineWidth: 2
+                                )
+                        }
+                        Text(opt.label)
+                            .font(.caption)
+                            // Concrete Colors: inside a Form button label the
+                            // accent is the base style, so the hierarchical
+                            // ones resolve to blue.
+                            .foregroundStyle(opt.id == selected ? Color.primary : Color.secondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
                     }
+                    .frame(maxWidth: .infinity)
                 }
-                Spacer(minLength: 8)
-                FetchedFrameImage(url: URL(string: "\(httpBase)/sample/\(sample)"))
-                    .ledPanel(width: 96, height: 48)
+                .buttonStyle(.plain)
             }
         }
-        .buttonStyle(.plain)
+        .padding(.vertical, 4)
     }
 }
 
@@ -3955,21 +3979,16 @@ struct LeagueEditorView: View {
     /// game rather than a generic one.
     private var spoilerChoiceSection: some View {
         Section {
-            PreviewChoiceRow(
-                title: "Show results",
-                sample: "plain.png?sport=\(sport.id)&live=1",
-                httpBase: model.httpBase,
-                selected: !model.leagueSpoiler(sport.id)
-            ) { model.setLeagueSpoiler(sport.id, false) }
-            PreviewChoiceRow(
-                title: "Hide results",
-                subtitle: "Until you reveal a game.",
-                // `normal`, because that is what a league-level hide does: the
-                // board-wide "hide everything" strictness is a separate setting.
-                sample: "normal.png?sport=\(sport.id)",
-                httpBase: model.httpBase,
-                selected: model.leagueSpoiler(sport.id)
-            ) { model.setLeagueSpoiler(sport.id, true) }
+            PreviewSelector(
+                options: [
+                    .init(false, "Show", "plain.png?sport=\(sport.id)&live=1"),
+                    // `normal`, because that is what a league-level hide does —
+                    // the board-wide "hide everything" strictness is separate.
+                    .init(true, "Hide", "normal.png?sport=\(sport.id)"),
+                ],
+                selected: model.leagueSpoiler(sport.id),
+                httpBase: model.httpBase
+            ) { model.setLeagueSpoiler(sport.id, $0) }
         } header: {
             Text("Spoilers")
         }
@@ -4051,7 +4070,6 @@ struct LeagueEditorView: View {
                         // The honesty requirement. The old picker was a ladder where
                         // one choice quietly included the rounds beyond it; these are
                         // separate, and saying so is the point of the change.
-                        Text("Each of these is separate, except the last — following everything covers them all.")
                     }
                 }
 
@@ -4077,12 +4095,16 @@ struct LeagueEditorView: View {
             // league plays one game at a time.
             if isGolfLeague {
                 Section {
-                    Toggle("Show round", isOn: Binding(
-                        get: { model.leagueShowRound(sport.id) },
-                        set: { model.setLeagueShowRound(sport.id, $0) }
-                    ))
-                } footer: {
-                    Text("Marks which round a tournament is on, in the corner of the panel and on the card. A leaderboard alone looks the same on Thursday as on Sunday.")
+                    PreviewSelector(
+                        options: [
+                            .init(true, "Show", "plain.png?sport=\(sport.id)"),
+                            .init(false, "Hide", "plain.png?sport=\(sport.id)&round=off"),
+                        ],
+                        selected: model.leagueShowRound(sport.id),
+                        httpBase: model.httpBase
+                    ) { model.setLeagueShowRound(sport.id, $0) }
+                } header: {
+                    Text("Round")
                 }
             }
             // Only for leagues that actually draw extras. The server says which,
@@ -4090,20 +4112,14 @@ struct LeagueEditorView: View {
             // off, so no row appears at all.
             if !sport.extrasLabel.isEmpty {
                 Section {
-                    PreviewChoiceRow(
-                        title: "Show",
-                        subtitle: sport.extrasLabel,
-                        sample: "plain.png?sport=\(sport.id)&extras=on",
-                        httpBase: model.httpBase,
-                        selected: model.leagueShowExtras(sport.id)
-                    ) { model.setLeagueShowExtras(sport.id, true) }
-                    PreviewChoiceRow(
-                        title: "Hide",
-                        subtitle: "Just the scoreline.",
-                        sample: "plain.png?sport=\(sport.id)&extras=off",
-                        httpBase: model.httpBase,
-                        selected: !model.leagueShowExtras(sport.id)
-                    ) { model.setLeagueShowExtras(sport.id, false) }
+                    PreviewSelector(
+                        options: [
+                            .init(true, "Show", "plain.png?sport=\(sport.id)&extras=on"),
+                            .init(false, "Hide", "plain.png?sport=\(sport.id)&extras=off"),
+                        ],
+                        selected: model.leagueShowExtras(sport.id),
+                        httpBase: model.httpBase
+                    ) { model.setLeagueShowExtras(sport.id, $0) }
                 } header: {
                     Text(sport.extrasLabel)
                 }
@@ -4119,22 +4135,19 @@ struct LeagueEditorView: View {
                     }
                 }
             } footer: {
-                Text("Overrides the board's setting for this league — leaderboards fit a full scroll pass into it.")
+                Text("Overrides the board setting for this league.")
             }
             // Team-name display style — hidden for leaderboard leagues (golf/F1),
             // whose fields are individuals with no per-team style.
             if !nameStyleChoices.isEmpty {
                 Section {
-                    ForEach(nameStyleChoices, id: \.style) { opt in
-                        PreviewChoiceRow(
-                            title: opt.label,
-                            sample: "plain.png?sport=\(sport.id)&style=\(styleParam(opt.style))",
-                            httpBase: model.httpBase,
-                            selected: (model.leagueNameStyle(sport.id) ?? defaultStyle) == opt.style
-                        ) {
-                            model.setLeagueNameStyle(sport.id, opt.style == defaultStyle ? nil : opt.style)
-                        }
-                    }
+                    PreviewSelector(
+                        options: nameStyleChoices.map {
+                            .init($0.style, $0.label, "plain.png?sport=\(sport.id)&style=\(styleParam($0.style))")
+                        },
+                        selected: model.leagueNameStyle(sport.id) ?? defaultStyle,
+                        httpBase: model.httpBase
+                    ) { model.setLeagueNameStyle(sport.id, $0 == defaultStyle ? nil : $0) }
                 } header: {
                     Text("Names")
                 }
@@ -5396,8 +5409,26 @@ struct SettingsView: View {
     /// its preview, and let someone pick it, with no rebuild.
     private var offModeSection: some View {
         Section {
-            ForEach(model.offModes, id: \.id) { mode in
-                offModeRow(mode)
+            PreviewSelector(
+                options: model.offModes.map { .init($0.id, $0.label, $0.preview) },
+                selected: model.current.offMode,
+                httpBase: model.httpBase
+            ) { model.setOffMode($0) }
+            // The chosen mode's own settings, when it declared any. Below the
+            // tiles rather than on one: it configures the selection, it is not
+            // one of the choices.
+            if let mode = model.offModes.first(where: { $0.id == model.current.offMode }),
+               !mode.fields.isEmpty {
+                Button { settingsForMode = mode } label: {
+                    HStack {
+                        Text("\(mode.label) settings").foregroundStyle(Color.primary)
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(Color.secondary)
+                    }
+                }
+                .buttonStyle(.plain)
             }
         } header: {
             HStack {
@@ -5407,74 +5438,6 @@ struct SettingsView: View {
             }
         }
     }
-
-    /// One mode: pick it by tapping the row, configure it with the trailing
-    /// control. The settings button appears only for modes that DECLARED
-    /// fields — nothing here knows which modes those are.
-    private func offModeRow(_ mode: UiOffMode) -> some View {
-        let selected = mode.id == model.current.offMode
-        return HStack(spacing: 12) {
-            Button {
-                model.setOffMode(mode.id)
-            } label: {
-                HStack(spacing: 12) {
-                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(selected ? Color.accentColor : Color.secondary)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(mode.label).foregroundStyle(.primary)
-                        Text(mode.description)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    // The label column may shrink but never vanish: with no
-                    // floor, the preview and the settings button took the row
-                    // and the text wrapped to one character per line.
-                    .frame(minWidth: 90, alignment: .leading)
-                    Spacer(minLength: 8)
-                    offModePreview(mode)
-                }
-            }
-            .buttonStyle(.plain)
-            if !mode.fields.isEmpty {
-                // A plain Button driving `navigationDestination(item:)`, NOT a
-                // NavigationLink. A NavigationLink inside a Form row claims the
-                // whole row and brings its own disclosure chevron; beside the
-                // select Button it fought for width and collapsed the labels to
-                // one character per line.
-                Button {
-                    settingsForMode = mode
-                } label: {
-                    Image(systemName: "slider.horizontal.3")
-                        .font(.body)
-                        .foregroundStyle(.secondary)
-                        // A glyph alone is a sub-20pt target; pad the hit area
-                        // without moving the visual edge.
-                        .padding(8)
-                        .contentShape(Rectangle())
-                        .padding(-8)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-    }
-
-    /// The mode's preview, following the CURRENT choice where the mode declares
-    /// one — so the Weather row shows the layout actually selected rather than
-    /// a fixed picture of one of them.
-    @ViewBuilder
-    private func offModePreview(_ mode: UiOffMode) -> some View {
-        if let path = model.currentPreviewPath(mode), let url = URL(string: "\(model.httpBase)\(path)") {
-            // grayFailure: a forked or older server may not host this preview,
-            // and an alarming badge there would be noise.
-            FetchedFrameImage(url: url, grayFailure: true).ledPanel(width: 96, height: 48)
-        } else {
-            // No preview declared means the mode draws nothing. Filled locally:
-            // a fetched all-black PNG is byte-identical to the loading state.
-            Rectangle().fill(.black).ledPanel(width: 96, height: 48)
-        }
-    }
-
 
     /// Spoiler settings, drawn with the receipts: the two display modes show
     /// the SAME example game rendered exactly as the board would show it.
@@ -5505,55 +5468,19 @@ struct SettingsView: View {
         // per-league and per-game hides, so gating it on the blanket toggle
         // would hide a setting that is still doing something.
         Section {
-            spoilerOptionRow(
-                "Hide results",
-                "Matchup and period, no scores.",
-                variant: "normal",
-                selected: !model.current.strictSpoilers
-            ) {
-                model.setStrictSpoilers(false)
-            }
-            spoilerOptionRow(
-                "Hide everything",
-                "Matchup only, then FINAL.",
-                variant: "strict",
-                selected: model.current.strictSpoilers
-            ) {
-                model.setStrictSpoilers(true)
-            }
+            PreviewSelector(
+                options: [
+                    .init(false, "Hide results", "normal.png"),
+                    .init(true, "Hide everything", "strict.png"),
+                ],
+                selected: model.current.strictSpoilers,
+                httpBase: model.httpBase
+            ) { model.setStrictSpoilers($0) }
         } header: {
             Text("When a game is hidden")
         }
     }
 
-    private func spoilerOptionRow(
-        _ title: String,
-        _ subtitle: String,
-        variant: String,
-        selected: Bool,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            HStack(spacing: 12) {
-                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    // Concrete Color, not the hierarchical `.primary`: inside a
-                    // Form button label the accent is already the base style, so
-                    // the bare version resolves to blue.
-                    Text(title).foregroundStyle(Color.primary)
-                    Text(subtitle).font(.caption).foregroundStyle(Color.secondary)
-                }
-                Spacer(minLength: 8)
-                // The example frame, rendered by the server's real pipeline,
-                // wearing the same LED treatment as a live frame (half size).
-                FetchedFrameImage(url: URL(string: "\(model.httpBase)/sample/\(variant).png"))
-                    .ledPanel(width: 96, height: 48)
-            }
-        }
-        // Matches offModeRow and choiceRow; without it this row alone tinted blue.
-        .buttonStyle(.plain)
-    }
 
     static var appVersion: String? {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String

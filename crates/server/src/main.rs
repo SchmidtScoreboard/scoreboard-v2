@@ -1325,6 +1325,32 @@ fn sample_game_for(sport_id: &str, extras: bool, live: bool) -> model::Game {
             g.clock = String::new();
             g.situation = None;
         }
+        "pga" | "lpga" | "f1" => {
+            // A leaderboard, not a team game. `render_spoiled` already has a
+            // path for these — title kept, rows dropped, progress centred — and
+            // the old fixture never produced one, so golf and F1 previewed
+            // their spoiler setting with a basketball frame.
+            let row = |name: &str, value: &str| model::LeaderRow {
+                name: name.into(),
+                value: value.into(),
+                ..Default::default()
+            };
+            let f1 = sport_id == "f1";
+            g.leaderboard = Some(model::Leaderboard {
+                name: if f1 { "MONACO GP".into() } else { "THE OPEN".into() },
+                rows: if f1 {
+                    vec![row("VER", "LAP 42"), row("NOR", "+2.1"), row("LEC", "+5.8"), row("HAM", "+9.4")]
+                } else {
+                    vec![row("SCHEFFLER", "-12"), row("MCILROY", "-9"), row("FLEETWOOD", "-8"), row("MORIKAWA", "-7")]
+                },
+            });
+            // Golf's round lives in `ordinal`, which is also what the "Show
+            // round" preview switches on and off.
+            g.ordinal = if f1 { String::new() } else { "R2".into() };
+            g.status = GameStatus::Active;
+            g.clock = String::new();
+            g.situation = None;
+        }
         _ => {
             // Basketball and anything else: a plain live game is enough to show
             // a name style or a spoiler, which is all those previews need.
@@ -1481,10 +1507,16 @@ async fn get_sample(
     // `?live=1` forces a game in progress. The spoiler rows pass it, because
     // Normal and Strict only differ while a game is running.
     let live = spoiler.is_some() || q.get("live").is_some_and(|v| v != "0");
-    let g = match &sport {
+    let mut g = match &sport {
         Some(id) => sample_game_for(id, extras, live),
         None => sample_game(),
     };
+    // `?round=off` previews golf's "Show round" switch, which `board_view`
+    // implements by clearing the ordinal — so the preview clears it the same
+    // way rather than inventing a second mechanism.
+    if q.get("round").is_some_and(|v| v == "off") {
+        g.ordinal.clear();
+    }
     // `?style=` previews a name style without storing it. Falls back to the
     // league default rather than erroring on a style this binary does not know.
     let style = q
@@ -8148,6 +8180,30 @@ mod sample_preview_tests {
             assert_ne!(nam, abb, "{sport}: Name and Abbrev look the same");
             assert_ne!(loc, abb, "{sport}: Location and Abbrev look the same");
         }
+        // Golf's round switch, and that a leaderboard league previews its
+        // spoiler as a LEADERBOARD rather than as somebody else's game.
+        let golf = sample_game_for("pga", true, false);
+        assert!(golf.leaderboard.is_some(), "golf must preview a leaderboard");
+        assert_eq!(golf.ordinal, "R2", "the round is what Show round switches");
+        let mut no_round = golf.clone();
+        no_round.ordinal.clear();
+        let style = default_name_style("pga");
+        assert_ne!(
+            render::render_frame(&golf, None, None, style).1,
+            render::render_frame(&no_round, None, None, style).1,
+            "the Show round preview shows no difference",
+        );
+        for sport in ["pga", "lpga", "f1"] {
+            let g = sample_game_for(sport, true, true);
+            assert!(g.leaderboard.is_some(), "{sport} must preview a leaderboard");
+            let st = default_name_style(sport);
+            let plain = render::render_frame(&g, None, None, st).1;
+            let normal = render::render_frame(&g, Some(SpoilerMode::Normal), None, st).1;
+            let strict = render::render_frame(&g, Some(SpoilerMode::Strict), None, st).1;
+            assert_ne!(plain, normal, "{sport}: hiding results shows no difference");
+            assert_ne!(normal, strict, "{sport}: strict looks like normal");
+        }
+
         // Spoiler modes, per league.
         for sport in ["mlb", "nhl", "nba"] {
             let style = default_name_style(sport);
@@ -8164,6 +8220,13 @@ mod sample_preview_tests {
     #[test]
     fn every_sample_league_has_locations() {
         for (id, ..) in espn::LEAGUE_IDENTITY {
+            // Leaderboard leagues have no teams — their frame is a field of
+            // individuals — which is also why the app offers them no name-style
+            // picker, so there is no Location preview to render.
+            if matches!(*id, "pga" | "lpga" | "f1") {
+                assert!(sample_game_for(id, true, false).leaderboard.is_some(), "{id}");
+                continue;
+            }
             let g = sample_game_for(id, true, false);
             assert!(!g.away.location.is_empty(), "{id} away has no location");
             assert!(!g.home.location.is_empty(), "{id} home has no location");
@@ -8171,4 +8234,5 @@ mod sample_preview_tests {
         }
     }
 }
+
 
