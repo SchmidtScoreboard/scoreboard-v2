@@ -3779,6 +3779,30 @@ async fn tick_loop(state: AppState) {
     }
 }
 
+/// Carry a football game's last known possession across a poll that omits it.
+///
+/// ESPN drops `situation.possession` transiently between plays while
+/// `possessionText` and the down keep coming. Without this, one such poll
+/// flips the frame from the field bar to the old four-corner text layout for
+/// up to POLL_SECS and back again — the layout was observed flapping
+/// mid-game. The down and yard line stay the FEED's; only the one omitted
+/// bit is bridged, and any stated possession always wins, so a turnover is
+/// wrong for at most the gap the feed itself created.
+fn bridge_football_possession(state: &AppState, games: &mut [Game]) {
+    let old = state.games.lock().unwrap();
+    for g in games.iter_mut() {
+        let Some(model::Situation::Football { home_possession: hp @ None, .. }) = &mut g.situation
+        else {
+            continue;
+        };
+        if let Some(model::Situation::Football { home_possession: prev @ Some(_), .. }) =
+            old.iter().find(|o| o.id == g.id).and_then(|o| o.situation.as_ref())
+        {
+            *hp = *prev;
+        }
+    }
+}
+
 /// Push fresh board state (now-showing list + config) to every app subscribed to
 /// this board, pruning any whose socket has closed.
 pub fn push_board_state(state: &AppState, board_id: &str) {
@@ -4038,6 +4062,7 @@ async fn poll_loop(state: AppState, source: Arc<dyn SportsDataSource>) {
         // server's own observation and the feed's data are merged.
         stamp_observed_end_times(&state, &mut games);
         stamp_observed_end_times(&state, &mut demo);
+        bridge_football_possession(&state, &mut games);
         *state.demo.lock().unwrap() = demo;
         *state.games.lock().unwrap() = games;
         let board_ids: Vec<String> = state.devices.lock().unwrap().keys().cloned().collect();
@@ -5023,6 +5048,35 @@ mod tests {
         handle_select_mode(&state, "b1", "clock");
         handle_select_mode(&state, "b1", "stocks");
         assert_eq!(state.config_for("b1").mode, "clock", "junk pick ignored");
+    }
+
+    /// A poll that omits possession must not flip the football frame back to
+    /// the text layout: the last known possession bridges the gap, the feed's
+    /// own statement always wins, and a game with no history stays honest.
+    #[test]
+    fn a_possession_less_poll_keeps_the_field_bar() {
+        let state = AppState::new_ephemeral();
+        let football = |id: &str, hp: Option<bool>| {
+            let mut g = sample_game_for("nfl", false, true);
+            g.id = id.into();
+            if let Some(model::Situation::Football { home_possession, .. }) = &mut g.situation {
+                *home_possession = hp;
+            }
+            g
+        };
+        *state.games.lock().unwrap() = vec![football("g1", Some(true)), football("g2", Some(false))];
+
+        // Next poll: g1 lost its possession bit, g2 states a new one, g3 is
+        // new and unknown.
+        let mut next = vec![football("g1", None), football("g2", Some(true)), football("g3", None)];
+        bridge_football_possession(&state, &mut next);
+        let hp = |g: &Game| match &g.situation {
+            Some(model::Situation::Football { home_possession, .. }) => *home_possession,
+            _ => panic!("football expected"),
+        };
+        assert_eq!(hp(&next[0]), Some(true), "omission bridged from the last poll");
+        assert_eq!(hp(&next[1]), Some(true), "a stated possession always wins");
+        assert_eq!(hp(&next[2]), None, "no history stays honestly unknown");
     }
 
     /// The legacy button is a clean toggle now: any lit mode -> "off" (with
