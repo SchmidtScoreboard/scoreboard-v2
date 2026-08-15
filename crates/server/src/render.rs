@@ -918,6 +918,32 @@ fn draw_football_field(c: &mut Canvas, g: &Game, home_ball: bool, yards: i32, to
     // over the end-zone fills, and the overhang is what makes it scan as a line
     // across the field rather than a mark on it.
     fill(c, field_x(yards), TOP - 1, 1, H + 2, WHITE);
+
+    // The yard line itself, the way the field paints it: counted from the
+    // nearer goal, so "SEA 25" reads 25 wherever SEA is defending. It sits on
+    // the side of the scrimmage line AWAY from the line to gain — which
+    // always lies downfield, to the right — so the number and the yellow
+    // line can never collide. Backed up too deep for the number to fit on
+    // the left, it jumps past the markers instead of squeezing between them;
+    // grey, because it is context, and the two LINES are the news.
+    let num = yards.min(100 - yards);
+    if num > 0 {
+        let s = num.to_string();
+        let w = text_width(&s, false);
+        // Baseline on the bar's last row: rows 25..30, leaving the top hash
+        // row untouched.
+        let by = TOP + H as i32 - 1;
+        let right = field_x(yards) - 2;
+        if right - w + 1 > EZ_OWN {
+            draw_text_right(c, &s, right, by, false, GREY);
+        } else {
+            let past = to_gain.map(field_x).unwrap_or_else(|| field_x(yards));
+            let x = past + 2;
+            if x + w < FRAME_WIDTH as i32 - EZ_OPP {
+                draw_text(c, &s, x, by, false, GREY);
+            }
+        }
+    }
 }
 
 /// The live football frame: down and distance, the period, and a field bar.
@@ -2117,6 +2143,42 @@ mod kern_tests {
         assert_eq!(field_x(0), EZ_OWN);
         assert_eq!(field_x(100), FRAME_WIDTH as i32 - EZ_OPP);
         assert!(field_x(25) < field_x(50) && field_x(50) < field_x(75), "monotonic");
+    }
+
+    /// The yard number sits on the OPPOSITE side of the scrimmage line from
+    /// the line to gain — and jumps past the markers when the ball is backed
+    /// up too deep for it to fit on the left.
+    #[test]
+    fn the_yard_number_sits_opposite_the_line_to_gain() {
+        let bar = |ball: &str, home_ball: bool| -> Vec<u8> {
+            let g = sit_game("nfl", "3rd", "8:12", Situation::Football {
+                down_string: "3rd & 4".into(),
+                ball_position: ball.into(),
+                home_possession: Some(home_ball),
+            });
+            render_game(&g, None, NameStyle::Name).1
+        };
+        // Grey pixels in the bar's text band (rows 25..=30) within x0..x1.
+        // The only grey in that band is the yard number.
+        let grey_in = |px: &[u8], x0: i32, x1: i32| -> usize {
+            let g = c565(GREY);
+            (25..=30)
+                .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+                .filter(|&(x, y)| px565(px, x, y) == g)
+                .count()
+        };
+
+        // SF at SEA's 25 = 75 out, gain at 79: "25" ends 2px left of scrimmage.
+        let px = bar("SEA 25", false);
+        assert!(grey_in(&px, field_x(50), field_x(75) - 1) > 0, "number left of the scrimmage line");
+        assert_eq!(grey_in(&px, field_x(75) + 1, field_x(79)), 0, "nothing between the two markers");
+
+        // SEA backed up at its own 8: no room on the left, so the number
+        // jumps past the line to gain (8 + 4 = the 12) rather than wedging
+        // between the markers.
+        let px = bar("SEA 8", true);
+        assert_eq!(grey_in(&px, EZ_OWN, field_x(8) - 1), 0, "too deep: nothing left of the ball");
+        assert!(grey_in(&px, field_x(12) + 1, 40) > 0, "the number sits past the markers instead");
     }
 
     /// The field bar draws, and it reverses when the other team has the ball.
