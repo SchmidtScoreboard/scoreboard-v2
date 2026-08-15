@@ -1434,6 +1434,79 @@ public func FfiConverterTypeScoreboardClient_lower(_ value: ScoreboardClient) ->
 }
 
 /**
+ * One screen of the troubleshooting guide: the panel state it names, and
+ * what to do about it. `slug` keys the server's `/guide/{slug}.png` preview.
+ */
+public struct GuideCopy {
+    public var slug: String
+    public var title: String
+    public var advice: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(slug: String, title: String, advice: String) {
+        self.slug = slug
+        self.title = title
+        self.advice = advice
+    }
+}
+
+extension GuideCopy: Equatable, Hashable {
+    public static func == (lhs: GuideCopy, rhs: GuideCopy) -> Bool {
+        if lhs.slug != rhs.slug {
+            return false
+        }
+        if lhs.title != rhs.title {
+            return false
+        }
+        if lhs.advice != rhs.advice {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(slug)
+        hasher.combine(title)
+        hasher.combine(advice)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeGuideCopy: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> GuideCopy {
+        return
+            try GuideCopy(
+                slug: FfiConverterString.read(from: &buf),
+                title: FfiConverterString.read(from: &buf),
+                advice: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: GuideCopy, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.slug, into: &buf)
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterString.write(value.advice, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGuideCopy_lift(_ buf: RustBuffer) throws -> GuideCopy {
+    return try FfiConverterTypeGuideCopy.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeGuideCopy_lower(_ value: GuideCopy) -> RustBuffer {
+    return FfiConverterTypeGuideCopy.lower(value)
+}
+
+/**
  * One board's full server-side config, pushed with every BoardState.
  */
 public struct UiBoardConfig {
@@ -2165,6 +2238,72 @@ public func FfiConverterTypeUiGame_lift(_ buf: RustBuffer) throws -> UiGame {
 #endif
 public func FfiConverterTypeUiGame_lower(_ value: UiGame) -> RustBuffer {
     return FfiConverterTypeUiGame.lower(value)
+}
+
+/**
+ * One section of the league list: the category name and its league ids in
+ * display order. Ids, not whole sports — the platform maps them back onto
+ * whatever element type its screen holds (catalog entries, preference rows).
+ */
+public struct UiLeagueGroup {
+    public var category: String
+    public var sportIds: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(category: String, sportIds: [String]) {
+        self.category = category
+        self.sportIds = sportIds
+    }
+}
+
+extension UiLeagueGroup: Equatable, Hashable {
+    public static func == (lhs: UiLeagueGroup, rhs: UiLeagueGroup) -> Bool {
+        if lhs.category != rhs.category {
+            return false
+        }
+        if lhs.sportIds != rhs.sportIds {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(category)
+        hasher.combine(sportIds)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiLeagueGroup: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiLeagueGroup {
+        return
+            try UiLeagueGroup(
+                category: FfiConverterString.read(from: &buf),
+                sportIds: FfiConverterSequenceString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UiLeagueGroup, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.category, into: &buf)
+        FfiConverterSequenceString.write(value.sportIds, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiLeagueGroup_lift(_ buf: RustBuffer) throws -> UiLeagueGroup {
+    return try FfiConverterTypeUiLeagueGroup.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiLeagueGroup_lower(_ value: UiLeagueGroup) -> RustBuffer {
+    return FfiConverterTypeUiLeagueGroup.lower(value)
 }
 
 /**
@@ -3904,6 +4043,31 @@ private struct FfiConverterSequenceString: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterSequenceTypeGuideCopy: FfiConverterRustBuffer {
+    typealias SwiftType = [GuideCopy]
+
+    static func write(_ value: [GuideCopy], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeGuideCopy.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [GuideCopy] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [GuideCopy]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeGuideCopy.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterSequenceTypeUiChampOption: FfiConverterRustBuffer {
     typealias SwiftType = [UiChampOption]
 
@@ -3971,6 +4135,31 @@ private struct FfiConverterSequenceTypeUiGame: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             try seq.append(FfiConverterTypeUiGame.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeUiLeagueGroup: FfiConverterRustBuffer {
+    typealias SwiftType = [UiLeagueGroup]
+
+    static func write(_ value: [UiLeagueGroup], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeUiLeagueGroup.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UiLeagueGroup] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UiLeagueGroup]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeUiLeagueGroup.read(from: &buf))
         }
         return seq
     }
@@ -4217,6 +4406,35 @@ public func defaultNameStyle(sportId: String) -> UiNameStyle {
 }
 
 /**
+ * The demo-games info card: the one setting whose consequence you cannot see
+ * from its row — the scores go fake, and nothing on the panel says so.
+ */
+public func demoGamesExplainer() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_demo_games_explainer($0
+        )
+    })
+}
+
+/**
+ * Group the catalog into sport sections, sections and leagues both in the
+ * server's declared order.
+ *
+ * Built from the groups that actually EXIST rather than by intersecting with
+ * a list this build knows: a hardcoded section order silently drops any
+ * league whose section it never heard of. A section ranks by its
+ * best-ranked league, so section order comes from the same declaration as
+ * league order; ties break alphabetically at both levels.
+ */
+public func groupLeagues(sports: [UiSport]) -> [UiLeagueGroup] {
+    return try! FfiConverterSequenceTypeUiLeagueGroup.lift(try! rustCall {
+        uniffi_app_core_fn_func_group_leagues(
+            FfiConverterSequenceTypeUiSport.lower(sports), $0
+        )
+    })
+}
+
+/**
  * The name-style choices a league offers, in menu order, each with its
  * league-specific label. Wraps protocol `name_style_options`. Empty for
  * leaderboard sports (golf/F1) and unknown leagues — the app hides the
@@ -4226,6 +4444,71 @@ public func nameStyleOptions(sportId: String) -> [UiNameStyleOption] {
     return try! FfiConverterSequenceTypeUiNameStyleOption.lift(try! rustCall {
         uniffi_app_core_fn_func_name_style_options(
             FfiConverterString.lower(sportId), $0
+        )
+    })
+}
+
+/**
+ * "Conference Finals +2": name one round, count the rest — four labels
+ * joined by separators is not readable at row width. None when nothing is
+ * picked.
+ */
+public func pickedRoundsLabel(pickedLabels: [String]) -> String? {
+    return try! FfiConverterOptionString.lift(try! rustCall {
+        uniffi_app_core_fn_func_picked_rounds_label(
+            FfiConverterSequenceString.lower(pickedLabels), $0
+        )
+    })
+}
+
+/**
+ * The Spoilers screen's footer: the one place the full set of spoiler scopes
+ * is stated, because they live on three different screens.
+ */
+public func spoilerExplainer() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_spoiler_explainer($0
+        )
+    })
+}
+
+/**
+ * A league's subscription in one line — "2 teams · MLS Cup" — or None when
+ * nothing is configured. Counts only favorites that still resolve against
+ * the catalog: configs can carry orphans (the old "Formula 1" pseudo-team
+ * from before the leaderboard-league split).
+ */
+public func subscriptionSummary(sport: UiSport, favoriteTeamIds: [String], pickedRoundIds: [String]) -> String? {
+    return try! FfiConverterOptionString.lift(try! rustCall {
+        uniffi_app_core_fn_func_subscription_summary(
+            FfiConverterTypeUiSport.lower(sport),
+            FfiConverterSequenceString.lower(favoriteTeamIds),
+            FfiConverterSequenceString.lower(pickedRoundIds), $0
+        )
+    })
+}
+
+public func troubleshootingFooter() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_troubleshooting_footer($0
+        )
+    })
+}
+
+/**
+ * The troubleshooting guide, in likelihood order: the healthy-looking states
+ * first, then the connect legs, then first-time setup.
+ */
+public func troubleshootingGuides() -> [GuideCopy] {
+    return try! FfiConverterSequenceTypeGuideCopy.lift(try! rustCall {
+        uniffi_app_core_fn_func_troubleshooting_guides($0
+        )
+    })
+}
+
+public func troubleshootingIntro() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_troubleshooting_intro($0
         )
     })
 }
@@ -4249,7 +4532,31 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_func_default_name_style() != 9560 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_app_core_checksum_func_demo_games_explainer() != 35237 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_group_leagues() != 37891 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_func_name_style_options() != 22961 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_picked_rounds_label() != 32761 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_spoiler_explainer() != 7464 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_subscription_summary() != 16059 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_troubleshooting_footer() != 62547 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_troubleshooting_guides() != 12831 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_troubleshooting_intro() != 34123 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_add_game() != 7881 {

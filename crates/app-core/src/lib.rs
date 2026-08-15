@@ -5,6 +5,10 @@
 
 uniffi::setup_scaffolding!();
 
+/// Shared user-facing copy and text-derivation rules — see the module doc for
+/// what belongs there versus on the platform.
+pub mod strings;
+
 use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use scoreboard_protocol::{

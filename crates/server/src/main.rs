@@ -1527,13 +1527,18 @@ fn sample_game_for(sport_id: &str, extras: bool, live: bool) -> model::Game {
     g
 }
 
-/// GET /demo/games — the synthetic slate as JSON. The discovery route: it is
-/// how you learn the demo ids without owning a board. Deliberately NOT
-/// board-scoped — synthetic games carry no spoiler risk, and accepting `?board=`
-/// would imply a scoping guarantee this handler does not provide.
-///
-/// `no-store`, unlike the day-cached `/guide`: the slate advances with the poll
-/// loop, so the bytes are not stable.
+// GET /demo/games — the synthetic slate as JSON. The discovery route: it is
+// how you learn the demo ids without owning a board. Deliberately NOT
+// board-scoped — synthetic games carry no spoiler risk, and accepting `?board=`
+// would imply a scoping guarantee this handler does not provide.
+//
+// `no-store`, unlike the day-cached `/guide`: the slate advances with the poll
+// loop, so the bytes are not stable.
+//
+// (Plain comments: the demo handlers live elsewhere in the file, and as ///
+// this block silently attached itself to `get_offmode` below, documenting the
+// wrong route.)
+
 /// GET /offmode/{id}.png — what an off mode looks like on the panel, for the
 /// app's settings rows. Rendered at a FIXED time so the bytes are stable and
 /// the day-long cache is safe (same rule as `/guide`).

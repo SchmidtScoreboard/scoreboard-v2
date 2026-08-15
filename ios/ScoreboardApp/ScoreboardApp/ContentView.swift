@@ -82,7 +82,7 @@ final class ListenerAdapter: ClientListener {
         Task { @MainActor in self.model?.applyGames(self.serverUrl, games) }
     }
     func onFrame(frameId: String, rgba: Data) {
-        let img = cgImageFromRGBA(rgba, width: 64, height: 32)
+        let img = cgImageFromRGBA(rgba)
         Task { @MainActor in if let img { self.model?.frames[frameId] = img } }
     }
     func onPaired(boardId: String) {
@@ -862,87 +862,43 @@ final class BoardViewModel: ObservableObject {
                 prefs.append(LeaguePref(sport: sport, teams: teams, bigGames: big))
             }
         }
-        // Same order as the Add League sheet: sport section, then name.
-        return prefs.sorted { Self.leagueOrder($0.sport, $1.sport) }
+        // Same order as the Add League sheet — the core's grouping call is the
+        // one ordering rule in the system; flatten its sections.
+        let byId = Dictionary(uniqueKeysWithValues: prefs.map { ($0.sport.id, $0) })
+        return groupLeagues(sports: prefs.map(\.sport)).flatMap { g in
+            g.sportIds.compactMap { byId[$0] }
+        }
     }
 
-    /// The sport section a league is listed under.
-    ///
-    /// The server declares this (`UiSport.category`), so a fork can add a league
-    /// and have it land in the right section without shipping a new app. An
-    /// empty string means the server is older than the field — those leagues
-    /// gather under one heading rather than vanishing.
-    static func leagueCategory(_ sport: UiSport) -> String {
-        sport.category.isEmpty ? "Other leagues" : sport.category
-    }
-
-    /// Section rank, then league name. Rank 0 is what an older server's catalog
-    /// decodes to, and sorts last rather than first.
-    private static func leagueOrder(_ a: UiSport, _ b: UiSport) -> Bool {
-        let ra = a.categoryRank == 0 ? UInt32.max : a.categoryRank
-        let rb = b.categoryRank == 0 ? UInt32.max : b.categoryRank
-        if ra != rb { return ra < rb }
-        if a.category != b.category { return a.category < b.category }
-        return a.name < b.name
-    }
-
-    /// Every catalog league grouped into its sport section, sections in the
-    /// server's declared order.
-    ///
-    /// Built from the groups that actually EXIST rather than by intersecting
-    /// with a list of sections this build knows. The old version walked a
-    /// hardcoded `categoryOrder` and `compactMap`ped it, which silently dropped
-    /// any league whose section wasn't in the array — harmless while the array
-    /// and the switch were the same table, but a league-losing bug the moment
-    /// the section became a server string.
+    /// Every catalog league grouped into its sport section — the grouping and
+    /// ORDERING rules live in the core (`strings::group_leagues`), where the
+    /// Android app will read the same ones. Swift maps the returned ids back
+    /// onto its own elements; a league the core somehow drops falls out here
+    /// rather than crashing, which is the honest failure.
     var leaguesByCategory: [(String, [UiSport])] {
-        var groups: [String: [UiSport]] = [:]
-        for sport in sports {
-            groups[Self.leagueCategory(sport), default: []].append(sport)
+        let byId = Dictionary(uniqueKeysWithValues: sports.map { ($0.id, $0) })
+        return groupLeagues(sports: sports).map { g in
+            (g.category, g.sportIds.compactMap { byId[$0] })
         }
-        return groups
-            .map { ($0.key, $0.value.sorted { Self.leagueOrder($0, $1) }) }
-            .sorted { a, b in
-                // Rank a section by its best-ranked league, so section order
-                // comes from the same declaration as league order.
-                let ra = a.1.map { $0.categoryRank == 0 ? UInt32.max : $0.categoryRank }.min() ?? .max
-                let rb = b.1.map { $0.categoryRank == 0 ? UInt32.max : $0.categoryRank }.min() ?? .max
-                return ra != rb ? ra < rb : a.0 < b.0
-            }
     }
 
-    /// The league preferences the dashboard shows, grouped the same way.
+    /// The league preferences the dashboard shows, grouped the same way —
+    /// same core call, mapped onto prefs instead of catalog entries.
     var leaguePrefsByCategory: [(String, [LeaguePref])] {
-        var groups: [String: [LeaguePref]] = [:]
-        for pref in leaguePrefs {
-            groups[Self.leagueCategory(pref.sport), default: []].append(pref)
+        let byId = Dictionary(uniqueKeysWithValues: leaguePrefs.map { ($0.sport.id, $0) })
+        return groupLeagues(sports: leaguePrefs.map(\.sport)).map { g in
+            (g.category, g.sportIds.compactMap { byId[$0] })
         }
-        return groups
-            .map { ($0.key, $0.value.sorted { Self.leagueOrder($0.sport, $1.sport) }) }
-            .sorted { a, b in
-                let ra = a.1.map { $0.sport.categoryRank == 0 ? UInt32.max : $0.sport.categoryRank }.min() ?? .max
-                let rb = b.1.map { $0.sport.categoryRank == 0 ? UInt32.max : $0.sport.categoryRank }.min() ?? .max
-                return ra != rb ? ra < rb : a.0 < b.0
-            }
     }
 
-    /// Short summary of a league's current subscription ("2 teams · MLS Cup"),
-    /// or nil when nothing is configured. Counts only favorites that still
-    /// resolve against the catalog — configs can carry orphans (e.g. the old
-    /// "Formula 1" team from before the leaderboard-league split).
+    /// "2 teams · MLS Cup", or nil when nothing is configured. The counting
+    /// and phrasing rules live in the core.
     func subscriptionSummary(_ sport: UiSport) -> String? {
-        var parts: [String] = []
-        let favs = favoriteIds(sport.id)
-        let n = sport.teams.filter { favs.contains($0.id) }.count
-        if n == 1 { parts.append("1 team") } else if n > 1 { parts.append("\(n) teams") }
-        // Name one round, count the rest: "Conference Finals +2" stays readable
-        // where four labels joined by a separator would not.
-        let picked = championshipIds(sport.id)
-        let labels = sport.championshipRounds.filter { picked.contains($0.id) }.map(\.label)
-        if let first = labels.first {
-            parts.append(labels.count == 1 ? first : "\(first) +\(labels.count - 1)")
-        }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        ScoreboardApp.subscriptionSummary(
+            sport: sport,
+            favoriteTeamIds: Array(favoriteIds(sport.id)),
+            pickedRoundIds: Array(championshipIds(sport.id))
+        )
     }
 
 
@@ -1049,10 +1005,10 @@ final class BoardViewModel: ObservableObject {
     /// "Majors only", "GP + Qualifying"), resolved from the catalog.
     func championshipLabel(_ sportId: String) -> String? {
         let picked = championshipIds(sportId)
-        guard !picked.isEmpty, let sport = sports.first(where: { $0.id == sportId }) else { return nil }
-        let labels = sport.championshipRounds.filter { picked.contains($0.id) }.map(\.label)
-        guard let first = labels.first else { return nil }
-        return labels.count == 1 ? first : "\(first) +\(labels.count - 1)"
+        guard let sport = sports.first(where: { $0.id == sportId }) else { return nil }
+        return pickedRoundsLabel(
+            pickedLabels: sport.championshipRounds.filter { picked.contains($0.id) }.map(\.label)
+        )
     }
 
     /// League groups for the expanded "view all" carousel: leagues the user has
@@ -1745,14 +1701,24 @@ struct SetupView: View {
     }
 }
 
-/// Build a CGImage from raw RGBA8 bytes — the server's pushed 64×32 frame.
-func cgImageFromRGBA(_ data: Data, width: Int, height: Int) -> CGImage? {
-    guard data.count == width * height * 4, let provider = CGDataProvider(data: data as CFData) else {
-        return nil
-    }
+/// Build a CGImage from raw RGBA8 bytes — a server-pushed frame.
+///
+/// Height is DERIVED from the byte count, never assumed: frames are variable
+/// height (a deep leaderboard renders up to 128 rows for the board to scroll,
+/// and the frame cache is shared, so those bytes can reach the app). The old
+/// signature took a hardcoded height and returned nil for anything else,
+/// which silently dropped every tall frame. Anything taller than the panel is
+/// cropped to the top 32 rows — the title and leading rows, the same window
+/// the static app render shows — so cards stay uniform.
+func cgImageFromRGBA(_ data: Data, width: Int = 64) -> CGImage? {
+    let rowBytes = width * 4
+    guard rowBytes > 0, data.count >= rowBytes, data.count % rowBytes == 0 else { return nil }
+    let height = min(data.count / rowBytes, 32)
+    let visible = data.prefix(height * rowBytes)
+    guard let provider = CGDataProvider(data: visible as CFData) else { return nil }
     return CGImage(
         width: width, height: height,
-        bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+        bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: rowBytes,
         space: CGColorSpaceCreateDeviceRGB(),
         bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
         provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent
@@ -2157,48 +2123,6 @@ struct TroubleshootingSheet: View {
     let httpBase: String
     @Environment(\.dismiss) private var dismiss
 
-    struct Guide: Identifiable {
-        let slug: String // GET /guide/{slug}.png
-        let title: String
-        let advice: String
-        var id: String { slug }
-    }
-
-    static let guides: [Guide] = [
-        // Ordered by likelihood: the healthy-looking states first, then the
-        // connect legs, then first-time setup.
-        Guide(
-            slug: "game",
-            title: "Showing scores as usual",
-            advice: "The panel keeps the latest scores up through brief network drops while it reconnects in the background — so it can look perfectly normal while the app says offline. Give it a minute: it either recovers quietly or switches to a CONNECTING screen."
-        ),
-        Guide(
-            slug: "black",
-            title: "Completely dark",
-            advice: "The board is asleep, turned off, or not getting power. Tap the knob to wake it. If it stays dark, check that it's plugged in and that the power adapter supplies 5V\u{2009}\u{2393}\u{2009}3A — the one from the box. Weaker adapters can't run the panel."
-        ),
-        Guide(
-            slug: "joining-wifi",
-            title: "Joining Wi-Fi",
-            advice: "The board can't reach your Wi-Fi: the router may be down, the password may have changed, or the board moved to a new network. If it persists, hold the knob for about 10 seconds to factory reset the board, then set it up again."
-        ),
-        Guide(
-            slug: "finding-server",
-            title: "Finding the server",
-            advice: "Wi-Fi is fine but the internet or the scoreboard service isn't reachable. Check your internet connection — the service may also be briefly restarting. The board reconnects on its own."
-        ),
-        Guide(
-            slug: "setup",
-            title: "Waiting for setup",
-            advice: "The board is waiting to be set up over Bluetooth: open the app and tap Add Scoreboard."
-        ),
-        Guide(
-            slug: "pair-code",
-            title: "Ready to pair",
-            advice: "The board is on Wi-Fi and ready to join the app: tap Add Scoreboard and type in the code shown on the panel."
-        ),
-    ]
-
     var body: some View {
         NavigationStack {
             TroubleshootingGuide(httpBase: httpBase)
@@ -2212,20 +2136,21 @@ struct TroubleshootingSheet: View {
 }
 
 /// The guide itself, with no presentation of its own — pushed from Settings,
-/// wrapped in a sheet by the offline card.
+/// wrapped in a sheet by the offline card. Its COPY comes from the core
+/// (`strings.rs`), where the Android app will read the same sentences.
 struct TroubleshootingGuide: View {
     let httpBase: String
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                Text("Match what the scoreboard's panel shows right now:")
+                Text(troubleshootingIntro())
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                ForEach(TroubleshootingSheet.guides) { g in
+                ForEach(troubleshootingGuides(), id: \.slug) { g in
                     guideRow(g)
                 }
-                Text("Whatever the panel shows, power-cycling is a safe first step: unplug the scoreboard and plug it back in. It always recovers on its own once your network is back.")
+                Text(troubleshootingFooter())
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -2235,7 +2160,7 @@ struct TroubleshootingGuide: View {
         .navigationBarTitleDisplayMode(.inline)
     }
 
-    private func guideRow(_ g: TroubleshootingSheet.Guide) -> some View {
+    private func guideRow(_ g: GuideCopy) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             // Gray failure: the guide endpoint may not exist yet on an older
             // server, and this is read precisely when the network is suspect —
@@ -2916,14 +2841,7 @@ enum SettingsInfoTopic: String, Identifiable {
 
     var explanation: String {
         switch self {
-        case .demoData:
-            """
-            Fills this scoreboard with a made-up slate of games — every sport and every layout at once — so you can see what it does out of season or before your teams are playing. The scores are NOT real.
-
-            It stays on until you turn it off; it will not time out on its own. Nothing else about the scoreboard changes, and your favorites and settings are waiting when you switch back.
-
-            The setting lives on the server, so you can turn it off from any paired phone even if the scoreboard is unplugged.
-            """
+        case .demoData: demoGamesExplainer()
         }
     }
 }
@@ -5574,13 +5492,7 @@ struct SettingsView: View {
         } footer: {
             // The scopes live on three different screens, so the one screen
             // named Spoilers is where the set of them has to be stated.
-            Text(
-                """
-                Spoiler protection hides scores and shows only the current period or a \
-                live indicator. Spoiler protection can be turned on for all leagues, \
-                specific leagues, individual teams, or individual games.
-                """
-            )
+            Text(spoilerExplainer())
         }
 
         // Its own section rather than a pseudo-header row inside the one above.

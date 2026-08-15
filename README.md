@@ -70,17 +70,16 @@ Working and verified end-to-end:
   (power, brightness) — verified running in the iOS Simulator against the local
   server.
 
-Stubbed / not done yet:
+Done since that list was written: Ed25519 signatures are verified on every
+device socket, BLE pairing ships in the firmware, the catalog is live ESPN
+data, sport-specific extras render (bases/outs, possession + field bar,
+power-play, leaderboards), and the app has grown the full dashboard, league
+editors, and settings.
 
-- Ed25519 auth is currently accept-any (real signatures next); the **BLE pairing**
-  flow isn't built.
-- **Sport-specific extras** (baseball bases/outs, football possession + down,
-  hockey power-play, golf leaderboard) aren't rendered yet.
-- The real team **catalog** the app shows is still mock data.
-- **Richer app screens** (team picker, schedule, dashboard) — only basic controls
-  so far.
-- **Android** app — the core is ready, the Kotlin UI is not.
-- **Hardware** — see below.
+Not done yet:
+
+- **Android** app — see `MAR-104`. The shared core carries the transport and,
+  increasingly, the app's logic and strings; the Kotlin UI does not exist.
 
 ## Running it
 
@@ -122,12 +121,10 @@ server, flashing, and setup.
 
 ## Roadmap
 
-1. Sport-specific render extras (complete the exact original look).
-2. Richer iOS app screens (teams & big games, schedule / "watch a game", dashboard).
-3. Real Ed25519 auth + the BLE pairing flow.
-4. Hardware bring-up (ESP32-S3 + panel) and firmware that reuses `board-core`.
-5. Android app (Kotlin UI over the shared core).
-6. Deploy the server to Railway.
+Items 1-4 and 6 of the original roadmap (render extras, app screens, real
+auth + BLE pairing, hardware bring-up, Railway deploy) are done. What remains:
+
+1. Android app (Kotlin UI over the shared core) — planned in `MAR-104`.
 
 ## License
 

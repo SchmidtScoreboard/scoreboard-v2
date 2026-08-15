@@ -3294,21 +3294,7 @@ mod tests {
         }
     }
 
-    /// While CONNECTED the board must draw the server's frame, not its own
-    /// clock.
-    ///
-    /// This is the bug it shipped with: the local clock was checked before the
-    /// online test, so a connected board ignored the frame it had just been
-    /// sent — and picking a clock style or 24-hour time in the app changed
-    /// nothing on the panel.
-    #[test]
-        /// The whole point: the clock keeps time with the server gone. A
-    /// server-rendered clock froze on whatever minute it died at.
-    #[test]
-        /// The regression this feature exists to kill: an idle clock used to light
-    /// up with CONNECTING 45 seconds into any outage, all night.
-    #[test]
-        /// The badge is the honest part: the TIME is still right, the SCORES have
+    /// The badge is the honest part: the TIME is still right, the SCORES have
     /// stopped. It waits out the same grace window as the connect screen so a
     /// deploy blip doesn't flash a red slash.
     #[test]
@@ -3498,10 +3484,6 @@ mod tests {
         assert_ne!(b.framebuffer(), without, "version line changes the boot screen");
     }
 
-    /// A press with no socket sleeps the panel locally AND tells the server the
-    /// moment there's a socket again — otherwise the board is dark while
-    /// `cfg.power` reads true and the app's toggle is a confirmed no-op.
-    #[test]
     /// A board that cannot join Wi-Fi retried forever behind a screen that looked
     /// the same at ten seconds and ten minutes — which is exactly what a WRONG
     /// PASSWORD looks like. The only way out was knowing to hold the knob for ten

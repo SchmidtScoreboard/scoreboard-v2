@@ -65,7 +65,7 @@ All curl-able; the app uses the same ones.
   risk), and `no-store` because the slate advances.
 - `GET /demo/render/{id}.png` — one demo game's 64x32 frame. Unknown id gets a
   visible `NO GAME` frame rather than a 404, same as `/render`.
-- `GET /guide/{joining-wifi|finding-server|setup|pair-code}.png` — the board's
+- `GET /guide/{game|black|joining-wifi|finding-server|setup|pair-code}.png` — the board's
   firmware-local screens (connect progress on either leg, BLE setup, the
   pairing screen with a fake `000000` code), rendered by the same board-core
   code the device runs — the app's troubleshooting sheet fetches these so its
