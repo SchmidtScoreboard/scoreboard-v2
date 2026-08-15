@@ -128,8 +128,12 @@ fn weather_variants() -> Vec<OffModeChoice> {
 pub fn off_modes() -> Vec<OffModeDescriptor> {
     vec![
         OffModeDescriptor {
+            // The ID stays "blank" — it is the stable contract in stored
+            // configs and settings exports. Only the LABEL says "Off": to the
+            // user, "show nothing when idle" and the pickable Off mode are the
+            // same darkness, and two names for one dark panel read as a bug.
             id: "blank".into(),
-            label: "Nothing".into(),
+            label: "Off".into(),
             description: "The panel stays dark.".into(),
             // No preview: an all-black PNG is indistinguishable from a failed
             // load, so the app draws the black panel itself.

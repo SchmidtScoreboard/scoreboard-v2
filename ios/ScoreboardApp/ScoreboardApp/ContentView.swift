@@ -223,7 +223,7 @@ final class BoardViewModel: ObservableObject {
             UiOffMode(id: "clock", label: "Clock",
                       description: "The time, in the scoreboard's timezone.",
                       preview: "/offmode/clock.png", input: nil, fields: []),
-            UiOffMode(id: "blank", label: "Nothing",
+            UiOffMode(id: "blank", label: "Off",
                       description: "The panel stays dark.", preview: nil, input: nil, fields: []),
         ]
     }
@@ -658,9 +658,9 @@ final class BoardViewModel: ObservableObject {
     }
 
     /// Every pickable mode, in display order: Scores first (the resting
-    /// state), the server-declared screens, Off last. The idle "Nothing"
-    /// screen is excluded — picking a dark screen IS Off, and two dark tiles
-    /// with different meanings is a trap.
+    /// state), the server-declared screens, Off last. The idle darkness
+    /// descriptor ("blank", labelled Off) is excluded — the hardcoded Off tile
+    /// IS that darkness, and two dark tiles would be a trap.
     struct PickableMode: Identifiable {
         let id: String
         let label: String
@@ -5394,28 +5394,6 @@ struct SettingsView: View {
         }
     }
 
-    /// One mode's timer: how long the board holds it before returning to
-    /// scores. The row for "Off" writes the legacy `sleep_hours` too, via the
-    /// server's fallback — an old app's sleep-duration setting and this row
-    /// are the same dial.
-    private func modeTimerRow(_ id: String, _ label: String) -> some View {
-        HStack(spacing: 6) {
-            Text(label)
-            Spacer()
-            Picker(label, selection: Binding(
-                get: { model.current.modeHours[id] ?? model.current.sleepHours },
-                set: { model.setModeHours(id, $0) }
-            )) {
-                Text("Until changed").tag(UInt32(0))
-                ForEach([UInt32(1), 2, 4, 8, 12, 24, 48], id: \.self) { h in
-                    Text(h == 1 ? "1 hour" : "\(h) hours").tag(h)
-                }
-            }
-            .pickerStyle(.menu)
-            .labelsHidden()
-        }
-    }
-
 
 
     /// The little ⓘ next to a settings row. `.borderless` so it hit-tests as its
@@ -5535,56 +5513,48 @@ struct SettingsView: View {
         }
     }
 
-    /// One idle screen: the tile selects it; a mode with settings carries a
-    /// trailing slider glyph that pushes ITS page — reachable whether or not
-    /// the mode is the current choice, because "configure the weather screen"
-    /// is not conditional on using it as the idle screen. The mode's timer
-    /// lives on that page too, beside the rest of what the mode is.
+    /// One idle screen. The ROW is a NavigationLink into the mode's settings
+    /// page — the fully supported List layout, after a hand-rolled trailing
+    /// link squeezed the label to a one-character column and drew a second
+    /// chevron. The tile-and-label is a plain Button INSIDE the link's label:
+    /// a Button in a link row wins the hit-test over its own frame, so the
+    /// picture selects while the rest of the row (glyph, chevron, whitespace)
+    /// pushes.
     ///
-    /// Two controls, side by side — the same shape as `leagueHeaderRow`: a
-    /// value-less NavigationLink pushes from where it sits (Settings → Screen
-    /// → Weather), and has no presentation state for a model-push rebuild to
-    /// tear down.
+    /// Every row gets the page: even "Off" has one now, because its timer
+    /// lives there like every other mode's.
     private func idleScreenRow(_ m: UiOffMode) -> some View {
         let selected = model.current.offMode == m.id
-        return HStack(spacing: 12) {
-            Button { model.setOffMode(m.id) } label: {
-                HStack(spacing: 14) {
-                    Group {
-                        if let path = m.preview {
-                            FetchedFrameImage(url: URL(string: "\(model.httpBase)\(path)"))
-                        } else {
-                            // "Nothing" has no preview on purpose: an all-black
-                            // PNG cannot be told apart from a failed load.
-                            Color.black
+        return NavigationLink {
+            OffModeSettingsView(model: model, mode: m)
+        } label: {
+            HStack(spacing: 14) {
+                Button { model.setOffMode(m.id) } label: {
+                    HStack(spacing: 14) {
+                        Group {
+                            if let path = m.preview {
+                                FetchedFrameImage(url: URL(string: "\(model.httpBase)\(path)"))
+                            } else {
+                                // "Off" has no preview on purpose: an all-black
+                                // PNG cannot be told apart from a failed load.
+                                Color.black
+                            }
                         }
+                        .ledPanel(width: 128, height: 64)
+                        .padding(2)
+                        .overlay {
+                            Rectangle()
+                                .strokeBorder(selected ? Color.accentColor : .clear, lineWidth: 2)
+                        }
+                        Text(m.label)
+                            .foregroundStyle(selected ? Color.primary : Color.secondary)
                     }
-                    .ledPanel(width: 128, height: 64)
-                    .padding(2)
-                    .overlay {
-                        Rectangle()
-                            .strokeBorder(selected ? Color.accentColor : .clear, lineWidth: 2)
-                    }
-                    Text(m.label)
-                        .foregroundStyle(selected ? Color.primary : Color.secondary)
-                    Spacer(minLength: 0)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            if !m.fields.isEmpty {
-                NavigationLink {
-                    OffModeSettingsView(model: model, mode: m)
-                } label: {
-                    Image(systemName: "slider.horizontal.3")
-                        .foregroundStyle(.secondary)
-                        // A glyph alone is a sub-20pt target; pad the hit area
-                        // without moving the visual edge.
-                        .padding(8)
-                        .contentShape(Rectangle())
-                        .padding(-8)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                Spacer(minLength: 8)
+                Image(systemName: "slider.horizontal.3")
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -5838,12 +5808,6 @@ struct SettingsView: View {
     @ViewBuilder private var sleepPage: some View {
         Form {
             offModeSection
-            // Off has no settings page to host its timer — it is the absence
-            // of a screen — so the one timer without a home sits as a bare
-            // row. Clock's and Weather's live on their own pages.
-            Section {
-                modeTimerRow("off", "Off timer")
-            }
             quietHoursSection
         }
         .navigationTitle("Screen")
@@ -6313,6 +6277,15 @@ struct OffModeSettingsView: View {
     @ObservedObject var model: BoardViewModel
     let mode: UiOffMode
 
+    /// The timer's key. The idle descriptor for darkness is "blank" (a stable
+    /// id in stored configs and exports) while the PICKABLE dark mode is
+    /// "off" — one darkness, two ids for historical reasons. The timer belongs
+    /// to the pickable mode: writing mode_hours["blank"] would configure a
+    /// timer nothing can ever run.
+    private var timerKey: String {
+        mode.id == "blank" ? "off" : mode.id
+    }
+
     var body: some View {
         Form {
             ForEach(model.visibleOffModeFields(mode), id: \.key) { field in
@@ -6327,8 +6300,8 @@ struct OffModeSettingsView: View {
                     Text("Timer")
                     Spacer()
                     Picker("Timer", selection: Binding(
-                        get: { model.current.modeHours[mode.id] ?? model.current.sleepHours },
-                        set: { model.setModeHours(mode.id, $0) }
+                        get: { model.current.modeHours[timerKey] ?? model.current.sleepHours },
+                        set: { model.setModeHours(timerKey, $0) }
                     )) {
                         Text("Until changed").tag(UInt32(0))
                         ForEach([UInt32(1), 2, 4, 8, 12, 24, 48], id: \.self) { h in
