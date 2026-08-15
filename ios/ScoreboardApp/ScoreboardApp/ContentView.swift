@@ -2568,21 +2568,15 @@ struct DashboardView: View {
         }
     }
 
-    /// Quiet hours, on the screen with the power button.
-    ///
-    /// Without this the setting is invisible from the dashboard: someone whose
-    /// board is dark at 11pm sees a power button that is ON and a footer that
-    /// says nothing, and the only explanation is three taps into Settings.
+    /// Quiet hours on the dashboard — but ONLY while the window is actually
+    /// darkening the panel. A configured-but-inactive window is a setting,
+    /// not a status, and stating it here all day was noise; the dark panel
+    /// with no explanation is the one moment this line earns its place.
     @ViewBuilder private var quietFooter: some View {
         if model.current.quietActive {
             Label(
                 "Quiet hours — the screen is off until \(Self.clockText(model.current.quietEndMin ?? 0)).",
                 systemImage: "moon.zzz.fill"
-            )
-        } else if let start = model.current.quietStartMin, let end = model.current.quietEndMin {
-            Label(
-                "Quiet hours \(Self.clockText(start)) to \(Self.clockText(end)).",
-                systemImage: "moon"
             )
         }
     }
@@ -5422,20 +5416,7 @@ struct SettingsView: View {
         }
     }
 
-    /// A timer per pickable non-scores mode. Section-level, because the rule
-    /// is the same for every row and stating it once is the point of the rule:
-    /// nothing you pick can strand the board forever.
-    private var modeTimersSection: some View {
-        Section {
-            ForEach(model.pickableModes.filter { $0.id != "scores" }, id: \.id) { m in
-                modeTimerRow(m.id, m.label)
-            }
-        } header: {
-            Text("Timers")
-        } footer: {
-            Text("How long the Scoreboard holds each mode — from the picker in Controls or the scoreboard's button — before returning to scores on its own.")
-        }
-    }
+
 
     /// The little ⓘ next to a settings row. `.borderless` so it hit-tests as its
     /// own button instead of swallowing the whole Form row.
@@ -5498,22 +5479,6 @@ struct SettingsView: View {
             }
         } header: {
             Text("Quiet hours")
-        } footer: {
-            if model.current.quietActive {
-                Label(
-                    "Sleeping now. Press the scoreboard's button to see it for the rest of tonight.",
-                    systemImage: "moon.zzz.fill"
-                )
-            } else {
-                // Stated whether or not a window is set, because it is also the
-                // answer to "what would turning this on do?".
-                //
-                // "Wake for live events" used to sit in this section. It was one
-                // switch that made the window mean two different things, and the
-                // footer needed a whole clause about the exception — a setting
-                // that has to be explained is worse than the plain rule.
-                Text("Turn the Scoreboard screen off entirely during this time window.")
-            }
         }
     }
 
@@ -5562,40 +5527,65 @@ struct SettingsView: View {
     /// its preview, and let someone pick it, with no rebuild.
     private var offModeSection: some View {
         Section {
-            PreviewSelector(
-                options: model.offModes.map { .init($0.id, $0.label, $0.preview) },
-                selected: model.current.offMode,
-                httpBase: model.httpBase
-            ) { model.setOffMode($0) }
-            // The chosen mode's own settings, when it declared any. Below the
-            // tiles rather than on one: it configures the selection, it is not
-            // one of the choices.
-            if let mode = model.offModes.first(where: { $0.id == model.current.offMode }),
-               !mode.fields.isEmpty {
-                // A real NavigationLink, declared HERE.
-                //
-                // It used to be a Button setting `settingsForMode`, read by a
-                // `.navigationDestination(item:)` anchored on the settings
-                // ROOT. A destination pushes from the depth it is DECLARED at,
-                // so opening Weather settings from this row — which lives one
-                // push deep, inside Sleep — popped Sleep and landed at depth 1.
-                // Back then returned to the settings root instead of Sleep.
-                //
-                // A value-less NavigationLink pushes from wherever it sits, so
-                // the stack is Settings → Sleep → Weather settings. It is also
-                // immune to the rebuild problem the sheets on the root are
-                // anchored against: there is no presentation state to tear down
-                // when a model push rebuilds this section.
-                NavigationLink {
-                    OffModeSettingsView(model: model, mode: mode)
-                } label: {
-                    Text("\(mode.label) settings")
-                }
+            ForEach(model.offModes, id: \.id) { m in
+                idleScreenRow(m)
             }
         } header: {
             Text("Idle Screen")
-        } footer: {
-            Text("Shown when the scoreboard is on Scores and nothing you follow is playing. A mode picked in Controls overrides it, and Off keeps the panel dark.")
+        }
+    }
+
+    /// One idle screen: the tile selects it; a mode with settings carries a
+    /// trailing slider glyph that pushes ITS page — reachable whether or not
+    /// the mode is the current choice, because "configure the weather screen"
+    /// is not conditional on using it as the idle screen. The mode's timer
+    /// lives on that page too, beside the rest of what the mode is.
+    ///
+    /// Two controls, side by side — the same shape as `leagueHeaderRow`: a
+    /// value-less NavigationLink pushes from where it sits (Settings → Screen
+    /// → Weather), and has no presentation state for a model-push rebuild to
+    /// tear down.
+    private func idleScreenRow(_ m: UiOffMode) -> some View {
+        let selected = model.current.offMode == m.id
+        return HStack(spacing: 12) {
+            Button { model.setOffMode(m.id) } label: {
+                HStack(spacing: 14) {
+                    Group {
+                        if let path = m.preview {
+                            FetchedFrameImage(url: URL(string: "\(model.httpBase)\(path)"))
+                        } else {
+                            // "Nothing" has no preview on purpose: an all-black
+                            // PNG cannot be told apart from a failed load.
+                            Color.black
+                        }
+                    }
+                    .ledPanel(width: 128, height: 64)
+                    .padding(2)
+                    .overlay {
+                        Rectangle()
+                            .strokeBorder(selected ? Color.accentColor : .clear, lineWidth: 2)
+                    }
+                    Text(m.label)
+                        .foregroundStyle(selected ? Color.primary : Color.secondary)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if !m.fields.isEmpty {
+                NavigationLink {
+                    OffModeSettingsView(model: model, mode: m)
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .foregroundStyle(.secondary)
+                        // A glyph alone is a sub-20pt target; pad the hit area
+                        // without moving the visual edge.
+                        .padding(8)
+                        .contentShape(Rectangle())
+                        .padding(-8)
+                }
+                .buttonStyle(.plain)
+            }
         }
     }
 
@@ -5847,8 +5837,13 @@ struct SettingsView: View {
 
     @ViewBuilder private var sleepPage: some View {
         Form {
-            modeTimersSection
             offModeSection
+            // Off has no settings page to host its timer — it is the absence
+            // of a screen — so the one timer without a home sits as a bare
+            // row. Clock's and Weather's live on their own pages.
+            Section {
+                modeTimerRow("off", "Off timer")
+            }
             quietHoursSection
         }
         .navigationTitle("Screen")
@@ -6322,6 +6317,27 @@ struct OffModeSettingsView: View {
         Form {
             ForEach(model.visibleOffModeFields(mode), id: \.key) { field in
                 fieldSection(field)
+            }
+            // The mode's timer, after its look: how long the board holds this
+            // screen when it is PICKED (in Controls or on the knob) before
+            // returning to scores. Lives here because this page is everything
+            // the mode is — one place to answer "what does Clock do?".
+            Section {
+                HStack(spacing: 6) {
+                    Text("Timer")
+                    Spacer()
+                    Picker("Timer", selection: Binding(
+                        get: { model.current.modeHours[mode.id] ?? model.current.sleepHours },
+                        set: { model.setModeHours(mode.id, $0) }
+                    )) {
+                        Text("Until changed").tag(UInt32(0))
+                        ForEach([UInt32(1), 2, 4, 8, 12, 24, 48], id: \.self) { h in
+                            Text(h == 1 ? "1 hour" : "\(h) hours").tag(h)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                }
             }
         }
         .navigationTitle(mode.label)
