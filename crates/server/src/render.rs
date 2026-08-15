@@ -930,9 +930,9 @@ fn draw_football_field(c: &mut Canvas, g: &Game, home_ball: bool, yards: i32, to
     if num > 0 {
         let s = num.to_string();
         let w = text_width(&s, false);
-        // Baseline on the bar's last row: rows 25..30, leaving the top hash
-        // row untouched.
-        let by = TOP + H as i32 - 1;
+        // Baseline one row up from the bar's bottom: rows 24..29, clearing
+        // the bottom hash row and centering the digits against the bar.
+        let by = TOP + H as i32 - 2;
         let right = field_x(yards) - 2;
         if right - w + 1 > EZ_OWN {
             draw_text_right(c, &s, right, by, false, GREY);
@@ -2158,11 +2158,11 @@ mod kern_tests {
             });
             render_game(&g, None, NameStyle::Name).1
         };
-        // Grey pixels in the bar's text band (rows 25..=30) within x0..x1.
+        // Grey pixels in the bar's text band (rows 24..=29) within x0..x1.
         // The only grey in that band is the yard number.
         let grey_in = |px: &[u8], x0: i32, x1: i32| -> usize {
             let g = c565(GREY);
-            (25..=30)
+            (24..=29)
                 .flat_map(|y| (x0..x1).map(move |x| (x, y)))
                 .filter(|&(x, y)| px565(px, x, y) == g)
                 .count()
@@ -2206,7 +2206,10 @@ mod kern_tests {
         // a scrimmage that does not sit on a hash — the scrimmage and the line
         // to gain both win their column, which is correct and would make these
         // pass for the wrong reason.
-        let mid = bar("SF 40", true); // SEA at midfield-ish, 60 yards out
+        // SF at its own 40: the scrimmage line sits at 26 and the yard number
+        // ends left of it at 24 — clear of the midfield hash (31) and the 80
+        // (46), so every hash sample below reads hashes, not digits.
+        let mid = bar("SF 40", false);
         let (hash, turf) = (c565(HASH), c565(Rgb888::new(0, 26, 0)));
         assert_eq!(px565(&mid, field_x(80), 24), hash, "hash at the 80, top row");
         assert_eq!(px565(&mid, field_x(80), 30), hash, "hash at the 80, bottom row");
@@ -2229,7 +2232,7 @@ mod kern_tests {
             4,
             "right edge: four blanks"
         );
-        assert_eq!(px565(&mid, field_x(60), 27), white, "the ball is short of the 20");
+        assert_eq!(px565(&mid, field_x(40), 27), white, "the scrimmage line sits at the 40");
         // Same string, other team: the ball is now at ITS 25, near the left.
         let px = bar("SEA 25", true);
         assert_eq!(px565(&px, field_x(25), 27), white, "scrimmage at the 25");
