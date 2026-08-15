@@ -8583,6 +8583,28 @@ mod tests {
 mod sample_preview_tests {
     use super::*;
 
+    /// Not an assertion — the football bar in its three knowledge states.
+    /// `cargo test -p server dump_football_states -- --ignored`
+    #[test]
+    #[ignore]
+    fn dump_football_states() {
+        let dir = std::env::var("PREVIEW_DIR").unwrap_or_else(|_| "/tmp/previews".into());
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut g = sample_game_for("nfl", true, true);
+        let f = render::render_frame(&g, None, None, NameStyle::Name).1;
+        save_png(&format!("{dir}/fb-full.png"), &f, 8);
+        if let Some(model::Situation::Football { home_possession, .. }) = &mut g.situation {
+            *home_possession = None;
+        }
+        let f = render::render_frame(&g, None, None, NameStyle::Name).1;
+        save_png(&format!("{dir}/fb-no-possession.png"), &f, 8);
+        if let Some(model::Situation::Football { ball_position, .. }) = &mut g.situation {
+            *ball_position = String::new();
+        }
+        let f = render::render_frame(&g, None, None, NameStyle::Name).1;
+        save_png(&format!("{dir}/fb-no-ball.png"), &f, 8);
+    }
+
     /// Not an assertion — a way to LOOK at every league's fixture.
     /// `cargo test -p server dump_league_previews -- --ignored --nocapture`
     #[test]

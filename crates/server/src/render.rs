@@ -779,30 +779,37 @@ pub fn render_game(g: &Game, tz: Option<chrono_tz::Tz>, style: NameStyle) -> (Fr
     (frame_id(&px), px)
 }
 
-/// End zone widths. UNEQUAL on purpose: a uniform hash rhythm — the same
-/// number of blank columns from each end zone to its nearest hash as between
-/// hashes — needs turf of exactly 9 hashes + 10 gaps × 4 blanks = 49 columns,
-/// and 64 - 49 = 15 splits 7/8. The extra column goes to the ATTACKING end
-/// zone, which also hosts the goal-line column (`field_x(100)` lands on its
-/// first column, where a "1st & Goal" line to gain draws), so its visible
-/// tint never thins below the defended one's.
-const EZ_OWN: i32 = 7;
-const EZ_OPP: i32 = 8;
+/// End zone widths. The field NEVER flips: home defends the left end zone,
+/// away the right, whoever has the ball — a bar that mirrored itself on every
+/// change of possession moved both end zones and teleported the ball, which
+/// read as a glitch, not a turnover. Possession shows as the ball sprite on
+/// the team rows and as which SIDE of the scrimmage line the first-down
+/// marker sits on.
+///
+/// UNEQUAL on purpose: a uniform hash rhythm — the same number of blank
+/// columns from each end zone to its nearest hash as between hashes — needs
+/// turf of exactly 9 hashes + 10 gaps × 4 blanks = 49 columns, and 64 - 49 =
+/// 15 splits 7/8. The extra column goes to the away end, which also hosts the
+/// goal-line column (`field_x(100)` lands on its first column), so its
+/// visible tint never thins below home's.
+const EZ_HOME: i32 = 7;
+const EZ_AWAY: i32 = 8;
 
 /// Yard hashes: bright enough to read as marks against the (0,26,0) turf, dim
 /// enough to stay under the scrimmage line and the line to gain.
 const HASH: Rgb888 = Rgb888::new(0, 55, 0);
 
-/// Panel x for a yard line, measured from the possessing team's own goal.
+/// Panel x for a yard line, measured from the HOME goal — the bar's fixed
+/// left edge.
 ///
 /// Turf is 49 columns (see the end-zone constants), so each decade is a hash
 /// plus four blank columns — the SAME four blanks that separate each end zone
 /// from its nearest hash, which is what makes the rhythm read as even at
-/// panel scale. Yard 100 lands on the attacking end zone's first column: the
-/// goal line IS that boundary, so "1st & Goal" draws its line exactly there.
+/// panel scale. Yard 100 lands on the away end zone's first column: the goal
+/// line IS that boundary, so a line to gain at the goal draws exactly there.
 fn field_x(yards: i32) -> i32 {
-    let field_w = FRAME_WIDTH as i32 - EZ_OWN - EZ_OPP;
-    EZ_OWN + (yards.clamp(0, 100) * field_w) / 100
+    let field_w = FRAME_WIDTH as i32 - EZ_HOME - EZ_AWAY;
+    EZ_HOME + (yards.clamp(0, 100) * field_w) / 100
 }
 
 /// A team colour at end-zone weight — enough to say whose end it is, dim enough
@@ -812,18 +819,20 @@ fn end_zone_tint(c: Rgb888) -> Rgb888 {
     Rgb888::new(f(c.r()), f(c.g()), f(c.b()))
 }
 
-/// Where the ball is, as yards from the POSSESSING team's own goal line.
+/// Where the ball is, as yards from the HOME goal line — the bar's fixed
+/// left edge.
 ///
-/// ESPN's `possessionText` is a side and a number — "SEA 25" — which is half an
-/// answer: the same string means the 25 or the 75 depending on who has the ball.
-/// `possession` supplies the other half. At midfield ESPN drops the side and
-/// sends a bare "50", which needs no disambiguating.
+/// ESPN's `possessionText` names a side and a number — "SEA 25" — and with a
+/// FIXED field that is a complete answer: SEA's 25 is one specific place
+/// whoever has the ball. Possession is not needed to place the ball, only to
+/// aim the line to gain. At midfield ESPN drops the side and sends a bare
+/// "50", which needs no disambiguating.
 ///
 /// Returns `None` rather than guessing when the string is not that shape, or
-/// when the side is neither team playing. A field bar is a claim about where the
-/// ball IS; drawing one from a string we did not understand would put it
-/// somewhere specific and wrong, which is worse than the text it replaced.
-fn yards_from_own_goal(g: &Game, ball_position: &str, home_ball: bool) -> Option<i32> {
+/// when the side is neither team playing. A field bar is a claim about where
+/// the ball IS; drawing one from a string we did not understand would put it
+/// somewhere specific and wrong.
+fn yards_from_home_goal(g: &Game, ball_position: &str) -> Option<i32> {
     let text = ball_position.trim();
     let (side, num) = match text.rsplit_once(' ') {
         Some((s, n)) => (Some(s.trim()), n),
@@ -838,48 +847,44 @@ fn yards_from_own_goal(g: &Game, ball_position: &str, home_ball: bool) -> Option
         // Sideless is only meaningful at midfield, where both readings agree.
         return (n == 50).then_some(50);
     };
-    let (own, opp) = if home_ball {
-        (&g.home.abbrev, &g.away.abbrev)
-    } else {
-        (&g.away.abbrev, &g.home.abbrev)
-    };
-    if side.eq_ignore_ascii_case(own) {
+    if side.eq_ignore_ascii_case(&g.home.abbrev) {
         Some(n)
-    } else if side.eq_ignore_ascii_case(opp) {
+    } else if side.eq_ignore_ascii_case(&g.away.abbrev) {
         Some(100 - n)
     } else {
         None
     }
 }
 
-/// The line to gain, in the same yards-from-own-goal units.
+/// The line to gain, in yards-from-home-goal. Home attacks RIGHT (toward the
+/// away end zone), away attacks LEFT — which SIDE of the scrimmage line the
+/// marker sits on is therefore also the possession indicator.
 ///
 /// `1st & Goal` carries no number because the line to gain IS the goal line.
-fn yards_to_gain(down_string: &str, from: i32) -> Option<i32> {
+fn yards_to_gain(down_string: &str, from: i32, home_ball: bool) -> Option<i32> {
     let tail = down_string.rsplit(|ch| ch == '&' || ch == '+').next()?.trim();
     if tail.eq_ignore_ascii_case("goal") {
-        return Some(100);
+        return Some(if home_ball { 100 } else { 0 });
     }
-    Some((from + tail.parse::<i32>().ok()?).min(100))
+    let d: i32 = tail.parse().ok()?;
+    Some(if home_ball { (from + d).min(100) } else { (from - d).max(0) })
 }
 
-/// The field bar: a cross-section of the field with the offense attacking right.
+/// The field bar: a cross-section of the field, home defending the LEFT end
+/// zone always.
 ///
-/// This is the whole point of the redesign. `SEA 25` is a fact you have to
-/// assemble — know which team SEA is, find who has the ball, then invert the
-/// number — and a position on a line is a fact you can see. Everything drawn
-/// here comes from `possessionText` and `possession`, both already parsed.
-fn draw_football_field(c: &mut Canvas, g: &Game, home_ball: bool, yards: i32, to_gain: Option<i32>) {
+/// `SEA 25` is a fact you have to assemble — know which team SEA is, then
+/// find the spot — and a position on a fixed line is a fact you can see.
+/// Every part draws independently of the others: the field itself always,
+/// the ball whenever the yard line parsed, the line to gain only when
+/// possession says which way it points. Whatever is unknown is simply
+/// absent — never a different layout, and never a guess.
+fn draw_football_field(c: &mut Canvas, g: &Game, yards: Option<i32>, to_gain: Option<i32>) {
     const TOP: i32 = 24;
     const H: u32 = 7;
-    let (own, opp) = if home_ball {
-        (g.home.primary, g.away.primary)
-    } else {
-        (g.away.primary, g.home.primary)
-    };
     fill(c, 0, TOP, FRAME_WIDTH as u32, H, Rgb888::new(0, 26, 0));
-    fill(c, 0, TOP, EZ_OWN as u32, H, end_zone_tint(own));
-    fill(c, FRAME_WIDTH as i32 - EZ_OPP, TOP, EZ_OPP as u32, H, end_zone_tint(opp));
+    fill(c, 0, TOP, EZ_HOME as u32, H, end_zone_tint(g.home.primary));
+    fill(c, FRAME_WIDTH as i32 - EZ_AWAY, TOP, EZ_AWAY as u32, H, end_zone_tint(g.away.primary));
     // Yard markings: 1px hashes at every 10, top and bottom rows only.
     //
     // The middle five rows stay clean turf, which is what keeps the hierarchy
@@ -907,6 +912,9 @@ fn draw_football_field(c: &mut Canvas, g: &Game, home_ball: bool, yards: i32, to
         fill(c, field_x(yard), TOP, 1, n, HASH);
         fill(c, field_x(yard), TOP + H as i32 - n as i32, 1, n, HASH);
     }
+    // Nothing more without a ball: the field alone is still an honest frame.
+    let Some(yards) = yards else { return };
+
     if let Some(gain) = to_gain {
         // A line to gain on top of the scrimmage line is no information, and it
         // would win the overdraw below and read as the wrong colour.
@@ -921,11 +929,12 @@ fn draw_football_field(c: &mut Canvas, g: &Game, home_ball: bool, yards: i32, to
 
     // The yard line itself, the way the field paints it: counted from the
     // nearer goal, so "SEA 25" reads 25 wherever SEA is defending. It sits on
-    // the side of the scrimmage line AWAY from the line to gain — which
-    // always lies downfield, to the right — so the number and the yellow
-    // line can never collide. Backed up too deep for the number to fit on
-    // the left, it jumps past the markers instead of squeezing between them;
-    // grey, because it is context, and the two LINES are the news.
+    // the side of the scrimmage line AWAY from the line to gain — which now
+    // points either way, since it aims at the possessing team's target end —
+    // so the number and the yellow line can never collide. With no gain line
+    // to dodge, it takes the roomier side; too cramped for the preferred
+    // side, it jumps past the markers instead of squeezing between them.
+    // Grey, because it is context, and the LINES are the news.
     let num = yards.min(100 - yards);
     if num > 0 {
         let s = num.to_string();
@@ -933,15 +942,23 @@ fn draw_football_field(c: &mut Canvas, g: &Game, home_ball: bool, yards: i32, to
         // Baseline one row up from the bar's bottom: rows 24..29, clearing
         // the bottom hash row and centering the digits against the bar.
         let by = TOP + H as i32 - 2;
-        let right = field_x(yards) - 2;
-        if right - w + 1 > EZ_OWN {
-            draw_text_right(c, &s, right, by, false, GREY);
-        } else {
-            let past = to_gain.map(field_x).unwrap_or_else(|| field_x(yards));
-            let x = past + 2;
-            if x + w < FRAME_WIDTH as i32 - EZ_OPP {
-                draw_text(c, &s, x, by, false, GREY);
-            }
+        let sx = field_x(yards);
+        let leftmost = to_gain.map_or(sx, |gy| field_x(gy).min(sx));
+        let rightmost = to_gain.map_or(sx, |gy| field_x(gy).max(sx));
+        let prefer_left = match to_gain {
+            Some(gy) => field_x(gy) >= sx,
+            None => yards >= 50,
+        };
+        let fits_left = leftmost - 2 - (w - 1) > EZ_HOME;
+        let fits_right = rightmost + 2 + w < FRAME_WIDTH as i32 - EZ_AWAY;
+        if prefer_left && fits_left {
+            draw_text_right(c, &s, leftmost - 2, by, false, GREY);
+        } else if !prefer_left && fits_right {
+            draw_text(c, &s, rightmost + 2, by, false, GREY);
+        } else if fits_right {
+            draw_text(c, &s, rightmost + 2, by, false, GREY);
+        } else if fits_left {
+            draw_text_right(c, &s, leftmost - 2, by, false, GREY);
         }
     }
 }
@@ -966,19 +983,18 @@ fn draw_football_situation(c: &mut Canvas, g: &Game, sit: &Situation) {
         let (y, color) = if *home_ball { (8, g.home.primary) } else { (1, g.away.primary) };
         draw_sprite(c, FOOTBALL, 1, y, color);
     }
-    let field = home_possession
-        .and_then(|home_ball| Some((home_ball, yards_from_own_goal(g, ball_position, home_ball)?)));
-    let Some((home_ball, yards)) = field else {
-        // Original rows: top at y=17, bottom at y=25. The original's draw_text
-        // put cap bottoms at y-1; ours puts them ON the baseline, hence the -1.
-        draw_text_right(c, down_string, 63, 21, false, WHITE);
-        draw_text(c, &g.ordinal, 2, 29, false, WHITE);
-        draw_text_right(c, ball_position, 63, 29, false, WHITE);
-        return;
-    };
     draw_text(c, down_string, 2, 21, false, WHITE);
     draw_text_right(c, &g.ordinal, 62, 21, false, GREY);
-    draw_football_field(c, g, home_ball, yards, yards_to_gain(down_string, yards));
+    // The bar always draws — there is no fallback layout any more. The field
+    // needs nothing; the ball needs only a parseable yard line (absolute now
+    // that the field is fixed); the first-down marker alone needs possession,
+    // for its direction. Each is present exactly when its fact is.
+    let yards = yards_from_home_goal(g, ball_position);
+    let gain = match (yards, home_possession) {
+        (Some(y), Some(hb)) => yards_to_gain(down_string, y, *hb),
+        _ => None,
+    };
+    draw_football_field(c, g, yards, gain);
 }
 
 /// Original baseball.rs bottom layout: 5x8 inning ordinal + half-inning arrow
@@ -2122,26 +2138,29 @@ mod kern_tests {
             ball_position: "SEA 25".into(),
             home_possession: Some(false),
         });
-        // away = SF, home = SEA.
-        assert_eq!(yards_from_own_goal(&g, "SEA 25", false), Some(75), "SF at SEA's 25");
-        assert_eq!(yards_from_own_goal(&g, "SEA 25", true), Some(25), "SEA at its own 25");
-        assert_eq!(yards_from_own_goal(&g, "SF 20", false), Some(20), "SF backed up");
-        assert_eq!(yards_from_own_goal(&g, "SF 20", true), Some(80), "SEA in the red zone");
-        assert_eq!(yards_from_own_goal(&g, "50", false), Some(50), "midfield needs no side");
-        assert_eq!(yards_from_own_goal(&g, "sea 25", false), Some(75), "case is ESPN's business");
+        // away = SF, home = SEA. Positions are ABSOLUTE — from the home goal,
+        // possession not consulted: SEA's 25 is one spot whoever has the ball.
+        assert_eq!(yards_from_home_goal(&g, "SEA 25"), Some(25), "the home 25");
+        assert_eq!(yards_from_home_goal(&g, "SF 20"), Some(80), "the away 20 = 80 from home");
+        assert_eq!(yards_from_home_goal(&g, "50"), Some(50), "midfield needs no side");
+        assert_eq!(yards_from_home_goal(&g, "sea 25"), Some(25), "case is ESPN's business");
         // Anything not understood must refuse rather than pick a spot.
         for junk in ["", "SEA", "MID 25", "SEA 75", "SEA XX", "-5"] {
-            assert_eq!(yards_from_own_goal(&g, junk, false), None, "{junk:?} should not parse");
+            assert_eq!(yards_from_home_goal(&g, junk), None, "{junk:?} should not parse");
         }
-        // The line to gain, including the down that has no number.
-        assert_eq!(yards_to_gain("3rd & 4", 75), Some(79));
-        assert_eq!(yards_to_gain("1st & Goal", 94), Some(100));
-        assert_eq!(yards_to_gain("2nd & 15", 95), Some(100), "clamped to the goal line");
-        assert_eq!(yards_to_gain("3rd & inches", 40), None);
-        // The own goal line opens the turf; the far goal line is the attacking
+        // The line to gain aims at the possessing team's target end: home
+        // attacks right (toward 100), away attacks left (toward 0).
+        assert_eq!(yards_to_gain("3rd & 4", 75, true), Some(79), "home drives right");
+        assert_eq!(yards_to_gain("3rd & 4", 75, false), Some(71), "away drives left");
+        assert_eq!(yards_to_gain("1st & Goal", 94, true), Some(100));
+        assert_eq!(yards_to_gain("1st & Goal", 6, false), Some(0), "away's goal is 0");
+        assert_eq!(yards_to_gain("2nd & 15", 95, true), Some(100), "clamped to the goal line");
+        assert_eq!(yards_to_gain("2nd & 15", 5, false), Some(0), "clamped the other way");
+        assert_eq!(yards_to_gain("3rd & inches", 40, true), None);
+        // The home goal line opens the turf; the away goal line is the away
         // END ZONE'S first column — the boundary a goal line actually is.
-        assert_eq!(field_x(0), EZ_OWN);
-        assert_eq!(field_x(100), FRAME_WIDTH as i32 - EZ_OPP);
+        assert_eq!(field_x(0), EZ_HOME);
+        assert_eq!(field_x(100), FRAME_WIDTH as i32 - EZ_AWAY);
         assert!(field_x(25) < field_x(50) && field_x(50) < field_x(75), "monotonic");
     }
 
@@ -2168,22 +2187,30 @@ mod kern_tests {
                 .count()
         };
 
-        // SF at SEA's 25 = 75 out, gain at 79: "25" ends 2px left of scrimmage.
+        // Ball at the home 25. AWAY possession drives LEFT: gain at 21, so
+        // the number goes RIGHT of the scrimmage line — and never between
+        // the markers.
         let px = bar("SEA 25", false);
-        assert!(grey_in(&px, field_x(50), field_x(75) - 1) > 0, "number left of the scrimmage line");
-        assert_eq!(grey_in(&px, field_x(75) + 1, field_x(79)), 0, "nothing between the two markers");
+        assert!(grey_in(&px, field_x(25) + 1, field_x(25) + 14) > 0, "number right of scrimmage");
+        assert_eq!(grey_in(&px, field_x(21) + 1, field_x(25)), 0, "nothing between the markers");
+        // Same spot, HOME possession drives RIGHT: gain at 29, number LEFT.
+        let px = bar("SEA 25", true);
+        assert!(grey_in(&px, EZ_HOME + 1, field_x(25) - 1) > 0, "number left of scrimmage");
+        assert_eq!(grey_in(&px, field_x(25) + 1, field_x(29)), 0, "nothing between the markers");
 
-        // SEA backed up at its own 8: no room on the left, so the number
-        // jumps past the line to gain (8 + 4 = the 12) rather than wedging
-        // between the markers.
+        // Home backed up at its own 8, driving right: no room on the left,
+        // so the number jumps past the line to gain (the 12) rather than
+        // wedging between the markers.
         let px = bar("SEA 8", true);
-        assert_eq!(grey_in(&px, EZ_OWN, field_x(8) - 1), 0, "too deep: nothing left of the ball");
+        assert_eq!(grey_in(&px, EZ_HOME, field_x(8) - 1), 0, "too deep: nothing left of the ball");
         assert!(grey_in(&px, field_x(12) + 1, 40) > 0, "the number sits past the markers instead");
     }
 
-    /// The field bar draws, and it reverses when the other team has the ball.
+    /// The field NEVER flips: home defends the left end zone whoever has the
+    /// ball, and possession shows as which side of the scrimmage line the
+    /// first-down marker sits on.
     #[test]
-    fn the_field_bar_orients_itself_by_possession() {
+    fn the_field_is_fixed_home_left_away_right() {
         let bar = |ball: &str, home_ball: bool| -> Vec<u8> {
             let g = sit_game("nfl", "3rd", "8:12", Situation::Football {
                 down_string: "3rd & 4".into(),
@@ -2193,23 +2220,22 @@ mod kern_tests {
             render_game(&g, None, NameStyle::Name).1
         };
         let (white, yellow) = (c565(WHITE), c565(YELLOW));
-        // SF (away) at SEA's 25 = 75 yards out: scrimmage right of centre, the
-        // line to gain four yards further right, still short of the end zone.
+        // Ball at the home 25 — ONE spot for both possessions. Away ball: the
+        // marker aims LEFT at away's target end. Home ball: it aims RIGHT.
         let px = bar("SEA 25", false);
-        assert_eq!(px565(&px, field_x(75), 27), white, "scrimmage at the 75");
-        assert_eq!(px565(&px, field_x(79), 27), yellow, "line to gain at the 79");
-        assert!(field_x(79) > field_x(75), "the offense attacks right, always");
+        assert_eq!(px565(&px, field_x(25), 27), white, "scrimmage at the home 25");
+        assert_eq!(px565(&px, field_x(21), 27), yellow, "away drives left: gain at the 21");
         // The scrimmage line overhangs the turf top and bottom.
-        assert_eq!(px565(&px, field_x(75), 23), white, "overhang above");
-        assert_eq!(px565(&px, field_x(75), 31), white, "overhang below");
+        assert_eq!(px565(&px, field_x(25), 23), white, "overhang above");
+        assert_eq!(px565(&px, field_x(25), 31), white, "overhang below");
+        let px = bar("SEA 25", true);
+        assert_eq!(px565(&px, field_x(25), 27), white, "same spot, home ball");
+        assert_eq!(px565(&px, field_x(29), 27), yellow, "home drives right: gain at the 29");
         // Yard hashes: on the top and bottom rows, and ONLY there. Checked from
-        // a scrimmage that does not sit on a hash — the scrimmage and the line
-        // to gain both win their column, which is correct and would make these
-        // pass for the wrong reason.
-        // SF at its own 40: the scrimmage line sits at 26 and the yard number
-        // ends left of it at 24 — clear of the midfield hash (31) and the 80
-        // (46), so every hash sample below reads hashes, not digits.
-        let mid = bar("SF 40", false);
+        // a ball spot whose scrimmage, gain and number all sit clear of every
+        // sampled hash — the markers win their columns, which is correct and
+        // would make these pass for the wrong reason.
+        let mid = bar("SEA 30", true);
         let (hash, turf) = (c565(HASH), c565(Rgb888::new(0, 26, 0)));
         assert_eq!(px565(&mid, field_x(80), 24), hash, "hash at the 80, top row");
         assert_eq!(px565(&mid, field_x(80), 30), hash, "hash at the 80, bottom row");
@@ -2223,34 +2249,36 @@ mod kern_tests {
         // The uniform-rhythm invariant, stated as the eye reads it: the SAME
         // number of blank columns everywhere — end zone to first hash, hash
         // to hash, last hash to end zone.
-        assert_eq!(field_x(10) - EZ_OWN, 4, "left edge: four blanks");
+        assert_eq!(field_x(10) - EZ_HOME, 4, "left edge: four blanks");
         for y in (20..=90).step_by(10) {
             assert_eq!(field_x(y) - field_x(y - 10) - 1, 4, "decade {y}: four blanks");
         }
         assert_eq!(
-            (FRAME_WIDTH as i32 - EZ_OPP) - field_x(90) - 1,
+            (FRAME_WIDTH as i32 - EZ_AWAY) - field_x(90) - 1,
             4,
             "right edge: four blanks"
         );
-        assert_eq!(px565(&mid, field_x(40), 27), white, "the scrimmage line sits at the 40");
-        // Same string, other team: the ball is now at ITS 25, near the left.
-        let px = bar("SEA 25", true);
-        assert_eq!(px565(&px, field_x(25), 27), white, "scrimmage at the 25");
-        assert_eq!(px565(&px, field_x(75), 27), c565(Rgb888::new(0, 26, 0)), "and not at the 75");
-        // End zones take the colour of whoever is defending them. With SEA
-        // holding, SEA's own end zone is behind it on the left.
-        assert_eq!(px565(&px, 1, 27), c565(end_zone_tint(sit_game("nfl", "", "", Situation::Football {
+        assert_eq!(px565(&mid, field_x(30), 27), white, "the scrimmage line sits at the 30");
+        // The FIXED sides, the point of this test: home's tint on the left,
+        // away's on the right, for BOTH possessions.
+        let ref_game = sit_game("nfl", "", "", Situation::Football {
             down_string: String::new(), ball_position: String::new(), home_possession: None,
-        }).home.primary)), "own end zone is the possessing team's");
+        });
+        let (home_tint, away_tint) =
+            (c565(end_zone_tint(ref_game.home.primary)), c565(end_zone_tint(ref_game.away.primary)));
+        for home_ball in [false, true] {
+            let px = bar("SEA 25", home_ball);
+            assert_eq!(px565(&px, 1, 27), home_tint, "home zone left (home_ball={home_ball})");
+            assert_eq!(px565(&px, 62, 27), away_tint, "away zone right (home_ball={home_ball})");
+        }
     }
 
-    /// Nothing we cannot place goes on the field — the text layout comes back.
-    ///
-    /// ESPN drops `situation` between drives and during timeouts, and a live
-    /// game with an empty possession string would otherwise render a bar with
-    /// the ball on the goal line, which is a specific claim and a false one.
+    /// There is no fallback layout: the bar always draws, and each part is
+    /// present exactly when its fact is. Unknown possession costs only the
+    /// first-down marker; an unreadable yard line costs the ball; the field
+    /// itself costs nothing.
     #[test]
-    fn an_unreadable_yard_line_falls_back_to_text_rather_than_guessing() {
+    fn missing_facts_hide_their_markers_never_the_field() {
         let frame = |ball: &str, poss: Option<bool>| {
             let g = sit_game("nfl", "3rd", "8:12", Situation::Football {
                 down_string: "3rd & 4".into(),
@@ -2260,19 +2288,33 @@ mod kern_tests {
             render_game(&g, None, NameStyle::Name).1
         };
         let turf = c565(Rgb888::new(0, 26, 0));
-        let white = c565(WHITE);
+        let (white, yellow) = (c565(WHITE), c565(YELLOW));
         let has_turf = |px: &[u8]| (0..64).any(|x| px565(px, x, 27) == turf);
-        let lit = |px: &[u8], x0: i32, x1: i32, y0: i32, y1: i32| {
-            (y0..=y1).any(|y| (x0..=x1).any(|x| px565(px, x, y) == white))
+        let any_yellow = |px: &[u8]| {
+            (23..=31).any(|y| (0..64).any(|x| px565(px, x, y) == yellow))
         };
-        // Drawable: bar, no bottom text row.
+        let scrimmage_at = |px: &[u8], yards: i32| px565(px, field_x(yards), 23) == white;
+
+        // Everything known: field, ball, marker.
         let good = frame("SEA 25", Some(false));
-        assert!(has_turf(&good), "a placeable ball gets a field");
-        // Not drawable: no field anywhere, and the old three-corner text is back.
-        for (ball, poss) in [("", Some(false)), ("SEA 25", None), ("garbage", Some(true))] {
-            let px = frame(ball, poss);
-            assert!(!has_turf(&px), "{ball:?}/{poss:?} drew a field it could not place");
-            assert!(lit(&px, 2, 30, 25, 29), "{ball:?}/{poss:?} lost the fallback period");
+        assert!(has_turf(&good) && scrimmage_at(&good, 25) && any_yellow(&good));
+
+        // Possession unknown: the ball still sits at its one absolute spot —
+        // only the first-down marker is missing.
+        let px = frame("SEA 25", None);
+        assert!(has_turf(&px), "the field survives unknown possession");
+        assert!(scrimmage_at(&px, 25), "the ball is placeable without possession");
+        assert!(!any_yellow(&px), "no possession, no first-down marker");
+
+        // Yard line unreadable: the field alone, no ball anywhere.
+        for ball in ["", "garbage", "SEA 75"] {
+            let px = frame(ball, Some(true));
+            assert!(has_turf(&px), "{ball:?}: the field itself costs nothing");
+            assert!(!any_yellow(&px), "{ball:?}: no spot, no marker");
+            assert!(
+                !(0..64).any(|x| px565(&px, x, 23) == white),
+                "{ball:?}: no scrimmage overhang row without a placeable ball"
+            );
         }
     }
 
@@ -2602,7 +2644,7 @@ mod kern_tests {
         // any attempt to draw it would land in this strip. Below the text line
         // the ONLY white is the scrimmage column — no text, no second line.
         assert_eq!(g.clock, "8:12", "the fixture still carries a clock to draw");
-        let scrimmage = field_x(75); // SF at SEA's 25
+        let scrimmage = field_x(25); // the ball at the home (SEA) 25 — absolute
         for y in 23..=31 {
             for x in 0..FRAME_WIDTH as i32 {
                 if px565(&px, x, y) == white {
