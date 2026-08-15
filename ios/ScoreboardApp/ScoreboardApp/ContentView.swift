@@ -2796,7 +2796,7 @@ struct DashboardView: View {
 enum AppNotes {
     static let byVersion: [String: String] = [
         "2026.8.0": """
-        - Off modes now have their own settings. Tap the slider next to Clock or Weather to pick a style, a layout, or 24-hour time.
+        - Off modes now have their own settings. Pick Clock or Weather, then tap the settings row underneath the pictures to choose a style, a layout, or 24-hour time.
         - Weather is one entry with four layouts, instead of four separate entries.
         - Quiet hours: pick a window and the scoreboard's screen is off through it every night.
         - Patch notes for the app and the scoreboard now live behind the buttons next to their version numbers.
@@ -2809,7 +2809,7 @@ enum AppNotes {
         - The Olympics offer the gold and bronze medal games instead of a "Postseason" option that could never match anything.
         - Conference Finals, March Madness and MLS Cup were quietly matching no games at all. Fixed — those options work now.
         - Following everything now ticks every round in the list, so the screen shows what it is actually doing.
-        - Golf tournaments show which round they are on, on the scoreboard and on the card. A Thursday leaderboard no longer looks exactly like a Sunday one. Turn it off under Show round in the tour's settings.
+        - Golf tournaments show which round they are on, on the scoreboard and on the card. A Thursday leaderboard no longer looks exactly like a Sunday one. Turn it off under Round in the tour's settings.
         - Add League is a button under the list now, and the leagues are grouped by sport without a second heading on top of them.
         - A golf card's start time is that round's first tee, so it moves along with the tournament.
         - Finished games show when they ended, not just when they started.
@@ -4119,6 +4119,9 @@ struct LeagueEditorView: View {
                                     Text(opt.label).foregroundStyle(Color.primary)
                                     Spacer()
                                 }
+                                // Without this the Spacer is dead and a short
+                                // label leaves most of the row untappable.
+                                .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                         }
@@ -4210,23 +4213,38 @@ struct LeagueEditorView: View {
             if !sport.teams.isEmpty {
                 Section("Teams") {
                     ForEach(filteredTeams, id: \.id) { team in
-                        Button {
-                            toggle(team.id)
-                        } label: {
-                            HStack(spacing: 12) {
-                                TeamBadge(team: team, sportId: sport.id)
-                                Text(team.name).foregroundStyle(.primary)
-                                Spacer()
-                                // Spoiler chip only for teams in the focus —
-                                // it's meaningless for teams the board ignores.
-                                if selection.contains(team.id) {
-                                    SpoilerChip(hidden: model.teamSpoiled(sport.id, team.id)) {
-                                        model.setTeamSpoiler(sport.id, team.id, !model.teamSpoiled(sport.id, team.id))
-                                    }
-                                    Image(systemName: "checkmark")
-                                        .fontWeight(.semibold)
-                                        .foregroundStyle(.tint)
+                        // Two controls, side by side — NOT a chip nested inside
+                        // the row button's label. A Button inside another
+                        // Button's label is ambiguous to hit-test, and this is
+                        // the shape the dashboard's team rows and
+                        // `leagueHeaderRow` already use.
+                        HStack(spacing: 12) {
+                            Button {
+                                toggle(team.id)
+                            } label: {
+                                HStack(spacing: 12) {
+                                    TeamBadge(team: team, sportId: sport.id)
+                                    // Concrete Color, and `.plain` below: a Form
+                                    // button tints its whole label with the
+                                    // accent, so the hierarchical `.primary`
+                                    // resolved to blue and every team name read
+                                    // as a link — while the round options a
+                                    // section above rendered in label colour.
+                                    Text(team.name).foregroundStyle(Color.primary)
+                                    Spacer(minLength: 8)
                                 }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            // Spoiler chip only for teams in the focus —
+                            // it's meaningless for teams the board ignores.
+                            if selection.contains(team.id) {
+                                SpoilerChip(hidden: model.teamSpoiled(sport.id, team.id)) {
+                                    model.setTeamSpoiler(sport.id, team.id, !model.teamSpoiled(sport.id, team.id))
+                                }
+                                Image(systemName: "checkmark")
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(.tint)
                             }
                         }
                     }
@@ -4932,8 +4950,6 @@ struct SettingsView: View {
     /// path where changing servers IS the errand.
     var openServerDirectly = false
     @Environment(\.dismiss) private var dismiss
-    /// Which mode's settings screen is open, if any.
-    @State private var settingsForMode: UiOffMode?
     /// Which version's patch notes sheet is up. Item-driven so the two entry
     /// points — the firmware row (running version, read-only) and the Update
     /// button (offered version, with Install) — share one nested-sheet slot.
@@ -5086,12 +5102,6 @@ struct SettingsView: View {
             // closed. The stack outlives the rebuilds.
             .sheet(item: $settingsInfo) { topic in
                 SettingsInfoCard(topic: topic)
-            }
-            // Anchored on the stack, not on a Section: Form sections rebuild on
-            // every model push (frames land every few seconds) and a
-            // destination attached to one is torn down with it.
-            .navigationDestination(item: $settingsForMode) { mode in
-                OffModeSettingsView(model: model, mode: mode)
             }
             .sheet(item: $notesTarget) { t in
                 FirmwareNotesSheet(
@@ -5467,16 +5477,25 @@ struct SettingsView: View {
             // one of the choices.
             if let mode = model.offModes.first(where: { $0.id == model.current.offMode }),
                !mode.fields.isEmpty {
-                Button { settingsForMode = mode } label: {
-                    HStack {
-                        Text("\(mode.label) settings").foregroundStyle(Color.primary)
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(Color.secondary)
-                    }
+                // A real NavigationLink, declared HERE.
+                //
+                // It used to be a Button setting `settingsForMode`, read by a
+                // `.navigationDestination(item:)` anchored on the settings
+                // ROOT. A destination pushes from the depth it is DECLARED at,
+                // so opening Weather settings from this row — which lives one
+                // push deep, inside Sleep — popped Sleep and landed at depth 1.
+                // Back then returned to the settings root instead of Sleep.
+                //
+                // A value-less NavigationLink pushes from wherever it sits, so
+                // the stack is Settings → Sleep → Weather settings. It is also
+                // immune to the rebuild problem the sheets on the root are
+                // anchored against: there is no presentation state to tear down
+                // when a model push rebuilds this section.
+                NavigationLink {
+                    OffModeSettingsView(model: model, mode: mode)
+                } label: {
+                    Text("\(mode.label) settings")
                 }
-                .buttonStyle(.plain)
             }
         } header: {
             Text("Sleep Screen")
@@ -6261,18 +6280,21 @@ struct OffModeSettingsView: View {
             HStack(spacing: 12) {
                 Image(systemName: selected ? "checkmark.circle.fill" : "circle")
                     .foregroundStyle(selected ? Color.accentColor : Color.secondary)
-                Text(opt.label).foregroundStyle(.primary)
+                Text(opt.label).foregroundStyle(Color.primary)
                 Spacer(minLength: 8)
                 if let p = opt.preview, let url = URL(string: "\(model.httpBase)\(p)") {
                     FetchedFrameImage(url: url, grayFailure: true)
                         .ledPanel(width: 96, height: 48)
                 }
             }
+            // `.plain` hit-tests the label's DRAWN CONTENT, so without this the
+            // gap between the words and the preview was dead and the row only
+            // answered on the check mark, the text and the picture.
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
 }
 
-/// `navigationDestination(item:)` needs an identity, and the descriptor
-/// already carries one: the mode id is its stable contract.
+/// The mode id is the descriptor's stable contract, so it is the identity too.
 extension UiOffMode: Identifiable {}
