@@ -538,6 +538,11 @@ void uniffi_app_core_fn_method_scoreboardclient_set_league_name_style(void*_Nonn
 void uniffi_app_core_fn_method_scoreboardclient_set_league_rows(void*_Nonnull ptr, RustBuffer board_id, RustBuffer sport_id, RustBuffer rows, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_SHOW_EXTRAS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_SHOW_EXTRAS
+void uniffi_app_core_fn_method_scoreboardclient_set_league_show_extras(void*_Nonnull ptr, RustBuffer board_id, RustBuffer sport_id, RustBuffer show, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_SHOW_ROUND
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_SHOW_ROUND
 void uniffi_app_core_fn_method_scoreboardclient_set_league_show_round(void*_Nonnull ptr, RustBuffer board_id, RustBuffer sport_id, RustBuffer show, RustCallStatus *_Nonnull out_status
@@ -1096,6 +1101,12 @@ uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_league_name_style(
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_ROWS
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_ROWS
 uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_league_rows(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_SHOW_EXTRAS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_SHOW_EXTRAS
+uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_league_show_extras(void
     
 );
 #endif
