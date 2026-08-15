@@ -2116,14 +2116,14 @@ struct TroubleshootingSheet: View {
     let httpBase: String
     @Environment(\.dismiss) private var dismiss
 
-    private struct Guide: Identifiable {
+    struct Guide: Identifiable {
         let slug: String // GET /guide/{slug}.png
         let title: String
         let advice: String
         var id: String { slug }
     }
 
-    private static let guides: [Guide] = [
+    static let guides: [Guide] = [
         // Ordered by likelihood: the healthy-looking states first, then the
         // connect legs, then first-time setup.
         Guide(
@@ -2160,35 +2160,45 @@ struct TroubleshootingSheet: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    Text("Match what the scoreboard's panel shows right now:")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    ForEach(Self.guides) { g in
-                        guideRow(g)
+            TroubleshootingGuide(httpBase: httpBase)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { dismiss() }
                     }
-                    Text("Whatever the panel shows, power-cycling is a safe first step: unplug the scoreboard and plug it back in. It always recovers on its own once your network is back.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
                 }
-                .padding(20)
-            }
-            .navigationTitle("Troubleshooting")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
         }
     }
+}
 
-    private func guideRow(_ g: Guide) -> some View {
+/// The guide itself, with no presentation of its own — pushed from Settings,
+/// wrapped in a sheet by the offline card.
+struct TroubleshootingGuide: View {
+    let httpBase: String
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                Text("Match what the scoreboard's panel shows right now:")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                ForEach(TroubleshootingSheet.guides) { g in
+                    guideRow(g)
+                }
+                Text("Whatever the panel shows, power-cycling is a safe first step: unplug the scoreboard and plug it back in. It always recovers on its own once your network is back.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(20)
+        }
+        .navigationTitle("Troubleshooting")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func guideRow(_ g: TroubleshootingSheet.Guide) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             // Gray failure: the guide endpoint may not exist yet on an older
-            // server, and this sheet is read precisely when the network is
-            // suspect — degrade quietly instead of alarming.
+            // server, and this is read precisely when the network is suspect —
+            // degrade quietly instead of alarming.
             FetchedFrameImage(url: URL(string: "\(httpBase)/guide/\(g.slug).png"), grayFailure: true)
                 .ledPanel()
                 .frame(maxWidth: .infinity)
@@ -2485,8 +2495,40 @@ struct DashboardView: View {
         } header: {
             Text("Controls")
         } footer: {
-            sleepFooter
+            VStack(alignment: .leading, spacing: 4) {
+                sleepFooter
+                quietFooter
+            }
         }
+    }
+
+    /// Quiet hours, on the screen with the power button.
+    ///
+    /// Without this the setting is invisible from the dashboard: someone whose
+    /// board is dark at 11pm sees a power button that is ON and a footer that
+    /// says nothing, and the only explanation is three taps into Settings.
+    @ViewBuilder private var quietFooter: some View {
+        if model.current.quietActive {
+            Label(
+                "Quiet hours — the screen is off until \(Self.clockText(model.current.quietEndMin ?? 0)).",
+                systemImage: "moon.zzz.fill"
+            )
+        } else if let start = model.current.quietStartMin, let end = model.current.quietEndMin {
+            Label(
+                "Quiet hours \(Self.clockText(start)) to \(Self.clockText(end)).",
+                systemImage: "moon"
+            )
+        }
+    }
+
+    /// Minutes since the board's local midnight, in the reader's own clock
+    /// format — a 24-hour locale should not be shown "10:00 PM".
+    static func clockText(_ minutes: UInt16) -> String {
+        var c = DateComponents()
+        c.year = 2000; c.month = 1; c.day = 1
+        c.hour = Int(minutes) / 60; c.minute = Int(minutes) % 60
+        guard let d = Calendar.current.date(from: c) else { return "" }
+        return d.formatted(date: .omitted, time: .shortened)
     }
 
     /// While asleep: a live countdown to the wake time (armed identically by the
@@ -2696,28 +2738,43 @@ struct DashboardView: View {
             }
     }
 
-    /// A league's title row: name, what it is subscribed to, and Edit.
+    /// A league's title row: name, what it is subscribed to, and the way in.
     ///
-    /// The subscription is a LABEL, not a control. It used to be a menu on its
-    /// own row, which meant the set of big games could be changed from two
+    /// The NAME is the link. Dropping the old Edit button left this row inert
+    /// and league preferences unreachable from the screen named after them —
+    /// so the title itself now pushes the editor, with a chevron to say so.
+    ///
+    /// The subscription text is a label, not a control. It used to be a menu on
+    /// its own row, which meant the set of big games could be changed from two
     /// places with different affordances; now the header states what is on and
     /// the edit screen is the single place that changes it.
     ///
-    /// The eye stays a control, because it is about this screen's own job —
+    /// The eye stays its own button, because it is about this screen's own job —
     /// hiding results you haven't watched yet — and it is the only way to reach
     /// that state for a league whose games aren't currently listed.
     private func leagueHeaderRow(_ pref: BoardViewModel.LeaguePref) -> some View {
         HStack(spacing: 10) {
-            Text(pref.sport.name)
-                .font(.headline)
-            Spacer(minLength: 8)
-            if let events = model.championshipLabel(pref.sport.id) {
-                Text(events)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+            NavigationLink {
+                LeagueEditorView(model: model, sport: pref.sport)
+            } label: {
+                HStack(spacing: 8) {
+                    Text(pref.sport.name)
+                        .font(.headline)
+                    Spacer(minLength: 8)
+                    if let events = model.championshipLabel(pref.sport.id) {
+                        Text(events)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    Image(systemName: "chevron.right")
+                        .font(.footnote.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
             SpoilerChip(hidden: model.leagueSpoiler(pref.sport.id)) {
                 model.setLeagueSpoiler(pref.sport.id, !model.leagueSpoiler(pref.sport.id))
             }
@@ -2741,9 +2798,12 @@ enum AppNotes {
         "2026.8.0": """
         - Off modes now have their own settings. Tap the slider next to Clock or Weather to pick a style, a layout, or 24-hour time.
         - Weather is one entry with four layouts, instead of four separate entries.
-        - Quiet hours: pick a window and the scoreboard sleeps through it every night. Turn on "Wake for live events" and a game that is actually on will still show.
+        - Quiet hours: pick a window and the scoreboard's screen is off through it every night.
         - Patch notes for the app and the scoreboard now live behind the buttons next to their version numbers.
-        - League Preferences is grouped by sport now, the same way Add League is. Each league shows what it is following right in its title row; tap Edit to change it.
+        - Settings that change how the panel looks — the sleep screen, spoilers, team names, the box-score line, golf's round — now show you the two frames and let you pick, instead of describing them.
+        - Those examples use your own league: NCAA football previews with NCAA teams, and the LPGA settings no longer offer a tournament from the men's tour.
+        - Scoreboard troubleshooting moved into Settings as its own page.
+        - League Preferences is grouped by sport now, the same way Add League is. Each league shows what it is following right in its title row; tap the league to change it.
         - There is no "Other" section any more — the Olympics, the Champions League and college baseball sit under their own sports.
         - Some leagues were renamed to read better in those groups: NCAAM, NCAAW, NCAA, and Men's World Cup.
         - The Olympics offer the gold and bronze medal games instead of a "Postseason" option that could never match anything.
@@ -2766,68 +2826,33 @@ enum AppNotes {
 }
 
 enum SettingsInfoTopic: String, Identifiable {
-    case whenOff, sleep, dwell, spoilers, demoData
+    /// One topic left, and deliberately: `whenOff`, `sleep`, `dwell` and
+    /// `spoilers` all had cards, and all four described a setting whose own row
+    /// now shows it — the Sleep Screen and spoiler rows render the actual
+    /// frames, and the pace and sleep rows say what they do in a footer. A card
+    /// you have to open to find out what a switch does is a worse answer than a
+    /// switch that shows you.
+    ///
+    /// Demo games keeps one because it is the setting whose consequence you
+    /// cannot see from the row: the scores go fake, and nothing on the panel
+    /// says so.
+    case demoData
     var id: String { rawValue }
 
     var icon: String {
         switch self {
-        case .whenOff: "clock"
-        case .sleep: "moon.zzz.fill"
-        case .dwell: "timer"
-        case .spoilers: "eye.slash"
         case .demoData: "theatermasks"
         }
     }
 
     var title: String {
         switch self {
-        case .whenOff: "Sleep Screen"
-        case .sleep: "Sleep duration"
-        case .dwell: "Time per event"
-        case .spoilers: "Spoilers"
         case .demoData: "Demo games"
         }
     }
 
     var explanation: String {
         switch self {
-        case .whenOff:
-            """
-            What the panel rests on when there is nothing to show — no games \
-            running, or none you follow. Dimmed to whatever brightness you \
-            have set.
-
-            The scoreboard is still awake here. Putting it to sleep, with the \
-            button or the toggle, turns the panel off entirely instead.
-
-            The choices come from your server, so a server running custom \
-            screens will offer them here too.
-            """
-        case .sleep:
-            """
-            Pressing the scoreboard's button puts it to sleep for this long. \
-            It wakes on its own when the timer ends; press again to wake it \
-            early. Asleep, the panel is dark — it goes back to games, or to \
-            your no-games screen, when it wakes.
-            """
-        case .dwell:
-            """
-            How long each event holds the panel before the rotation moves on. \
-            Scrolling leaderboards fit one full pass into this time.
-
-            Any league can override this from its editor — give F1 30 seconds \
-            while baseball flashes by in 10.
-            """
-        case .spoilers:
-            """
-            Spoiler protection hides scores until you're ready. Set it at \
-            three levels: a whole LEAGUE (from the league's editor — every \
-            game in it stays hidden), a single GAME (from the card's menu — \
-            hide one result, or reveal one exception), or EVERYTHING the \
-            scoreboard shows (the switch in this section). The board shows \
-            the matchup and progress; scores stay off the panel and the app \
-            until revealed.
-            """
         case .demoData:
             """
             Fills this scoreboard with a made-up slate of games — every sport and every layout at once — so you can see what it does out of season or before your teams are playing. The scores are NOT real.
@@ -3813,26 +3838,26 @@ struct TeamColorSwatch: View {
 /// One league's editor: pick any number of teams (shown with their brand colors)
 /// plus the big-games option. Edits are buffered locally and committed as a SINGLE
 /// request when the page is dismissed.
-/// A row of choices shown as pictures side by side, one tile each.
-///
-/// Horizontal because a vertical list of three rows, each carrying a label, a
-/// sentence and a thumbnail, spends most of a screen saying what one glance at
-/// three frames already says. The frame IS the description, so the tiles carry
+/// Choices shown as pictures: the frame IS the description, so the tiles carry
 /// a label and nothing else.
 ///
-/// `sample` is everything after `/sample/` — variant plus query — so the
-/// example is the user's OWN league. A `nil` sample draws a black panel, which
-/// is what "Nothing" actually looks like and what an all-black PNG could never
-/// be told apart from a failed load.
+/// Two choices sit side by side, where the pair reads as a comparison. Three or
+/// more stack, because at tile widths that fit three across the panel is too
+/// small to read — and reading it is the entire point.
+///
+/// `path` is a complete path under the server, not a `/sample` suffix: off-mode
+/// previews live at `/offmode/…` and league examples at `/sample/…`, and a
+/// selector that assumed one prefix silently requested `/sample//offmode/…` and
+/// showed a broken image for every clock and weather tile.
 private struct PreviewSelector<Choice: Hashable>: View {
     struct Option: Identifiable {
         let id: Choice
         let label: String
-        let sample: String?
-        init(_ id: Choice, _ label: String, _ sample: String?) {
+        let path: String?
+        init(_ id: Choice, _ label: String, _ path: String?) {
             self.id = id
             self.label = label
-            self.sample = sample
+            self.path = path
         }
     }
 
@@ -3841,41 +3866,70 @@ private struct PreviewSelector<Choice: Hashable>: View {
     let httpBase: String
     let onSelect: (Choice) -> Void
 
+    private var side: Bool { options.count <= 2 }
+
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            ForEach(options) { opt in
-                Button { onSelect(opt.id) } label: {
-                    VStack(spacing: 6) {
-                        Group {
-                            if let sample = opt.sample {
-                                FetchedFrameImage(url: URL(string: "\(httpBase)/sample/\(sample)"))
-                            } else {
-                                Color.black
-                            }
+        if side {
+            HStack(alignment: .top, spacing: 12) {
+                ForEach(options) { tile($0, width: 148, height: 74) }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 4)
+        } else {
+            VStack(spacing: 10) {
+                ForEach(options) { opt in
+                    Button { onSelect(opt.id) } label: {
+                        HStack(spacing: 14) {
+                            panel(opt, width: 128, height: 64)
+                            Text(opt.label)
+                                .foregroundStyle(opt.id == selected ? Color.primary : Color.secondary)
+                            Spacer(minLength: 0)
                         }
-                        .ledPanel(width: 92, height: 46)
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 6)
-                                .strokeBorder(
-                                    opt.id == selected ? Color.accentColor : .clear,
-                                    lineWidth: 2
-                                )
-                        }
-                        Text(opt.label)
-                            .font(.caption)
-                            // Concrete Colors: inside a Form button label the
-                            // accent is the base style, so the hierarchical
-                            // ones resolve to blue.
-                            .foregroundStyle(opt.id == selected ? Color.primary : Color.secondary)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.8)
+                        .contentShape(Rectangle())
                     }
-                    .frame(maxWidth: .infinity)
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    private func tile(_ opt: Option, width: CGFloat, height: CGFloat) -> some View {
+        Button { onSelect(opt.id) } label: {
+            VStack(spacing: 6) {
+                panel(opt, width: width, height: height)
+                Text(opt.label)
+                    .font(.caption)
+                    // Concrete Colors: inside a Form button label the accent is
+                    // the base style, so the hierarchical ones come out blue.
+                    .foregroundStyle(opt.id == selected ? Color.primary : Color.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// The panel plus its selection ring. A RECTANGLE, matching `ledPanel`'s own
+    /// square-cornered border — a rounded ring around a hard-edged 64x32 frame
+    /// reads as two shapes fighting.
+    private func panel(_ opt: Option, width: CGFloat, height: CGFloat) -> some View {
+        Group {
+            if let path = opt.path {
+                FetchedFrameImage(url: URL(string: "\(httpBase)\(path)"))
+            } else {
+                // "Nothing" has no preview: an all-black PNG cannot be told
+                // apart from a failed load, so the tile draws the panel itself.
+                Color.black
             }
         }
-        .padding(.vertical, 4)
+        .ledPanel(width: width, height: height)
+        .padding(2)
+        .overlay {
+            Rectangle()
+                .strokeBorder(opt.id == selected ? Color.accentColor : .clear, lineWidth: 2)
+        }
     }
 }
 
@@ -3981,10 +4035,10 @@ struct LeagueEditorView: View {
         Section {
             PreviewSelector(
                 options: [
-                    .init(false, "Show", "plain.png?sport=\(sport.id)&live=1"),
+                    .init(false, "Show", "/sample/plain.png?sport=\(sport.id)&live=1"),
                     // `normal`, because that is what a league-level hide does —
                     // the board-wide "hide everything" strictness is separate.
-                    .init(true, "Hide", "normal.png?sport=\(sport.id)"),
+                    .init(true, "Hide", "/sample/normal.png?sport=\(sport.id)"),
                 ],
                 selected: model.leagueSpoiler(sport.id),
                 httpBase: model.httpBase
@@ -4001,9 +4055,15 @@ struct LeagueEditorView: View {
         case "pga", "lpga": return "Events"
         case "f1": return "Sessions"
         case "wc": return "Matches"
-        default: return "Big games"
+        // A league with exactly one thing to follow has no "big" games to
+        // single out — every match is the subscription, so the section says so
+        // rather than heading a lone switch with a category it isn't.
+        default: return singleOption ? "All matches" : "Big games"
         }
     }
+
+    /// True when the league's whole subscription is one switch.
+    private var singleOption: Bool { sport.championshipRounds.count == 1 }
 
     /// Teams matching the search text (all of them when it's empty).
     private var filteredTeams: [UiTeam] {
@@ -4032,7 +4092,7 @@ struct LeagueEditorView: View {
                 // has no postseason, so "every match" is its only honest
                 // subscription — gets a switch instead of a one-item checklist,
                 // which reads like a choice that hasn't been made.
-                if let only = sport.championshipRounds.first, sport.championshipRounds.count == 1 {
+                if let only = sport.championshipRounds.first, singleOption {
                     Section {
                         Toggle(only.label, isOn: Binding(
                             get: { champ.contains(only.id) },
@@ -4048,8 +4108,6 @@ struct LeagueEditorView: View {
                         ))
                     } header: {
                         Text(optionsTitle)
-                    } footer: {
-                        Text("This league has no separate rounds to follow.")
                     }
                 } else {
                     Section {
@@ -4087,8 +4145,6 @@ struct LeagueEditorView: View {
                         Text("Top 10").tag(UInt32(10))
                         Text(sport.id == "f1" ? "Full field" : "Top 20").tag(UInt32(20))
                     }
-                } footer: {
-                    Text("How much of the field the board shows. More than four rows scrolls through the list.")
                 }
             }
             // Golf only: F1 weekends have sessions, not rounds, and every other
@@ -4097,8 +4153,8 @@ struct LeagueEditorView: View {
                 Section {
                     PreviewSelector(
                         options: [
-                            .init(true, "Show", "plain.png?sport=\(sport.id)"),
-                            .init(false, "Hide", "plain.png?sport=\(sport.id)&round=off"),
+                            .init(true, "Show", "/sample/plain.png?sport=\(sport.id)"),
+                            .init(false, "Hide", "/sample/plain.png?sport=\(sport.id)&round=off"),
                         ],
                         selected: model.leagueShowRound(sport.id),
                         httpBase: model.httpBase
@@ -4114,8 +4170,8 @@ struct LeagueEditorView: View {
                 Section {
                     PreviewSelector(
                         options: [
-                            .init(true, "Show", "plain.png?sport=\(sport.id)&extras=on"),
-                            .init(false, "Hide", "plain.png?sport=\(sport.id)&extras=off"),
+                            .init(true, "Show", "/sample/plain.png?sport=\(sport.id)&extras=on"),
+                            .init(false, "Hide", "/sample/plain.png?sport=\(sport.id)&extras=off"),
                         ],
                         selected: model.leagueShowExtras(sport.id),
                         httpBase: model.httpBase
@@ -4134,8 +4190,6 @@ struct LeagueEditorView: View {
                         Text("\(s) seconds").tag(s)
                     }
                 }
-            } footer: {
-                Text("Overrides the board setting for this league.")
             }
             // Team-name display style — hidden for leaderboard leagues (golf/F1),
             // whose fields are individuals with no per-team style.
@@ -4143,7 +4197,7 @@ struct LeagueEditorView: View {
                 Section {
                     PreviewSelector(
                         options: nameStyleChoices.map {
-                            .init($0.style, $0.label, "plain.png?sport=\(sport.id)&style=\(styleParam($0.style))")
+                            .init($0.style, $0.label, "/sample/plain.png?sport=\(sport.id)&style=\(styleParam($0.style))")
                         },
                         selected: model.leagueNameStyle(sport.id) ?? defaultStyle,
                         httpBase: model.httpBase
@@ -5252,8 +5306,7 @@ struct SettingsView: View {
     /// race weekend at once, and "event" was doing all the work.
     private var dwellRow: some View {
         HStack(spacing: 6) {
-            Text("Seconds per screen")
-            infoButton(.dwell)
+            Label("Seconds per screen", systemImage: "timer")
             Spacer()
             Picker("Seconds per screen", selection: Binding(
                 get: { model.current.dwellSecs },
@@ -5271,7 +5324,6 @@ struct SettingsView: View {
     private var sleepDurationRow: some View {
         HStack(spacing: 6) {
             Text("Sleep duration")
-            infoButton(.sleep)
             Spacer()
             Picker("Sleep duration", selection: Binding(
                 get: { model.current.sleepHours },
@@ -5344,10 +5396,6 @@ struct SettingsView: View {
             if let start = model.current.quietStartMin, let end = model.current.quietEndMin {
                 quietTimeRow("Sleeps at", minutes: start) { model.setQuietHours($0, end) }
                 quietTimeRow("Wakes at", minutes: end) { model.setQuietHours(start, $0) }
-                Toggle("Wake for live events", isOn: Binding(
-                    get: { model.current.quietAllowEvents },
-                    set: { model.setQuietAllowEvents($0) }
-                ))
             }
         } header: {
             Text("Quiet hours")
@@ -5357,15 +5405,15 @@ struct SettingsView: View {
                     "Sleeping now. Press the scoreboard's button to see it for the rest of tonight.",
                     systemImage: "moon.zzz.fill"
                 )
-            } else if model.current.quietStartMin != nil {
-                // Say what the two settings do together, because the
-                // combination is the point: dark overnight, except for a game
-                // that is genuinely on.
-                Text(
-                    model.current.quietAllowEvents
-                        ? "The panel stays dark during this window every night, in the scoreboard's own timezone — but a live game still shows."
-                        : "The panel stays dark during this window every night, in the scoreboard's own timezone."
-                )
+            } else {
+                // Stated whether or not a window is set, because it is also the
+                // answer to "what would turning this on do?".
+                //
+                // "Wake for live events" used to sit in this section. It was one
+                // switch that made the window mean two different things, and the
+                // footer needed a whole clause about the exception — a setting
+                // that has to be explained is worse than the plain rule.
+                Text("Turn the Scoreboard screen off entirely during this time window.")
             }
         }
     }
@@ -5431,11 +5479,7 @@ struct SettingsView: View {
                 .buttonStyle(.plain)
             }
         } header: {
-            HStack {
-                Text("Sleep Screen")
-                Spacer()
-                infoButton(.whenOff)
-            }
+            Text("Sleep Screen")
         }
     }
 
@@ -5450,14 +5494,17 @@ struct SettingsView: View {
                 set: { model.setSpoilerAll($0) }
             ))
         } header: {
-            HStack {
-                Text("Spoilers")
-                Spacer()
-                // Trailing ⓘ: the three spoiler scopes (league / game /
-                // everything) live in three different places, and nothing on
-                // this screen says so.
-                infoButton(.spoilers)
-            }
+            Text("Spoilers")
+        } footer: {
+            // The scopes live on three different screens, so the one screen
+            // named Spoilers is where the set of them has to be stated.
+            Text(
+                """
+                Spoiler protection hides scores and shows only the current period or a \
+                live indicator. Spoiler protection can be turned on for all leagues, \
+                specific leagues, individual teams, or individual games.
+                """
+            )
         }
 
         // Its own section rather than a pseudo-header row inside the one above.
@@ -5470,8 +5517,8 @@ struct SettingsView: View {
         Section {
             PreviewSelector(
                 options: [
-                    .init(false, "Hide results", "normal.png"),
-                    .init(true, "Hide everything", "strict.png"),
+                    .init(false, "Hide results", "/sample/normal.png"),
+                    .init(true, "Hide everything", "/sample/strict.png"),
                 ],
                 selected: model.current.strictSpoilers,
                 httpBase: model.httpBase
@@ -5581,13 +5628,18 @@ struct SettingsView: View {
             showRename = true
         } label: {
             HStack {
-                Text("Name")
-                    .foregroundStyle(.primary)
+                // Concrete Colors, and `.plain` below: a Form button tints its
+                // whole label with the accent, so a `.primary` inside a default
+                // button style still came out blue and read as a link.
+                Label("Scoreboard Name", systemImage: "textformat")
+                    .foregroundStyle(Color.primary)
                 Spacer()
                 Text(model.currentName)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.secondary)
             }
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
         .alert("Name this scoreboard", isPresented: $showRename) {
             TextField("Name", text: $renameText)
             Button("Save") { model.rename(renameText) }
@@ -5679,7 +5731,11 @@ struct SettingsView: View {
 
     @ViewBuilder private var sleepPage: some View {
         Form {
-            Section { sleepDurationRow }
+            Section {
+                sleepDurationRow
+            } footer: {
+                Text("When the power button is pressed, the Scoreboard will go to sleep for \(model.current.sleepHours == 1 ? "1 hour" : "\(model.current.sleepHours) hours"). After that time, it will resume automatically showing scores.")
+            }
             offModeSection
             quietHoursSection
         }
@@ -5741,8 +5797,11 @@ struct SettingsView: View {
     /// Settings is where people go for help, so it lives here too.
     private var helpSection: some View {
         Section {
-            Button {
-                showTroubleshooting = true
+            // A push, not a sheet. Everything else Settings offers is a page in
+            // this stack; a modal for the one screen you read top to bottom
+            // meant a Done button where a Back button belongs.
+            NavigationLink {
+                TroubleshootingGuide(httpBase: model.httpBase)
             } label: {
                 Label("Scoreboard troubleshooting", systemImage: "questionmark.circle")
             }

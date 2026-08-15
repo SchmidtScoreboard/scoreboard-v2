@@ -1244,6 +1244,147 @@ fn sample_game() -> model::Game {
     }
 }
 
+/// The two sides of a league's demonstration game: `(abbrev, mascot, location,
+/// primary, secondary)` each, then the away and home score.
+///
+/// PER LEAGUE, not per sport. Sharing one fixture across a family previewed
+/// NCAA football settings with the Packers and the Bears, offered "The Open" as
+/// the example LPGA event, and showed Arsenal against PSG on the MLS screen —
+/// on the screens whose entire job is "here is what YOUR league will look
+/// like". The whole point of a preview is recognition.
+///
+/// Mascots are kept SHORT where the renderer might fall back: NHL and soccer
+/// rows use the 5x8 font and `pair_style` drops to the abbreviation when a name
+/// does not fit, which would make the Name and Abbrev previews pixel-identical.
+struct SampleSides {
+    away: (&'static str, &'static str, &'static str, &'static str, &'static str),
+    home: (&'static str, &'static str, &'static str, &'static str, &'static str),
+    scores: (u32, u32),
+}
+
+/// The fixture for each league. A league missing here falls back to its
+/// family's shape via `sample_sides`, so a fork adding a league still previews
+/// something rather than nothing.
+fn sample_sides(sport_id: &str) -> SampleSides {
+    let s = |away, home, scores| SampleSides { away, home, scores };
+    match sport_id {
+        // ---- hockey ----
+        "nhl" => s(
+            ("BOS", "BRUINS", "BOSTON", "FFB81C", "000000"),
+            ("TOR", "LEAFS", "TORONTO", "00205B", "FFFFFF"),
+            (3, 3),
+        ),
+        // Olympic hockey is countries, and ESPN gives it no colors at all — the
+        // flag table is the same one the catalog falls back to.
+        "olyhm" | "olyhw" => s(
+            ("CAN", "CANADA", "CANADA", "D52B1E", "1D1D1B"),
+            ("USA", "USA", "UNITED STATES", "0A3161", "B31942"),
+            (2, 1),
+        ),
+        // ---- basketball ----
+        "nba" => s(
+            ("BOS", "CELTICS", "BOSTON", "007A33", "FFFFFF"),
+            ("LAL", "LAKERS", "LOS ANGELES", "552583", "FDB927"),
+            (88, 84),
+        ),
+        // Not the Aces, whose primary is pure black: the row fill IS the
+        // primary, so a black one draws no band at all and the preview shows
+        // half a card.
+        "wnba" => s(
+            ("SEA", "STORM", "SEATTLE", "2C5234", "FEE11A"),
+            ("NY", "LIBERTY", "NEW YORK", "6ECEB2", "000000"),
+            (79, 74),
+        ),
+        "cbb" => s(
+            ("DUKE", "BLUE DEVILS", "DUKE", "001A57", "FFFFFF"),
+            ("UNC", "TAR HEELS", "NORTH CAROLINA", "7BAFD4", "FFFFFF"),
+            (71, 68),
+        ),
+        "wcbb" => s(
+            ("UCONN", "HUSKIES", "CONNECTICUT", "000E2F", "FFFFFF"),
+            ("SC", "GAMECOCKS", "SOUTH CAROLINA", "73000A", "000000"),
+            (66, 63),
+        ),
+        "olybm" | "olybw" => s(
+            ("USA", "USA", "UNITED STATES", "0A3161", "B31942"),
+            ("FRA", "FRANCE", "FRANCE", "002395", "ED2939"),
+            (87, 82),
+        ),
+        // ---- baseball ----
+        "mlb" => s(
+            ("DET", "TIGERS", "DETROIT", "0C2340", "FA4616"),
+            ("CLE", "GUARDIANS", "CLEVELAND", "E31937", "0C2340"),
+            (6, 4),
+        ),
+        "cbase" => s(
+            ("LSU", "TIGERS", "LSU", "461D7C", "FDD023"),
+            ("TENN", "VOLS", "TENNESSEE", "FF8200", "FFFFFF"),
+            (5, 3),
+        ),
+        // ---- football ----
+        "nfl" => s(
+            ("GB", "PACKERS", "GREEN BAY", "203731", "FFB612"),
+            ("CHI", "BEARS", "CHICAGO", "0B162A", "C83803"),
+            (17, 24),
+        ),
+        "cfb" => s(
+            ("MICH", "WOLVERINES", "MICHIGAN", "00274C", "FFCB05"),
+            ("OSU", "BUCKEYES", "OHIO STATE", "BB0000", "666666"),
+            (21, 27),
+        ),
+        // ---- soccer ----
+        "mls" => s(
+            ("LA", "GALAXY", "LOS ANGELES", "00245D", "FFD200"),
+            ("SEA", "SOUNDERS", "SEATTLE", "5D9732", "005595"),
+            (1, 1),
+        ),
+        // Arsenal red against Chelsea blue, not against Liverpool red: two
+        // near-identical bands stacked on each other is a picture of one team.
+        "epl" => s(
+            ("ARS", "ARSENAL", "ARSENAL", "EF0107", "FFFFFF"),
+            ("CHE", "CHELSEA", "CHELSEA", "034694", "FFFFFF"),
+            (1, 1),
+        ),
+        "ucl" => s(
+            ("RMA", "MADRID", "REAL MADRID", "FEBE10", "00529F"),
+            ("PSG", "PSG", "PARIS", "004170", "E30613"),
+            (1, 1),
+        ),
+        "wc" | "wwc" | "olysm" | "olysw" => s(
+            ("ARG", "ARGENTINA", "ARGENTINA", "75AADB", "FFFFFF"),
+            ("BRA", "BRAZIL", "BRAZIL", "FEDF00", "009B3A"),
+            (1, 1),
+        ),
+        // Fallback: unknown leagues get a neutral pair rather than someone
+        // else's teams.
+        _ => s(
+            ("BOS", "CELTICS", "BOSTON", "007A33", "FFFFFF"),
+            ("LAL", "LAKERS", "LOS ANGELES", "552583", "FDB927"),
+            (88, 84),
+        ),
+    }
+}
+
+/// The event a leaderboard league previews with. Golf's two tours do not share
+/// majors — offering "The Open" as the LPGA example is showing someone a
+/// tournament their tour does not play.
+fn sample_leaderboard(sport_id: &str) -> (&'static str, Vec<(&'static str, &'static str)>) {
+    match sport_id {
+        "lpga" => (
+            "US WOMENS OPEN",
+            vec![("KO", "-11"), ("KORDA", "-9"), ("THITIKUL", "-7"), ("YIN", "-6")],
+        ),
+        "f1" => (
+            "MONACO GP",
+            vec![("VER", "LAP 42"), ("NOR", "+2.1"), ("LEC", "+5.8"), ("HAM", "+9.4")],
+        ),
+        _ => (
+            "THE OPEN",
+            vec![("SCHEFFLER", "-12"), ("MCILROY", "-9"), ("FLEETWOOD", "-8"), ("MORIKAWA", "-7")],
+        ),
+    }
+}
+
 /// A demonstration game for ONE league, so a settings preview shows something
 /// the user recognises: hits and errors on a baseball final, shots on a live
 /// NHL frame, a shootout on a soccer knockout.
@@ -1252,27 +1393,26 @@ fn sample_game() -> model::Game {
 /// name-style preview is exactly the thing that needs them — a Location preview
 /// against an empty location would show a blank row and read as a bug.
 fn sample_game_for(sport_id: &str, extras: bool, live: bool) -> model::Game {
-    let team = |abbrev: &str, name: &str, location: &str, score: u32, p: &str, sec: &str| {
-        model::TeamSide {
-            abbrev: abbrev.into(),
-            name: name.into(),
-            location: location.into(),
-            score,
-            primary: model::hex_to_rgb(p),
-            secondary: model::ensure_contrast(model::hex_to_rgb(p), model::hex_to_rgb(sec)),
-            hits: None,
-            errors: None,
-            shots: None,
-            shootout: None,
-            aggregate: None,
-        }
+    let side = |t: (&str, &str, &str, &str, &str), score: u32| model::TeamSide {
+        abbrev: t.0.into(),
+        name: t.1.into(),
+        location: t.2.into(),
+        score,
+        primary: model::hex_to_rgb(t.3),
+        secondary: model::ensure_contrast(model::hex_to_rgb(t.3), model::hex_to_rgb(t.4)),
+        hits: None,
+        errors: None,
+        shots: None,
+        shootout: None,
+        aggregate: None,
     };
     let mut g = sample_game();
     g.sport_id = sport_id.into();
+    let sides = sample_sides(sport_id);
+    g.away = side(sides.away, sides.scores.0);
+    g.home = side(sides.home, sides.scores.1);
     match sport_id {
         "mlb" | "cbase" => {
-            g.away = team("DET", "TIGERS", "DETROIT", 6, "0C2340", "FA4616");
-            g.home = team("CLE", "GUARDIANS", "CLEVELAND", 4, "E31937", "0C2340");
             // Final, because hits and errors are a post-game line.
             g.status = GameStatus::Final;
             g.ordinal = String::new();
@@ -1285,13 +1425,6 @@ fn sample_game_for(sport_id: &str, extras: bool, live: bool) -> model::Game {
             }
         }
         "nhl" | "olyhm" | "olyhw" => {
-            // Short mascots on purpose. NHL rows use the 5x8 font, and
-            // `pair_style` falls back to the abbreviation when a name does not
-            // fit — with "BLACKHAWKS" the Name and Abbrev previews came out
-            // pixel-identical, which is the exact confusion these previews
-            // exist to remove.
-            g.away = team("BOS", "BRUINS", "BOSTON", 3, "FFB81C", "000000");
-            g.home = team("TOR", "LEAFS", "TORONTO", 3, "00205B", "FFFFFF");
             // Live and even strength, so the shots have the strip to themselves
             // rather than losing it to the power-play badge.
             g.situation = Some(model::Situation::Hockey {
@@ -1306,8 +1439,6 @@ fn sample_game_for(sport_id: &str, extras: bool, live: bool) -> model::Game {
             }
         }
         _ if espn::is_soccer(sport_id) => {
-            g.away = team("ARS", "ARSENAL", "ARSENAL", 1, "EF0107", "FFFFFF");
-            g.home = team("PSG", "PSG", "PARIS", 1, "004170", "E30613");
             g.status = GameStatus::Final;
             g.ordinal = String::new();
             g.clock = String::new();
@@ -1318,35 +1449,40 @@ fn sample_game_for(sport_id: &str, extras: bool, live: bool) -> model::Game {
             }
         }
         "nfl" | "cfb" => {
-            g.away = team("GB", "PACKERS", "GREEN BAY", 17, "203731", "FFB612");
-            g.home = team("CHI", "BEARS", "CHICAGO", 24, "0B162A", "C83803");
-            g.status = GameStatus::Final;
-            g.ordinal = String::new();
+            // A LIVE football game with the ball in play. The fixture used to
+            // be a Final with no situation, so every football preview was a
+            // quarter and two scores — none of the down-and-distance and field
+            // position that is most of what a football frame draws, and the
+            // thing someone is actually choosing between.
+            g.status = GameStatus::Active;
+            g.ordinal = "3RD".into();
             g.clock = String::new();
-            g.situation = None;
+            g.situation = Some(model::Situation::Football {
+                down_string: "3rd & 4".into(),
+                ball_position: format!("{} 38", sides.home.0),
+                home_possession: Some(true),
+            });
         }
         "pga" | "lpga" | "f1" => {
             // A leaderboard, not a team game. `render_spoiled` already has a
             // path for these — title kept, rows dropped, progress centred — and
             // the old fixture never produced one, so golf and F1 previewed
             // their spoiler setting with a basketball frame.
-            let row = |name: &str, value: &str| model::LeaderRow {
-                name: name.into(),
-                value: value.into(),
-                ..Default::default()
-            };
-            let f1 = sport_id == "f1";
+            let (title, rows) = sample_leaderboard(sport_id);
             g.leaderboard = Some(model::Leaderboard {
-                name: if f1 { "MONACO GP".into() } else { "THE OPEN".into() },
-                rows: if f1 {
-                    vec![row("VER", "LAP 42"), row("NOR", "+2.1"), row("LEC", "+5.8"), row("HAM", "+9.4")]
-                } else {
-                    vec![row("SCHEFFLER", "-12"), row("MCILROY", "-9"), row("FLEETWOOD", "-8"), row("MORIKAWA", "-7")]
-                },
+                name: title.into(),
+                rows: rows
+                    .into_iter()
+                    .map(|(name, value)| model::LeaderRow {
+                        name: name.into(),
+                        value: value.into(),
+                        ..Default::default()
+                    })
+                    .collect(),
             });
             // Golf's round lives in `ordinal`, which is also what the "Show
             // round" preview switches on and off.
-            g.ordinal = if f1 { String::new() } else { "R2".into() };
+            g.ordinal = if sport_id == "f1" { String::new() } else { "R2".into() };
             g.status = GameStatus::Active;
             g.clock = String::new();
             g.situation = None;
@@ -1354,8 +1490,6 @@ fn sample_game_for(sport_id: &str, extras: bool, live: bool) -> model::Game {
         _ => {
             // Basketball and anything else: a plain live game is enough to show
             // a name style or a spoiler, which is all those previews need.
-            g.away = team("BOS", "CELTICS", "BOSTON", 88, "007A33", "FFFFFF");
-            g.home = team("LAL", "LAKERS", "LOS ANGELES", 84, "552583", "FDB927");
             g.ordinal = "3RD".into();
             g.situation = None;
         }
@@ -2561,15 +2695,16 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
     // Quiet means DARK, not the off mode. "Quiet hours" that answer with a lit
     // clock at 1am have not done the thing they were turned on for; a board
     // that wants a clock overnight simply leaves the window off.
+    //
+    // There is no exception. "Wake for live events" used to carve one out for a
+    // game that was genuinely on, and it made the window mean two things at
+    // once: the setting could not be described without a clause, and a board
+    // that lit up at 2am for a match had done exactly what it was told in a way
+    // nobody could predict from the screen. `cfg.quiet_allow_events` is still
+    // accepted on the wire so an older app's command is not an error, and is
+    // deliberately not read here.
     if quiet_now(&cfg) {
-        // The exception: a game that is actually happening. The point is a dark
-        // bedroom, not a missed race — but only for real games, so the panel
-        // goes back to dark when the race ends rather than falling through to
-        // the clock.
-        let live = cfg.power && cfg.quiet_allow_events && !chosen_games(state, &cfg).is_empty();
-        if !live {
-            return dark_manifest(&cfg);
-        }
+        return dark_manifest(&cfg);
     }
 
     // Priority 1: live games (only while powered on).
@@ -7543,6 +7678,25 @@ mod tests {
         assert!(m.countdown_ms.is_none(), "no notice countdown while quiet");
     }
 
+    /// A stored `quiet_allow_events` must NOT light the panel. The setting is
+    /// gone from the app, so a board that still carries `true` from an older
+    /// build would wake for a game with nothing on any screen able to explain
+    /// it and nothing able to turn it off.
+    #[test]
+    fn a_leftover_wake_for_live_events_no_longer_lights_the_panel() {
+        let state = AppState::new_ephemeral();
+        let cfg = BoardConfig {
+            quiet_hours: Some(window_around_now(&BoardConfig::default())),
+            quiet_allow_events: true,
+            power: true,
+            ..Default::default()
+        };
+        state.configs.lock().unwrap().insert("b".into(), cfg);
+        *state.games.lock().unwrap() = vec![sample_game_for("nhl", true, true)];
+        let m = manifest_for_board(&state, "b");
+        assert!(!m.display_on, "quiet hours mean dark, with no exception");
+    }
+
     /// The knob inside a window means "show me anyway", NOT "sleep 24 hours" —
     /// `power` is still true in a window, so without its own arm the press
     /// lands in the showing-games branch and arms the sleep timer.
@@ -8149,6 +8303,79 @@ mod tests {
 #[cfg(test)]
 mod sample_preview_tests {
     use super::*;
+
+    /// Not an assertion — a way to LOOK at every league's fixture.
+    /// `cargo test -p server dump_league_previews -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn dump_league_previews() {
+        let dir = std::env::var("PREVIEW_DIR").unwrap_or_else(|_| "/tmp/previews".into());
+        std::fs::create_dir_all(&dir).unwrap();
+        for (id, ..) in espn::LEAGUE_IDENTITY {
+            for (tag, extras, live) in [("live", true, true), ("final", true, false)] {
+                let g = sample_game_for(id, extras, live);
+                let f = render::render_frame(&g, None, None, NameStyle::Name).1;
+                save_png(&format!("{dir}/{id}-{tag}.png"), &f, 8);
+            }
+        }
+        println!("wrote {dir}");
+    }
+
+    /// Every league previews with ITS OWN teams. The fixture used to be keyed
+    /// by sport family, so the NCAA football settings screen demonstrated
+    /// itself with the Packers and the Bears, and MLS with Arsenal.
+    #[test]
+    fn each_league_previews_with_teams_from_that_league() {
+        // Leagues that share a family and must not share a fixture.
+        for (a, b) in [
+            ("nfl", "cfb"),
+            ("mlb", "cbase"),
+            ("nba", "cbb"),
+            ("nba", "wnba"),
+            ("cbb", "wcbb"),
+            ("mls", "epl"),
+            ("epl", "ucl"),
+            // Golf and F1 are leaderboards with no team sides — the title
+            // assertion below is what covers those.
+        ] {
+            let ga = sample_game_for(a, false, true);
+            let gb = sample_game_for(b, false, true);
+            assert_ne!(
+                (ga.away.abbrev.clone(), ga.home.abbrev.clone()),
+                (gb.away.abbrev.clone(), gb.home.abbrev.clone()),
+                "{a} and {b} preview with the same teams"
+            );
+        }
+        // ...and the leaderboard leagues do not share an event.
+        let title = |id: &str| sample_game_for(id, false, true).leaderboard.unwrap().name;
+        assert_ne!(title("pga"), title("lpga"), "LPGA previews a PGA event");
+        assert_ne!(title("pga"), title("f1"));
+    }
+
+    /// A football preview has to show the part of a football frame that is
+    /// football: down, distance and field position. It was a Final with no
+    /// situation, so both previews were a quarter and two scores.
+    #[test]
+    fn football_previews_show_the_down_and_the_ball() {
+        for id in ["nfl", "cfb"] {
+            let g = sample_game_for(id, true, true);
+            assert_eq!(g.status, GameStatus::Active, "{id}");
+            match g.situation {
+                Some(model::Situation::Football { ref down_string, ref home_possession, .. }) => {
+                    assert!(!down_string.is_empty(), "{id} has no down string");
+                    assert!(home_possession.is_some(), "{id} has no possession");
+                }
+                other => panic!("{id} previews with {other:?}, not a football situation"),
+            }
+            // And it must reach the panel: a situation the renderer ignores is
+            // the same bug one step later.
+            let with = render::render_frame(&g, None, None, NameStyle::Name).1;
+            let mut bare = g.clone();
+            bare.situation = None;
+            let without = render::render_frame(&bare, None, None, NameStyle::Name).1;
+            assert_ne!(with, without, "{id}: the football situation draws nothing");
+        }
+    }
 
     /// The previews must actually DIFFER, or the settings row is showing the
     /// user two identical pictures and asking them to choose.

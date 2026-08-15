@@ -340,15 +340,22 @@ impl SportsDataSource for EspnSource {
                             } else {
                                 t.display_name
                             };
+                            // ESPN's Olympic hockey rosters shout two of their
+                            // twelve country names and none of the others.
+                            let name = crate::teams::unshout(&name);
                             // ESPN gives "" when a color is absent — normalize to None.
                             let hex = |s: String| (!s.is_empty()).then_some(s);
+                            // ...and gives none at all for Olympic hockey, so
+                            // those countries fall back to their flag.
+                            let flag = crate::teams::flag_colors(&abbrev);
                             Some(Team {
                                 id: crate::team_key(lg.sport_id, &abbrev),
                                 league_id: lg.sport_id.into(),
                                 name,
+                                color: hex(t.color).or_else(|| flag.map(|(c, _)| c.to_string())),
+                                alt_color: hex(t.alternate_color)
+                                    .or_else(|| flag.map(|(_, c)| c.to_string())),
                                 abbrev,
-                                color: hex(t.color),
-                                alt_color: hex(t.alternate_color),
                             })
                         })
                         .collect(),

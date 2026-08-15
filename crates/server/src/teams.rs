@@ -176,3 +176,110 @@ static NFL: &[(&str, &str)] = &[
     ("NYJ", "Jets"), ("PHI", "Eagles"), ("PIT", "Steelers"), ("SF", "49ers"),
     ("SEA", "Seahawks"), ("TB", "Buccaneers"), ("TEN", "Titans"), ("WSH", "Washington"),
 ];
+
+// ---- national teams ----
+
+/// ESPN shouts SOME country names and not others. Its Olympic hockey rosters
+/// come back with `CZECHIA` and `FRANCE` next to `Finland` and `Switzerland`,
+/// which reads as a rendering bug in a list the app shows verbatim.
+///
+/// Only a name with NO lowercase at all is touched, and only past four
+/// characters: a genuinely capitalised short name (`PSG`, `AZ`) is not
+/// shouting, it is its name. Word-by-word so `UNITED STATES` would come back as
+/// `United States` rather than `United states`.
+pub fn unshout(name: &str) -> String {
+    let n = name.trim();
+    if n.chars().count() <= 4 || n.chars().any(|c| c.is_lowercase()) {
+        return n.to_string();
+    }
+    n.split(' ')
+        .map(|w| {
+            let mut cs = w.chars();
+            match cs.next() {
+                Some(f) => f.to_string() + &cs.as_str().to_lowercase(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Flag colors for national teams, keyed by IOC/FIFA code.
+///
+/// ESPN returns no colors AT ALL for Olympic hockey (its other national-team
+/// leagues are fine), so those twelve countries drew as the app's colorless
+/// default while every other league had badges. A flag is the obvious source,
+/// and the codes are shared across sports — the same table serves any
+/// national-team league whose feed comes back bare.
+///
+/// Two colors, primary then secondary, picked so the pair stays legible as a
+/// badge: a flag's white is skipped in favour of its next color, because white
+/// on the app's light background is nothing at all.
+pub fn flag_colors(abbrev: &str) -> Option<(&'static str, &'static str)> {
+    Some(match abbrev {
+        "CAN" => ("d52b1e", "1d1d1b"), // red / black, not the flag's white
+        "USA" => ("0a3161", "b31942"),
+        "CZE" => ("11457e", "d7141a"),
+        "SVK" => ("0b4ea2", "ee1c25"),
+        "FIN" => ("003580", "5a8fd6"),
+        "SWE" => ("006aa7", "fecc00"),
+        "SUI" => ("d52b1e", "8c1a12"),
+        "GER" => ("1a1a1a", "dd0000"),
+        "FRA" => ("002395", "ed2939"),
+        "ITA" => ("008c45", "cd212a"),
+        "LAT" => ("9e3039", "6b2027"),
+        "DEN" => ("c8102e", "8f0b20"),
+        "JPN" => ("bc002d", "1d1d1b"),
+        "NOR" => ("ba0c2f", "00205b"),
+        "AUT" => ("ed2939", "9c1b26"),
+        "CHN" => ("ee1c25", "ffde00"),
+        "KOR" => ("003478", "c60c30"),
+        "POL" => ("dc143c", "8f0d27"),
+        "SLO" => ("005da4", "ed1c24"),
+        "HUN" => ("cd2a3e", "436f4d"),
+        "GBR" => ("012169", "c8102e"),
+        "KAZ" => ("00afca", "fec50c"),
+        "BLR" => ("c8313e", "4aa657"),
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod national_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_shouting_names_are_touched() {
+        assert_eq!(unshout("CZECHIA"), "Czechia");
+        assert_eq!(unshout("UNITED STATES"), "United States");
+        // Already fine — must come back byte-identical, not round-tripped.
+        assert_eq!(unshout("Switzerland"), "Switzerland");
+        assert_eq!(unshout("Red Sox"), "Red Sox");
+        // Short and capitalised is a name, not shouting.
+        assert_eq!(unshout("PSG"), "PSG");
+        assert_eq!(unshout("AZ"), "AZ");
+    }
+
+    /// Every country on an Olympic hockey roster needs a color, since ESPN
+    /// supplies none for that league and the app has no other source.
+    #[test]
+    fn every_olympic_hockey_nation_has_a_flag() {
+        for code in [
+            "CZE", "CAN", "DEN", "FRA", "FIN", "GER", "ITA", "LAT", "SVK", "SWE", "SUI", "USA",
+            "JPN",
+        ] {
+            assert!(flag_colors(code).is_some(), "{code} has no flag colors");
+        }
+    }
+
+    #[test]
+    fn flag_colors_are_six_hex_digits() {
+        for code in ["CAN", "USA", "SWE", "KAZ"] {
+            let (a, b) = flag_colors(code).unwrap();
+            for c in [a, b] {
+                assert_eq!(c.len(), 6, "{code}: {c}");
+                assert!(c.chars().all(|ch| ch.is_ascii_hexdigit()), "{code}: {c}");
+            }
+        }
+    }
+}
