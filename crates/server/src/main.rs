@@ -90,6 +90,12 @@ const PAIR_CODE_TTL: Duration = Duration::from_secs(10 * 60);
 pub struct AppState {
     pub catalog: Arc<Catalog>,
     pub games: Arc<Mutex<Vec<Game>>>,
+    /// False until the first poll has WRITTEN a slate. "Never fetched" and
+    /// "fetched and empty" must be distinguishable: a board reconnecting into
+    /// a freshly restarted server was pushed the idle screen out of boot
+    /// emptiness, blinked to weather for the seconds until the first sweep
+    /// landed, then blinked back — once per deploy, live games and all.
+    pub slate_ready: Arc<std::sync::atomic::AtomicBool>,
     /// The synthetic slate that boards with `demo_data` read, regenerated every
     /// poll alongside the live one. Seeded at tick 0 so `/demo/*` and a board
     /// that flips the toggle before the first poll are never blank.
@@ -347,8 +353,10 @@ impl AppState {
     #[cfg(test)]
     fn new_ephemeral() -> Self {
         let state = Self::new_inner(None, mock_catalog());
-        // Tests exercise selection/rotation against a known slate.
+        // Tests exercise selection/rotation against a known slate — which also
+        // means the slate is KNOWN, so the boot hold does not apply.
         *state.games.lock().unwrap() = espn::mock_games();
+        state.slate_ready.store(true, std::sync::atomic::Ordering::Relaxed);
         state
     }
 
@@ -378,15 +386,18 @@ impl AppState {
         sanitize_configs(&catalog, &mut configs);
         sanitize_off_modes(&mut configs);
         migrate_champ_options(&mut configs);
-        AppState {
+        let state = AppState {
             demo: Arc::new(Mutex::new(espn::demo_games(0, 0))),
             demo_source: Arc::new(espn::DemoSource::new()),
             weather: Arc::new(weather::Cache::default()),
             beats: Arc::new(Mutex::new(HashMap::new())),
             catalog: Arc::new(catalog),
             // Empty until the first real fetch — boards show their no-games
-            // behavior rather than fake placeholder games.
+            // behavior rather than fake placeholder games (but see
+            // `slate_ready`: until that fetch, manifests HOLD rather than
+            // claim idleness).
             games: Arc::new(Mutex::new(Vec::new())),
+            slate_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             frames: Arc::new(Mutex::new(HashMap::new())),
             configs: Arc::new(Mutex::new(configs)),
             unparsed: Arc::new(Mutex::new(unparsed)),
@@ -413,7 +424,10 @@ impl AppState {
             // Matches FIRMWARE_DIR's default; main() re-points it when the
             // env var is set (mirroring how `state.firmware` is filled in).
             fw_notes_dir: PathBuf::from("./firmware-dist/notes"),
-        }
+        };
+        // Live debug sessions survive a deploy; see DEBUG_SESSIONS_KEY.
+        load_debug_sessions(&state);
+        state
     }
 
     /// Cache a rendered frame, stamped with the current eviction generation.
@@ -2547,10 +2561,71 @@ pub fn mint_debug_token(state: &AppState, board_id: &str, secs: u32) -> String {
     let now = std::time::Instant::now();
     let session_ends = now + Duration::from_secs(u64::from(secs));
     let readable_until = session_ends + DEBUG_READ_GRACE;
-    let mut tokens = state.debug_tokens.lock().unwrap();
-    tokens.retain(|_, (_, _, readable)| *readable > now);
-    tokens.insert(nonce.clone(), (board_id.to_string(), session_ends, readable_until));
+    {
+        let mut tokens = state.debug_tokens.lock().unwrap();
+        tokens.retain(|_, (_, _, readable)| *readable > now);
+        tokens.insert(nonce.clone(), (board_id.to_string(), session_ends, readable_until));
+    }
+    persist_debug_sessions(state);
     format!("/debug/{nonce}")
+}
+
+/// The durable copy of the live debug sessions — the key detail that makes
+/// log streaming survive a DEPLOY.
+///
+/// Sessions used to live only in process memory (Instant deadlines cannot even
+/// represent anything else), which was fine for the failure it was designed
+/// around — a BOARD rebooting mid-session gets re-armed on reconnect — and
+/// silently fatal for the other restart: every `railway up` while a session
+/// ran destroyed the token, so the board reconnected to a server that had
+/// never heard of the session, the re-arm found nothing, and the app kept
+/// showing a live-looking link and countdown onto a stream that had stopped.
+/// On a day with a dozen deploys the feature simply read as broken.
+///
+/// Stored as wall-clock seconds in the same kv table as the daily-report
+/// marker; loaded at boot converted back to Instants. The buffered LINES are
+/// deliberately not persisted — the re-armed board streams fresh ones within
+/// seconds, and stale console lines presented as current would mislead.
+const DEBUG_SESSIONS_KEY: &str = "debug_sessions";
+
+pub(crate) fn persist_debug_sessions(state: &AppState) {
+    let now_i = std::time::Instant::now();
+    let now_u = unix_now();
+    let rows: Vec<(String, String, u64, u64)> = state
+        .debug_tokens
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(n, (b, ends, readable))| {
+            (
+                n.clone(),
+                b.clone(),
+                now_u + ends.saturating_duration_since(now_i).as_secs(),
+                now_u + readable.saturating_duration_since(now_i).as_secs(),
+            )
+        })
+        .collect();
+    state.kv_set(DEBUG_SESSIONS_KEY, &serde_json::to_string(&rows).unwrap());
+}
+
+fn load_debug_sessions(state: &AppState) {
+    let Some(json) = state.kv_get(DEBUG_SESSIONS_KEY) else { return };
+    let Ok(rows) = serde_json::from_str::<Vec<(String, String, u64, u64)>>(&json) else { return };
+    let now_i = std::time::Instant::now();
+    let now_u = unix_now();
+    let mut tokens = state.debug_tokens.lock().unwrap();
+    for (nonce, board, ends_u, readable_u) in rows {
+        if readable_u > now_u {
+            tokens.insert(
+                nonce,
+                (
+                    board,
+                    now_i + Duration::from_secs(ends_u.saturating_sub(now_u)),
+                    now_i + Duration::from_secs(readable_u - now_u),
+                ),
+            );
+        }
+    }
 }
 
 /// Seconds left on this board's debug session, if one is live.
@@ -3108,6 +3183,24 @@ pub fn push_all_connected(state: &AppState) {
 }
 
 pub fn push_board(state: &AppState, board_id: &str) {
+    // Boot hold: before the first sweep, a scores-mode board would be told
+    // "idle" purely because the process is young. Send nothing instead — the
+    // board keeps whatever it was showing through the restart (its offline
+    // grace held the frame), and the first poll's push follows in seconds.
+    // Every state that does NOT depend on the slate — setup, quiet, a notice,
+    // a picked mode, off, demo (whose slate is seeded at boot) — pushes
+    // normally.
+    if !state.slate_ready.load(std::sync::atomic::Ordering::Relaxed) {
+        let cfg = state.config_for(board_id);
+        let would_claim_idle = cfg.mode == MODE_SCORES
+            && !cfg.demo_data
+            && !board_prefs(&cfg).unconfigured
+            && !quiet_now(&cfg)
+            && !state.notices.lock().unwrap().contains_key(board_id);
+        if would_claim_idle {
+            return;
+        }
+    }
     let manifest = manifest_for_board(state, board_id);
     let json = serde_json::to_string(&ServerMsg::Manifest(manifest)).unwrap();
     {
@@ -4065,6 +4158,10 @@ async fn poll_loop(state: AppState, source: Arc<dyn SportsDataSource>) {
         bridge_football_possession(&state, &mut games);
         *state.demo.lock().unwrap() = demo;
         *state.games.lock().unwrap() = games;
+        // Unconditionally, even when the sweep came back empty: a genuinely
+        // gameless day should idle honestly. The flag distinguishes "never
+        // fetched", nothing more.
+        state.slate_ready.store(true, std::sync::atomic::Ordering::Relaxed);
         let board_ids: Vec<String> = state.devices.lock().unwrap().keys().cloned().collect();
         for bid in &board_ids {
             push_board(&state, bid);
@@ -5048,6 +5145,80 @@ mod tests {
         handle_select_mode(&state, "b1", "clock");
         handle_select_mode(&state, "b1", "stocks");
         assert_eq!(state.config_for("b1").mode, "clock", "junk pick ignored");
+    }
+
+    /// A board reconnecting into a freshly restarted server must not be told
+    /// "idle" out of boot emptiness — the source of a weather blink on every
+    /// deploy with games live. Manifests HOLD until the first sweep lands;
+    /// slate-independent states still push immediately.
+    #[test]
+    fn a_restarting_server_holds_manifests_until_the_first_sweep() {
+        use std::sync::atomic::Ordering;
+        let state = AppState::new_ephemeral();
+        state.slate_ready.store(false, Ordering::Relaxed);
+        state.games.lock().unwrap().clear();
+
+        state.configs.lock().unwrap().insert("b1".into(), watch_all());
+        push_board(&state, "b1");
+        assert!(
+            state.last_manifest.lock().unwrap().get("b1").is_none(),
+            "a scores board gets NOTHING before the first sweep — never a false idle"
+        );
+
+        // Slate-independent state: a board in mode "off" is dark whatever the
+        // slate says, so it pushes at boot.
+        let mut off = watch_all();
+        apply_mode(&mut off, MODE_OFF);
+        state.configs.lock().unwrap().insert("b2".into(), off);
+        push_board(&state, "b2");
+        assert!(
+            state.last_manifest.lock().unwrap().get("b2").is_some(),
+            "slate-independent states push through the boot hold"
+        );
+
+        // The first sweep write releases the hold — even an EMPTY one, so a
+        // genuinely gameless day still idles honestly.
+        state.slate_ready.store(true, Ordering::Relaxed);
+        push_board(&state, "b1");
+        assert!(
+            state.last_manifest.lock().unwrap().get("b1").is_some(),
+            "after the sweep, the idle claim is honest"
+        );
+    }
+
+    /// A live debug session must survive a DEPLOY: the board's re-arm on
+    /// reconnect only works if the restarted server still knows the session,
+    /// and the app's link only works if the same nonce still resolves.
+    #[test]
+    fn a_debug_session_survives_a_restart() {
+        let path = std::env::temp_dir().join(format!("sb-dbg-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let url = {
+            let state = AppState::new_inner(Some(open_db(&path).unwrap()), mock_catalog());
+            mint_debug_token(&state, "b1", 600)
+        };
+        {
+            let state = AppState::new_inner(Some(open_db(&path).unwrap()), mock_catalog());
+            let left = debug_session_remaining(&state, "b1").expect("the session survives the deploy");
+            assert!(left > 500 && left <= 600, "with its clock still roughly right, got {left}");
+            let nonce = url.trim_start_matches("/debug/");
+            assert_eq!(
+                resolve_debug_token(&state, nonce).as_deref(),
+                Some("b1"),
+                "the app's existing link keeps resolving"
+            );
+            // Revocation is durable too.
+            state.debug_tokens.lock().unwrap().clear();
+            persist_debug_sessions(&state);
+        }
+        {
+            let state = AppState::new_inner(Some(open_db(&path).unwrap()), mock_catalog());
+            assert!(
+                debug_session_remaining(&state, "b1").is_none(),
+                "a revoked session stays revoked across the next deploy"
+            );
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     /// A poll that omits possession must not flip the football frame back to

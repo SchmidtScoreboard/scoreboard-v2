@@ -829,8 +829,10 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) -> O
                     if delivered { "delivered" } else { "board offline — will re-arm on connect" }
                 );
                 // Off revokes everything at once: the board stops sending, the
-                // buffer goes, and any URL handed out stops resolving.
+                // buffer goes, and any URL handed out stops resolving — from
+                // this process and, via the persisted copy, from the next one.
                 state.debug_tokens.lock().unwrap().retain(|_, (b, _, _)| b != board_id);
+                crate::persist_debug_sessions(state);
                 if !on {
                     state.debug_logs.lock().unwrap().remove(board_id);
                     return None;
