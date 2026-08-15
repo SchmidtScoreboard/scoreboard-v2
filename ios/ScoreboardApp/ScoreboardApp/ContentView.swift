@@ -2800,7 +2800,8 @@ enum AppNotes {
         - Weather is one entry with four layouts, instead of four separate entries.
         - Quiet hours: pick a window and the scoreboard's screen is off through it every night.
         - Patch notes for the app and the scoreboard now live behind the buttons next to their version numbers.
-        - Settings that change how the panel looks — the sleep screen, spoilers, team names, the box-score line, golf's round — now show you the two frames and let you pick, instead of describing them.
+        - Settings that change how the panel looks — the idle screen, spoilers, team names, the box-score line, golf's round — now show you the two frames and let you pick, instead of describing them.
+        - The clock/weather setting is called "Idle Screen" now. It is what the scoreboard shows when it is on and nothing you follow is playing — asleep, the panel is off entirely.
         - Those examples use your own league: NCAA football previews with NCAA teams, and the LPGA settings no longer offer a tournament from the men's tour.
         - Scoreboard troubleshooting moved into Settings as its own page.
         - League Preferences is grouped by sport now, the same way Add League is. Each league shows what it is following right in its title row; tap the league to change it.
@@ -2828,7 +2829,7 @@ enum AppNotes {
 enum SettingsInfoTopic: String, Identifiable {
     /// One topic left, and deliberately: `whenOff`, `sleep`, `dwell` and
     /// `spoilers` all had cards, and all four described a setting whose own row
-    /// now shows it — the Sleep Screen and spoiler rows render the actual
+    /// now shows it — the Idle Screen and spoiler rows render the actual
     /// frames, and the pace and sleep rows say what they do in a footer. A card
     /// you have to open to find out what a switch does is a worse answer than a
     /// switch that shows you.
@@ -5458,7 +5459,13 @@ struct SettingsView: View {
         return UInt16((c.hour ?? 0) * 60 + (c.minute ?? 0))
     }
 
-    /// What the panel shows while the scoreboard is off.
+    /// What the panel shows while the scoreboard is AWAKE with nothing on.
+    ///
+    /// Named "Idle Screen", not "Sleep Screen". Asleep is dark — the server's
+    /// priority 4 returns `dark_manifest` and never reaches the off mode — so
+    /// this setting governs the other case entirely: powered on, nothing live,
+    /// nothing upcoming. It was called "Sleep Screen" for one release and that
+    /// name described the one state it has nothing to do with.
     ///
     /// Every row here comes from the SERVER (`model.offModes`) — label,
     /// subtitle, preview path, and the optional text input all travel in the
@@ -5498,7 +5505,9 @@ struct SettingsView: View {
                 }
             }
         } header: {
-            Text("Sleep Screen")
+            Text("Idle Screen")
+        } footer: {
+            Text("Shown when the scoreboard is on but nothing you follow is playing. While it's asleep the panel is off.")
         }
     }
 

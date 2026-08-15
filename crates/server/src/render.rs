@@ -782,6 +782,10 @@ pub fn render_game(g: &Game, tz: Option<chrono_tz::Tz>, style: NameStyle) -> (Fr
 /// Width of an end zone on the field bar. The playing field is what is left.
 const END_ZONE: i32 = 7;
 
+/// Yard hashes: bright enough to read as marks against the (0,26,0) turf, dim
+/// enough to stay under the scrimmage line and the line to gain.
+const HASH: Rgb888 = Rgb888::new(0, 55, 0);
+
 /// Panel x for a yard line, measured from the possessing team's own goal.
 ///
 /// Both goal lines land on the outermost turf columns, so 0 and 100 are as far
@@ -866,17 +870,34 @@ fn draw_football_field(c: &mut Canvas, g: &Game, home_ball: bool, yards: i32, to
     fill(c, 0, TOP, FRAME_WIDTH as u32, H, Rgb888::new(0, 26, 0));
     fill(c, 0, TOP, END_ZONE as u32, H, end_zone_tint(own));
     fill(c, FRAME_WIDTH as i32 - END_ZONE, TOP, END_ZONE as u32, H, end_zone_tint(opp));
-    // Midfield and the attacking 20, drawn as markings rather than as states.
+    // Yard markings: 1px hashes at every 10, top and bottom rows only.
     //
-    // The red zone was first a state — the defending end zone came up to full
-    // colour inside the 20 — and that cue is only as loud as the defending
-    // team's primary. Seattle's navy at full strength is barely brighter than
+    // The middle five rows stay clean turf, which is what keeps the hierarchy
+    // readable — the white scrimmage line and the yellow line to gain are the
+    // only things that cross the bar, so they are the only things the eye goes
+    // to. Nothing else is full height any more, midfield included.
+    //
+    // 10 yards is 4.9px on a 50-column field, so the hashes land 5px apart
+    // (one 4px gap at midfield, from rounding). That reads as discrete marks.
+    // 5-yard hashes would be 2.45px apart and would alias into hatch, which is
+    // why the pitch is ten.
+    //
+    // There WAS a red mark at the attacking 20. It came from an earlier design
+    // where the red zone was a STATE — the defending end zone came up to full
+    // colour inside the 20 — and that cue was only ever as loud as the
+    // defending team's primary: navy at full strength is barely brighter than
     // the same navy at the 40% these end zones use, so the most exciting moment
-    // in the game announced itself for San Francisco and stayed silent for
-    // Seattle. A line on the field is the same width for everyone, and the
-    // scrimmage line crossing it is the event.
-    fill(c, field_x(50), TOP, 1, H, Rgb888::new(0, 64, 0));
-    fill(c, field_x(80), TOP, 1, H, Rgb888::new(80, 0, 0));
+    // in the game announced itself for one team and stayed silent for the
+    // other. Worth remembering, because it is the reason not to try that again.
+    // The line that replaced it was honest but it was a fourth vertical on a
+    // seven-pixel bar, and you can already see the ball approaching the goal.
+    for yard in (10..=90).step_by(10) {
+        // The 50 is the one hash you navigate by, so it gets depth rather than
+        // height: two rows at each edge instead of one. Still not a line.
+        let n = if yard == 50 { 2 } else { 1 };
+        fill(c, field_x(yard), TOP, 1, n, HASH);
+        fill(c, field_x(yard), TOP + H as i32 - n as i32, 1, n, HASH);
+    }
     if let Some(gain) = to_gain {
         // A line to gain on top of the scrimmage line is no information, and it
         // would win the overdraw below and read as the wrong colour.
@@ -2109,14 +2130,22 @@ mod kern_tests {
         // The scrimmage line overhangs the turf top and bottom.
         assert_eq!(px565(&px, field_x(75), 23), white, "overhang above");
         assert_eq!(px565(&px, field_x(75), 31), white, "overhang below");
-        // The 20 is marked on the field rather than signalled by lighting up
-        // the end zone, so it reads the same whatever colour the defence wears.
-        // Checked from a scrimmage that does not sit on the mark and overdraw
-        // it — the scrimmage and the line to gain both win that column, which
-        // is correct and would make this assertion pass for the wrong reason.
+        // Yard hashes: on the top and bottom rows, and ONLY there. Checked from
+        // a scrimmage that does not sit on a hash — the scrimmage and the line
+        // to gain both win their column, which is correct and would make these
+        // pass for the wrong reason.
         let mid = bar("SF 40", true); // SEA at midfield-ish, 60 yards out
-        assert_eq!(px565(&mid, field_x(80), 27), c565(Rgb888::new(80, 0, 0)), "the 20 is marked");
-        assert_eq!(px565(&mid, field_x(60), 27), white, "…and the ball is short of it");
+        let (hash, turf) = (c565(HASH), c565(Rgb888::new(0, 26, 0)));
+        assert_eq!(px565(&mid, field_x(80), 24), hash, "hash at the 80, top row");
+        assert_eq!(px565(&mid, field_x(80), 30), hash, "hash at the 80, bottom row");
+        assert_eq!(px565(&mid, field_x(80), 27), turf, "…and nothing across the middle");
+        // The 50 is two rows deep at each edge, the others one.
+        assert_eq!(px565(&mid, field_x(50), 25), hash, "the 50 is the deep one");
+        assert_eq!(px565(&mid, field_x(80), 25), turf, "…and the others are not");
+        // Absence matters as much as presence: a hash at the wrong column would
+        // pass every assertion above. field_x(80)=46, and 44 is between marks.
+        assert_eq!(px565(&mid, 44, 24), turf, "no hash between the marks");
+        assert_eq!(px565(&mid, field_x(60), 27), white, "the ball is short of the 20");
         // Same string, other team: the ball is now at ITS 25, near the left.
         let px = bar("SEA 25", true);
         assert_eq!(px565(&px, field_x(25), 27), white, "scrimmage at the 25");
