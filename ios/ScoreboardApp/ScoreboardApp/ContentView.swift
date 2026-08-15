@@ -2445,6 +2445,13 @@ struct DashboardView: View {
                 onCommit: { model.setBrightness($0) }
             )
             modePicker
+                // The rail spans the CARD: zero row insets so the scroll view
+                // owns the full width and clips at the section's edge, with a
+                // content margin putting the first tile back on the other
+                // rows' leading line — the dashboard carousel's exact recipe.
+                // Left inside its own row insets, the rail clipped mid-card,
+                // which read as tiles vanishing at a random x.
+                .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
         } header: {
             Text("Controls")
         } footer: {
@@ -2461,6 +2468,12 @@ struct DashboardView: View {
     /// choices like this.
     private var modePicker: some View {
         ScrollView(.horizontal, showsIndicators: false) {
+            modePickerTiles
+        }
+        .contentMargins(.horizontal, 20, for: .scrollContent)
+    }
+
+    private var modePickerTiles: some View {
             HStack(alignment: .top, spacing: 10) {
                 ForEach(model.pickableModes, id: \.id) { m in
                     Button { model.setMode(m.id) } label: {
@@ -2490,7 +2503,6 @@ struct DashboardView: View {
                 }
             }
             .padding(.vertical, 2)
-        }
     }
 
     /// Quiet hours on the dashboard — but ONLY while the window is actually
@@ -2753,9 +2765,9 @@ struct DashboardView: View {
                             .lineLimit(1)
                             .truncationMode(.tail)
                     }
-                    Image(systemName: "chevron.right")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(.tertiary)
+                    // No hand-drawn chevron: the NavigationLink draws its own
+                    // disclosure indicator even nested in a row, and drawing a
+                    // second one shipped a row with two arrows.
                 }
                 .contentShape(Rectangle())
             }
@@ -4949,8 +4961,8 @@ struct SettingsView: View {
     /// Settings' own remove confirm.
     @State private var showRemoveConfirm = false
     /// The rename alert (the About section's Name row).
-    @State private var showRename = false
     @State private var renameText = ""
+    @FocusState private var nameFieldFocused: Bool
     /// Which settings-row explainer card is up (nil = none).
     @State private var settingsInfo: SettingsInfoTopic?
     /// Import tapped with nothing usable on the clipboard.
@@ -5611,29 +5623,25 @@ struct SettingsView: View {
     /// The board's name, top level: it is the one thing on this screen that
     /// identifies WHICH scoreboard you are looking at.
     private var nameRow: some View {
-        Button {
-            renameText = model.currentName
-            showRename = true
-        } label: {
-            HStack {
-                // Concrete Colors, and `.plain` below: a Form button tints its
-                // whole label with the accent, so a `.primary` inside a default
-                // button style still came out blue and read as a link.
-                Label("Scoreboard Name", systemImage: "textformat")
-                    .foregroundStyle(Color.primary)
-                Spacer()
-                Text(model.currentName)
-                    .foregroundStyle(Color.secondary)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .alert("Name this scoreboard", isPresented: $showRename) {
+        HStack(spacing: 6) {
+            // A bare Label, not a Button label: the row is no longer tappable
+            // chrome around a popup, so nothing tints the text — and the icon
+            // picks up the accent on its own, matching its siblings.
+            Label("Scoreboard Name", systemImage: "textformat")
+            // Edited in place. The field commits on return; while it has
+            // focus the server's pushes don't overwrite the keystrokes, and a
+            // rename from another phone lands whenever the field is idle.
             TextField("Name", text: $renameText)
-            Button("Save") { model.rename(renameText) }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Shown in your scoreboard list. Saved to the server.")
+                .multilineTextAlignment(.trailing)
+                .foregroundStyle(Color.secondary)
+                .submitLabel(.done)
+                .autocorrectionDisabled()
+                .focused($nameFieldFocused)
+                .onSubmit { model.rename(renameText) }
+                .onAppear { renameText = model.currentName }
+                .onChange(of: model.currentName) {
+                    if !nameFieldFocused { renameText = model.currentName }
+                }
         }
     }
 

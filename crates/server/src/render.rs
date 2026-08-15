@@ -788,11 +788,16 @@ const HASH: Rgb888 = Rgb888::new(0, 55, 0);
 
 /// Panel x for a yard line, measured from the possessing team's own goal.
 ///
-/// Both goal lines land on the outermost turf columns, so 0 and 100 are as far
-/// apart as the bar can put them and every yard between is half a pixel.
+/// The field spans the FULL 50 turf columns (not 49): 10 yards is then
+/// exactly 5px, so the 10-yard hashes land perfectly evenly — the old
+/// span-between-outermost-columns mapping made a decade 4.9px and one gap
+/// came out a pixel short. The cost is that yard 100 lands one past the last
+/// turf column, on the end zone's first column — which is where a goal line
+/// actually is, so the "1st & Goal" line to gain draws on the boundary it
+/// names.
 fn field_x(yards: i32) -> i32 {
     let field_w = FRAME_WIDTH as i32 - 2 * END_ZONE;
-    END_ZONE + (yards.clamp(0, 100) * (field_w - 1) + 50) / 100
+    END_ZONE + (yards.clamp(0, 100) * field_w + 50) / 100
 }
 
 /// A team colour at end-zone weight — enough to say whose end it is, dim enough
@@ -877,10 +882,9 @@ fn draw_football_field(c: &mut Canvas, g: &Game, home_ball: bool, yards: i32, to
     // only things that cross the bar, so they are the only things the eye goes
     // to. Nothing else is full height any more, midfield included.
     //
-    // 10 yards is 4.9px on a 50-column field, so the hashes land 5px apart
-    // (one 4px gap at midfield, from rounding). That reads as discrete marks.
-    // 5-yard hashes would be 2.45px apart and would alias into hatch, which is
-    // why the pitch is ten.
+    // 10 yards is exactly 5px (see `field_x`), so the hashes are perfectly
+    // even. 5-yard hashes would be 2.5px apart and would alias into hatch,
+    // which is why the pitch is ten.
     //
     // There WAS a red mark at the attacking 20. It came from an earlier design
     // where the red zone was a STATE — the defending end zone came up to full
@@ -2103,9 +2107,11 @@ mod kern_tests {
         assert_eq!(yards_to_gain("1st & Goal", 94), Some(100));
         assert_eq!(yards_to_gain("2nd & 15", 95), Some(100), "clamped to the goal line");
         assert_eq!(yards_to_gain("3rd & inches", 40), None);
-        // Both goal lines sit on turf, as far apart as the bar can put them.
+        // The own goal line opens the turf; the far goal line is the END
+        // ZONE'S first column — the boundary a goal line actually is. That
+        // asymmetry is what buys the exactly-even hash spacing (see field_x).
         assert_eq!(field_x(0), END_ZONE);
-        assert_eq!(field_x(100), FRAME_WIDTH as i32 - END_ZONE - 1);
+        assert_eq!(field_x(100), FRAME_WIDTH as i32 - END_ZONE);
         assert!(field_x(25) < field_x(50) && field_x(50) < field_x(75), "monotonic");
     }
 
@@ -2143,8 +2149,12 @@ mod kern_tests {
         assert_eq!(px565(&mid, field_x(50), 25), hash, "the 50 is the deep one");
         assert_eq!(px565(&mid, field_x(80), 25), turf, "…and the others are not");
         // Absence matters as much as presence: a hash at the wrong column would
-        // pass every assertion above. field_x(80)=46, and 44 is between marks.
+        // pass every assertion above. field_x(80)=47; 44 sits between marks.
         assert_eq!(px565(&mid, 44, 24), turf, "no hash between the marks");
+        // And the even-spacing invariant itself: every decade is 5px.
+        for y in (10..=90).step_by(10) {
+            assert_eq!(field_x(y) - field_x(y - 10), 5, "decade {y} must be 5px");
+        }
         assert_eq!(px565(&mid, field_x(60), 27), white, "the ball is short of the 20");
         // Same string, other team: the ball is now at ITS 25, near the left.
         let px = bar("SEA 25", true);
