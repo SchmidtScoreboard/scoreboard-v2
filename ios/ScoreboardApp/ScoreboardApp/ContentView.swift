@@ -3,6 +3,7 @@ import CoreBluetooth
 import Security
 import CoreGraphics
 import UIKit
+import LinkPresentation
 
 /// The app's Ed25519 identity (32-byte secret seed, hex) lives in the Keychain so it
 /// survives app restarts AND unpairing — losing it would mean re-pairing every board.
@@ -3241,7 +3242,7 @@ final class CardSheets: ObservableObject {
     /// Fetch the rendered frame and blow it up for sharing. A raw 64×32 PNG is
     /// a postage stamp in a message thread; the crisp-pixel 512×256 is the
     /// point, so the upscale is nearest-neighbor, never smoothed.
-    func fetchShareImage(_ url: URL?) {
+    func fetchShareImage(_ url: URL?, title: String) {
         guard let url else { shareFailed = true; return }
         Task { @MainActor in
             do {
@@ -3251,7 +3252,7 @@ final class CardSheets: ObservableObject {
                     shareFailed = true
                     return
                 }
-                share = ShareableImage(image: big)
+                share = ShareableImage(image: big, title: title)
             } catch {
                 shareFailed = true
             }
@@ -3265,7 +3266,7 @@ extension View {
     func cardSheets(_ sheets: CardSheets) -> some View {
         self
             .sheet(item: Binding(get: { sheets.share }, set: { sheets.share = $0 })) { item in
-                ActivityShareSheet(items: [item.image])
+                ActivityShareSheet(items: [ShareImageSource(image: item.image, title: item.title)])
             }
             .sheet(item: Binding(get: { sheets.info }, set: { sheets.info = $0 })) { target in
                 GameInfoSheet(title: target.title, url: target.url)
@@ -3339,7 +3340,10 @@ struct CardMenuItems: View {
             .pickerStyle(.menu)
         }
         Button {
-            sheets.fetchShareImage(renderURL)
+            // Golf/F1 cards have no away/home pair; the leaderboard title
+            // would live in the frame anyway, so the sheet header stays plain.
+            let title = game.away.isEmpty ? "Scoreboard" : "\(game.away) @ \(game.home)"
+            sheets.fetchShareImage(renderURL, title: title)
         } label: {
             Label("Share image", systemImage: "square.and.arrow.up")
         }
@@ -3431,6 +3435,48 @@ struct CardMenuItems: View {
 struct ShareableImage: Identifiable {
     let id = UUID()
     let image: UIImage
+    /// The share sheet's header title ("PACKERS @ BEARS").
+    let title: String
+}
+
+/// The share item, dressed for the sheet: a bare UIImage shares fine but the
+/// sheet's header shows a generic placeholder. LPLinkMetadata with an image
+/// provider is what puts the actual frame and a title up top, and handing the
+/// UIImage itself to each activity is what keeps Save Image and friends on
+/// the row (with the photo-add usage description in Info.plist, which Save
+/// requires).
+final class ShareImageSource: NSObject, UIActivityItemSource {
+    let image: UIImage
+    let title: String
+    init(image: UIImage, title: String) {
+        self.image = image
+        self.title = title
+    }
+
+    func activityViewControllerPlaceholderItem(_ controller: UIActivityViewController) -> Any {
+        image
+    }
+
+    func activityViewController(
+        _ controller: UIActivityViewController,
+        itemForActivityType type: UIActivity.ActivityType?
+    ) -> Any? {
+        image
+    }
+
+    func activityViewController(
+        _ controller: UIActivityViewController,
+        subjectForActivityType type: UIActivity.ActivityType?
+    ) -> String {
+        title
+    }
+
+    func activityViewControllerLinkMetadata(_ controller: UIActivityViewController) -> LPLinkMetadata? {
+        let md = LPLinkMetadata()
+        md.title = title
+        md.imageProvider = NSItemProvider(object: image)
+        return md
+    }
 }
 
 /// UIActivityViewController bridge: ShareLink needs its item up front, but the

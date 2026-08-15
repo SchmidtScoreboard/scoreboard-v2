@@ -20,6 +20,11 @@
 	<string>1</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- Only exercised by "Save Image" in the share sheet. Add-only access:
+	     the app never reads the library. Without this key the save action is
+	     missing from the sheet (or crashes the moment it is tapped). -->
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Saves shared scoreboard images to your photo library.</string>
 	<!-- Scoreboard servers speak plain ws/http (the board has no TLS stack), and
 	     users can point a board at any host — LAN IPs, Railway TCP proxies, etc.
 	     ATS would silently block every /render image fetch to a non-local name. -->
