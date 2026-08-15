@@ -3247,7 +3247,7 @@ final class CardSheets: ObservableObject {
             do {
                 let (data, _) = try await URLSession.shared.data(from: url)
                 guard let small = UIImage(data: data),
-                      let big = upscaledCrisp(small, factor: 8) else {
+                      let big = ledShareImage(small) else {
                     shareFailed = true
                     return
                 }
@@ -3447,18 +3447,56 @@ struct ActivityShareSheet: UIViewControllerRepresentable {
 /// Integer nearest-neighbor upscale. CGContext with interpolation off keeps
 /// every LED pixel a hard-edged square — smoothing would melt the panel into
 /// a blurry gradient.
-private func upscaledCrisp(_ image: UIImage, factor: Int) -> UIImage? {
+/// The share export: each panel pixel drawn as a lit square with a dark
+/// gutter, on a black bezel — the picture of an LED matrix, not a blown-up
+/// bitmap. A raw nearest-neighbor upscale reads as low-resolution clip art;
+/// the gutter is what makes it read as the physical board.
+private func ledShareImage(_ image: UIImage) -> UIImage? {
     guard let cg = image.cgImage else { return nil }
-    let w = cg.width * factor
-    let h = cg.height * factor
+    // 12px per LED: a 10px lit square + 2px gutter, plus a one-LED bezel all
+    // round. 64x32 -> 792x408, comfortably message-sized.
+    let pitch = 12, dot = 10, bezel = 12
+    let (pw, ph) = (cg.width, cg.height)
+    let w = pw * pitch + 2 * bezel
+    let h = ph * pitch + 2 * bezel
+    // Read the source pixels once.
+    guard let src = CGContext(
+        data: nil, width: pw, height: ph,
+        bitsPerComponent: 8, bytesPerRow: pw * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ) else { return nil }
+    src.draw(cg, in: CGRect(x: 0, y: 0, width: pw, height: ph))
+    guard let px = src.data else { return nil }
+    let bytes = px.bindMemory(to: UInt8.self, capacity: pw * ph * 4)
+
     guard let ctx = CGContext(
         data: nil, width: w, height: h,
         bitsPerComponent: 8, bytesPerRow: 0,
         space: CGColorSpaceCreateDeviceRGB(),
         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
     ) else { return nil }
-    ctx.interpolationQuality = .none
-    ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+    ctx.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
+    ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+    for y in 0..<ph {
+        for x in 0..<pw {
+            let i = (y * pw + x) * 4
+            let (r, g, b) = (bytes[i], bytes[i + 1], bytes[i + 2])
+            // Unlit LEDs stay part of the bezel — drawing a black square
+            // with a black gutter is a no-op, so skip the fill.
+            if r == 0 && g == 0 && b == 0 { continue }
+            ctx.setFillColor(CGColor(
+                red: CGFloat(r) / 255, green: CGFloat(g) / 255, blue: CGFloat(b) / 255, alpha: 1
+            ))
+            // CGContext's origin is bottom-left; flip y so the frame isn't
+            // shared upside down.
+            ctx.fill(CGRect(
+                x: bezel + x * pitch + (pitch - dot) / 2,
+                y: bezel + (ph - 1 - y) * pitch + (pitch - dot) / 2,
+                width: dot, height: dot
+            ))
+        }
+    }
     return ctx.makeImage().map { UIImage(cgImage: $0) }
 }
 

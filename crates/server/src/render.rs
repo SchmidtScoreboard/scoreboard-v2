@@ -779,8 +779,15 @@ pub fn render_game(g: &Game, tz: Option<chrono_tz::Tz>, style: NameStyle) -> (Fr
     (frame_id(&px), px)
 }
 
-/// Width of an end zone on the field bar. The playing field is what is left.
-const END_ZONE: i32 = 7;
+/// End zone widths. UNEQUAL on purpose: a uniform hash rhythm — the same
+/// number of blank columns from each end zone to its nearest hash as between
+/// hashes — needs turf of exactly 9 hashes + 10 gaps × 4 blanks = 49 columns,
+/// and 64 - 49 = 15 splits 7/8. The extra column goes to the ATTACKING end
+/// zone, which also hosts the goal-line column (`field_x(100)` lands on its
+/// first column, where a "1st & Goal" line to gain draws), so its visible
+/// tint never thins below the defended one's.
+const EZ_OWN: i32 = 7;
+const EZ_OPP: i32 = 8;
 
 /// Yard hashes: bright enough to read as marks against the (0,26,0) turf, dim
 /// enough to stay under the scrimmage line and the line to gain.
@@ -788,16 +795,14 @@ const HASH: Rgb888 = Rgb888::new(0, 55, 0);
 
 /// Panel x for a yard line, measured from the possessing team's own goal.
 ///
-/// The field spans the FULL 50 turf columns (not 49): 10 yards is then
-/// exactly 5px, so the 10-yard hashes land perfectly evenly — the old
-/// span-between-outermost-columns mapping made a decade 4.9px and one gap
-/// came out a pixel short. The cost is that yard 100 lands one past the last
-/// turf column, on the end zone's first column — which is where a goal line
-/// actually is, so the "1st & Goal" line to gain draws on the boundary it
-/// names.
+/// Turf is 49 columns (see the end-zone constants), so each decade is a hash
+/// plus four blank columns — the SAME four blanks that separate each end zone
+/// from its nearest hash, which is what makes the rhythm read as even at
+/// panel scale. Yard 100 lands on the attacking end zone's first column: the
+/// goal line IS that boundary, so "1st & Goal" draws its line exactly there.
 fn field_x(yards: i32) -> i32 {
-    let field_w = FRAME_WIDTH as i32 - 2 * END_ZONE;
-    END_ZONE + (yards.clamp(0, 100) * field_w + 50) / 100
+    let field_w = FRAME_WIDTH as i32 - EZ_OWN - EZ_OPP;
+    EZ_OWN + (yards.clamp(0, 100) * field_w) / 100
 }
 
 /// A team colour at end-zone weight — enough to say whose end it is, dim enough
@@ -873,8 +878,8 @@ fn draw_football_field(c: &mut Canvas, g: &Game, home_ball: bool, yards: i32, to
         (g.away.primary, g.home.primary)
     };
     fill(c, 0, TOP, FRAME_WIDTH as u32, H, Rgb888::new(0, 26, 0));
-    fill(c, 0, TOP, END_ZONE as u32, H, end_zone_tint(own));
-    fill(c, FRAME_WIDTH as i32 - END_ZONE, TOP, END_ZONE as u32, H, end_zone_tint(opp));
+    fill(c, 0, TOP, EZ_OWN as u32, H, end_zone_tint(own));
+    fill(c, FRAME_WIDTH as i32 - EZ_OPP, TOP, EZ_OPP as u32, H, end_zone_tint(opp));
     // Yard markings: 1px hashes at every 10, top and bottom rows only.
     //
     // The middle five rows stay clean turf, which is what keeps the hierarchy
@@ -2107,11 +2112,10 @@ mod kern_tests {
         assert_eq!(yards_to_gain("1st & Goal", 94), Some(100));
         assert_eq!(yards_to_gain("2nd & 15", 95), Some(100), "clamped to the goal line");
         assert_eq!(yards_to_gain("3rd & inches", 40), None);
-        // The own goal line opens the turf; the far goal line is the END
-        // ZONE'S first column — the boundary a goal line actually is. That
-        // asymmetry is what buys the exactly-even hash spacing (see field_x).
-        assert_eq!(field_x(0), END_ZONE);
-        assert_eq!(field_x(100), FRAME_WIDTH as i32 - END_ZONE);
+        // The own goal line opens the turf; the far goal line is the attacking
+        // END ZONE'S first column — the boundary a goal line actually is.
+        assert_eq!(field_x(0), EZ_OWN);
+        assert_eq!(field_x(100), FRAME_WIDTH as i32 - EZ_OPP);
         assert!(field_x(25) < field_x(50) && field_x(50) < field_x(75), "monotonic");
     }
 
@@ -2149,12 +2153,20 @@ mod kern_tests {
         assert_eq!(px565(&mid, field_x(50), 25), hash, "the 50 is the deep one");
         assert_eq!(px565(&mid, field_x(80), 25), turf, "…and the others are not");
         // Absence matters as much as presence: a hash at the wrong column would
-        // pass every assertion above. field_x(80)=47; 44 sits between marks.
+        // pass every assertion above. field_x(80)=46; 44 sits between marks.
         assert_eq!(px565(&mid, 44, 24), turf, "no hash between the marks");
-        // And the even-spacing invariant itself: every decade is 5px.
-        for y in (10..=90).step_by(10) {
-            assert_eq!(field_x(y) - field_x(y - 10), 5, "decade {y} must be 5px");
+        // The uniform-rhythm invariant, stated as the eye reads it: the SAME
+        // number of blank columns everywhere — end zone to first hash, hash
+        // to hash, last hash to end zone.
+        assert_eq!(field_x(10) - EZ_OWN, 4, "left edge: four blanks");
+        for y in (20..=90).step_by(10) {
+            assert_eq!(field_x(y) - field_x(y - 10) - 1, 4, "decade {y}: four blanks");
         }
+        assert_eq!(
+            (FRAME_WIDTH as i32 - EZ_OPP) - field_x(90) - 1,
+            4,
+            "right edge: four blanks"
+        );
         assert_eq!(px565(&mid, field_x(60), 27), white, "the ball is short of the 20");
         // Same string, other team: the ball is now at ITS 25, near the left.
         let px = bar("SEA 25", true);
