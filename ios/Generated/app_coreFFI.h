@@ -558,6 +558,16 @@ void uniffi_app_core_fn_method_scoreboardclient_set_league_spoiler(void*_Nonnull
 void uniffi_app_core_fn_method_scoreboardclient_set_listener(void*_Nonnull ptr, uint64_t listener, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_MODE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_MODE
+void uniffi_app_core_fn_method_scoreboardclient_set_mode(void*_Nonnull ptr, RustBuffer board_id, RustBuffer mode, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_MODE_HOURS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_MODE_HOURS
+void uniffi_app_core_fn_method_scoreboardclient_set_mode_hours(void*_Nonnull ptr, RustBuffer board_id, RustBuffer mode, uint32_t hours, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_OFF_MODE
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_OFF_MODE
 void uniffi_app_core_fn_method_scoreboardclient_set_off_mode(void*_Nonnull ptr, RustBuffer board_id, RustBuffer id, RustCallStatus *_Nonnull out_status
@@ -1125,6 +1135,18 @@ uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_league_spoiler(voi
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_LISTENER
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_LISTENER
 uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_listener(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_MODE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_MODE
+uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_mode(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_MODE_HOURS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_MODE_HOURS
+uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_mode_hours(void
     
 );
 #endif

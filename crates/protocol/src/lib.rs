@@ -651,7 +651,28 @@ pub struct BoardConfig {
     /// Per-mode input values, keyed by `OffModeInput::key`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub off_mode_params: BTreeMap<String, String>,
+    /// What the panel is DOING, as one open string: "scores" (the resting
+    /// state — game rotation, idle screen when nothing is on), "off" (dark),
+    /// or any server-declared off-mode id ("clock", "weather", a fork's
+    /// screen) held persistently.
+    ///
+    /// A string, never an enum: the same compatibility rule as `off_mode`. An
+    /// old binary ignores the field entirely and keeps reading `power`, which
+    /// is why `power` is written as a derived twin on every mode write — see
+    /// `set_mode`, and the invariant test beside the forked-off-mode one.
+    #[serde(default = "default_mode")]
+    pub mode: String,
+    /// Per-mode timer durations in HOURS, keyed by mode id ("off", "clock",
+    /// …). Picking a non-scores mode runs it for its configured duration and
+    /// then the board returns to scores on its own — the auto-wake property
+    /// the old sleep timer had, generalized. 0 = until changed (no timer).
+    /// A mode with no entry falls back to `sleep_hours`, which keeps an old
+    /// app's SetSleepHours meaningful.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mode_hours: BTreeMap<String, u32>,
     /// How long a button-press sleep lasts before the board wakes itself.
+    /// LEGACY as a concept (superseded by `mode_hours`) but load-bearing as
+    /// the fallback duration and as the field old apps still write.
     #[serde(default = "default_sleep_hours")]
     pub sleep_hours: u32,
     /// Seconds each game holds the panel before the rotation advances.
@@ -717,6 +738,16 @@ pub struct BoardConfig {
 fn default_sleep_hours() -> u32 {
     24
 }
+
+fn default_mode() -> String {
+    MODE_SCORES.to_string()
+}
+
+/// The two mode ids that are NOT off-mode ids, reserved by the server's
+/// SetMode validation. Everything else in the mode namespace is an off-mode
+/// catalog id.
+pub const MODE_SCORES: &str = "scores";
+pub const MODE_OFF: &str = "off";
 
 fn default_dwell_secs() -> u32 {
     10
@@ -928,6 +959,14 @@ pub struct PortableSettings {
     /// How long a button-press sleep lasts before the board wakes itself.
     #[serde(default = "default_sleep_hours")]
     pub sleep_hours: u32,
+    /// Per-mode timer durations — durable preferences, like `sleep_hours`.
+    /// The current MODE stays out of the blob for the same reason power and
+    /// wake_at do: it is live state, and an import that yanked a board into
+    /// "off" would be the demo_data-shaped failure those exclusions prevent.
+    /// `#[serde(default)]`, and NO version bump: the import check is exact
+    /// equality, so a bump would kill every existing export.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mode_hours: BTreeMap<String, u32>,
     /// What the panel shows while the display is off / idle. Legacy twin of
     /// `off_mode`, kept so an export stays readable by an older binary.
     #[serde(default)]
@@ -967,6 +1006,7 @@ impl From<&BoardConfig> for PortableSettings {
             brightness: cfg.brightness,
             dwell_secs: cfg.dwell_secs,
             sleep_hours: cfg.sleep_hours,
+            mode_hours: cfg.mode_hours.clone(),
             off_state: cfg.off_state,
             off_mode: cfg.off_mode.clone(),
             off_mode_params: cfg.off_mode_params.clone(),
@@ -988,6 +1028,7 @@ impl PortableSettings {
         cfg.brightness = self.brightness;
         cfg.dwell_secs = self.dwell_secs;
         cfg.sleep_hours = self.sleep_hours;
+        cfg.mode_hours = self.mode_hours.clone();
         cfg.off_state = self.off_state;
         // An export from a FORKED server can name a mode this one does not
         // offer. Carry it across anyway and let the server re-clamp it against
@@ -1024,6 +1065,23 @@ impl BoardConfig {
         self.off_mode = Some(id.to_string());
         self.off_state = if draws_nothing { OffState::Blank } else { OffState::Clock };
     }
+
+    /// Write the mode AND its legacy twin. `power` has no serde default — it
+    /// is one of the three fields every old parser REQUIRES — so it keeps
+    /// being written forever, derived: lit unless the mode is "off". Dropping
+    /// it from serialization would make a rolled-back server quarantine every
+    /// stored board and a fielded app fail its whole BoardState decode.
+    ///
+    /// Same twin pattern as `set_off_mode`/`off_state`, for the same reason.
+    pub fn set_mode(&mut self, mode: &str) {
+        self.mode = mode.to_string();
+        self.power = mode != MODE_OFF;
+    }
+
+    /// A mode's timer, in hours. 0 = until changed.
+    pub fn mode_duration_hours(&self, mode: &str) -> u32 {
+        self.mode_hours.get(mode).copied().unwrap_or(self.sleep_hours)
+    }
 }
 
 impl Default for BoardConfig {
@@ -1042,6 +1100,8 @@ impl Default for BoardConfig {
             quiet_hours: None,
             quiet_allow_events: false,
             quiet_override: false,
+            mode: default_mode(),
+            mode_hours: BTreeMap::new(),
             sleep_hours: default_sleep_hours(),
             dwell_secs: default_dwell_secs(),
             wake_at: None,
@@ -1086,7 +1146,15 @@ pub enum Command {
     ResetRotation,
     /// What the panel shows while off / idle (blank or a server-rendered clock).
     SetOffState { off_state: OffState },
+    /// Put the board in a MODE: "scores", "off", or an off-mode id held
+    /// persistently. Non-scores modes run for their configured duration
+    /// (`SetModeHours`) and then return to scores. Replaces SetPower, which
+    /// stays as an accepted alias for already-installed apps.
+    SetMode { mode: String },
+    /// Configure a mode's timer, in hours. 0 = until changed.
+    SetModeHours { mode: String, hours: u32 },
     /// How long a button-press sleep lasts (hours) before auto-wake.
+    /// LEGACY alias: the fallback duration for modes `mode_hours` misses.
     SetSleepHours { hours: u32 },
     /// Stay asleep with no auto-wake: cancels a running sleep timer without
     /// turning the display back on ("off until I say so").
@@ -1966,6 +2034,52 @@ mod fw_channel_tests {
 
         cfg.set_off_mode("blank", true);
         assert_eq!(cfg.off_state, OffState::Blank, "a dark mode reads as Blank");
+    }
+
+    /// The power twin invariant, in the style of the forked-off-mode test
+    /// above: EVERY mode write must leave a `power` bool an old parser can
+    /// read, truthful about whether the panel is lit. `power` has no serde
+    /// default — it is required — so a serialization that dropped it would
+    /// quarantine every stored board on rollback.
+    #[test]
+    fn every_mode_write_leaves_a_power_bool_old_parsers_accept() {
+        let mut cfg = BoardConfig::default();
+        for (mode, lit) in [(MODE_OFF, false), ("clock", true), ("weather", true), (MODE_SCORES, true)] {
+            cfg.set_mode(mode);
+            assert_eq!(cfg.power, lit, "{mode}: power must say whether the panel is lit");
+            let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+            assert_eq!(v["power"], lit, "{mode}: power must be IN the json, not defaulted");
+        }
+    }
+
+    /// A row written by an old binary has no `mode` field: it must parse, and
+    /// it must default to scores — the migration of sleeping rows is the
+    /// server's job at load, not serde's.
+    #[test]
+    fn an_old_row_without_a_mode_parses_as_scores() {
+        let old = r#"{"brightness":80,"power":false,"sports":[],"wake_at":123}"#;
+        let cfg: BoardConfig = serde_json::from_str(old).unwrap();
+        assert_eq!(cfg.mode, MODE_SCORES);
+        assert!(!cfg.power);
+        assert_eq!(cfg.wake_at, Some(123));
+    }
+
+    /// Timer durations are durable preferences and travel with an export; the
+    /// current MODE is live state and must not.
+    #[test]
+    fn portable_settings_carry_durations_but_never_the_mode() {
+        let mut source = BoardConfig::default();
+        source.mode_hours.insert("clock".into(), 3);
+        source.set_mode(MODE_OFF);
+        let blob = PortableSettings::from(&source);
+        let mut target = BoardConfig::default();
+        blob.apply_to(&mut target);
+        assert_eq!(target.mode_hours.get("clock"), Some(&3));
+        assert_eq!(target.mode, MODE_SCORES, "an import must not change what the board is doing");
+        assert!(target.power);
+        // And the blob's json carries no mode key at all.
+        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&blob).unwrap()).unwrap();
+        assert!(v.get("mode").is_none());
     }
 
     /// Off-mode selection travels with an export, so cloning a setup onto a

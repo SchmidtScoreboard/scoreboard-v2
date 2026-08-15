@@ -341,10 +341,6 @@ pub struct Notice {
     /// knob press mid-notice) yields a different manifest the dedup can't
     /// swallow, restarting the bar with the new expiry.
     pub epoch: u64,
-    /// When the countdown ends, put the board to sleep (the NO GAMES notice
-    /// SAYS "sleeping in 10 seconds" — this makes it true). Guarded by epoch:
-    /// a notice that was replaced or cleared never sleeps the board late.
-    pub then_sleep: bool,
 }
 
 impl AppState {
@@ -695,7 +691,8 @@ fn load_configs(conn: &Connection) -> (HashMap<String, BoardConfig>, HashSet<Str
     };
     for (pubkey, json) in rows.flatten() {
         match serde_json::from_str::<BoardConfig>(&json) {
-            Ok(cfg) => {
+            Ok(mut cfg) => {
+                migrate_legacy_row(&mut cfg);
                 out.insert(pubkey, cfg);
             }
             Err(e) => {
@@ -709,6 +706,17 @@ fn load_configs(conn: &Connection) -> (HashMap<String, BoardConfig>, HashSet<Str
         }
     }
     (out, bad)
+}
+
+/// A row written by a pre-mode binary while ASLEEP: power=false with `mode`
+/// at its serde default. Unreachable for new writes (`set_mode` keeps the twin
+/// in sync), so the combination uniquely identifies a legacy sleeping board —
+/// map it to "off" and KEEP wake_at, so the sweep in `tick_once` honours the
+/// wake time the old binary promised. Idempotent and restart-safe.
+fn migrate_legacy_row(cfg: &mut BoardConfig) {
+    if !cfg.power && cfg.mode == MODE_SCORES {
+        cfg.mode = MODE_OFF.to_string();
+    }
 }
 
 /// Load the pairing allow-list (board pubkey -> set of controller pubkeys).
@@ -2707,8 +2715,10 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
         return dark_manifest(&cfg);
     }
 
-    // Priority 1: live games (only while powered on).
-    if cfg.power {
+    // Priority 1: live games — only in SCORES mode. A deliberately picked
+    // clock/weather/off holds the panel; that a lit board can now miss a game
+    // is the point of picking a mode, not a bug.
+    if cfg.mode == MODE_SCORES {
         let chosen = chosen_games(state, &cfg);
         if !chosen.is_empty() {
             // Games override any lingering notice ("no games" message ends early).
@@ -2803,8 +2813,9 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
     // This is the resting state, not a timed notice — it stays until the board
     // has something to show, because the thing it is asking for is the thing
     // that ends it. Below the notice block so a SLEEPING splash still gets its
-    // moment, and gated on `power` so turning the board off still turns it off.
-    if cfg.power && board_prefs(&cfg).unconfigured {
+    // moment, and gated on scores mode: "off" must stay dark, and a
+    // deliberately picked clock on an unconfigured board should show the clock.
+    if cfg.mode == MODE_SCORES && board_prefs(&cfg).unconfigured {
         let (id, px) = render::render_notice(&SETUP_LINES, None);
         state.cache_frame(id.clone(), px);
         return Manifest {
@@ -2819,23 +2830,24 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
         };
     }
 
-    // Priority 4: ASLEEP. Dark, not the off mode.
-    //
-    // These were one state and should never have been: "what the panel shows
-    // when there are no games" and "what it shows when you turned it off" are
-    // different answers to different questions. Sharing them meant pressing the
-    // knob at bedtime lit a clock, which is not what off means to anyone — and
-    // it made the off-mode setting unexplainable, since it governed both.
-    //
-    // Quiet hours already drew this distinction (`dark_manifest` above); this
-    // applies the same decision to the other way a board goes dark. The SLEEPING
-    // splash still runs first — it is priority 3, and it is the only feedback
-    // that a press registered — and expires into darkness rather than the clock.
-    if !cfg.power {
+    // Priority 4: mode "off" is dark. Not the idle screen — "what the panel
+    // shows when there are no games" and "what it shows when you turned it
+    // off" are different answers to different questions, and the split is the
+    // one thing the old power model got right. The SLEEPING splash still runs
+    // first (priority 2) and expires into darkness rather than the clock.
+    if cfg.mode == MODE_OFF {
         return dark_manifest(&cfg);
     }
 
-    // Priority 5: awake with nothing to show — the configured off mode.
+    // Priority 5: a PICKED mode — clock, weather, a fork's screen — held
+    // persistently until its timer returns the board to scores. The same
+    // renderer as the idle screen; the difference is only what chose the id.
+    if cfg.mode != MODE_SCORES {
+        return screen_manifest(state, &cfg, tz, &cfg.mode.clone());
+    }
+
+    // Priority 6: scores mode with nothing to show — the configured idle
+    // screen.
     idle_manifest(state, &cfg, tz)
 }
 
@@ -2864,13 +2876,19 @@ fn dark_manifest(cfg: &BoardConfig) -> Manifest {
 }
 
 /// The idle panel: whatever the configured off mode draws, or darkness.
+fn idle_manifest(state: &AppState, cfg: &BoardConfig, tz: Option<chrono_tz::Tz>) -> Manifest {
+    screen_manifest(state, cfg, tz, cfg.off_mode_id())
+}
+
+/// A named screen — the idle screen, or a mode held by the picker.
 ///
 /// Extracted so the `display_on` / `off_state` derivation exists once — quiet
-/// hours and the ordinary idle path must not be able to disagree about it.
-fn idle_manifest(state: &AppState, cfg: &BoardConfig, tz: Option<chrono_tz::Tz>) -> Manifest {
-    // The ONLY place the off mode is resolved.
+/// hours, the idle path, and a picked mode must not be able to disagree
+/// about it.
+fn screen_manifest(state: &AppState, cfg: &BoardConfig, tz: Option<chrono_tz::Tz>, mode_id: &str) -> Manifest {
+    // The ONLY place a screen id is resolved into frames.
     let rotation: Vec<RotationEntry> = offmode::render_off_mode(
-        cfg.off_mode_id(),
+        mode_id,
         &offmode::OffCtx {
             tz,
             params: &cfg.off_mode_params,
@@ -3068,7 +3086,6 @@ const NOTICE_GREY: embedded_graphics::pixelcolor::Rgb888 =
     embedded_graphics::pixelcolor::Rgb888::new(160, 160, 160);
 /// How long the "SLEEPING…" splash stays up before the off-state takes over.
 const SPLASH_SECS: u64 = 4;
-const NO_GAMES_SECS: u64 = 10;
 
 /// Show a transient full-screen notice on one board. The manifest render
 /// pre-bakes the WHOLE progress-bar sweep as one dwell-timed rotation (see
@@ -3076,7 +3093,7 @@ const NO_GAMES_SECS: u64 = 10;
 /// zero network traffic per step. One task remains, solely to clear the notice
 /// at expiry — its push re-renders, sees the notice lapsed, and swaps in the
 /// post-notice view.
-pub fn set_notice(state: &AppState, board_id: &str, lines: &[(&str, bool, embedded_graphics::pixelcolor::Rgb888)], secs: u64, then_sleep: bool) {
+pub fn set_notice(state: &AppState, board_id: &str, lines: &[(&str, bool, embedded_graphics::pixelcolor::Rgb888)], secs: u64) {
     // Nonzero and unique per showing (0 = the games rotation).
     static NOTICE_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let now = std::time::Instant::now();
@@ -3089,7 +3106,6 @@ pub fn set_notice(state: &AppState, board_id: &str, lines: &[(&str, bool, embedd
             created: now,
             until,
             epoch,
-            then_sleep,
         },
     );
     // (No-op outside a tokio runtime, i.e. in sync tests — the tick loop covers it.)
@@ -3103,72 +3119,43 @@ pub fn set_notice(state: &AppState, board_id: &str, lines: &[(&str, bool, embedd
 }
 
 /// Notice countdown expiry: if OUR notice (by epoch) is still the active one,
-/// retire it — and if it promised sleep ("NO GAMES / SLEEPING IN…"), actually
-/// put the board to sleep with the standard timed wake. A replaced or already
-/// -cleared notice does nothing: a newer showing owns the screen, and a game
-/// that appeared mid-countdown (priority 1 clears the notice) must not have
-/// the panel yanked dark 10 seconds later.
+/// retire it and push the post-notice view. A replaced or already-cleared
+/// notice does nothing — a newer showing owns the screen and its own expiry
+/// task pushes.
+///
+/// Notices no longer carry consequences (`then_sleep` died with the NO GAMES
+/// countdown): a splash is only ever an announcement, and the mode it
+/// announced was already applied before it was shown.
 pub(crate) fn finish_notice(state: &AppState, board_id: &str, epoch: u64) {
     let mine = {
         let mut notices = state.notices.lock().unwrap();
         match notices.get(board_id) {
             Some(n) if n.epoch == epoch => {
-                let sleep = n.then_sleep;
                 notices.remove(board_id);
-                Some(sleep)
+                true
             }
-            _ => None,
+            _ => false,
         }
     };
-    match mine {
-        Some(true) => {
-            let mut cfg = state.config_for(board_id);
-            cfg.power = false;
-            cfg.wake_at = Some(unix_now() + cfg.sleep_hours.max(1) as u64 * 3600);
-            state.configs.lock().unwrap().insert(board_id.to_string(), cfg.clone());
-            state.persist_config(board_id, &cfg);
-            tracing::info!("board '{board_id}': no-games countdown lapsed -> sleep");
-            push_board(state, board_id);
-            push_board_state(state, board_id);
-        }
-        Some(false) => push_board(state, board_id),
-        // Replaced/cleared: the newer showing's own expiry task pushes.
-        None => {}
+    if mine {
+        push_board(state, board_id);
     }
 }
 
-/// A single knob press, reported by the board. The server owns what it means:
-/// - asleep (power off) -> wake; if nothing is live, show the "no games" notice
-/// - showing games      -> sleep for `sleep_hours` (with a brief splash saying so)
-/// - idle (no games)    -> show the "no games" notice for 5 minutes
+/// A single knob press from PRE-PICKER firmware. Stage-2 firmware opens a
+/// local mode picker instead and never sends this — but this mapping is
+/// permanent mixed-fleet surface, not scaffolding: a board that never updates
+/// keeps a working button forever.
+///
+/// - inside the quiet window -> override for the rest of tonight. This arm is
+///   FIRST and load-bearing: without it a night-time press falls through and
+///   arms "off" against an already-dark panel, and the user presses twice.
+/// - any lit mode -> "off", with off's configured timer — the old button's
+///   sleep, minus the no-games countdown.
+/// - "off" -> "scores". Waking to scores rather than the prior mode matches
+///   what the legacy button always meant.
 pub fn handle_button(state: &AppState, board_id: &str) {
     let mut cfg = state.config_for(board_id);
-    let has_games = !candidate_games(state, &cfg).is_empty();
-
-    // A press DURING the no-games countdown means "yes, sleep now" — don't
-    // make the user wait out the bar they were just shown.
-    let counting_down = state
-        .notices
-        .lock()
-        .unwrap()
-        .get(board_id)
-        .is_some_and(|n| n.then_sleep && std::time::Instant::now() < n.until);
-    if counting_down {
-        state.notices.lock().unwrap().remove(board_id);
-        cfg.power = false;
-        cfg.wake_at = Some(unix_now() + cfg.sleep_hours.max(1) as u64 * 3600);
-        state.configs.lock().unwrap().insert(board_id.to_string(), cfg.clone());
-        state.persist_config(board_id, &cfg);
-        tracing::info!("board '{board_id}': button skipped the no-games countdown -> sleep");
-        push_board(state, board_id);
-        push_board_state(state, board_id);
-        return;
-    }
-
-    // A press inside a quiet window means "I want to see it, for the rest of
-    // tonight". This arm goes FIRST: `cfg.power` is still true in a window, so
-    // without it the press falls into the showing-games arm below and the
-    // server answers a dark panel by arming a 24-hour sleep.
     if quiet_now(&cfg) {
         cfg.quiet_override = true;
         state.notices.lock().unwrap().remove(board_id);
@@ -3180,30 +3167,12 @@ pub fn handle_button(state: &AppState, board_id: &str) {
         return;
     }
 
-    if !cfg.power {
-        // Wake up.
-        cfg.power = true;
-        cfg.wake_at = None;
-        if !has_games {
-            set_notice(state, board_id, &[("NO GAMES", true, NOTICE_WHITE), ("SLEEPING IN", false, NOTICE_GREY), ("10 SECONDS", false, NOTICE_GREY)], NO_GAMES_SECS, true);
-        }
-        tracing::info!("board '{board_id}': button -> wake");
-    } else if has_games {
-        // Sleep for the configured duration.
-        let hours = cfg.sleep_hours.max(1);
-        cfg.power = false;
-        cfg.wake_at = Some(unix_now() + hours as u64 * 3600);
-        let caption = if hours == 1 { "FOR 1 HOUR".to_string() } else { format!("FOR {hours} HOURS") };
-        set_notice(state, board_id, &[("SLEEPING", true, NOTICE_WHITE), (&caption, false, NOTICE_GREY)], SPLASH_SECS, false);
-        tracing::info!("board '{board_id}': button -> sleep {hours}h");
-    } else {
-        // Powered on but idle: show why the panel is dark, then re-sleep.
-        set_notice(state, board_id, &[("NO GAMES", true, NOTICE_WHITE), ("SLEEPING IN", false, NOTICE_GREY), ("10 SECONDS", false, NOTICE_GREY)], NO_GAMES_SECS, true);
-        tracing::info!("board '{board_id}': button -> no-games notice");
-    }
-
+    let target = if cfg.mode == MODE_OFF { MODE_SCORES } else { MODE_OFF };
+    apply_mode(&mut cfg, target);
     state.configs.lock().unwrap().insert(board_id.to_string(), cfg.clone());
     state.persist_config(board_id, &cfg);
+    handle_mode_change(state, board_id, &cfg);
+    tracing::info!("board '{board_id}': button -> {target}");
     push_board(state, board_id);
     push_board_state(state, board_id);
 }
@@ -3523,13 +3492,44 @@ pub fn handle_install_firmware(state: &AppState, board_id: &str, channel: FwChan
 /// a timed sleep (`apply_command` armed `wake_at`), so the splash shows the same
 /// duration line; powering on cancels any active notice so the games/off-state
 /// appear immediately.
-pub fn handle_app_power(state: &AppState, board_id: &str, on: bool) {
-    if on {
-        state.notices.lock().unwrap().remove(board_id);
+/// Put a config in a mode. The ONE place mode transitions happen — the app's
+/// picker, the legacy SetPower alias, and the physical button all come
+/// through here, so they cannot disagree about the side effects.
+///
+/// - Any pick during the quiet window sets the override — INCLUDING re-picking
+///   the current mode. The 2am gesture is "answer me now", and a pick that
+///   changed nothing visible would read as a dead button.
+/// - A non-scores mode arms its configured timer (`mode_hours`, falling back
+///   to `sleep_hours`; 0 = until changed). Scores clears it. The tick_once
+///   sweep returns the board to scores when the timer lapses, so no board can
+///   be forgotten on a mode.
+pub fn apply_mode(cfg: &mut BoardConfig, mode: &str) {
+    if quiet_now(cfg) {
+        cfg.quiet_override = true;
+    }
+    cfg.set_mode(mode);
+    cfg.wake_at = if mode == MODE_SCORES {
+        None
     } else {
-        let hours = state.config_for(board_id).sleep_hours.max(1);
-        let caption = if hours == 1 { "FOR 1 HOUR".to_string() } else { format!("FOR {hours} HOURS") };
-        set_notice(state, board_id, &[("SLEEPING", true, NOTICE_WHITE), (&caption, false, NOTICE_GREY)], SPLASH_SECS, false);
+        match cfg.mode_duration_hours(mode).min(72) {
+            0 => None,
+            h => Some(unix_now() + h as u64 * 3600),
+        }
+    };
+}
+
+/// The feedback half of a mode change, outside the config lock: clear any
+/// lingering splash, and announce "off" — darkness alone doesn't say whether
+/// the press registered or the panel died.
+pub fn handle_mode_change(state: &AppState, board_id: &str, cfg: &BoardConfig) {
+    state.notices.lock().unwrap().remove(board_id);
+    if cfg.mode == MODE_OFF {
+        let caption = match cfg.mode_duration_hours(MODE_OFF).min(72) {
+            0 => "UNTIL TURNED ON".to_string(),
+            1 => "FOR 1 HOUR".to_string(),
+            h => format!("FOR {h} HOURS"),
+        };
+        set_notice(state, board_id, &[("SLEEPING", true, NOTICE_WHITE), (&caption, false, NOTICE_GREY)], SPLASH_SECS);
     }
 }
 
@@ -3585,7 +3585,7 @@ pub fn weather_locations(state: &AppState) -> Vec<String> {
         .lock()
         .unwrap()
         .values()
-        .filter(|c| c.off_mode_id().starts_with("weather"))
+        .filter(|c| c.off_mode_id().starts_with("weather") || c.mode.starts_with("weather"))
         .filter_map(|c| c.off_mode_params.get(offmode::LOCATION).cloned())
         .filter(|l| !l.trim().is_empty())
         .collect();
@@ -3638,8 +3638,12 @@ pub fn tick_once(state: &AppState) {
         push_board_state(state, &bid);
     }
 
-    // Wake-timer check covers ALL configured boards (a board can be offline when
-    // its timer lapses; the config should still flip so the app shows it awake).
+    // Mode-timer check covers ALL configured boards (a board can be offline
+    // when its timer lapses; the config should still flip so the app agrees).
+    // This is the old sleep-timer wake sweep, generalized: `wake_at` now means
+    // "when the current non-scores mode expires", so a row persisted mid-sleep
+    // by the old binary gets its "waking at 7am" promise honoured by the same
+    // code that returns a timed clock mode to scores.
     let lapsed: Vec<String> = state
         .configs
         .lock()
@@ -3650,12 +3654,12 @@ pub fn tick_once(state: &AppState) {
         .collect();
     for bid in lapsed {
         let mut cfg = state.config_for(&bid);
-        cfg.power = true;
+        cfg.set_mode(MODE_SCORES);
         cfg.wake_at = None;
         state.configs.lock().unwrap().insert(bid.clone(), cfg.clone());
         state.persist_config(&bid, &cfg);
         push_board_state(state, &bid);
-        tracing::info!("board '{bid}': sleep timer lapsed -> waking");
+        tracing::info!("board '{bid}': mode timer lapsed -> scores");
     }
     let board_ids: Vec<String> = state.devices.lock().unwrap().keys().cloned().collect();
     for bid in board_ids {
@@ -4894,64 +4898,158 @@ mod tests {
         assert_eq!(state.config_for("b1").brightness, 10, "clamped to 10..=100");
     }
 
-    /// Button while powered on but idle (no live games) -> the "no games" notice,
-    /// without turning the board off.
+    /// The legacy button is a clean toggle now: any lit mode -> "off" (with
+    /// off's timer), "off" -> "scores". No hidden third state, games or not.
     #[test]
-    fn button_with_no_games_shows_notice() {
+    fn legacy_button_toggles_between_scores_and_off() {
         let state = AppState::new_ephemeral();
         state.games.lock().unwrap().clear();
         handle_button(&state, "b1");
         let cfg = state.config_for("b1");
-        assert!(cfg.power, "no-games press must not sleep the board");
-        assert!(state.notices.lock().unwrap().contains_key("b1"));
-        let m = manifest_for_board(&state, "b1");
-        // One dwell-timed step per second of countdown.
-        assert!(m.display_on && m.rotation.len() == 1, "notice rotation shows");
-        assert_eq!(m.countdown_ms, Some(NO_GAMES_SECS as u32 * 1000), "the bar is the board's to fill");
-        assert!(
-            state.notices.lock().unwrap().get("b1").unwrap().then_sleep,
-            "the countdown notice re-sleeps the board on expiry"
-        );
-    }
+        assert_eq!(cfg.mode, MODE_OFF, "press from scores means off, games or not");
+        assert!(!cfg.power, "the legacy twin agrees");
+        assert!(cfg.wake_at.is_some(), "off arms its configured timer");
+        assert!(state.notices.lock().unwrap().contains_key("b1"), "and says so");
 
-    /// A second press DURING the no-games countdown sleeps immediately — the
-    /// user shouldn't have to wait out the bar they were just shown.
-    #[test]
-    fn second_press_skips_the_no_games_countdown() {
-        let state = AppState::new_ephemeral();
-        state.games.lock().unwrap().clear();
-        handle_button(&state, "b1"); // countdown up, power on
-        assert!(state.config_for("b1").power);
-        handle_button(&state, "b1"); // "yes, sleep now"
-        let cfg = state.config_for("b1");
-        assert!(!cfg.power, "second press sleeps without waiting");
-        assert!(cfg.wake_at.is_some(), "the standard timed wake is armed");
-        assert!(
-            !state.notices.lock().unwrap().contains_key("b1"),
-            "countdown cancelled, straight to the off-state"
-        );
-    }
-
-    /// The countdown's expiry actually sleeps the board — but only if OUR
-    /// notice (by epoch) is still the active one. A cleared/replaced notice
-    /// (a game appeared mid-countdown) must never yank the panel dark late.
-    #[test]
-    fn countdown_expiry_sleeps_unless_superseded() {
-        let state = AppState::new_ephemeral();
-        state.games.lock().unwrap().clear();
         handle_button(&state, "b1");
+        let cfg = state.config_for("b1");
+        assert_eq!(cfg.mode, MODE_SCORES, "press from off means scores");
+        assert!(cfg.power);
+        assert!(cfg.wake_at.is_none(), "scores runs on no timer");
+        assert!(!state.notices.lock().unwrap().contains_key("b1"), "waking cancels the splash");
+    }
+
+    /// A press from a PICKED mode (sticky clock) also goes to off — the legacy
+    /// button's meaning was always "make it dark", not "cycle".
+    #[test]
+    fn legacy_button_from_a_picked_mode_goes_dark() {
+        let state = AppState::new_ephemeral();
+        let mut cfg = BoardConfig::default();
+        apply_mode(&mut cfg, "clock");
+        state.configs.lock().unwrap().insert("b1".into(), cfg);
+        handle_button(&state, "b1");
+        assert_eq!(state.config_for("b1").mode, MODE_OFF);
+    }
+
+    /// Notice expiry retires the notice and nothing else — a splash is an
+    /// announcement, never a consequence. The mode it announced was applied
+    /// before it was shown.
+    #[test]
+    fn notice_expiry_changes_no_config() {
+        let state = AppState::new_ephemeral();
+        state.games.lock().unwrap().clear();
+        handle_button(&state, "b1"); // -> off, with the SLEEPING splash up
+        let before = state.config_for("b1");
         let epoch = state.notices.lock().unwrap().get("b1").unwrap().epoch;
         finish_notice(&state, "b1", epoch);
-        let cfg = state.config_for("b1");
-        assert!(!cfg.power, "expiry honors the promise: board is asleep");
-        assert!(cfg.wake_at.is_some());
+        assert!(!state.notices.lock().unwrap().contains_key("b1"), "notice retired");
+        let after = state.config_for("b1");
+        assert_eq!(after.mode, before.mode, "expiry must not touch the mode");
+        assert_eq!(after.wake_at, before.wake_at);
 
-        // Round 2: the notice is cleared before expiry (as when games appear).
-        handle_button(&state, "b1"); // wake -> new countdown
+        // A superseded expiry (notice already cleared/replaced) is a no-op.
+        handle_button(&state, "b1"); // wake -> scores; splash cancelled
+        handle_button(&state, "b1"); // off again -> fresh splash
         let epoch = state.notices.lock().unwrap().get("b1").unwrap().epoch;
         state.notices.lock().unwrap().remove("b1");
         finish_notice(&state, "b1", epoch);
-        assert!(state.config_for("b1").power, "a superseded countdown never sleeps the board");
+        assert_eq!(state.config_for("b1").mode, MODE_OFF, "superseded expiry changes nothing");
+    }
+
+    /// The one place mode transitions happen, exercised directly.
+    #[test]
+    fn apply_mode_arms_the_configured_timer() {
+        let mut cfg = BoardConfig::default();
+        // A pick uses the mode's own configured hours...
+        cfg.mode_hours.insert("clock".into(), 3);
+        apply_mode(&mut cfg, "clock");
+        assert_eq!(cfg.mode, "clock");
+        assert!(cfg.power, "a lit mode keeps the legacy twin true");
+        let until = cfg.wake_at.expect("clock runs on its timer");
+        let expect = unix_now() + 3 * 3600;
+        assert!(until.abs_diff(expect) <= 2, "3 hours from now");
+        // ...an unconfigured mode falls back to sleep_hours...
+        apply_mode(&mut cfg, MODE_OFF);
+        let until = cfg.wake_at.expect("off falls back to sleep_hours");
+        assert!(until.abs_diff(unix_now() + 24 * 3600) <= 2, "the 24h default");
+        assert!(!cfg.power);
+        // ...zero means until changed...
+        cfg.mode_hours.insert("weather".into(), 0);
+        apply_mode(&mut cfg, "weather");
+        assert_eq!(cfg.wake_at, None, "0 = no timer");
+        // ...and scores never has one.
+        apply_mode(&mut cfg, MODE_SCORES);
+        assert_eq!(cfg.wake_at, None);
+        assert!(cfg.power);
+    }
+
+    /// Any pick during the quiet window sets the override — INCLUDING
+    /// re-picking the current mode. The 2am gesture is "answer me now"; a pick
+    /// that changed nothing visible would read as a dead button.
+    #[test]
+    fn any_mode_pick_during_quiet_hours_overrides_the_window() {
+        let mut cfg = BoardConfig {
+            quiet_hours: Some(window_around_now(&BoardConfig::default())),
+            ..Default::default()
+        };
+        assert!(quiet_now(&cfg), "precondition: inside the window");
+        apply_mode(&mut cfg, MODE_SCORES); // the current mode, re-picked
+        assert!(cfg.quiet_override, "same-mode pick still answers");
+        assert!(!quiet_now(&cfg), "and the panel lights for the rest of tonight");
+    }
+
+    /// The timer sweep returns a lapsed mode to scores — the same sweep that
+    /// honours an old binary's persisted sleep, so both are covered at once.
+    #[test]
+    fn the_sweep_returns_a_lapsed_mode_to_scores() {
+        let state = AppState::new_ephemeral();
+        let mut cfg = BoardConfig::default();
+        apply_mode(&mut cfg, "clock");
+        cfg.wake_at = Some(unix_now() - 1); // timer already lapsed
+        state.configs.lock().unwrap().insert("b1".into(), cfg);
+        tick_once(&state);
+        let after = state.config_for("b1");
+        assert_eq!(after.mode, MODE_SCORES, "lapsed timer -> scores");
+        assert!(after.power);
+        assert_eq!(after.wake_at, None);
+    }
+
+    /// A row persisted by the OLD binary mid-sleep: power=false, defaulted
+    /// mode, wake_at set. It must load as "off" WITH the wake time kept, so
+    /// the sweep honours the "waking at 7am" the old binary promised.
+    #[test]
+    fn a_legacy_sleeping_row_wakes_when_promised() {
+        let old = r#"{"brightness":80,"power":false,"sports":[],"wake_at":123}"#;
+        let mut cfg: BoardConfig = serde_json::from_str(old).unwrap();
+        migrate_legacy_row(&mut cfg);
+        assert_eq!(cfg.mode, MODE_OFF, "a sleeping legacy row is an off-mode row");
+        assert_eq!(cfg.wake_at, Some(123), "the promise survives the migration");
+        // And a lit legacy row stays scores.
+        let lit = r#"{"brightness":80,"power":true,"sports":[]}"#;
+        let mut cfg: BoardConfig = serde_json::from_str(lit).unwrap();
+        migrate_legacy_row(&mut cfg);
+        assert_eq!(cfg.mode, MODE_SCORES);
+    }
+
+    /// A picked mode holds the panel over live games — that is what picking
+    /// means — and "off" stays dark even with games on.
+    #[test]
+    fn a_picked_mode_outranks_games() {
+        let state = AppState::new_ephemeral();
+        let games = candidate_games(&state, &watch_all());
+        assert!(!games.is_empty(), "precondition: the mock slate has games");
+        let mut cfg = watch_all();
+        apply_mode(&mut cfg, "clock");
+        state.configs.lock().unwrap().insert("b1".into(), cfg.clone());
+        let m = manifest_for_board(&state, "b1");
+        assert!(m.display_on, "a picked clock is lit");
+        // The clock is a single non-scrolling frame, not the games rotation.
+        assert_eq!(m.rotation.len(), 1, "the clock, not the rotation");
+
+        apply_mode(&mut cfg, MODE_OFF);
+        state.configs.lock().unwrap().insert("b1".into(), cfg);
+        let m = manifest_for_board(&state, "b1");
+        assert!(!m.display_on, "off is dark even with games on");
     }
 
     /// Loading configs drops team favorites for leagues the catalog says have no
@@ -5338,14 +5436,14 @@ mod tests {
         cfg.off_mode = Some("clock".into());
 
         // Awake with nothing on: the configured off mode lights the panel.
-        cfg.power = true;
+        apply_mode(&mut cfg, MODE_SCORES);
         state.configs.lock().unwrap().insert("b1".into(), cfg.clone());
         let awake = manifest_for_board(&state, "b1");
         assert!(awake.display_on, "an idle board still draws its off mode");
         assert!(!awake.rotation.is_empty(), "and has something to draw");
 
-        // Asleep: dark, whatever the off mode says.
-        cfg.power = false;
+        // Off: dark, whatever the idle screen says.
+        apply_mode(&mut cfg, MODE_OFF);
         state.configs.lock().unwrap().insert("b1".into(), cfg);
         // Clear the SLEEPING splash so this tests the resting state, not the
         // notice that (deliberately) precedes it.
@@ -6472,21 +6570,21 @@ mod tests {
         assert_eq!(config.focused_game_id.as_deref(), Some(all[0].id.as_str()));
     }
 
-    /// App power-off shows the "SLEEPING" splash; power-on cancels it immediately.
+    /// Picking "off" shows the "SLEEPING" splash; any other pick cancels it.
     #[test]
-    fn app_power_toggle_drives_notice() {
+    fn mode_changes_drive_the_notice() {
         let state = AppState::new_ephemeral();
-        handle_app_power(&state, "b1", false);
-        assert!(state.notices.lock().unwrap().contains_key("b1"), "power off -> splash");
-        // Config isn't flipped here (apply_command does that), so force it off to
-        // check the manifest shows the notice rather than the off-state.
-        let cfg = BoardConfig { power: false, ..Default::default() };
-        state.configs.lock().unwrap().insert("b1".into(), cfg);
+        let mut cfg = BoardConfig::default();
+        apply_mode(&mut cfg, MODE_OFF);
+        state.configs.lock().unwrap().insert("b1".into(), cfg.clone());
+        handle_mode_change(&state, "b1", &cfg);
+        assert!(state.notices.lock().unwrap().contains_key("b1"), "off -> splash");
         let m = manifest_for_board(&state, "b1");
-        assert!(m.display_on && m.rotation.len() == 1, "splash notice shows");
+        assert!(m.display_on && m.rotation.len() == 1, "splash notice shows over the dark mode");
         assert_eq!(m.countdown_ms, Some(SPLASH_SECS as u32 * 1000));
-        handle_app_power(&state, "b1", true);
-        assert!(!state.notices.lock().unwrap().contains_key("b1"), "power on cancels the notice");
+        apply_mode(&mut cfg, MODE_SCORES);
+        handle_mode_change(&state, "b1", &cfg);
+        assert!(!state.notices.lock().unwrap().contains_key("b1"), "a lit pick cancels the splash");
     }
 
     /// The notice frame carries a depleting progress bar: as time passes the render
@@ -6523,15 +6621,15 @@ mod tests {
     fn notice_is_one_frame_plus_a_board_countdown() {
         let state = AppState::new_ephemeral();
         state.games.lock().unwrap().clear();
-        handle_button(&state, "b1"); // idle press -> the 10-second "NO GAMES" countdown
+        handle_button(&state, "b1"); // press -> off, with the SLEEPING splash up
         let m = manifest_for_board(&state, "b1");
 
         assert_eq!(m.rotation.len(), 1, "one frame; the bar fill is device-side");
-        assert_eq!(m.countdown_ms, Some(NO_GAMES_SECS as u32 * 1000));
+        assert_eq!(m.countdown_ms, Some(SPLASH_SECS as u32 * 1000));
         assert!(!m.rotation[0].scroll, "notices never scroll");
         // Dwell pads 2s past expiry: a single entry never advances, and the
         // expiry push swaps the screen before the pad could matter.
-        assert_eq!(m.rotation[0].dwell_ms as u64, NO_GAMES_SECS * 1000 + 2000);
+        assert_eq!(m.rotation[0].dwell_ms as u64, SPLASH_SECS * 1000 + 2000);
 
         // The frame ships the bar EMPTY (outline only): interior row is dark.
         let frames = state.frames.lock().unwrap();
@@ -7669,7 +7767,7 @@ mod tests {
         assert!(quiet_now(&state.config_for("b")), "precondition: inside the window");
 
         // Games are live, and a notice is pending — neither may wake the panel.
-        set_notice(&state, "b", &[("HELLO", true, NOTICE_WHITE)], 30, false);
+        set_notice(&state, "b", &[("HELLO", true, NOTICE_WHITE)], 30);
         let m = manifest_for_board(&state, "b");
         assert!(
             m.rotation.iter().all(|r| !r.scroll) && m.rotation.len() <= 1,

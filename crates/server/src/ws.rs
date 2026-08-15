@@ -599,10 +599,10 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) -> O
         crate::handle_install_firmware(state, board_id, *channel);
         return None;
     }
-    // Set when the app toggles power, so the board gets the same "SLEEPING" splash
-    // (or notice cancel) the physical button produces. Handled outside the config
-    // lock below.
-    let mut power_toggle: Option<bool> = None;
+    // Set when a command changed the board's MODE (the picker, or the legacy
+    // SetPower alias), so the feedback half — notice cancel, the SLEEPING
+    // splash for "off" — runs outside the config lock below.
+    let mut mode_changed = false;
     // Set on SetFwChannel: the update answer a connected DEVICE holds
     // (`UpdateAvailable`, feeding its settings menu) may change with the
     // channel, so it gets re-pushed alongside the app's BoardState below.
@@ -624,18 +624,40 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) -> O
             // Same range as the physical knob (10..=100 in steps of 10) — one
             // brightness, one scale, whichever control set it last.
             Command::SetBrightness { level } => cfg.brightness = level.clamp(10, 100),
+            // LEGACY alias from already-installed apps: power is a two-mode
+            // world, so it maps exactly onto the two modes it can name.
+            // (power:false was DARK before modes existed — never the idle
+            // screen — so "off" is the faithful mapping, not off_mode_id().)
             Command::SetPower { on } => {
-                cfg.power = on;
-                if on {
-                    // Turning on from the app cancels any pending sleep timer.
-                    cfg.wake_at = None;
+                crate::apply_mode(cfg, if on { MODE_SCORES } else { MODE_OFF });
+                mode_changed = true;
+            }
+            // The picker. Validated like SetOffMode: with open string ids an
+            // unchecked assignment would let a typo — or an export from a fork
+            // offering modes this server doesn't — park a board on a mode
+            // nothing can render.
+            Command::SetMode { mode } => {
+                let mode = if mode == MODE_SCORES || mode == MODE_OFF {
+                    mode
                 } else {
-                    // App sleep = button sleep: the same timed window, after
-                    // which the server wakes the board — never an indefinite off.
-                    cfg.wake_at =
-                        Some(crate::unix_now() + cfg.sleep_hours.max(1) as u64 * 3600);
+                    crate::offmode::migrate(&mode, &mut cfg.off_mode_params)
+                };
+                if mode == MODE_SCORES || mode == MODE_OFF || crate::offmode::offers(&mode) {
+                    // A freshly picked weather screen fetches NOW — staring at
+                    // UNAVAILABLE for up to an hour is not a feature. Cadence
+                    // is untouched: this reuses the SetOffMode spawn below.
+                    weather_dirty |= mode.starts_with("weather");
+                    crate::apply_mode(cfg, &mode);
+                    mode_changed = true;
+                } else {
+                    tracing::warn!("board {board_id}: unknown mode {mode:?}, ignoring");
                 }
-                power_toggle = Some(on);
+            }
+            // A mode's timer. 0 = until changed. Applies from the NEXT pick —
+            // re-arming a running timer under someone's feet would turn a
+            // settings edit into a surprise power event.
+            Command::SetModeHours { mode, hours } => {
+                cfg.mode_hours.insert(mode, hours.min(72));
             }
             Command::SetSportConfig {
                 sport_id,
@@ -933,8 +955,8 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) -> O
         }
         cfg.clone()
     };
-    if let Some(on) = power_toggle {
-        crate::handle_app_power(state, board_id, on);
+    if mode_changed {
+        crate::handle_mode_change(state, board_id, &updated);
     }
     if let Some(on) = demo_toggled {
         crate::set_notice(
@@ -945,7 +967,6 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) -> O
                 (if on { "ON" } else { "OFF" }, false, crate::NOTICE_GREY),
             ],
             crate::SPLASH_SECS,
-            false,
         );
     }
     if tz_changed {
@@ -1114,6 +1135,40 @@ mod tests {
     /// SetLeagueNameStyle upserts the league's SportConfig.name_style like the
     /// other per-league settings: Some sets it (creating the entry if needed),
     /// None reverts to the league default, and None on an unconfigured league is
+    /// The picker's wire path, end to end: a valid mode sticks (with its
+    /// timer), an unknown one is ignored, and the legacy SetPower alias
+    /// writes the same fields — so the app's dual-send is idempotent.
+    #[tokio::test]
+    async fn set_mode_round_trips_and_rejects_unknowns() {
+        let state = AppState::new_ephemeral();
+        let board = "board-mode";
+
+        apply_command(&state, board, Command::SetModeHours { mode: "clock".into(), hours: 3 });
+        apply_command(&state, board, Command::SetMode { mode: "clock".into() });
+        let cfg = state.config_for(board);
+        assert_eq!(cfg.mode, "clock");
+        assert!(cfg.power, "legacy twin stays truthful for a lit mode");
+        assert!(cfg.wake_at.is_some(), "the configured 3h timer is armed");
+
+        // Unknown ids are ignored, not stored — a fork's export cannot park a
+        // board on a mode nothing can render.
+        apply_command(&state, board, Command::SetMode { mode: "stocks".into() });
+        assert_eq!(state.config_for(board).mode, "clock", "unknown mode ignored");
+
+        // The legacy alias maps onto the same two modes...
+        apply_command(&state, board, Command::SetPower { on: false });
+        let cfg = state.config_for(board);
+        assert_eq!(cfg.mode, MODE_OFF);
+        assert!(!cfg.power);
+        // ...and the app's dual-send (SetPower + SetMode, same pick) lands on
+        // the same state twice, not a surprise.
+        apply_command(&state, board, Command::SetMode { mode: MODE_OFF.into() });
+        assert_eq!(state.config_for(board).mode, MODE_OFF);
+        apply_command(&state, board, Command::SetPower { on: true });
+        assert_eq!(state.config_for(board).mode, MODE_SCORES);
+        assert!(state.config_for(board).wake_at.is_none());
+    }
+
     /// a no-op (no empty entry).
     #[tokio::test]
     async fn set_league_name_style_round_trips() {

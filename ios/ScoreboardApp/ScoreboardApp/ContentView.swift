@@ -130,6 +130,11 @@ struct BoardInfo {
     var focusedGameId: String?
     var offMode: String = "clock"
     var offModeParams: [String: String] = [:]
+    /// What the board is DOING: "scores", "off", or an off-mode id held
+    /// persistently. Open string, mirroring the server.
+    var mode: String = "scores"
+    /// Per-mode timer hours (0 = until changed; missing = sleepHours).
+    var modeHours: [String: UInt32] = [:]
     var quietStartMin: UInt16? = nil
     var quietEndMin: UInt16? = nil
     var quietAllowEvents = false
@@ -266,7 +271,6 @@ final class BoardViewModel: ObservableObject {
     // Convenience accessors for the selected board (keep the views terse).
     var online: Bool { current.online }
     var nowShowing: [UiGame] { current.nowShowing }
-    var power: Bool { current.power }
     var brightness: Double { current.brightness }
     var focusedGameId: String? { current.focusedGameId }
     var extraGameIds: Set<String> { current.extraGameIds }
@@ -623,22 +627,57 @@ final class BoardViewModel: ObservableObject {
     }
 
     // ---- controls (operate on the selected board) ----
-    func setPower(_ on: Bool) {
+    /// Put the board in a mode. The optimistic mirror runs the same timer rule
+    /// as the server (`apply_mode`): non-scores modes arm their configured
+    /// hours, scores clears the timer. The server's push confirms.
+    func setMode(_ mode: String) {
         guard let id = selectedBoardId else { return }
         mutate(id) {
-            $0.power = on
-            // App sleep runs the same timed window as the button press; show the
-            // countdown immediately (the server confirms with the real wake time).
-            $0.wakeAt = on ? nil : UInt64(Date().timeIntervalSince1970) + UInt64($0.sleepHours) * 3600
+            $0.mode = mode
+            $0.power = mode != "off"
+            let hours = $0.modeHours[mode] ?? $0.sleepHours
+            $0.wakeAt = (mode == "scores" || hours == 0)
+                ? nil
+                : UInt64(Date().timeIntervalSince1970) + UInt64(min(hours, 72)) * 3600
         }
-        client?.setPower(boardId: id, on: on)
+        client?.setMode(boardId: id, mode: mode)
     }
 
-    /// Stay asleep with no auto-wake ("off until I say so").
-    func keepOff() {
+    /// Configure a mode's timer, in hours. 0 = until changed.
+    func setModeHours(_ mode: String, _ hours: UInt32) {
+        guard let id = selectedBoardId else { return }
+        mutate(id) { $0.modeHours[mode] = hours }
+        client?.setModeHours(boardId: id, mode: mode, hours: hours)
+    }
+
+    /// Drop the running timer: the current mode holds until changed.
+    func keepMode() {
         guard let id = selectedBoardId else { return }
         mutate(id) { $0.wakeAt = nil }
         client?.clearWakeTimer(boardId: id)
+    }
+
+    /// Every pickable mode, in display order: Scores first (the resting
+    /// state), the server-declared screens, Off last. The idle "Nothing"
+    /// screen is excluded — picking a dark screen IS Off, and two dark tiles
+    /// with different meanings is a trap.
+    struct PickableMode: Identifiable {
+        let id: String
+        let label: String
+        let path: String?
+    }
+
+    var pickableModes: [PickableMode] {
+        var out = [PickableMode(id: "scores", label: "Scores", path: "/sample/plain.png?live=1")]
+        for m in offModes where m.preview != nil {
+            out.append(PickableMode(id: m.id, label: m.label, path: m.preview))
+        }
+        out.append(PickableMode(id: "off", label: "Off", path: nil))
+        return out
+    }
+
+    func modeLabel(_ id: String) -> String {
+        pickableModes.first(where: { $0.id == id })?.label ?? id.capitalized
     }
 
     /// Round to the knob's scale (steps of 10, floor 10) so the slider and the
@@ -1191,6 +1230,8 @@ final class BoardViewModel: ObservableObject {
             $0.championship = champ
             $0.offMode = c.offMode
             $0.offModeParams = c.offModeParams
+            $0.mode = c.mode
+            $0.modeHours = c.modeHours
             $0.quietStartMin = c.quietStartMin
             $0.quietEndMin = c.quietEndMin
             $0.quietAllowEvents = c.quietAllowEvents
@@ -2468,37 +2509,62 @@ struct DashboardView: View {
         }
     }
 
-    /// One compact controls row (power + brightness), then off-behavior + sleep
-    /// duration; a footer explains an active sleep timer.
+    /// Brightness plus the MODE PICKER — there is no power button any more.
+    /// "Off" is one mode among several, which dissolved the five-way state
+    /// machine a single press used to mean: every tile does exactly one thing.
     private var controlsSection: some View {
         Section {
-            HStack(spacing: 14) {
-                Button {
-                    model.setPower(!model.power)
-                } label: {
-                    Image(systemName: "power")
-                        .font(.headline.weight(.bold))
-                        .foregroundStyle(model.power ? .white : .secondary)
-                        .frame(width: 36, height: 36)
-                        .background(model.power ? AnyShapeStyle(.green) : AnyShapeStyle(Color(.systemGray5)), in: Circle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Power")
-                .accessibilityValue(model.power ? "On" : "Off")
-
-                BrightnessControl(
-                    value: model.brightness,
-                    onPreview: { model.previewBrightness($0) },
-                    onCommit: { model.setBrightness($0) }
-                )
-            }
+            BrightnessControl(
+                value: model.brightness,
+                onPreview: { model.previewBrightness($0) },
+                onCommit: { model.setBrightness($0) }
+            )
+            modePicker
         } header: {
             Text("Controls")
         } footer: {
             VStack(alignment: .leading, spacing: 4) {
-                sleepFooter
+                modeFooter
                 quietFooter
             }
+        }
+    }
+
+    /// A horizontal rail of mode tiles. Compact on purpose — this sits on the
+    /// dashboard, not in Settings — but each tile is still the real frame,
+    /// because a picture of what the panel will do is the app's language for
+    /// choices like this.
+    private var modePicker: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(alignment: .top, spacing: 10) {
+                ForEach(model.pickableModes, id: \.id) { m in
+                    Button { model.setMode(m.id) } label: {
+                        VStack(spacing: 4) {
+                            Group {
+                                if let path = m.path {
+                                    FetchedFrameImage(url: URL(string: "\(model.httpBase)\(path)"))
+                                } else {
+                                    Color.black
+                                }
+                            }
+                            .ledPanel(width: 84, height: 42)
+                            .padding(2)
+                            .overlay {
+                                Rectangle()
+                                    .strokeBorder(model.current.mode == m.id ? Color.accentColor : .clear, lineWidth: 2)
+                            }
+                            Text(m.label)
+                                .font(.caption2)
+                                .foregroundStyle(model.current.mode == m.id ? Color.primary : Color.secondary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(m.label)
+                    .accessibilityAddTraits(model.current.mode == m.id ? .isSelected : [])
+                }
+            }
+            .padding(.vertical, 2)
         }
     }
 
@@ -2531,25 +2597,25 @@ struct DashboardView: View {
         return d.formatted(date: .omitted, time: .shortened)
     }
 
-    /// While asleep: a live countdown to the wake time (armed identically by the
-    /// app's power button and the physical knob) with an escape hatch to stay off
-    /// indefinitely — or, once indefinite, a note that only power turns it back on.
-    @ViewBuilder private var sleepFooter: some View {
-        if !model.power {
+    /// While a non-scores mode holds the panel: a live countdown to when it
+    /// returns to scores, with an escape hatch to hold the mode indefinitely —
+    /// or, timerless, a note that it stays until changed.
+    @ViewBuilder private var modeFooter: some View {
+        if model.current.mode != "scores" {
             if let w = model.current.wakeAt, TimeInterval(w) > Date().timeIntervalSince1970 {
                 HStack(spacing: 12) {
                     // `.relative` keeps itself accurate ("1 hr, 53 min" … "45 sec").
-                    (Text("Asleep — waking in ")
+                    (Text("\(model.modeLabel(model.current.mode)) — back to scores in ")
                         + Text(Date(timeIntervalSince1970: TimeInterval(w)), style: .relative)
                         + Text("."))
                     Spacer(minLength: 8)
-                    Button("Keep off") { model.keepOff() }
+                    Button("Keep") { model.keepMode() }
                         .font(.footnote.weight(.semibold))
                         .buttonStyle(.plain)
                         .foregroundStyle(.tint)
                 }
             } else {
-                Text("Asleep until turned back on.")
+                Text("\(model.modeLabel(model.current.mode)) until changed.")
             }
         }
     }
@@ -2799,6 +2865,8 @@ enum AppNotes {
         - Off modes now have their own settings. Pick Clock or Weather, then tap the settings row underneath the pictures to choose a style, a layout, or 24-hour time.
         - Weather is one entry with four layouts, instead of four separate entries.
         - Quiet hours: pick a window and the scoreboard's screen is off through it every night.
+        - The power button is gone. In its place, Controls has a mode picker: Scores, Clock, Weather, or Off. Every mode except Scores runs on its own timer — set them under Settings > Screen — and the scoreboard returns to scores by itself when the timer ends. Pick "Until changed" to hold a mode indefinitely.
+        - The scoreboard's button still works exactly as before: press to turn the panel off, press to bring the scores back.
         - Patch notes for the app and the scoreboard now live behind the buttons next to their version numbers.
         - Settings that change how the panel looks — the idle screen, spoilers, team names, the box-score line, golf's round — now show you the two frames and let you pick, instead of describing them.
         - The clock/weather setting is called "Idle Screen" now. It is what the scoreboard shows when it is on and nothing you follow is playing — asleep, the panel is off entirely.
@@ -5058,7 +5126,7 @@ struct SettingsView: View {
                     Section {
                         NavigationLink { sleepPage } label: {
                             HStack {
-                                Label("Sleep", systemImage: "moon")
+                                Label("Screen", systemImage: "moon")
                                 if model.current.quietActive {
                                     Spacer()
                                     rowBadge("Sleeping now")
@@ -5332,20 +5400,40 @@ struct SettingsView: View {
         }
     }
 
-    private var sleepDurationRow: some View {
+    /// One mode's timer: how long the board holds it before returning to
+    /// scores. The row for "Off" writes the legacy `sleep_hours` too, via the
+    /// server's fallback — an old app's sleep-duration setting and this row
+    /// are the same dial.
+    private func modeTimerRow(_ id: String, _ label: String) -> some View {
         HStack(spacing: 6) {
-            Text("Sleep duration")
+            Text(label)
             Spacer()
-            Picker("Sleep duration", selection: Binding(
-                get: { model.current.sleepHours },
-                set: { model.setSleepHours($0) }
+            Picker(label, selection: Binding(
+                get: { model.current.modeHours[id] ?? model.current.sleepHours },
+                set: { model.setModeHours(id, $0) }
             )) {
+                Text("Until changed").tag(UInt32(0))
                 ForEach([UInt32(1), 2, 4, 8, 12, 24, 48], id: \.self) { h in
                     Text(h == 1 ? "1 hour" : "\(h) hours").tag(h)
                 }
             }
             .pickerStyle(.menu)
             .labelsHidden()
+        }
+    }
+
+    /// A timer per pickable non-scores mode. Section-level, because the rule
+    /// is the same for every row and stating it once is the point of the rule:
+    /// nothing you pick can strand the board forever.
+    private var modeTimersSection: some View {
+        Section {
+            ForEach(model.pickableModes.filter { $0.id != "scores" }, id: \.id) { m in
+                modeTimerRow(m.id, m.label)
+            }
+        } header: {
+            Text("Timers")
+        } footer: {
+            Text("How long the Scoreboard holds each mode — from the picker in Controls or the scoreboard's button — before returning to scores on its own.")
         }
     }
 
@@ -5507,7 +5595,7 @@ struct SettingsView: View {
         } header: {
             Text("Idle Screen")
         } footer: {
-            Text("Shown when the scoreboard is on but nothing you follow is playing. While it's asleep the panel is off.")
+            Text("Shown when the scoreboard is on Scores and nothing you follow is playing. A mode picked in Controls overrides it, and Off keeps the panel dark.")
         }
     }
 
@@ -5759,15 +5847,11 @@ struct SettingsView: View {
 
     @ViewBuilder private var sleepPage: some View {
         Form {
-            Section {
-                sleepDurationRow
-            } footer: {
-                Text("When the power button is pressed, the Scoreboard will go to sleep for \(model.current.sleepHours == 1 ? "1 hour" : "\(model.current.sleepHours) hours"). After that time, it will resume automatically showing scores.")
-            }
+            modeTimersSection
             offModeSection
             quietHoursSection
         }
-        .navigationTitle("Sleep")
+        .navigationTitle("Screen")
         .navigationBarTitleDisplayMode(.inline)
     }
 

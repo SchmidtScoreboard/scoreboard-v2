@@ -188,6 +188,12 @@ pub struct UiBoardConfig {
     /// generated Swift and abort the whole config decode the first time a
     /// forked server named a mode this build had never heard of.
     pub off_mode: String,
+    /// What the board is DOING: "scores", "off", or an off-mode id held
+    /// persistently. A string for the same closed-enum reason as `off_mode`.
+    pub mode: String,
+    /// Per-mode timer durations in hours (0 = until changed); a missing mode
+    /// falls back to `sleep_hours`.
+    pub mode_hours: HashMap<String, u32>,
     /// Values the user typed for the selected mode's declared input.
     pub off_mode_params: HashMap<String, String>,
     pub sleep_hours: u32,
@@ -617,6 +623,25 @@ impl ScoreboardClient {
 
     pub fn set_power(&self, board_id: String, on: bool) {
         let _ = self.tx.send(Out::Command(board_id, Command::SetPower { on }));
+    }
+
+    /// Put the board in a mode: "scores", "off", or an off-mode id. For the
+    /// two modes the LEGACY command can express, the equivalent SetPower is
+    /// sent alongside — a not-yet-deployed (or rolled-back) server drops the
+    /// unknown SetMode silently, and the alias keeps the picker working
+    /// through the skew. On a current server both arrive and both write the
+    /// same mode, so the pair is idempotent.
+    pub fn set_mode(&self, board_id: String, mode: String) {
+        if mode == "scores" || mode == "off" {
+            let on = mode == "scores";
+            let _ = self.tx.send(Out::Command(board_id.clone(), Command::SetPower { on }));
+        }
+        let _ = self.tx.send(Out::Command(board_id, Command::SetMode { mode }));
+    }
+
+    /// Configure a mode's timer, in hours. 0 = until changed.
+    pub fn set_mode_hours(&self, board_id: String, mode: String, hours: u32) {
+        let _ = self.tx.send(Out::Command(board_id, Command::SetModeHours { mode, hours }));
     }
 
     /// Forget a board: drop it from the subscription set and tell the server,
@@ -1147,6 +1172,8 @@ fn to_ui_board_config(c: BoardConfig) -> UiBoardConfig {
         name: c.name,
         off_mode,
         off_mode_params,
+        mode: c.mode.clone(),
+        mode_hours: c.mode_hours.clone().into_iter().collect(),
         sleep_hours: c.sleep_hours,
         dwell_secs: c.dwell_secs,
         wake_at: c.wake_at,

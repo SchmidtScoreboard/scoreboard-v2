@@ -722,6 +722,21 @@ public protocol ScoreboardClientProtocol: AnyObject {
     func setListener(listener: ClientListener)
 
     /**
+     * Put the board in a mode: "scores", "off", or an off-mode id. For the
+     * two modes the LEGACY command can express, the equivalent SetPower is
+     * sent alongside — a not-yet-deployed (or rolled-back) server drops the
+     * unknown SetMode silently, and the alias keeps the picker working
+     * through the skew. On a current server both arrive and both write the
+     * same mode, so the pair is idempotent.
+     */
+    func setMode(boardId: String, mode: String)
+
+    /**
+     * Configure a mode's timer, in hours. 0 = until changed.
+     */
+    func setModeHours(boardId: String, mode: String, hours: UInt32)
+
+    /**
      * What the panel shows while off / idle (blank or a server-rendered clock).
      * Pick a server-declared off mode. The id comes from `on_off_modes`; the
      * server validates it and ignores one it does not offer.
@@ -1198,6 +1213,32 @@ open class ScoreboardClient:
     }
 
     /**
+     * Put the board in a mode: "scores", "off", or an off-mode id. For the
+     * two modes the LEGACY command can express, the equivalent SetPower is
+     * sent alongside — a not-yet-deployed (or rolled-back) server drops the
+     * unknown SetMode silently, and the alias keeps the picker working
+     * through the skew. On a current server both arrive and both write the
+     * same mode, so the pair is idempotent.
+     */
+    open func setMode(boardId: String, mode: String) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_set_mode(self.uniffiClonePointer(),
+                                                            FfiConverterString.lower(boardId),
+                                                            FfiConverterString.lower(mode), $0)
+    }
+    }
+
+    /**
+     * Configure a mode's timer, in hours. 0 = until changed.
+     */
+    open func setModeHours(boardId: String, mode: String, hours: UInt32) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_set_mode_hours(self.uniffiClonePointer(),
+                                                                  FfiConverterString.lower(boardId),
+                                                                  FfiConverterString.lower(mode),
+                                                                  FfiConverterUInt32.lower(hours), $0)
+    }
+    }
+
+    /**
      * What the panel shows while off / idle (blank or a server-rendered clock).
      * Pick a server-declared off mode. The id comes from `on_off_modes`; the
      * server validates it and ignores one it does not offer.
@@ -1414,6 +1455,16 @@ public struct UiBoardConfig {
      */
     public var offMode: String
     /**
+     * What the board is DOING: "scores", "off", or an off-mode id held
+     * persistently. A string for the same closed-enum reason as `off_mode`.
+     */
+    public var mode: String
+    /**
+     * Per-mode timer durations in hours (0 = until changed); a missing mode
+     * falls back to `sleep_hours`.
+     */
+    public var modeHours: [String: UInt32]
+    /**
      * Values the user typed for the selected mode's declared input.
      */
     public var offModeParams: [String: String]
@@ -1480,6 +1531,14 @@ public struct UiBoardConfig {
                     * forked server named a mode this build had never heard of.
                     */ offMode: String,
                 /**
+                    * What the board is DOING: "scores", "off", or an off-mode id held
+                    * persistently. A string for the same closed-enum reason as `off_mode`.
+                    */ mode: String,
+                /**
+                    * Per-mode timer durations in hours (0 = until changed); a missing mode
+                    * falls back to `sleep_hours`.
+                    */ modeHours: [String: UInt32],
+                /**
                     * Values the user typed for the selected mode's declared input.
                     */ offModeParams: [String: String], sleepHours: UInt32,
                 /**
@@ -1527,6 +1586,8 @@ public struct UiBoardConfig {
         self.focusedGameId = focusedGameId
         self.name = name
         self.offMode = offMode
+        self.mode = mode
+        self.modeHours = modeHours
         self.offModeParams = offModeParams
         self.sleepHours = sleepHours
         self.dwellSecs = dwellSecs
@@ -1568,6 +1629,12 @@ extension UiBoardConfig: Equatable, Hashable {
             return false
         }
         if lhs.offMode != rhs.offMode {
+            return false
+        }
+        if lhs.mode != rhs.mode {
+            return false
+        }
+        if lhs.modeHours != rhs.modeHours {
             return false
         }
         if lhs.offModeParams != rhs.offModeParams {
@@ -1624,6 +1691,8 @@ extension UiBoardConfig: Equatable, Hashable {
         hasher.combine(focusedGameId)
         hasher.combine(name)
         hasher.combine(offMode)
+        hasher.combine(mode)
+        hasher.combine(modeHours)
         hasher.combine(offModeParams)
         hasher.combine(sleepHours)
         hasher.combine(dwellSecs)
@@ -1656,6 +1725,8 @@ public struct FfiConverterTypeUiBoardConfig: FfiConverterRustBuffer {
                 focusedGameId: FfiConverterOptionString.read(from: &buf),
                 name: FfiConverterOptionString.read(from: &buf),
                 offMode: FfiConverterString.read(from: &buf),
+                mode: FfiConverterString.read(from: &buf),
+                modeHours: FfiConverterDictionaryStringUInt32.read(from: &buf),
                 offModeParams: FfiConverterDictionaryStringString.read(from: &buf),
                 sleepHours: FfiConverterUInt32.read(from: &buf),
                 dwellSecs: FfiConverterUInt32.read(from: &buf),
@@ -1682,6 +1753,8 @@ public struct FfiConverterTypeUiBoardConfig: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.focusedGameId, into: &buf)
         FfiConverterOptionString.write(value.name, into: &buf)
         FfiConverterString.write(value.offMode, into: &buf)
+        FfiConverterString.write(value.mode, into: &buf)
+        FfiConverterDictionaryStringUInt32.write(value.modeHours, into: &buf)
         FfiConverterDictionaryStringString.write(value.offModeParams, into: &buf)
         FfiConverterUInt32.write(value.sleepHours, into: &buf)
         FfiConverterUInt32.write(value.dwellSecs, into: &buf)
@@ -4081,6 +4154,32 @@ private struct FfiConverterSequenceTypeUiTeam: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterDictionaryStringUInt32: FfiConverterRustBuffer {
+    static func write(_ value: [String: UInt32], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for (key, value) in value {
+            FfiConverterString.write(key, into: &buf)
+            FfiConverterUInt32.write(value, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [String: UInt32] {
+        let len: Int32 = try readInt(&buf)
+        var dict = [String: UInt32]()
+        dict.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            let key = try FfiConverterString.read(from: &buf)
+            let value = try FfiConverterUInt32.read(from: &buf)
+            dict[key] = value
+        }
+        return dict
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterDictionaryStringString: FfiConverterRustBuffer {
     static func write(_ value: [String: String], into buf: inout [UInt8]) {
         let len = Int32(value.count)
@@ -4250,6 +4349,12 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_listener() != 33592 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_scoreboardclient_set_mode() != 28226 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_scoreboardclient_set_mode_hours() != 20109 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_off_mode() != 43268 {
