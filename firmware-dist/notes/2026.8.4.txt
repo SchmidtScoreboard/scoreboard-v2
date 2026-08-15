@@ -1,0 +1,5 @@
+- Pressing the knob now opens a menu of what the scoreboard can show: Scores, Clock, Weather, or Off. Turn the knob to choose, press to pick.
+- The menu starts on the choice you most likely want — Off while the scoreboard is lit, Scores while it's dark — so two quick presses still work like the old on/off toggle.
+- The dot at the right edge marks what the scoreboard is showing now.
+- Everything except Scores runs on a timer you can set in the app, and the scoreboard goes back to scores by itself when it ends.
+- Double-press still opens the settings menu, and holding the knob still resets the scoreboard, exactly as before.

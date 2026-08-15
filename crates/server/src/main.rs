@@ -2692,7 +2692,34 @@ fn chosen_games(state: &AppState, cfg: &BoardConfig) -> Vec<Game> {
     candidate_games(state, cfg)
 }
 
+/// Every mode the board's single-press picker offers, in display order:
+/// scores first (the resting state), the server-declared lit screens, off
+/// last. The idle "Nothing" screen is excluded for the same reason the app
+/// excludes it — a picked dark screen IS off, and two dark rows with
+/// different meanings is a trap. The APP composes its own copy of this list
+/// (it also needs preview paths); the ids must agree, which
+/// `the_picker_offers_what_select_mode_accepts` pins.
+pub fn pickable_modes() -> Vec<ModeEntry> {
+    let mut out = vec![ModeEntry { id: MODE_SCORES.into(), label: "SCORES".into() }];
+    for m in offmode::off_modes() {
+        if m.preview.is_some() {
+            out.push(ModeEntry { id: m.id.to_string(), label: m.label.to_uppercase() });
+        }
+    }
+    out.push(ModeEntry { id: MODE_OFF.into(), label: "OFF".into() });
+    out
+}
+
 pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
+    // The picker data rides EVERY manifest — most importantly the dark ones,
+    // because a board showing "off" is exactly the board whose picker matters.
+    let mut m = manifest_inner(state, board_id);
+    m.mode = state.config_for(board_id).mode.clone();
+    m.modes = pickable_modes();
+    m
+}
+
+fn manifest_inner(state: &AppState, board_id: &str) -> Manifest {
     let cfg = state.config_for(board_id);
     let tz = board_tz(&cfg);
 
@@ -2751,6 +2778,8 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
                 rotation.push(RotationEntry { frame_id: id, dwell_ms, scroll: scrolls });
             }
             return Manifest {
+        mode: String::new(),
+        modes: Vec::new(),
                 clock_hour24: false,
                 // Games / notice path: never a device-drawn clock.
                 local_clock: false,
@@ -2793,6 +2822,8 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
                     scroll: false,
                 }];
                 return Manifest {
+        mode: String::new(),
+        modes: Vec::new(),
                     clock_hour24: false,
                     // Games / notice path: never a device-drawn clock.
                     local_clock: false,
@@ -2819,6 +2850,8 @@ pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
         let (id, px) = render::render_notice(&SETUP_LINES, None);
         state.cache_frame(id.clone(), px);
         return Manifest {
+        mode: String::new(),
+        modes: Vec::new(),
             clock_hour24: false,
             local_clock: false,
             rotation: vec![RotationEntry { frame_id: id, dwell_ms: 60_000, scroll: false }],
@@ -2864,6 +2897,8 @@ const SETUP_LINES: [(&str, bool, embedded_graphics::pixelcolor::Rgb888); 3] = [
 /// configured off mode — during quiet hours there is nothing to draw.
 fn dark_manifest(cfg: &BoardConfig) -> Manifest {
     Manifest {
+        mode: String::new(),
+        modes: Vec::new(),
         clock_hour24: false,
         rotation: Vec::new(),
         display_on: false,
@@ -2906,6 +2941,8 @@ fn screen_manifest(state: &AppState, cfg: &BoardConfig, tz: Option<chrono_tz::Tz
     .collect();
 
     Manifest {
+        mode: String::new(),
+        modes: Vec::new(),
         // Only the idle path can be a local clock, and only when it drew
         // something. The rendered frame still ships alongside it.
         // Always false. The board used to draw its own clock from this, which
@@ -3140,6 +3177,43 @@ pub(crate) fn finish_notice(state: &AppState, board_id: &str, epoch: u64) {
     if mine {
         push_board(state, board_id);
     }
+}
+
+/// A mode picked on the board's own panel. The board offered ids from
+/// `Manifest.modes`, but the socket is not a trust boundary the picker can
+/// lean on — validate exactly like the app's SetMode.
+pub fn handle_select_mode(state: &AppState, board_id: &str, mode: &str) {
+    let mut cfg = state.config_for(board_id);
+    let mode = if mode == MODE_SCORES || mode == MODE_OFF {
+        mode.to_string()
+    } else {
+        offmode::migrate(mode, &mut cfg.off_mode_params)
+    };
+    if !(mode == MODE_SCORES || mode == MODE_OFF || offmode::offers(&mode)) {
+        tracing::warn!("board '{board_id}': picker sent unknown mode {mode:?}, ignoring");
+        return;
+    }
+    apply_mode(&mut cfg, &mode);
+    state.configs.lock().unwrap().insert(board_id.to_string(), cfg.clone());
+    state.persist_config(board_id, &cfg);
+    handle_mode_change(state, board_id, &cfg);
+    // Same immediate-fetch rule as the app's pick: a weather screen chosen on
+    // the knob should not stare at UNAVAILABLE until the hourly loop.
+    // (No-op outside a tokio runtime, i.e. in sync tests — same rule as
+    // `set_notice`'s expiry task.)
+    if cfg.mode.starts_with("weather") {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let st = state.clone();
+            let board = board_id.to_string();
+            handle.spawn(async move {
+                weather::refresh_all(&st.weather, weather_locations(&st)).await;
+                push_board(&st, &board);
+            });
+        }
+    }
+    tracing::info!("board '{board_id}': picker -> {}", cfg.mode);
+    push_board(state, board_id);
+    push_board_state(state, board_id);
 }
 
 /// A single knob press from PRE-PICKER firmware. Stage-2 firmware opens a
@@ -4896,6 +4970,54 @@ mod tests {
 
         handle_device_brightness(&state, "b1", 0); // below the knob floor
         assert_eq!(state.config_for("b1").brightness, 10, "clamped to 10..=100");
+    }
+
+    /// The board trusts `Manifest.modes` to know what it may offer; the
+    /// server validates `SelectMode` against scores/off/offers. These are two
+    /// separate code paths that must agree, or the picker shows a row the
+    /// server then rejects.
+    #[test]
+    fn the_picker_offers_what_select_mode_accepts() {
+        let state = AppState::new_ephemeral();
+        for entry in pickable_modes() {
+            handle_select_mode(&state, "b1", &entry.id);
+            assert_eq!(state.config_for("b1").mode, entry.id, "{} must be selectable", entry.id);
+        }
+        // And the list is Scores-first, Off-last, with no dark idle screen
+        // masquerading as a second Off.
+        let modes = pickable_modes();
+        assert_eq!(modes.first().map(|m| m.id.as_str()), Some(MODE_SCORES));
+        assert_eq!(modes.last().map(|m| m.id.as_str()), Some(MODE_OFF));
+        assert!(!modes.iter().any(|m| m.id == "blank"), "Nothing is not a mode");
+    }
+
+    /// The picker data rides EVERY manifest — most importantly the dark ones,
+    /// because a board showing "off" is exactly the board whose picker
+    /// matters.
+    #[test]
+    fn every_manifest_carries_the_picker() {
+        let state = AppState::new_ephemeral();
+        handle_select_mode(&state, "b1", MODE_OFF);
+        // Clear the (correct) SLEEPING splash to reach the resting dark state.
+        state.notices.lock().unwrap().remove("b1");
+        let dark = manifest_for_board(&state, "b1");
+        assert!(!dark.display_on, "precondition: this is the dark manifest");
+        assert_eq!(dark.mode, MODE_OFF);
+        assert!(!dark.modes.is_empty(), "the dark manifest still offers the picker");
+
+        handle_select_mode(&state, "b1", "clock");
+        let lit = manifest_for_board(&state, "b1");
+        assert_eq!(lit.mode, "clock");
+        assert_eq!(lit.modes, dark.modes, "one list, whatever is showing");
+    }
+
+    /// The device path validates like the app path: junk is ignored.
+    #[test]
+    fn select_mode_ignores_junk() {
+        let state = AppState::new_ephemeral();
+        handle_select_mode(&state, "b1", "clock");
+        handle_select_mode(&state, "b1", "stocks");
+        assert_eq!(state.config_for("b1").mode, "clock", "junk pick ignored");
     }
 
     /// The legacy button is a clean toggle now: any lit mode -> "off" (with

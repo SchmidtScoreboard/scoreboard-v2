@@ -437,6 +437,26 @@ pub struct Manifest {
     /// field and shows the static outline — a graceful downgrade.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub countdown_ms: Option<u32>,
+    /// The board's current MODE id ("scores", "off", an off-mode id). Drives
+    /// the picker's "you are here" marker and its default cursor. Empty from
+    /// a server that predates modes — the board then keeps the legacy
+    /// press-reports-ButtonPress behavior.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mode: String,
+    /// Every mode the board may offer in its single-press picker, in display
+    /// order. Empty list = no picker (old server): single press falls back to
+    /// ButtonPress. Ids are what `ClientMsg::SelectMode` sends back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<ModeEntry>,
+}
+
+/// One row of the board's mode picker: the id the board sends back and the
+/// label it draws. Self-describing, so a forked server's screens appear in
+/// the picker with no firmware change.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ModeEntry {
+    pub id: String,
+    pub label: String,
 }
 
 // ---- per-league team-name display style ----
@@ -1281,8 +1301,13 @@ pub enum ClientMsg {
     // under a fresh board_id; this message just keeps the server's tables
     // from accumulating orphans and unpairs the old id from every phone.
     FactoryReset,
-    // device reports a single knob press — the server decides sleep/wake/notice
+    // device reports a single knob press — the server decides sleep/wake/notice.
+    // LEGACY: picker-era firmware sends SelectMode instead (and only falls
+    // back to this when the server sent no mode list).
     ButtonPress,
+    // device reports a mode picked from its on-panel picker (an id from
+    // Manifest.modes, or "scores"/"off")
+    SelectMode { mode: String },
     // device reports a knob turn — the server adopts this as the board's one
     // brightness (the same value SetBrightness writes and the manifest echoes)
     DeviceBrightness { level: u8 },

@@ -182,6 +182,9 @@ async fn device_loop(
                 Ok(ClientMsg::ButtonPress) => {
                     crate::handle_button(&state, &board_id);
                 }
+                Ok(ClientMsg::SelectMode { mode }) => {
+                    crate::handle_select_mode(&state, &board_id, &mode);
+                }
                 Ok(ClientMsg::DeviceBrightness { level }) => {
                     crate::handle_device_brightness(&state, &board_id, level);
                 }

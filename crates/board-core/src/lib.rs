@@ -141,6 +141,11 @@ enum MenuScreen {
     DebugInfo,
     ResetConfirm,
     UpdateConfirm,
+    /// The single-press mode picker: what the panel should be DOING, chosen
+    /// on the panel. Rows come from `Manifest.modes` (server-authored), so a
+    /// fork's screens appear with no firmware change. Distinct from Root — the
+    /// admin menu stays on the double tap.
+    ModePicker,
 }
 
 struct MenuState {
@@ -162,6 +167,9 @@ const MENU_ITEM_COUNT: usize = 5;
 // The debug-info screen shows this many FONT_4X6 rows at once (5 × 6px + 1px
 // top margin fills the 32px panel); the rest scroll.
 const DEBUG_INFO_VISIBLE: usize = 5;
+// Same geometry for the mode picker: 5 rows visible, window scrolls with the
+// cursor when a forked server offers more.
+const PICKER_VISIBLE: usize = 5;
 // Menu selection fills: deep blue for the ordinary selection, the deep-red
 // member of the danger family for ERASE. Row text stays WHITE on top of them.
 // Both values are picked for brightness 10, the worst case: the fill is still
@@ -1000,7 +1008,15 @@ impl Board {
                     return;
                 }
                 if self.online && matches!(self.mode, Mode::Running) {
-                    self.outbox.push(ClientMsg::ButtonPress);
+                    // A server that lists modes gets a PICKER; one that
+                    // predates them keeps the legacy press-and-let-the-server
+                    // -decide. The empty-list fallback is also what keeps the
+                    // button alive against a rolled-back server.
+                    if self.manifest.as_ref().is_some_and(|m| !m.modes.is_empty()) {
+                        self.open_mode_picker();
+                    } else {
+                        self.outbox.push(ClientMsg::ButtonPress);
+                    }
                 } else if matches!(self.mode, Mode::Running | Mode::Asleep) {
                     // Sleep toggle only makes sense between running and asleep;
                     // a press on the setup/pairing screens must NOT yank the
@@ -1051,6 +1067,41 @@ impl Board {
         self.mode = Mode::Setup;
     }
 
+    /// Open the single-press mode picker. The cursor starts on the OBVIOUS
+    /// next mode — Off when anything is lit, Scores when off — so press-press
+    /// approximates the old toggle, while rotation reaches everything else.
+    fn open_mode_picker(&mut self) {
+        if self.menu.is_some() {
+            return;
+        }
+        let (cursor, count) = self
+            .manifest
+            .as_ref()
+            .map(|man| {
+                let modes = &man.modes;
+                let target = if man.mode == "off" {
+                    modes.iter().position(|e| e.id == "scores")
+                } else {
+                    modes.iter().position(|e| e.id == "off")
+                };
+                (target.unwrap_or(0), modes.len())
+            })
+            .unwrap_or((0, 0));
+        if count == 0 {
+            return;
+        }
+        self.menu = Some(MenuState {
+            screen: MenuScreen::ModePicker,
+            selected: cursor,
+            // Window the cursor into view from the start (a default of Off on
+            // a 6-row fork list must not open scrolled to the top with the
+            // cursor off-screen).
+            scroll: cursor.saturating_sub(PICKER_VISIBLE - 1),
+            confirm_selected: false,
+            last_interaction: self.clock,
+        });
+    }
+
     /// Open the settings menu (the double-tap toggle). The mode machine is
     /// left exactly as it stands — the menu is an overlay, and dropping it
     /// later is the whole "restore the prior state" story.
@@ -1096,6 +1147,18 @@ impl Board {
             // direction moves the selection forward, to ERASE / UPDATE.
             MenuScreen::ResetConfirm | MenuScreen::UpdateConfirm => {
                 m.confirm_selected = delta < 0
+            }
+            MenuScreen::ModePicker => {
+                let count = self.manifest.as_ref().map(|man| man.modes.len()).unwrap_or(0);
+                let m = self.menu.as_mut().unwrap();
+                m.selected = (m.selected as i32 - delta)
+                    .clamp(0, count.saturating_sub(1) as i32) as usize;
+                // Keep the cursor inside the visible window.
+                if m.selected < m.scroll {
+                    m.scroll = m.selected;
+                } else if m.selected >= m.scroll + PICKER_VISIBLE {
+                    m.scroll = m.selected + 1 - PICKER_VISIBLE;
+                }
             }
         }
     }
@@ -1161,6 +1224,22 @@ impl Board {
                     m.screen = MenuScreen::Root;
                 }
             }
+            MenuScreen::ModePicker => {
+                // Tap = pick the row under the cursor. Queued like every other
+                // outbound (sent on reconnect if the socket just dropped), and
+                // the menu closes — the next manifest is the answer. Selecting
+                // the CURRENT mode is still a real pick: during quiet hours it
+                // is the override gesture, and the server treats it as one.
+                let chosen = self
+                    .manifest
+                    .as_ref()
+                    .and_then(|man| man.modes.get(m.selected))
+                    .map(|e| e.id.clone());
+                if let Some(mode) = chosen {
+                    self.outbox.push(ClientMsg::SelectMode { mode });
+                }
+                self.menu = None;
+            }
         }
     }
 
@@ -1193,6 +1272,7 @@ impl Board {
                 MenuScreen::DebugInfo => self.screen_debug_info(m),
                 MenuScreen::ResetConfirm => self.screen_reset_confirm(m),
                 MenuScreen::UpdateConfirm => self.screen_update_confirm(m),
+                MenuScreen::ModePicker => self.screen_mode_picker(m),
             };
             scale_buf(&mut buf, self.local_brightness);
             return buf;
@@ -1489,6 +1569,34 @@ impl Board {
     /// scrolling. The blue is picked to stay visibly blue, with the white
     /// text still brighter, at brightness 10 (see
     /// `menu_selection_stays_legible_at_min_brightness` and the screen dumps).
+    /// The single-press mode picker: a windowed list of the server's modes,
+    /// the same row geometry and selection bar as the root menu. The CURRENT
+    /// mode wears a 2px amber tick at the right edge — "you are here" must
+    /// survive scrolling, so it marks the row, not a fixed position.
+    fn screen_mode_picker(&self, m: &MenuState) -> Vec<u32> {
+        let mut c = Canvas::new();
+        let Some(man) = &self.manifest else { return c.into_u32() };
+        let amber = Rgb888::new(0xFF, 0x88, 0x00);
+        for (i, e) in man.modes.iter().enumerate().skip(m.scroll).take(PICKER_VISIBLE) {
+            let row = i - m.scroll;
+            let y = 1 + row as i32 * 6;
+            if i == m.selected {
+                Rectangle::new(Point::new(0, y - 1), Size::new(FRAME_WIDTH as u32, 7))
+                    .into_styled(PrimitiveStyle::with_fill(MENU_SELECT_BLUE))
+                    .draw(&mut c)
+                    .ok();
+            }
+            left_text(&mut c, &e.label, 1, y, Rgb888::WHITE);
+            if e.id == man.mode {
+                Rectangle::new(Point::new(FRAME_WIDTH as i32 - 3, y), Size::new(2, 5))
+                    .into_styled(PrimitiveStyle::with_fill(amber))
+                    .draw(&mut c)
+                    .ok();
+            }
+        }
+        c.into_u32()
+    }
+
     fn screen_menu_root(&self, m: &MenuState) -> Vec<u32> {
         let mut c = Canvas::new();
         let update_row = self.update_row_label();
@@ -1981,6 +2089,7 @@ fn overlay_brightness_bar(buf: &mut [u32], brightness: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scoreboard_protocol::ModeEntry;
     use scoreboard_protocol::encode_frame_payload;
 
     /// Wrap pixels the way the wire does: frames reach `on_frame` as
@@ -2067,9 +2176,91 @@ mod tests {
         assert_ne!(once, b.framebuffer(), "wall time advances the animation");
     }
 
+    /// A manifest whose `modes` list is non-empty turns the single press into
+    /// the PICKER. Selection reports SelectMode; nothing sends ButtonPress.
+    #[test]
+    fn single_press_opens_the_picker_and_selection_reports_the_mode() {
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.on_manifest(Manifest {
+            mode: "scores".into(),
+            modes: vec![
+                ModeEntry { id: "scores".into(), label: "SCORES".into() },
+                ModeEntry { id: "clock".into(), label: "CLOCK".into() },
+                ModeEntry { id: "weather".into(), label: "WEATHER".into() },
+                ModeEntry { id: "off".into(), label: "OFF".into() },
+            ],
+            rotation: Vec::new(),
+            display_on: true,
+            local_clock: false,
+            clock_hour24: false,
+            off_state: Default::default(),
+            brightness: 80,
+            epoch: 0,
+            countdown_ms: None,
+        });
+        b.take_outgoing(); // drop the frame requests from the manifest
+
+        b.gesture(Gesture::Single);
+        assert!(b.menu.is_some(), "press opens the picker");
+        assert_eq!(b.menu.as_ref().unwrap().screen, MenuScreen::ModePicker);
+        assert!(b.take_outgoing().is_empty(), "no ButtonPress — the picker replaced it");
+
+        // Cursor defaulted to Off (the board is lit): press-press ≈ old toggle.
+        assert_eq!(b.menu.as_ref().unwrap().selected, 3, "cursor starts on Off while lit");
+
+        // Rotate one detent back up the list (down-the-list is -delta) and
+        // pick WEATHER instead.
+        b.encoder(1);
+        assert_eq!(b.menu.as_ref().unwrap().selected, 2);
+        b.gesture(Gesture::Single);
+        let out = b.take_outgoing();
+        assert!(
+            matches!(out.as_slice(), [ClientMsg::SelectMode { mode }] if mode == "weather"),
+            "selection reports the picked id, got {out:?}"
+        );
+        assert!(b.menu.is_none(), "the picker closes on selection");
+    }
+
+    /// A dark board's cursor starts on Scores — the other half of the
+    /// press-press toggle.
+    #[test]
+    fn picker_cursor_starts_on_scores_when_off() {
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.on_manifest(Manifest {
+            mode: "off".into(),
+            modes: vec![
+                ModeEntry { id: "scores".into(), label: "SCORES".into() },
+                ModeEntry { id: "off".into(), label: "OFF".into() },
+            ],
+            rotation: Vec::new(),
+            display_on: false,
+            local_clock: false,
+            clock_hour24: false,
+            off_state: Default::default(),
+            brightness: 80,
+            epoch: 0,
+            countdown_ms: None,
+        });
+        b.take_outgoing();
+        b.gesture(Gesture::Single);
+        assert_eq!(b.menu.as_ref().unwrap().selected, 0, "cursor starts on Scores while off");
+        b.gesture(Gesture::Single);
+        let out = b.take_outgoing();
+        assert!(
+            matches!(out.as_slice(), [ClientMsg::SelectMode { mode }] if mode == "scores"),
+            "press-press from dark means scores, got {out:?}"
+        );
+    }
+
     /// While ONLINE, a single press is the server's call: it goes to the outbox as
     /// ButtonPress and the local mode doesn't change (the next manifest will).
     /// Offline keeps the local sleep/wake toggle (tested above) as a fallback.
+    /// STILL TRUE against a server that sends no mode list (it predates the
+    /// picker, or rolled back): the button must never go dead.
     #[test]
     fn online_press_reports_to_server_instead_of_local_sleep() {
         let mut b = Board::new();
@@ -2116,6 +2307,8 @@ mod tests {
     #[test]
     fn offline_knob_turn_reaches_the_server_on_reconnect() {
         let m = |bright: u8| Manifest {
+            mode: String::new(),
+            modes: Vec::new(),
             countdown_ms: None,
             rotation: Vec::new(),
             display_on: true,
@@ -2169,6 +2362,8 @@ mod tests {
         // has been — see `offline_knob_turn_reaches_the_server_on_reconnect`).
         b.set_online(true);
         let m = |bright: u8| Manifest {
+            mode: String::new(),
+            modes: Vec::new(),
             countdown_ms: None,
             rotation: Vec::new(),
             display_on: true,
@@ -2199,6 +2394,8 @@ mod tests {
     fn same_shape_manifest_keeps_rotation_position() {
         use scoreboard_protocol::RotationEntry;
         let mk = |ids: &[&str]| Manifest {
+            mode: String::new(),
+            modes: Vec::new(),
             countdown_ms: None,
             rotation: ids
                 .iter()
@@ -2264,6 +2461,8 @@ mod tests {
         b.set_online(true);
         b.tick(0);
         b.on_manifest(Manifest {
+            mode: String::new(),
+            modes: Vec::new(),
             countdown_ms: None,
             rotation: vec![RotationEntry {
                 frame_id: "tall".into(),
@@ -2295,6 +2494,8 @@ mod tests {
 
         // Without the scroll flag a tall frame just shows its top window.
         b.on_manifest(Manifest {
+            mode: String::new(),
+            modes: Vec::new(),
             countdown_ms: None,
             rotation: vec![RotationEntry { frame_id: "tall".into(), dwell_ms: 10_000, scroll: false }],
             display_on: true,
@@ -2363,6 +2564,8 @@ mod tests {
     #[test]
     fn countdown_bar_fills_on_the_device_clock() {
         let mk = |epoch: u64| Manifest {
+            mode: String::new(),
+            modes: Vec::new(),
             rotation: vec![scoreboard_protocol::RotationEntry {
                 frame_id: "n1".into(),
                 dwell_ms: 6000,
@@ -2959,6 +3162,8 @@ mod tests {
         b.set_online(true);
         b.tick(0);
         b.on_manifest(Manifest {
+            mode: String::new(),
+            modes: Vec::new(),
             countdown_ms: None,
             rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 1000, scroll: false }],
             display_on: true,
@@ -3002,6 +3207,8 @@ mod tests {
         b.set_online(true);
         b.tick(0);
         b.on_manifest(Manifest {
+            mode: String::new(),
+            modes: Vec::new(),
             countdown_ms: None,
             rotation: vec![],
             display_on: false,
@@ -3034,6 +3241,8 @@ mod tests {
             (0..FRAME_PIXELS).flat_map(|_| px).collect()
         };
         let mk = |ids: &[&str], epoch: u64| Manifest {
+            mode: String::new(),
+            modes: Vec::new(),
             countdown_ms: None,
             rotation: ids
                 .iter()
@@ -3072,6 +3281,8 @@ mod tests {
     /// With nothing cached (fresh boot) there is no content to hold, so going
     fn clock_manifest() -> Manifest {
         Manifest {
+            mode: String::new(),
+            modes: Vec::new(),
             countdown_ms: None,
             rotation: Vec::new(),
             display_on: true,
@@ -3121,7 +3332,9 @@ mod tests {
         b.on_manifest(clock_manifest());
         // No set_time call.
         let mut reference = running_board();
-        reference.on_manifest(Manifest { local_clock: false, ..clock_manifest() });
+        reference.on_manifest(Manifest {
+            mode: String::new(),
+            modes: Vec::new(), local_clock: false, ..clock_manifest() });
         assert_eq!(b.framebuffer(), reference.framebuffer(), "falls back to the server path");
     }
 
@@ -3130,7 +3343,9 @@ mod tests {
     #[test]
     fn a_powered_off_board_stays_dark_through_an_outage() {
         let mut b = running_board();
-        b.on_manifest(Manifest { display_on: false, ..clock_manifest() });
+        b.on_manifest(Manifest {
+            mode: String::new(),
+            modes: Vec::new(), display_on: false, ..clock_manifest() });
         b.set_online(false);
         b.tick(OFFLINE_GRACE_MS + 1);
         assert!(b.framebuffer().iter().all(|&p| p == 0), "off means off");
@@ -3200,6 +3415,8 @@ mod tests {
         b.set_online(true);
         b.tick(0);
         b.on_manifest(Manifest {
+            mode: String::new(),
+            modes: Vec::new(),
             countdown_ms: None,
             rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 1000, scroll: false }],
             display_on: true,
@@ -3359,6 +3576,8 @@ mod tests {
             (0..FRAME_PIXELS).flat_map(|_| px).collect()
         };
         let mk = |on: bool| Manifest {
+            mode: String::new(),
+            modes: Vec::new(),
             countdown_ms: None,
             rotation: if on {
                 vec![RotationEntry { frame_id: "a".into(), dwell_ms: 1000, scroll: false }]
@@ -3459,6 +3678,8 @@ mod tests {
             (0..FRAME_PIXELS).flat_map(|_| px).collect()
         };
         let manifest = || Manifest {
+            mode: String::new(),
+            modes: Vec::new(),
             countdown_ms: None,
             rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 1000, scroll: false }],
             display_on: true,
@@ -3586,6 +3807,8 @@ mod tests {
         b.set_online(true);
         b.tick(0);
         b.on_manifest(Manifest {
+            mode: String::new(),
+            modes: Vec::new(),
             countdown_ms: None,
             rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 10_000, scroll: false }],
             display_on: true,
@@ -3744,6 +3967,8 @@ mod tests {
     fn rotation(ids: &[&str], dwell_ms: u32, scroll: bool) -> Manifest {
         use scoreboard_protocol::RotationEntry;
         Manifest {
+            mode: String::new(),
+            modes: Vec::new(),
             countdown_ms: None,
             rotation: ids
                 .iter()
