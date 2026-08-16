@@ -8,26 +8,29 @@ are deliberately Android-idiom.
 
 ## Status
 
-Proven working:
-- **The Kotlin bindings run against the real core.** The generated bindings
-  (`core/src/main/kotlin/uniffi/app_core/app_core.kt`) were compiled and
-  executed on the JVM over JNA against the host build of `libapp_core` —
-  shared rules (league grouping, labels, guide copy) return byte-identical
-  results to Swift.
+Feature-complete against the iOS app for everything a phone does:
 
-Written, pending first on-device build (this machine has no Android SDK):
-- `core/` — the bindings as an Android library over per-ABI `libapp_core.so`.
-- `app/` — pairing screen (code entry), board screen: online dot, brightness
-  (knob detents), mode picker with follow-the-glass selection, now-showing
-  games rendered from the server's pushed RGBA frames (variable height,
-  nearest-neighbor).
+- **Set up a new scoreboard over Bluetooth** — scans by name, reads the
+  network list the BOARD scanned, writes credentials (and optionally a server
+  + TLS pin) in the order the firmware requires.
+- **Pair** an already-provisioned board with the code on its panel.
+- **Dashboard** — live/upcoming cards from the server's pushed frames, ring
+  states, add/remove/pin/hide/share per card, brightness, the mode picker,
+  quiet-hours note, reset rotation, league cards, board switcher.
+- **All games** — grouped, searchable, add/remove.
+- **Leagues** — subscriptions, teams, rounds, leaderboard depth, per-league
+  display overrides.
+- **Settings** — display name, seconds per screen, Screen (idle screens with
+  live previews, per-mode pages, timers, quiet hours), Spoilers, Updates,
+  Troubleshooting, Advanced.
 
-Not started (each its own milestone):
-- **BLE provisioning** ("Add Scoreboard" from scratch) — the GATT contract is
-  in `firmware-rs/src/ble.rs`; until it lands, pair with the code an
-  already-provisioned board shows.
-- Settings surfaces (leagues, spoilers, screen/timers, updates), multi-board,
-  the LED-look share export.
+Every RULE in there is a call into the shared core — ordering, ring
+precedence, the picker, descriptor interpretation, the provisioning sequence
+and pin grammar. What is Kotlin's own is layout, navigation, permissions,
+formatting, and the BLE/Keystore plumbing.
+
+Not built: the firmware developer picker and debug log streaming (both
+DEBUG-only on iOS).
 
 ## Building
 
