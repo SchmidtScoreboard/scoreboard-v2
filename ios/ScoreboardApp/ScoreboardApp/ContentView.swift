@@ -281,11 +281,9 @@ final class BoardViewModel: ObservableObject {
     /// TLS URL to plaintext `http://` — which would leave the whole image path
     /// unencrypted while the socket looked fine.
     var httpBase: String {
-        var u = serverURL(of: selectedBoardId)
-        if u.hasSuffix("/ws") { u = String(u.dropLast(3)) }
-        if u.hasPrefix("wss://") { return "https://" + String(u.dropFirst(6)) }
-        if u.hasPrefix("ws://") { return "http://" + String(u.dropFirst(5)) }
-        return u
+        // The scheme mapping lives in the core: a sloppy rewrite drops every
+        // image fetch out of TLS silently, so both platforms read one rule.
+        ScoreboardApp.httpBase(wsUrl: serverURL(of: selectedBoardId))
     }
 
     /// boardId -> ws URL. Boards without an entry ride the default `serverUrl`

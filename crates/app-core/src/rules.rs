@@ -338,6 +338,146 @@ pub fn compute_wake_at(
     }
 }
 
+// ---- league preferences ----
+
+/// One league a board follows, resolved against the catalog: the league, the
+/// favorited teams in USER ORDER, and the labels of the rounds it subscribes
+/// to.
+#[derive(uniffi::Record, Clone)]
+pub struct UiLeaguePref {
+    pub sport: crate::UiSport,
+    pub teams: Vec<crate::UiTeam>,
+    pub round_labels: Vec<String>,
+    pub league_spoiler: bool,
+    pub spoiler_team_ids: Vec<String>,
+}
+
+/// The leagues worth showing on the dashboard, in catalog order.
+///
+/// A league earns a card when it has favorites, subscribed rounds, or ANY
+/// per-league override — a dwell or depth override alone still counts, or it
+/// would be active but invisible (set from Add League without subscribing, or
+/// left behind after the last favorite is removed).
+///
+/// Favorites come back in the order the config lists them (the user's own
+/// drag order), not catalog order; unknown ids are dropped rather than
+/// faked — configs carry orphans from before the leaderboard-league split.
+#[uniffi::export]
+pub fn league_prefs(
+    config: crate::UiBoardConfig,
+    sports: Vec<crate::UiSport>,
+) -> Vec<UiLeaguePref> {
+    let mut out = Vec::new();
+    for sport in &sports {
+        let Some(sc) = config.sports.iter().find(|s| s.sport_id == sport.id) else { continue };
+        let teams: Vec<crate::UiTeam> = sc
+            .favorite_team_ids
+            .iter()
+            .filter_map(|id| sport.teams.iter().find(|t| &t.id == id).cloned())
+            .collect();
+        let round_labels: Vec<String> = sport
+            .championship_rounds
+            .iter()
+            .filter(|r| sc.championship_option_ids.contains(&r.id))
+            .map(|r| r.label.clone())
+            .collect();
+        let has_override = sc.dwell_secs.is_some()
+            || sc.leaderboard_rows.is_some()
+            || sc.show_round.is_some()
+            || sc.show_extras.is_some()
+            || sc.name_style.is_some();
+        if teams.is_empty()
+            && round_labels.is_empty()
+            && !has_override
+            && !sc.spoiler
+            && sc.spoiler_team_ids.is_empty()
+        {
+            continue;
+        }
+        out.push(UiLeaguePref {
+            sport: sport.clone(),
+            teams,
+            round_labels,
+            league_spoiler: sc.spoiler,
+            spoiler_team_ids: sc.spoiler_team_ids.clone(),
+        });
+    }
+    out
+}
+
+/// The blanket "everything in this league" option id. Subscribing to it
+/// implies every round; the CONVERSE does not hold — inferring it once turned
+/// a majors-only golf subscription into the entire PGA season and made
+/// majors-only inexpressible.
+pub const WHOLE_LEAGUE_OPTION: &str = "all";
+
+/// Toggling one round of a league's subscription.
+///
+/// Picking the blanket option selects every round (that IS what it means).
+/// Un-picking any single round only removes that round — it must NOT clear
+/// the blanket implication for the others, which is the one-way rule above.
+#[uniffi::export]
+pub fn toggle_round(
+    round_id: String,
+    picked: Vec<String>,
+    all_round_ids: Vec<String>,
+) -> Vec<String> {
+    let mut set: Vec<String> = picked;
+    if set.contains(&round_id) {
+        set.retain(|r| *r != round_id);
+        return set;
+    }
+    if round_id == WHOLE_LEAGUE_OPTION {
+        return all_round_ids;
+    }
+    set.push(round_id);
+    // Keep the catalog's order rather than tap order, so the summary reads
+    // the same however it was built.
+    all_round_ids.into_iter().filter(|r| set.contains(r)).collect()
+}
+
+/// Leaderboard depth choices for a league: (rows, label). F1 calls the
+/// deepest one "Full field" — a rule iOS was maintaining in three places.
+#[uniffi::export]
+pub fn leaderboard_depth_options(sport_id: String) -> Vec<UiDepthOption> {
+    vec![
+        UiDepthOption { rows: 4, label: "Top 4 — no scrolling".into() },
+        UiDepthOption { rows: 10, label: "Top 10".into() },
+        UiDepthOption {
+            rows: 20,
+            label: if sport_id == "f1" { "Full field".into() } else { "Top 20".into() },
+        },
+    ]
+}
+
+#[derive(uniffi::Record, Clone)]
+pub struct UiDepthOption {
+    pub rows: u32,
+    pub label: String,
+}
+
+// ---- endpoints ----
+
+/// The HTTP origin for a board's server, derived from its websocket URL:
+/// drop a trailing `/ws`, then `wss` -> `https` and `ws` -> `http`.
+///
+/// The scheme mapping is the part to be careful with. Every preview, frame
+/// and guide image the app renders is fetched from this origin, so a rewrite
+/// that lands on `http` for a `wss` server silently downgrades all of it to
+/// cleartext against a server that was speaking TLS — no error, just an
+/// unencrypted fetch. One rule, one place, both platforms.
+#[uniffi::export]
+pub fn http_base(ws_url: String) -> String {
+    let u = ws_url.strip_suffix("/ws").unwrap_or(&ws_url);
+    if let Some(rest) = u.strip_prefix("wss://") {
+        return format!("https://{rest}");
+    }
+    if let Some(rest) = u.strip_prefix("ws://") {
+        return format!("http://{rest}");
+    }
+    u.to_string()
+}
+
 // ---- the mode picker ----
 
 /// One tile of the Controls mode picker.
@@ -713,6 +853,41 @@ mod tests {
             configured_preview(Some("/sample/plain.png?live=1".into()), params).as_deref(),
             Some("/sample/plain.png?live=1")
         );
+    }
+
+    /// The scheme mapping, pinned: a `wss` server must never resolve to an
+    /// `http` origin, or every image fetch silently drops out of TLS.
+    /// The one-way blanket rule: picking "all" selects every round, but
+    /// un-picking one round must not clear the others — the inverse once
+    /// turned a majors-only subscription into the whole season.
+    #[test]
+    fn the_blanket_option_implies_every_round_but_not_the_converse() {
+        let all = vec!["all".to_string(), "majors".to_string(), "regular".to_string()];
+        let picked = toggle_round("all".into(), vec![], all.clone());
+        assert_eq!(picked, all, "the blanket option selects everything");
+        // Un-pick ONE round: the rest survive, including the blanket entry —
+        // no inference back the other way.
+        let after = toggle_round("regular".into(), picked, all.clone());
+        assert_eq!(after, ["all", "majors"], "one round off, the rest stay");
+        // A single pick on an empty set is just that round.
+        assert_eq!(toggle_round("majors".into(), vec![], all), ["majors"]);
+    }
+
+    #[test]
+    fn depth_labels_name_f1s_full_field() {
+        assert_eq!(leaderboard_depth_options("f1".into())[2].label, "Full field");
+        assert_eq!(leaderboard_depth_options("pga".into())[2].label, "Top 20");
+    }
+
+    #[test]
+    fn http_base_never_downgrades_a_tls_server() {
+        assert_eq!(http_base("wss://live.example.com/ws".into()), "https://live.example.com");
+        assert_eq!(http_base("ws://127.0.0.1:7878/ws".into()), "http://127.0.0.1:7878");
+        // No /ws suffix, and an already-http origin, both pass through.
+        assert_eq!(http_base("wss://live.example.com".into()), "https://live.example.com");
+        assert_eq!(http_base("https://live.example.com".into()), "https://live.example.com");
+        // The suffix rule is exact — a host ENDING in "ws" is not a suffix.
+        assert_eq!(http_base("wss://news/ws".into()), "https://news");
     }
 
     #[test]

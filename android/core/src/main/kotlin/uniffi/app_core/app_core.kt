@@ -995,6 +995,14 @@ internal open class UniffiVTableCallbackInterfaceClientListener(
 
 
 
+
+
+
+
+
+
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -1147,8 +1155,14 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_group_leagues(`sports`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_http_base(`wsUrl`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_involves_favorite(`sportId`: RustBuffer.ByValue,`away`: RustBuffer.ByValue,`home`: RustBuffer.ByValue,`favoriteTeamIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
+    fun uniffi_app_core_fn_func_leaderboard_depth_options(`sportId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_league_prefs(`config`: RustBuffer.ByValue,`sports`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_mode_label(`id`: RustBuffer.ByValue,`offModes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_name_style_options(`sportId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1174,6 +1188,8 @@ internal interface UniffiLib : Library {
     fun uniffi_app_core_fn_func_subscription_summary(`sport`: RustBuffer.ByValue,`favoriteTeamIds`: RustBuffer.ByValue,`pickedRoundIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_team_id(`sportId`: RustBuffer.ByValue,`abbrev`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_toggle_round(`roundId`: RustBuffer.ByValue,`picked`: RustBuffer.ByValue,`allRoundIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_troubleshooting_footer(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1323,7 +1339,13 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_app_core_checksum_func_group_leagues(
     ): Short
+    fun uniffi_app_core_checksum_func_http_base(
+    ): Short
     fun uniffi_app_core_checksum_func_involves_favorite(
+    ): Short
+    fun uniffi_app_core_checksum_func_leaderboard_depth_options(
+    ): Short
+    fun uniffi_app_core_checksum_func_league_prefs(
     ): Short
     fun uniffi_app_core_checksum_func_mode_label(
     ): Short
@@ -1350,6 +1372,8 @@ internal interface UniffiLib : Library {
     fun uniffi_app_core_checksum_func_subscription_summary(
     ): Short
     fun uniffi_app_core_checksum_func_team_id(
+    ): Short
+    fun uniffi_app_core_checksum_func_toggle_round(
     ): Short
     fun uniffi_app_core_checksum_func_troubleshooting_footer(
     ): Short
@@ -1546,7 +1570,16 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_app_core_checksum_func_group_leagues() != 37891.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_app_core_checksum_func_http_base() != 21014.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_app_core_checksum_func_involves_favorite() != 62993.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_leaderboard_depth_options() != 20168.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_league_prefs() != 47967.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_mode_label() != 48403.toShort()) {
@@ -1586,6 +1619,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_team_id() != 22288.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_toggle_round() != 37301.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_troubleshooting_footer() != 62547.toShort()) {
@@ -3579,6 +3615,38 @@ public object FfiConverterTypeUiChampOption: FfiConverterRustBuffer<UiChampOptio
 
 
 
+data class UiDepthOption (
+    var `rows`: kotlin.UInt, 
+    var `label`: kotlin.String
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeUiDepthOption: FfiConverterRustBuffer<UiDepthOption> {
+    override fun read(buf: ByteBuffer): UiDepthOption {
+        return UiDepthOption(
+            FfiConverterUInt.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: UiDepthOption) = (
+            FfiConverterUInt.allocationSize(value.`rows`) +
+            FfiConverterString.allocationSize(value.`label`)
+    )
+
+    override fun write(value: UiDepthOption, buf: ByteBuffer) {
+            FfiConverterUInt.write(value.`rows`, buf)
+            FfiConverterString.write(value.`label`, buf)
+    }
+}
+
+
+
 /**
  * One firmware image the server currently hosts (protocol `FwImage`), as
  * listed for the DEBUG firmware picker. `channel` is a lowercase route name
@@ -3776,6 +3844,55 @@ public object FfiConverterTypeUiLeagueGroup: FfiConverterRustBuffer<UiLeagueGrou
     override fun write(value: UiLeagueGroup, buf: ByteBuffer) {
             FfiConverterString.write(value.`category`, buf)
             FfiConverterSequenceString.write(value.`sportIds`, buf)
+    }
+}
+
+
+
+/**
+ * One league a board follows, resolved against the catalog: the league, the
+ * favorited teams in USER ORDER, and the labels of the rounds it subscribes
+ * to.
+ */
+data class UiLeaguePref (
+    var `sport`: UiSport, 
+    var `teams`: List<UiTeam>, 
+    var `roundLabels`: List<kotlin.String>, 
+    var `leagueSpoiler`: kotlin.Boolean, 
+    var `spoilerTeamIds`: List<kotlin.String>
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeUiLeaguePref: FfiConverterRustBuffer<UiLeaguePref> {
+    override fun read(buf: ByteBuffer): UiLeaguePref {
+        return UiLeaguePref(
+            FfiConverterTypeUiSport.read(buf),
+            FfiConverterSequenceTypeUiTeam.read(buf),
+            FfiConverterSequenceString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterSequenceString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: UiLeaguePref) = (
+            FfiConverterTypeUiSport.allocationSize(value.`sport`) +
+            FfiConverterSequenceTypeUiTeam.allocationSize(value.`teams`) +
+            FfiConverterSequenceString.allocationSize(value.`roundLabels`) +
+            FfiConverterBoolean.allocationSize(value.`leagueSpoiler`) +
+            FfiConverterSequenceString.allocationSize(value.`spoilerTeamIds`)
+    )
+
+    override fun write(value: UiLeaguePref, buf: ByteBuffer) {
+            FfiConverterTypeUiSport.write(value.`sport`, buf)
+            FfiConverterSequenceTypeUiTeam.write(value.`teams`, buf)
+            FfiConverterSequenceString.write(value.`roundLabels`, buf)
+            FfiConverterBoolean.write(value.`leagueSpoiler`, buf)
+            FfiConverterSequenceString.write(value.`spoilerTeamIds`, buf)
     }
 }
 
@@ -5177,6 +5294,34 @@ public object FfiConverterSequenceTypeUiChampOption: FfiConverterRustBuffer<List
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeUiDepthOption: FfiConverterRustBuffer<List<UiDepthOption>> {
+    override fun read(buf: ByteBuffer): List<UiDepthOption> {
+        val len = buf.getInt()
+        return List<UiDepthOption>(len) {
+            FfiConverterTypeUiDepthOption.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<UiDepthOption>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeUiDepthOption.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<UiDepthOption>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeUiDepthOption.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeUiFwImage: FfiConverterRustBuffer<List<UiFwImage>> {
     override fun read(buf: ByteBuffer): List<UiFwImage> {
         val len = buf.getInt()
@@ -5251,6 +5396,34 @@ public object FfiConverterSequenceTypeUiLeagueGroup: FfiConverterRustBuffer<List
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeUiLeagueGroup.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeUiLeaguePref: FfiConverterRustBuffer<List<UiLeaguePref>> {
+    override fun read(buf: ByteBuffer): List<UiLeaguePref> {
+        val len = buf.getInt()
+        return List<UiLeaguePref>(len) {
+            FfiConverterTypeUiLeaguePref.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<UiLeaguePref>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeUiLeaguePref.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<UiLeaguePref>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeUiLeaguePref.write(it, buf)
         }
     }
 }
@@ -5755,12 +5928,65 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     
 
         /**
+         * The HTTP origin for a board's server, derived from its websocket URL:
+         * drop a trailing `/ws`, then `wss` -> `https` and `ws` -> `http`.
+         *
+         * The scheme mapping is the part to be careful with. Every preview, frame
+         * and guide image the app renders is fetched from this origin, so a rewrite
+         * that lands on `http` for a `wss` server silently downgrades all of it to
+         * cleartext against a server that was speaking TLS — no error, just an
+         * unencrypted fetch. One rule, one place, both platforms.
+         */ fun `httpBase`(`wsUrl`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_http_base(
+        FfiConverterString.lower(`wsUrl`),_status)
+}
+    )
+    }
+    
+
+        /**
          * Whether a game involves one of the board's favorited teams.
          */ fun `involvesFavorite`(`sportId`: kotlin.String, `away`: kotlin.String, `home`: kotlin.String, `favoriteTeamIds`: List<kotlin.String>): kotlin.Boolean {
             return FfiConverterBoolean.lift(
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_app_core_fn_func_involves_favorite(
         FfiConverterString.lower(`sportId`),FfiConverterString.lower(`away`),FfiConverterString.lower(`home`),FfiConverterSequenceString.lower(`favoriteTeamIds`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Leaderboard depth choices for a league: (rows, label). F1 calls the
+         * deepest one "Full field" — a rule iOS was maintaining in three places.
+         */ fun `leaderboardDepthOptions`(`sportId`: kotlin.String): List<UiDepthOption> {
+            return FfiConverterSequenceTypeUiDepthOption.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_leaderboard_depth_options(
+        FfiConverterString.lower(`sportId`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * The leagues worth showing on the dashboard, in catalog order.
+         *
+         * A league earns a card when it has favorites, subscribed rounds, or ANY
+         * per-league override — a dwell or depth override alone still counts, or it
+         * would be active but invisible (set from Add League without subscribing, or
+         * left behind after the last favorite is removed).
+         *
+         * Favorites come back in the order the config lists them (the user's own
+         * drag order), not catalog order; unknown ids are dropped rather than
+         * faked — configs carry orphans from before the leaderboard-league split.
+         */ fun `leaguePrefs`(`config`: UiBoardConfig, `sports`: List<UiSport>): List<UiLeaguePref> {
+            return FfiConverterSequenceTypeUiLeaguePref.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_league_prefs(
+        FfiConverterTypeUiBoardConfig.lower(`config`),FfiConverterSequenceTypeUiSport.lower(`sports`),_status)
 }
     )
     }
@@ -5943,6 +6169,22 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_app_core_fn_func_team_id(
         FfiConverterString.lower(`sportId`),FfiConverterString.lower(`abbrev`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Toggling one round of a league's subscription.
+         *
+         * Picking the blanket option selects every round (that IS what it means).
+         * Un-picking any single round only removes that round — it must NOT clear
+         * the blanket implication for the others, which is the one-way rule above.
+         */ fun `toggleRound`(`roundId`: kotlin.String, `picked`: List<kotlin.String>, `allRoundIds`: List<kotlin.String>): List<kotlin.String> {
+            return FfiConverterSequenceString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_toggle_round(
+        FfiConverterString.lower(`roundId`),FfiConverterSequenceString.lower(`picked`),FfiConverterSequenceString.lower(`allRoundIds`),_status)
 }
     )
     }

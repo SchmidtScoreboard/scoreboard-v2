@@ -44,8 +44,21 @@ Then:
 
 ```bash
 ./build-core.sh        # libapp_core.so per ABI + fresh Kotlin bindings
-./gradlew assembleDebug
+./run.sh               # build + install + launch on a device
+./run.sh --emu         # ...booting the "scoreboard" AVD first
+./run.sh --emu --logs  # ...and following the app's logcat
 ```
+
+`./gradlew assembleDebug` alone just builds the APK
+(`app/build/outputs/apk/debug/app-debug.apk`).
+
+**JDK version matters**: AGP wants 17-21. A newer JDK fails with a bare
+version number as the entire error message. `run.sh` defaults `JAVA_HOME` to
+the brew `openjdk@21`.
+
+**Testing on your phone**: enable Developer options > USB debugging, plug in,
+accept the RSA prompt, then `./run.sh`. The app talks to the hosted server
+over TLS, so the phone needs no special network setup.
 
 `build-core.sh` is the only correct way to refresh the core — the same rule
 as `ios/build-core.sh`.
