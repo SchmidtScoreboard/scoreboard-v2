@@ -33,7 +33,14 @@ import uniffi.app_core.snapBrightness
  */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-fun Dashboard(session: Session, state: Session.AppState, boardId: String, onSettings: () -> Unit) {
+fun Dashboard(
+    session: Session,
+    state: Session.AppState,
+    boardId: String,
+    onSettings: () -> Unit,
+    onBrowse: () -> Unit,
+    onLeagues: () -> Unit,
+) {
     val board = state.boards[boardId] ?: return
     val cfg = board.config
     Scaffold(
@@ -64,7 +71,13 @@ fun Dashboard(session: Session, state: Session.AppState, boardId: String, onSett
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
-            item { SectionHeader("Live and Upcoming") }
+            item {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    SectionHeader("Live and Upcoming")
+                    Spacer(Modifier.weight(1f))
+                    TextButton(onClick = onBrowse) { Text("View all") }
+                }
+            }
             val showing = displayedNowShowing(board.nowShowing, cfg?.focusedGameId)
             if (showing.isEmpty()) {
                 item {
@@ -116,6 +129,13 @@ fun Dashboard(session: Session, state: Session.AppState, boardId: String, onSett
             if (cfg != null) {
                 val prefs = leaguePrefs(cfg, state.sports)
                 val byId = prefs.associateBy { it.sport.id }
+                item {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        SectionHeader("Leagues")
+                        Spacer(Modifier.weight(1f))
+                        TextButton(onClick = onLeagues) { Text("Edit") }
+                    }
+                }
                 for (group in uniffi.app_core.groupLeagues(prefs.map { it.sport })) {
                     item { SectionHeader(group.category) }
                     items(group.sportIds.mapNotNull { byId[it] }, key = { it.sport.id }) { pref ->

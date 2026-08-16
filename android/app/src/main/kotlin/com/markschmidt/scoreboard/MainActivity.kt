@@ -23,7 +23,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Screen { Dashboard, Settings }
+private enum class Screen { Dashboard, Settings, Browse, Leagues }
 
 @Composable
 private fun Root(session: Session) {
@@ -37,8 +37,15 @@ private fun Root(session: Session) {
     }
     BackHandler(enabled = screen != Screen.Dashboard) { screen = Screen.Dashboard }
     when (screen) {
-        Screen.Dashboard -> Dashboard(session, state, boardId) { screen = Screen.Settings }
+        Screen.Dashboard -> Dashboard(
+            session, state, boardId,
+            onSettings = { screen = Screen.Settings },
+            onBrowse = { screen = Screen.Browse },
+            onLeagues = { screen = Screen.Leagues },
+        )
         Screen.Settings -> SettingsScreen(session, state, boardId) { screen = Screen.Dashboard }
+        Screen.Browse -> BrowseScreen(session, state, boardId) { screen = Screen.Dashboard }
+        Screen.Leagues -> LeagueListScreen(session, state, boardId) { screen = Screen.Dashboard }
     }
 }
 
