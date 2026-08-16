@@ -3690,9 +3690,17 @@ pub fn apply_mode(cfg: &mut BoardConfig, mode: &str) {
     };
 }
 
+/// How long the idle-arrival announcement holds before the idle screen (or
+/// darkness) takes over. Long enough to be read from across a room, short
+/// enough that the idle screen is what the evening actually shows.
+const IDLE_NOTICE_SECS: u64 = 120;
+
 /// The feedback half of a mode change, outside the config lock: clear any
-/// lingering splash, and announce "off" — darkness alone doesn't say whether
-/// the press registered or the panel died.
+/// lingering splash, announce "off" — darkness alone doesn't say whether the
+/// press registered or the panel died — and announce the idle HANDOFF when
+/// scores mode has nothing to show. Without that last one, picking Scores on
+/// a gameless evening flipped the panel straight to the weather screen, which
+/// read as being in weather mode: the board looked like it ignored the pick.
 pub fn handle_mode_change(state: &AppState, board_id: &str, cfg: &BoardConfig) {
     state.notices.lock().unwrap().remove(board_id);
     if cfg.mode == MODE_OFF {
@@ -3702,7 +3710,39 @@ pub fn handle_mode_change(state: &AppState, board_id: &str, cfg: &BoardConfig) {
             h => format!("FOR {h} HOURS"),
         };
         set_notice(state, board_id, &[("SLEEPING", true, NOTICE_WHITE), (&caption, false, NOTICE_GREY)], SPLASH_SECS);
+    } else if cfg.mode == MODE_SCORES && chosen_games(state, cfg).is_empty() {
+        idle_arrival_notice(state, board_id, cfg);
     }
+}
+
+/// "NO GAMES / WEATHER IN / 2 MINUTES" — the countdown bar underneath is the
+/// device's own fill, like every notice. A game appearing mid-countdown
+/// clears it (priority 1 always wins), and its expiry simply reveals the idle
+/// screen it named.
+fn idle_arrival_notice(state: &AppState, board_id: &str, cfg: &BoardConfig) {
+    let idle = cfg.off_mode_id();
+    let line2 = if offmode::draws_nothing(idle) {
+        "SCREEN OFF IN".to_string()
+    } else {
+        let label = offmode::off_modes()
+            .iter()
+            .find(|m| m.id == idle)
+            .map(|m| m.label.to_uppercase())
+            .unwrap_or_else(|| idle.to_uppercase());
+        // A fork's long label must not overrun the 64px line; the first ten
+        // characters carry the identity.
+        format!("{} IN", label.chars().take(10).collect::<String>())
+    };
+    set_notice(
+        state,
+        board_id,
+        &[
+            ("NO GAMES", true, NOTICE_WHITE),
+            (&line2, false, NOTICE_GREY),
+            ("2 MINUTES", false, NOTICE_GREY),
+        ],
+        IDLE_NOTICE_SECS,
+    );
 }
 
 pub(crate) fn unix_now() -> u64 {
@@ -3830,6 +3870,11 @@ pub fn tick_once(state: &AppState) {
         cfg.wake_at = None;
         state.configs.lock().unwrap().insert(bid.clone(), cfg.clone());
         state.persist_config(&bid, &cfg);
+        // A timer expiring into a gameless evening gets the same idle handoff
+        // announcement as a hand-picked Scores — one arrival, one behavior.
+        if chosen_games(state, &cfg).is_empty() {
+            idle_arrival_notice(state, &bid, &cfg);
+        }
         push_board_state(state, &bid);
         tracing::info!("board '{bid}': mode timer lapsed -> scores");
     }
@@ -5147,6 +5192,49 @@ mod tests {
         assert_eq!(state.config_for("b1").mode, "clock", "junk pick ignored");
     }
 
+    /// Arriving in scores mode with nothing to show announces the idle
+    /// handoff — "NO GAMES / WEATHER IN / 2 MINUTES" — instead of flipping
+    /// straight to the idle screen, which read as being in the wrong mode.
+    #[test]
+    fn picking_scores_on_a_gameless_evening_announces_the_idle_handoff() {
+        let state = AppState::new_ephemeral();
+        state.games.lock().unwrap().clear();
+        let mut cfg = watch_all();
+        cfg.set_off_mode("weather", false);
+        apply_mode(&mut cfg, MODE_SCORES);
+        state.configs.lock().unwrap().insert("b1".into(), cfg.clone());
+        handle_mode_change(&state, "b1", &cfg);
+        let lines: Vec<String> = state.notices.lock().unwrap().get("b1").unwrap()
+            .lines.iter().map(|(t, ..)| t.clone()).collect();
+        assert_eq!(lines, ["NO GAMES", "WEATHER IN", "2 MINUTES"], "the handoff names the idle screen");
+        let m = manifest_for_board(&state, "b1");
+        assert!(m.display_on && m.countdown_ms == Some(IDLE_NOTICE_SECS as u32 * 1000));
+
+        // A blank idle screen says what actually happens: the panel goes off.
+        cfg.set_off_mode("blank", true);
+        state.configs.lock().unwrap().insert("b1".into(), cfg.clone());
+        handle_mode_change(&state, "b1", &cfg);
+        let lines: Vec<String> = state.notices.lock().unwrap().get("b1").unwrap()
+            .lines.iter().map(|(t, ..)| t.clone()).collect();
+        assert_eq!(lines, ["NO GAMES", "SCREEN OFF IN", "2 MINUTES"]);
+
+        // With games on the slate there is no handoff to announce.
+        *state.games.lock().unwrap() = espn::mock_games();
+        handle_mode_change(&state, "b1", &cfg);
+        assert!(state.notices.lock().unwrap().get("b1").is_none(), "games mean no announcement");
+
+        // And the announcement's expiry reveals the idle screen it named.
+        state.games.lock().unwrap().clear();
+        cfg.set_off_mode("weather", false);
+        state.configs.lock().unwrap().insert("b1".into(), cfg.clone());
+        handle_mode_change(&state, "b1", &cfg);
+        let epoch = state.notices.lock().unwrap().get("b1").unwrap().epoch;
+        finish_notice(&state, "b1", epoch);
+        let m = manifest_for_board(&state, "b1");
+        assert!(m.display_on, "the idle screen follows");
+        assert!(m.countdown_ms.is_none(), "with no bar left over");
+    }
+
     /// A board reconnecting into a freshly restarted server must not be told
     /// "idle" out of boot emptiness — the source of a weather blink on every
     /// deploy with games live. Manifests HOLD until the first sweep lands;
@@ -5268,7 +5356,11 @@ mod tests {
         assert_eq!(cfg.mode, MODE_SCORES, "press from off means scores");
         assert!(cfg.power);
         assert!(cfg.wake_at.is_none(), "scores runs on no timer");
-        assert!(!state.notices.lock().unwrap().contains_key("b1"), "waking cancels the splash");
+        // This board is GAMELESS, so waking replaces the splash with the idle
+        // handoff announcement rather than silence.
+        let lines: Vec<String> = state.notices.lock().unwrap().get("b1").unwrap()
+            .lines.iter().map(|(t, ..)| t.clone()).collect();
+        assert_eq!(lines[0], "NO GAMES", "waking into nothing announces the handoff");
     }
 
     /// A press from a PICKED mode (sticky clock) also goes to off — the legacy
@@ -6926,7 +7018,9 @@ mod tests {
     #[test]
     fn mode_changes_drive_the_notice() {
         let state = AppState::new_ephemeral();
-        let mut cfg = BoardConfig::default();
+        // A CONFIGURED board with games on the slate: the scores pick below
+        // must land in the rotation, not the gameless idle handoff.
+        let mut cfg = watch_all();
         apply_mode(&mut cfg, MODE_OFF);
         state.configs.lock().unwrap().insert("b1".into(), cfg.clone());
         handle_mode_change(&state, "b1", &cfg);
@@ -7025,6 +7119,9 @@ mod tests {
     #[test]
     fn notice_epochs_mark_a_new_program_per_showing() {
         let state = AppState::new_ephemeral();
+        // Configured and with games, so the wake press lands in the games
+        // rotation (program 0) rather than the gameless idle handoff.
+        state.configs.lock().unwrap().insert("b1".into(), watch_all());
         handle_button(&state, "b1"); // games showing -> sleep + splash
         let first = manifest_for_board(&state, "b1");
         assert_ne!(first.epoch, 0, "a notice is not the games program");

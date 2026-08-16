@@ -671,10 +671,36 @@ final class BoardViewModel: ObservableObject {
     var pickableModes: [PickableMode] {
         var out = [PickableMode(id: "scores", label: "Scores", path: "/sample/plain.png?live=1")]
         for m in offModes where m.preview != nil {
-            out.append(PickableMode(id: m.id, label: m.label, path: m.preview))
+            out.append(PickableMode(id: m.id, label: m.label, path: configuredPreview(m.preview)))
         }
         out.append(PickableMode(id: "off", label: "Off", path: nil))
         return out
+    }
+
+    /// A mode preview showing THIS board's configuration, not the default: the
+    /// stored params ride along, so a clock set to the word style previews as
+    /// the word clock. Each mode reads only its own keys, so passing the whole
+    /// map to every preview is harmless.
+    private func configuredPreview(_ path: String?) -> String? {
+        guard let path, path.hasPrefix("/offmode/"), !current.offModeParams.isEmpty else { return path }
+        let qs = current.offModeParams.compactMap { k, v -> String? in
+            guard let ek = k.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+                  let ev = v.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return nil }
+            return "\(ek)=\(ev)"
+        }.sorted().joined(separator: "&")
+        return qs.isEmpty ? path : path + (path.contains("?") ? "&" : "?") + qs
+    }
+
+    /// What the PANEL is showing, as a picker id — the tile the ring belongs
+    /// on. In scores mode with nothing on, the panel is showing the idle
+    /// screen, and a ring on "Scores" while weather glows on the wall reads as
+    /// a lie; the ring follows the glass. Tapping Scores still re-picks scores
+    /// mode, and the board announces the idle handoff itself.
+    var effectiveMode: String {
+        if current.mode == "scores" && nowShowing.isEmpty {
+            return current.offMode == "blank" ? "off" : current.offMode
+        }
+        return current.mode
     }
 
     func modeLabel(_ id: String) -> String {
@@ -2445,7 +2471,9 @@ struct DashboardView: View {
                 onPreview: { model.previewBrightness($0) },
                 onCommit: { model.setBrightness($0) }
             )
+            .listRowSeparator(.hidden)
             modePicker
+                .listRowSeparator(.hidden)
                 // The rail spans the CARD: zero row insets so the scroll view
                 // owns the full width and clips at the section's edge, with a
                 // content margin putting the first tile back on the other
@@ -2477,8 +2505,9 @@ struct DashboardView: View {
     private var modePickerTiles: some View {
             HStack(alignment: .top, spacing: 10) {
                 ForEach(model.pickableModes, id: \.id) { m in
+                    let showing = model.effectiveMode == m.id
                     Button { model.setMode(m.id) } label: {
-                        VStack(spacing: 4) {
+                        VStack(spacing: 5) {
                             Group {
                                 if let path = m.path {
                                     FetchedFrameImage(url: URL(string: "\(model.httpBase)\(path)"))
@@ -2486,21 +2515,21 @@ struct DashboardView: View {
                                     Color.black
                                 }
                             }
-                            .ledPanel(width: 84, height: 42)
+                            .ledPanel(width: 116, height: 58)
                             .padding(2)
                             .overlay {
                                 Rectangle()
-                                    .strokeBorder(model.current.mode == m.id ? Color.accentColor : .clear, lineWidth: 2)
+                                    .strokeBorder(showing ? Color.accentColor : .clear, lineWidth: 2)
                             }
                             Text(m.label)
-                                .font(.caption2)
-                                .foregroundStyle(model.current.mode == m.id ? Color.primary : Color.secondary)
+                                .font(.caption)
+                                .foregroundStyle(showing ? Color.primary : Color.secondary)
                         }
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(m.label)
-                    .accessibilityAddTraits(model.current.mode == m.id ? .isSelected : [])
+                    .accessibilityAddTraits(showing ? .isSelected : [])
                 }
             }
             .padding(.vertical, 2)
@@ -2823,83 +2852,6 @@ enum AppNotes {
 
     static func forVersion(_ version: String) -> String {
         byVersion[version] ?? ""
-    }
-}
-
-enum SettingsInfoTopic: String, Identifiable {
-    /// One topic left, and deliberately: `whenOff`, `sleep`, `dwell` and
-    /// `spoilers` all had cards, and all four described a setting whose own row
-    /// now shows it — the Idle Screen and spoiler rows render the actual
-    /// frames, and the pace and sleep rows say what they do in a footer. A card
-    /// you have to open to find out what a switch does is a worse answer than a
-    /// switch that shows you.
-    ///
-    /// Demo games keeps one because it is the setting whose consequence you
-    /// cannot see from the row: the scores go fake, and nothing on the panel
-    /// says so.
-    case demoData
-    var id: String { rawValue }
-
-    var icon: String {
-        switch self {
-        case .demoData: "theatermasks"
-        }
-    }
-
-    var title: String {
-        switch self {
-        case .demoData: "Demo games"
-        }
-    }
-
-    var explanation: String {
-        switch self {
-        case .demoData: demoGamesExplainer()
-        }
-    }
-}
-
-/// The card an ⓘ settings button pulls up: icon, title, and a plain-language
-/// explanation of what the setting does on the physical board.
-struct SettingsInfoCard: View {
-    let topic: SettingsInfoTopic
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 12) {
-                Image(systemName: topic.icon)
-                    .font(.title2)
-                    .foregroundStyle(.yellow)
-                    .frame(width: 36, height: 36)
-                    .background(Color(white: 0.2), in: RoundedRectangle(cornerRadius: 9))
-                Text(topic.title)
-                    .font(.title3.weight(.semibold))
-                Spacer()
-            }
-            // Scrolls when needed — a fixed sheet height was clipping the
-            // longer explanations (and even the title at some type sizes).
-            ScrollView {
-                Text(topic.explanation)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            Button {
-                dismiss()
-            } label: {
-                Text("Done")
-                    .font(.body.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-            }
-            .buttonStyle(.borderedProminent)
-        }
-        .padding([.horizontal, .bottom], 20)
-        .padding(.top, 24)
-        .presentationDetents([.medium])
-        .presentationDragIndicator(.visible)
     }
 }
 
@@ -5048,7 +5000,6 @@ struct SettingsView: View {
     @State private var renameText = ""
     @FocusState private var nameFieldFocused: Bool
     /// Which settings-row explainer card is up (nil = none).
-    @State private var settingsInfo: SettingsInfoTopic?
     /// Import tapped with nothing usable on the clipboard.
     @State private var showImportEmptyAlert = false
     /// The board-screens guide (also reachable from the offline card's ⓘ).
@@ -5177,9 +5128,6 @@ struct SettingsView: View {
             // every model push (frames land every few seconds), and a sheet
             // attached to one is torn down with it — it opened and instantly
             // closed. The stack outlives the rebuilds.
-            .sheet(item: $settingsInfo) { topic in
-                SettingsInfoCard(topic: topic)
-            }
             .sheet(item: $notesTarget) { t in
                 FirmwareNotesSheet(
                     version: t.version,
@@ -5278,8 +5226,6 @@ struct SettingsView: View {
             }
         } header: {
             Text("Server")
-        } footer: {
-            serverFooter
         }
     }
 
@@ -5288,24 +5234,6 @@ struct SettingsView: View {
     /// Silent on an empty field: this sheet can legitimately be left without a
     /// pin (it's the Bluetooth sheet that refuses to send without one).
     private var pinProblem: String? { BluetoothProvisioner.pinComplaint(customPin) }
-
-    @ViewBuilder private var serverFooter: some View {
-        if let boardId {
-            Text("Where “\(model.displayName(boardId))” lives. Changing it points this scoreboard at a different server right away; new pairings still use the default one. An address applies when you press return.")
-        } else if preset.isSelfHosted {
-            #if DEBUG
-            Text("Your board and this app both use this address; the board dials its host and port directly. The pin is the 64-character key your server printed on setup (`gen-tls-cert`) — it's handed to a board during Bluetooth setup, and the board trusts no other key. The address applies when you press return; the pin saves as you type. From a physical phone, a dev server needs your Mac's LAN IP.")
-            #else
-            Text("Your board and this app both use this address; the board dials its host and port directly. The pin is the 64-character key your server printed on setup (`gen-tls-cert`) — it's handed to a board during Bluetooth setup, and the board trusts no other key. The address applies when you press return; the pin saves as you type.")
-            #endif
-        } else {
-            #if DEBUG
-            Text("Pick “My own server” to run your own — you'll need its address and the TLS pin it printed on first run. Localhost works in the Simulator; from a physical phone use your Mac's LAN IP. Changes apply right away.")
-            #else
-            Text("The hosted server needs no setup. Pick “My own server” only if you run the scoreboard server yourself — you'll need its address and the TLS pin it printed on first run.")
-            #endif
-        }
-    }
 
     /// DEBUG only: have the board stream its console to the server, so a board
     /// on a shelf can be read without carrying it to a laptop and plugging in a
@@ -5320,7 +5248,7 @@ struct SettingsView: View {
         // nil in ordinary settings, which is why this rendered nothing at all.
         if let boardId = model.selectedBoardId {
             Section {
-                Picker("For", selection: Binding(
+                Picker("Log session length", selection: Binding(
                     get: { model.debugLogMinutes },
                     set: { model.debugLogMinutes = $0 }
                 )) {
@@ -5371,8 +5299,6 @@ struct SettingsView: View {
                 }
             } header: {
                 Text("Developer")
-            } footer: {
-                Text("The board's console, sent to the server instead of only to USB. Warnings are always kept and arrive as soon as you turn this on; the chatty stuff starts now. The board stops on its own when the window ends, and the link stops working with it.")
             }
         } else {
             // Never render nothing: a section that silently vanishes is
@@ -5409,36 +5335,17 @@ struct SettingsView: View {
     }
 
 
-
-    /// The little ⓘ next to a settings row. `.borderless` so it hit-tests as its
-    /// own button instead of swallowing the whole Form row.
-    private func infoButton(_ topic: SettingsInfoTopic) -> some View {
-        Button {
-            settingsInfo = topic
-        } label: {
-            Image(systemName: "info.circle")
-                .foregroundStyle(.secondary)
-                .font(.subheadline)
-        }
-        .buttonStyle(.borderless)
-        .accessibilityLabel("About this setting")
-    }
-
-    /// The demo slate. Named "Demo games", never bare "Demo" — the server
-    /// picker already has an unrelated "Demo" preset, and two things called the
-    /// same thing on one screen is how someone flips the wrong one.
+    /// The demo slate. The header is bare "Demo" (owner's call) — the server
+    /// picker on this page also has a "Demo" preset, so the TOGGLE carries the
+    /// disambiguation: "Display demo games" can't be misread as a server.
     private var demoSection: some View {
         Section {
-            Toggle("Demo games", isOn: Binding(
+            Toggle("Display demo games", isOn: Binding(
                 get: { model.current.demoData },
                 set: { model.setDemoData($0) }
             ))
         } header: {
-            HStack {
-                Text("Demo games")
-                Spacer()
-                infoButton(.demoData)
-            }
+            Text("Demo")
         } footer: {
             if model.current.demoData {
                 Label(
@@ -5619,8 +5526,8 @@ struct SettingsView: View {
 
     /// A version fact plus a discrete button for its notes.
     ///
-    /// The notes button is `.borderless` so it does not claim the row — the same
-    /// reason `infoButton` is — and the label styles are concrete `Color`s
+    /// The notes button is `.borderless` so it does not claim the row, and the
+    /// label styles are concrete `Color`s
     /// rather than the hierarchical `.primary`/`.secondary`, which resolve
     /// against the accent inside a Form and come out blue.
     private func versionRow(_ title: String, _ version: String?, kind: NotesTarget.Kind) -> some View {
@@ -5671,7 +5578,7 @@ struct SettingsView: View {
             Text("Transfer settings")
         } footer: {
             Text(model.connected
-                ? "Exports league preferences, spoiler rules, brightness, and timing for another scoreboard. Pinned or manually added games and this board's name don't transfer."
+                ? "Exports league preferences, spoiler rules, brightness, and timing for another scoreboard."
                 : "Unavailable while disconnected from this scoreboard's server.")
         }
         .sheet(item: $model.settingsExport) { export in
@@ -5711,7 +5618,7 @@ struct SettingsView: View {
             // A bare Label, not a Button label: the row is no longer tappable
             // chrome around a popup, so nothing tints the text — and the icon
             // picks up the accent on its own, matching its siblings.
-            Label("Scoreboard Name", systemImage: "textformat")
+            Label("Display Name", systemImage: "textformat")
             // Edited in place. The field commits on return; while it has
             // focus the server's pushes don't overwrite the keystrokes, and a
             // rename from another phone lands whenever the field is idle.
@@ -5789,12 +5696,6 @@ struct SettingsView: View {
             }
         } header: {
             Text("Updates")
-        } footer: {
-            #if DEBUG
-            Text("Beta gets updates before everyone else. Dev is for development builds — expect breakage.")
-            #else
-            Text("Beta gets updates before everyone else.")
-            #endif
         }
     }
 
