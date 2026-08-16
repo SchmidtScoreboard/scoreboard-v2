@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# The cross-platform parity reminder (CLAUDE.md: "Cross-platform parity").
+#
+# A WARNING, not a wall: the contract allows one-sided changes when the
+# commit message says why, and a hook cannot judge prose. It exists so a
+# platform-only change is never one by ACCIDENT.
+staged="$(git diff --cached --name-only)"
+touches_ios=$(grep -c '^ios/' <<<"$staged" || true)
+touches_android=$(grep -c '^android/' <<<"$staged" || true)
+touches_core=$(grep -c '^crates/app-core/' <<<"$staged" || true)
+
+if [[ "$touches_ios" -gt 0 && "$touches_android" -eq 0 && "$touches_core" -eq 0 ]]; then
+    echo "parity: this commit touches ios/ but neither android/ nor the shared core." >&2
+    echo "parity: fine if it's layout/platform plumbing — say why in the commit message" >&2
+    echo "parity: if it's strings, logic, or behavior, it belongs in crates/app-core." >&2
+elif [[ "$touches_android" -gt 0 && "$touches_ios" -eq 0 && "$touches_core" -eq 0 ]]; then
+    echo "parity: this commit touches android/ but neither ios/ nor the shared core." >&2
+    echo "parity: fine if it's layout/platform plumbing — say why in the commit message." >&2
+fi
+exit 0

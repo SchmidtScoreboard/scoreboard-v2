@@ -50,7 +50,8 @@ These are owner decisions, not preferences. Do not relitigate them silently.
 
 ## Cross-platform parity (Android)
 
-The Android app does not exist yet. When `android/` exists, these bind:
+`android/` exists (Kotlin/Compose over the same core — see android/README.md
+for status and build). These bind:
 
 - **Every user-facing string lives in `crates/app-core` (`strings.rs`) or
   comes from the server's descriptors.** Neither platform hardcodes copy that
@@ -77,6 +78,7 @@ The Android app does not exist yet. When `android/` exists, these bind:
 | `crates/board-core` | board logic (menus, gestures, rotation), host-testable |
 | `firmware-rs` | ESP32-S3 firmware embedding board-core (own workspace) |
 | `ios/ScoreboardApp` | SwiftUI app; `ContentView.swift` is the whole UI |
+| `android` | Kotlin/Compose app over the same core (`android/build-core.sh`) |
 | `firmware-dist` | signed OTA dists per channel + notes + release ledger |
 
 ## Checks
@@ -87,4 +89,8 @@ cargo test --workspace          # server, protocol, app-core, board-core
 xcodebuild -project ios/ScoreboardApp/ScoreboardApp.xcodeproj \
   -scheme ScoreboardApp -sdk iphoneos -configuration Debug \
   ARCHS=arm64 CODE_SIGNING_ALLOWED=NO build
+./android/build-core.sh         # after any app-core/protocol change (needs NDK)
+(cd android && ./gradlew assembleDebug)   # needs the Android SDK
 ```
+
+The parity reminder hook: `cp scripts/git-hooks/pre-commit .git/hooks/`.
