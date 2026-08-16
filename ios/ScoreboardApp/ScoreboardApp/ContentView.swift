@@ -697,6 +697,12 @@ final class BoardViewModel: ObservableObject {
     /// a lie; the ring follows the glass. Tapping Scores still re-picks scores
     /// mode, and the board announces the idle handoff itself.
     var effectiveMode: String {
+        // Quiet hours darken the panel whatever the mode says, so the ring
+        // sits on Off — the glass is off. `quietActive` is server-derived and
+        // already accounts for tonight's override, and any tap during the
+        // window sets that override, so the ring moves the moment the panel
+        // answers.
+        if current.quietActive { return "off" }
         if current.mode == "scores" && nowShowing.isEmpty {
             return current.offMode == "blank" ? "off" : current.offMode
         }
