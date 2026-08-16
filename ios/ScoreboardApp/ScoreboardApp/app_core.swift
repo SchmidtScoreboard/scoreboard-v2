@@ -462,6 +462,22 @@ private struct FfiConverterUInt64: FfiConverterPrimitive {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterDouble: FfiConverterPrimitive {
+    typealias FfiType = Double
+    typealias SwiftType = Double
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Double {
+        return try lift(readDouble(&buf))
+    }
+
+    static func write(_ value: Double, into buf: inout [UInt8]) {
+        writeDouble(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterBool: FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -2779,6 +2795,152 @@ public func FfiConverterTypeUiOffModeInput_lower(_ value: UiOffModeInput) -> Rus
     return FfiConverterTypeUiOffModeInput.lower(value)
 }
 
+/**
+ * One tile of the Controls mode picker.
+ */
+public struct UiPickableMode {
+    public var id: String
+    public var label: String
+    /**
+     * Complete server path for the tile's preview; None draws a black panel
+     * (an all-black PNG cannot be told apart from a failed load).
+     */
+    public var path: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, label: String,
+                /**
+                    * Complete server path for the tile's preview; None draws a black panel
+                    * (an all-black PNG cannot be told apart from a failed load).
+                    */ path: String?)
+    {
+        self.id = id
+        self.label = label
+        self.path = path
+    }
+}
+
+extension UiPickableMode: Equatable, Hashable {
+    public static func == (lhs: UiPickableMode, rhs: UiPickableMode) -> Bool {
+        if lhs.id != rhs.id {
+            return false
+        }
+        if lhs.label != rhs.label {
+            return false
+        }
+        if lhs.path != rhs.path {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(label)
+        hasher.combine(path)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiPickableMode: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiPickableMode {
+        return
+            try UiPickableMode(
+                id: FfiConverterString.read(from: &buf),
+                label: FfiConverterString.read(from: &buf),
+                path: FfiConverterOptionString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UiPickableMode, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterOptionString.write(value.path, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiPickableMode_lift(_ buf: RustBuffer) throws -> UiPickableMode {
+    return try FfiConverterTypeUiPickableMode.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiPickableMode_lower(_ value: UiPickableMode) -> RustBuffer {
+    return FfiConverterTypeUiPickableMode.lower(value)
+}
+
+/**
+ * The two one-off sets, after a mutation — returned together because the
+ * rules move ids BETWEEN them.
+ */
+public struct UiRotationSets {
+    public var extraGameIds: [String]
+    public var excludedGameIds: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(extraGameIds: [String], excludedGameIds: [String]) {
+        self.extraGameIds = extraGameIds
+        self.excludedGameIds = excludedGameIds
+    }
+}
+
+extension UiRotationSets: Equatable, Hashable {
+    public static func == (lhs: UiRotationSets, rhs: UiRotationSets) -> Bool {
+        if lhs.extraGameIds != rhs.extraGameIds {
+            return false
+        }
+        if lhs.excludedGameIds != rhs.excludedGameIds {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(extraGameIds)
+        hasher.combine(excludedGameIds)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiRotationSets: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiRotationSets {
+        return
+            try UiRotationSets(
+                extraGameIds: FfiConverterSequenceString.read(from: &buf),
+                excludedGameIds: FfiConverterSequenceString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UiRotationSets, into buf: inout [UInt8]) {
+        FfiConverterSequenceString.write(value.extraGameIds, into: &buf)
+        FfiConverterSequenceString.write(value.excludedGameIds, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiRotationSets_lift(_ buf: RustBuffer) throws -> UiRotationSets {
+    return try FfiConverterTypeUiRotationSets.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiRotationSets_lower(_ value: UiRotationSets) -> RustBuffer {
+    return FfiConverterTypeUiRotationSets.lower(value)
+}
+
 public struct UiSport {
     public var id: String
     public var name: String
@@ -3214,6 +3376,89 @@ public func FfiConverterTypeUiTeam_lower(_ value: UiTeam) -> RustBuffer {
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * The ring a game's card wears — one source, so no two screens can disagree.
+ *
+ * Deliberately ignores `UiGame.queued` for MEMBERSHIP: the server computes
+ * that flag when it answers a Browse and nothing clears it locally, so a
+ * removed game kept its dashed ring until the next fetch. It is consulted
+ * only for claimed-ness of games past the board state's upcoming cap, where
+ * the flag is stale in one harmless direction (it can't know about a local
+ * removal — the exclusion check covers that).
+ */
+
+public enum UiCardHighlight {
+    case none
+    /**
+     * A pin overrides the rotation, so it outranks every other state.
+     */
+    case pinned
+    /**
+     * Claimed but not started: the dashed ring.
+     */
+    case queued
+    /**
+     * On the panel now: the solid ring.
+     */
+    case included
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiCardHighlight: FfiConverterRustBuffer {
+    typealias SwiftType = UiCardHighlight
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiCardHighlight {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return .none
+
+        case 2: return .pinned
+
+        case 3: return .queued
+
+        case 4: return .included
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: UiCardHighlight, into buf: inout [UInt8]) {
+        switch value {
+        case .none:
+            writeInt(&buf, Int32(1))
+
+        case .pinned:
+            writeInt(&buf, Int32(2))
+
+        case .queued:
+            writeInt(&buf, Int32(3))
+
+        case .included:
+            writeInt(&buf, Int32(4))
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiCardHighlight_lift(_ buf: RustBuffer) throws -> UiCardHighlight {
+    return try FfiConverterTypeUiCardHighlight.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiCardHighlight_lower(_ value: UiCardHighlight) -> RustBuffer {
+    return FfiConverterTypeUiCardHighlight.lower(value)
+}
+
+extension UiCardHighlight: Equatable, Hashable {}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * What the panel shows while off / idle.
  * Firmware release channel a board follows (protocol `FwChannel`). Channels
  * are cumulative toward Dev: a beta board may also be offered stable builds
@@ -3274,6 +3519,64 @@ public func FfiConverterTypeUiFwChannel_lower(_ value: UiFwChannel) -> RustBuffe
 }
 
 extension UiFwChannel: Equatable, Hashable {}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Why a game is on the board: manually added, or via a favorite. None when
+ * neither applies — a one-off REMOVED game has no active source even if a
+ * preference would otherwise cover it (it reads "Not on scoreboard" until
+ * re-added or Reset).
+ */
+
+public enum UiGameSource {
+    case added
+    case favorite
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiGameSource: FfiConverterRustBuffer {
+    typealias SwiftType = UiGameSource
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiGameSource {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return .added
+
+        case 2: return .favorite
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: UiGameSource, into buf: inout [UInt8]) {
+        switch value {
+        case .added:
+            writeInt(&buf, Int32(1))
+
+        case .favorite:
+            writeInt(&buf, Int32(2))
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiGameSource_lift(_ buf: RustBuffer) throws -> UiGameSource {
+    return try FfiConverterTypeUiGameSource.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiGameSource_lower(_ value: UiGameSource) -> RustBuffer {
+    return FfiConverterTypeUiGameSource.lower(value)
+}
+
+extension UiGameSource: Equatable, Hashable {}
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -3994,6 +4297,30 @@ private struct FfiConverterOptionTypeUiOffModeInput: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterOptionTypeUiGameSource: FfiConverterRustBuffer {
+    typealias SwiftType = UiGameSource?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeUiGameSource.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeUiGameSource.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterOptionTypeUiNameStyle: FfiConverterRustBuffer {
     typealias SwiftType = UiNameStyle?
 
@@ -4268,6 +4595,31 @@ private struct FfiConverterSequenceTypeUiOffModeField: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterSequenceTypeUiPickableMode: FfiConverterRustBuffer {
+    typealias SwiftType = [UiPickableMode]
+
+    static func write(_ value: [UiPickableMode], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeUiPickableMode.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UiPickableMode] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UiPickableMode]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeUiPickableMode.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterSequenceTypeUiSport: FfiConverterRustBuffer {
     typealias SwiftType = [UiSport]
 
@@ -4392,6 +4744,66 @@ private struct FfiConverterDictionaryStringString: FfiConverterRustBuffer {
     }
 }
 
+public func cardHighlight(game: UiGame, focusedGameId: String?, nowShowing: [UiGame], extraGameIds: [String], excludedGameIds: [String]) -> UiCardHighlight {
+    return try! FfiConverterTypeUiCardHighlight.lift(try! rustCall {
+        uniffi_app_core_fn_func_card_highlight(
+            FfiConverterTypeUiGame.lower(game),
+            FfiConverterOptionString.lower(focusedGameId),
+            FfiConverterSequenceTypeUiGame.lower(nowShowing),
+            FfiConverterSequenceString.lower(extraGameIds),
+            FfiConverterSequenceString.lower(excludedGameIds), $0
+        )
+    })
+}
+
+/**
+ * The optimistic mirror of the server's `apply_mode` timer rule: hours from
+ * the mode's own setting, falling back to `sleep_hours`; "scores" and 0 run
+ * on no timer; everything else expires `min(hours, 72)` from now. The 72 is
+ * the server's clamp — if these disagreed, the app's countdown would lie
+ * until the next push.
+ */
+public func computeWakeAt(mode: String, modeHours: [String: UInt32], sleepHours: UInt32, nowUnix: UInt64) -> UInt64? {
+    return try! FfiConverterOptionUInt64.lift(try! rustCall {
+        uniffi_app_core_fn_func_compute_wake_at(
+            FfiConverterString.lower(mode),
+            FfiConverterDictionaryStringUInt32.lower(modeHours),
+            FfiConverterUInt32.lower(sleepHours),
+            FfiConverterUInt64.lower(nowUnix), $0
+        )
+    })
+}
+
+/**
+ * A mode preview showing THIS board's configuration: the stored params ride
+ * along as a sorted, percent-encoded query. Each mode reads only its own
+ * keys, so passing the whole map to every preview is harmless; sorted so the
+ * URL is stable and the platform image cache can hit.
+ */
+public func configuredPreview(path: String?, params: [String: String]) -> String? {
+    return try! FfiConverterOptionString.lift(try! rustCall {
+        uniffi_app_core_fn_func_configured_preview(
+            FfiConverterOptionString.lower(path),
+            FfiConverterDictionaryStringString.lower(params), $0
+        )
+    })
+}
+
+/**
+ * The preview for a mode: the selected choice's, if any visible choice field
+ * declares one, else the mode's own. Every path comes from the DESCRIPTOR —
+ * the app never builds a preview URL out of an id, or a forked server's
+ * mode stops previewing.
+ */
+public func currentPreviewPath(mode: UiOffMode, params: [String: String]) -> String? {
+    return try! FfiConverterOptionString.lift(try! rustCall {
+        uniffi_app_core_fn_func_current_preview_path(
+            FfiConverterTypeUiOffMode.lower(mode),
+            FfiConverterDictionaryStringString.lower(params), $0
+        )
+    })
+}
+
 /**
  * The style a league falls back to when its `name_style` override is unset.
  * Wraps protocol `default_name_style` so the app can preselect it in the
@@ -4417,6 +4829,109 @@ public func demoGamesExplainer() -> String {
 }
 
 /**
+ * The "Live and Upcoming" panel's order: pinned game, then live, then
+ * upcoming, with cap-bumped games trailing. Within a bucket the SERVER's
+ * order is the actual rotation order — Rust's stable sort preserves it,
+ * which is the tiebreak machinery Swift had to hand-roll.
+ */
+public func displayedNowShowing(games: [UiGame], focusedGameId: String?) -> [UiGame] {
+    return try! FfiConverterSequenceTypeUiGame.lift(try! rustCall {
+        uniffi_app_core_fn_func_displayed_now_showing(
+            FfiConverterSequenceTypeUiGame.lower(games),
+            FfiConverterOptionString.lower(focusedGameId), $0
+        )
+    })
+}
+
+/**
+ * The ring follows the GLASS: what the panel is actually showing, as a
+ * picker id. Quiet hours force Off (the window darkens the panel whatever
+ * the mode says); scores mode with nothing on is showing the idle screen,
+ * with the blank descriptor reading as Off.
+ */
+public func effectiveMode(mode: String, quietActive: Bool, nowShowingEmpty: Bool, offMode: String) -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_effective_mode(
+            FfiConverterString.lower(mode),
+            FfiConverterBool.lower(quietActive),
+            FfiConverterBool.lower(nowShowingEmpty),
+            FfiConverterString.lower(offMode), $0
+        )
+    })
+}
+
+/**
+ * What a board shows before the server's catalog arrives: enough descriptors
+ * to render the idle-screen setting sanely offline. Labels must match the
+ * server's ("Off", not "Nothing" — one darkness, one name).
+ */
+public func fallbackOffModes() -> [UiOffMode] {
+    return try! FfiConverterSequenceTypeUiOffMode.lift(try! rustCall {
+        uniffi_app_core_fn_func_fallback_off_modes($0
+        )
+    })
+}
+
+/**
+ * The favorited team that puts this game on the board, if one does —
+ * returned as the ABBREV (away checked first); the platform resolves the
+ * display name against its catalog.
+ */
+public func favoriteAbbrev(sportId: String, away: String, home: String, favoriteTeamIds: [String]) -> String? {
+    return try! FfiConverterOptionString.lift(try! rustCall {
+        uniffi_app_core_fn_func_favorite_abbrev(
+            FfiConverterString.lower(sportId),
+            FfiConverterString.lower(away),
+            FfiConverterString.lower(home),
+            FfiConverterSequenceString.lower(favoriteTeamIds), $0
+        )
+    })
+}
+
+/**
+ * Has this game NOT started? The two feeds spell it differently — missing
+ * one spelling once put a dashed ring on the dashboard and a solid ring on
+ * the same game in All Games.
+ */
+public func gameNotStarted(status: String) -> Bool {
+    return try! FfiConverterBool.lift(try! rustCall {
+        uniffi_app_core_fn_func_game_not_started(
+            FfiConverterString.lower(status), $0
+        )
+    })
+}
+
+public func gameSource(gameId: String, sportId: String, away: String, home: String, excludedGameIds: [String], extraGameIds: [String], favoriteTeamIds: [String]) -> UiGameSource? {
+    return try! FfiConverterOptionTypeUiGameSource.lift(try! rustCall {
+        uniffi_app_core_fn_func_game_source(
+            FfiConverterString.lower(gameId),
+            FfiConverterString.lower(sportId),
+            FfiConverterString.lower(away),
+            FfiConverterString.lower(home),
+            FfiConverterSequenceString.lower(excludedGameIds),
+            FfiConverterSequenceString.lower(extraGameIds),
+            FfiConverterSequenceString.lower(favoriteTeamIds), $0
+        )
+    })
+}
+
+/**
+ * A human title for a game card: "BOS @ TOR" for team games (abbreviations —
+ * full names truncate at card width), or the event name for leaderboard
+ * sports (golf/F1), whose `home` is empty. Event names arrive panel-style
+ * ALL CAPS; the card reads better as "Monaco GP" — words of two letters or
+ * fewer (GP, Q) stay caps.
+ */
+public func gameTitle(away: String, home: String) -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_game_title(
+            FfiConverterString.lower(away),
+            FfiConverterString.lower(home), $0
+        )
+    })
+}
+
+/**
  * Group the catalog into sport sections, sections and leagues both in the
  * server's declared order.
  *
@@ -4430,6 +4945,33 @@ public func groupLeagues(sports: [UiSport]) -> [UiLeagueGroup] {
     return try! FfiConverterSequenceTypeUiLeagueGroup.lift(try! rustCall {
         uniffi_app_core_fn_func_group_leagues(
             FfiConverterSequenceTypeUiSport.lower(sports), $0
+        )
+    })
+}
+
+/**
+ * Whether a game involves one of the board's favorited teams.
+ */
+public func involvesFavorite(sportId: String, away: String, home: String, favoriteTeamIds: [String]) -> Bool {
+    return try! FfiConverterBool.lift(try! rustCall {
+        uniffi_app_core_fn_func_involves_favorite(
+            FfiConverterString.lower(sportId),
+            FfiConverterString.lower(away),
+            FfiConverterString.lower(home),
+            FfiConverterSequenceString.lower(favoriteTeamIds), $0
+        )
+    })
+}
+
+/**
+ * A picker id's display label: Scores/Off for the two reserved ids, the
+ * descriptor's label otherwise, capitalized id as the last resort.
+ */
+public func modeLabel(id: String, offModes: [UiOffMode]) -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_mode_label(
+            FfiConverterString.lower(id),
+            FfiConverterSequenceTypeUiOffMode.lower(offModes), $0
         )
     })
 }
@@ -4449,6 +4991,36 @@ public func nameStyleOptions(sportId: String) -> [UiNameStyleOption] {
 }
 
 /**
+ * Stored value, else the field's declared default, else empty. MUST agree
+ * with `OffModeDescriptor::value` in the protocol crate — the server renders
+ * from that one; `the_app_and_the_server_resolve_off_mode_values_identically`
+ * makes the mirror machine-checked instead of a comment.
+ */
+public func offModeValue(mode: UiOffMode, key: String, params: [String: String]) -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_off_mode_value(
+            FfiConverterTypeUiOffMode.lower(mode),
+            FfiConverterString.lower(key),
+            FfiConverterDictionaryStringString.lower(params), $0
+        )
+    })
+}
+
+/**
+ * Every pickable mode, in display order: Scores first (the resting state),
+ * the server's lit screens, Off last. The dark idle descriptor is excluded —
+ * the Off entry IS that darkness, and two dark tiles with different meanings
+ * is a trap.
+ */
+public func pickableModes(offModes: [UiOffMode]) -> [UiPickableMode] {
+    return try! FfiConverterSequenceTypeUiPickableMode.lift(try! rustCall {
+        uniffi_app_core_fn_func_pickable_modes(
+            FfiConverterSequenceTypeUiOffMode.lower(offModes), $0
+        )
+    })
+}
+
+/**
  * "Conference Finals +2": name one round, count the rest — four labels
  * joined by separators is not readable at row width. None when nothing is
  * picked.
@@ -4457,6 +5029,81 @@ public func pickedRoundsLabel(pickedLabels: [String]) -> String? {
     return try! FfiConverterOptionString.lift(try! rustCall {
         uniffi_app_core_fn_func_picked_rounds_label(
             FfiConverterSequenceString.lower(pickedLabels), $0
+        )
+    })
+}
+
+/**
+ * Add a game. Adding back a game the user had one-off REMOVED clears the
+ * exclusion rather than creating an extra — that's what the server does,
+ * and mirroring it exactly is what lets the card flip on the tap instead of
+ * on the next push.
+ */
+public func rotationAdd(gameId: String, extraGameIds: [String], excludedGameIds: [String]) -> UiRotationSets {
+    return try! FfiConverterTypeUiRotationSets.lift(try! rustCall {
+        uniffi_app_core_fn_func_rotation_add(
+            FfiConverterString.lower(gameId),
+            FfiConverterSequenceString.lower(extraGameIds),
+            FfiConverterSequenceString.lower(excludedGameIds), $0
+        )
+    })
+}
+
+/**
+ * Whether the board has CLAIMED this game right now — by preference (in the
+ * board's own list and not cap-bumped) or by a one-off add. A one-off
+ * REMOVAL wins over both: the exclusion applies optimistically, so the card
+ * flips on the tap rather than on the server's next push.
+ */
+public func rotationIsShowing(gameId: String, nowShowing: [UiGame], extraGameIds: [String], excludedGameIds: [String]) -> Bool {
+    return try! FfiConverterBool.lift(try! rustCall {
+        uniffi_app_core_fn_func_rotation_is_showing(
+            FfiConverterString.lower(gameId),
+            FfiConverterSequenceTypeUiGame.lower(nowShowing),
+            FfiConverterSequenceString.lower(extraGameIds),
+            FfiConverterSequenceString.lower(excludedGameIds), $0
+        )
+    })
+}
+
+/**
+ * Whether Reset has anything to undo.
+ */
+public func rotationModified(focusedGameId: String?, extraGameIds: [String], excludedGameIds: [String], spoilerGameIds: [String], revealedGameIds: [String]) -> Bool {
+    return try! FfiConverterBool.lift(try! rustCall {
+        uniffi_app_core_fn_func_rotation_modified(
+            FfiConverterOptionString.lower(focusedGameId),
+            FfiConverterSequenceString.lower(extraGameIds),
+            FfiConverterSequenceString.lower(excludedGameIds),
+            FfiConverterSequenceString.lower(spoilerGameIds),
+            FfiConverterSequenceString.lower(revealedGameIds), $0
+        )
+    })
+}
+
+/**
+ * Remove a game from the rotation regardless of WHY it's there: a one-off
+ * add is un-added; a preference-driven game is EXCLUDED (League Preferences
+ * stay intact — Reset brings exclusions back).
+ */
+public func rotationRemove(gameId: String, extraGameIds: [String], excludedGameIds: [String]) -> UiRotationSets {
+    return try! FfiConverterTypeUiRotationSets.lift(try! rustCall {
+        uniffi_app_core_fn_func_rotation_remove(
+            FfiConverterString.lower(gameId),
+            FfiConverterSequenceString.lower(extraGameIds),
+            FfiConverterSequenceString.lower(excludedGameIds), $0
+        )
+    })
+}
+
+/**
+ * The knob's detents: steps of 10, floor 10, cap 100 — one scale for the
+ * slider, the physical dial, and the server clamp.
+ */
+public func snapBrightness(value: Double) -> UInt8 {
+    return try! FfiConverterUInt8.lift(try! rustCall {
+        uniffi_app_core_fn_func_snap_brightness(
+            FfiConverterDouble.lower(value), $0
         )
     })
 }
@@ -4488,6 +5135,19 @@ public func subscriptionSummary(sport: UiSport, favoriteTeamIds: [String], picke
     })
 }
 
+/**
+ * THE team-id convention: `{sport}-{abbrev, lowercased}`. This string was
+ * hand-spelled in three places in Swift; every favorites lookup rides on it.
+ */
+public func teamId(sportId: String, abbrev: String) -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_team_id(
+            FfiConverterString.lower(sportId),
+            FfiConverterString.lower(abbrev), $0
+        )
+    })
+}
+
 public func troubleshootingFooter() -> String {
     return try! FfiConverterString.lift(try! rustCall {
         uniffi_app_core_fn_func_troubleshooting_footer($0
@@ -4513,6 +5173,20 @@ public func troubleshootingIntro() -> String {
     })
 }
 
+/**
+ * The fields to draw, honouring one level of conditional visibility against
+ * the RESOLVED value — a condition on a defaulted field works before the
+ * user has touched anything.
+ */
+public func visibleOffModeFields(mode: UiOffMode, params: [String: String]) -> [UiOffModeField] {
+    return try! FfiConverterSequenceTypeUiOffModeField.lift(try! rustCall {
+        uniffi_app_core_fn_func_visible_off_mode_fields(
+            FfiConverterTypeUiOffMode.lower(mode),
+            FfiConverterDictionaryStringString.lower(params), $0
+        )
+    })
+}
+
 private enum InitializationResult {
     case ok
     case contractVersionMismatch
@@ -4529,25 +5203,88 @@ private var initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if uniffi_app_core_checksum_func_card_highlight() != 5739 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_compute_wake_at() != 32537 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_configured_preview() != 38572 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_current_preview_path() != 7060 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_func_default_name_style() != 9560 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_demo_games_explainer() != 35237 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_app_core_checksum_func_displayed_now_showing() != 48767 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_effective_mode() != 28114 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_fallback_off_modes() != 1849 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_favorite_abbrev() != 22469 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_game_not_started() != 42164 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_game_source() != 30305 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_game_title() != 18481 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_func_group_leagues() != 37891 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_involves_favorite() != 62993 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_mode_label() != 48403 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_name_style_options() != 22961 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_app_core_checksum_func_off_mode_value() != 49163 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_pickable_modes() != 3409 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_func_picked_rounds_label() != 32761 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_rotation_add() != 1110 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_rotation_is_showing() != 53519 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_rotation_modified() != 22741 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_rotation_remove() != 58838 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_snap_brightness() != 17678 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_spoiler_explainer() != 7464 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_subscription_summary() != 16059 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_team_id() != 22288 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_troubleshooting_footer() != 62547 {
@@ -4557,6 +5294,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_troubleshooting_intro() != 34123 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_visible_off_mode_fields() != 44653 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_add_game() != 7881 {

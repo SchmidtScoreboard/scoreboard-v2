@@ -128,9 +128,9 @@ private fun BrightnessRow(value: Float, onCommit: (Float) -> Unit) {
             value = level,
             onValueChange = { level = it },
             onValueChangeFinished = {
-                // The knob's detents: steps of 10, floor 10 — one scale
-                // everywhere, same as the physical dial and iOS.
-                level = level.coerceIn(10f, 100f).let { (it / 10f).toInt() * 10f }
+                // The knob's detents come from the core — one scale for this
+                // slider, the iOS slider, and the physical dial.
+                level = uniffi.app_core.snapBrightness(level.toDouble()).toFloat()
                 onCommit(level)
             },
             valueRange = 10f..100f,
@@ -144,24 +144,18 @@ private fun BrightnessRow(value: Float, onCommit: (Float) -> Unit) {
 @Composable
 private fun ModePicker(session: Session, state: Session.AppState, boardId: String, currentMode: String) {
     val board = state.boards[boardId]
-    // The picker list mirrors iOS: Scores first, the server's lit screens,
-    // Off last; the dark idle descriptor is excluded because the Off entry IS
-    // that darkness. The ring follows the GLASS: quiet hours and the
-    // scores-idle case land on the effective screen, not the mode field.
-    val modes = buildList {
-        add("scores" to "Scores")
-        state.offModes.filter { it.preview != null }.forEach { add(it.id to it.label) }
-        add("off" to "Off")
-    }
-    val effective = when {
-        board?.quietActive == true -> "off"
-        currentMode == "scores" && board?.nowShowing.isNullOrEmpty() ->
-            board?.config?.offMode?.let { if (it == "blank") "off" else it } ?: "scores"
-        else -> currentMode
-    }
+    // Tiles and the follow-the-glass ring come from the CORE — the same
+    // functions the iOS picker reads, so the two cannot drift.
+    val modes = uniffi.app_core.pickableModes(state.offModes)
+    val effective = uniffi.app_core.effectiveMode(
+        mode = currentMode,
+        quietActive = board?.quietActive == true,
+        nowShowingEmpty = board?.nowShowing.isNullOrEmpty(),
+        offMode = board?.config?.offMode ?: "clock",
+    )
     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        items(modes, key = { it.first }) { (id, label) ->
-            FilterChip(selected = id == effective, onClick = { session.setMode(boardId, id) }, label = { Text(label) })
+        items(modes, key = { it.id }) { m ->
+            FilterChip(selected = m.id == effective, onClick = { session.setMode(boardId, m.id) }, label = { Text(m.label) })
         }
     }
 }
@@ -184,6 +178,12 @@ private fun GameRow(game: uniffi.app_core.UiGame, rgba: ByteArray?) {
                     .border(1.dp, Color.White.copy(alpha = 0.1f)),
             )
         }
-        Text("${game.away} @ ${game.home} — ${game.detail}", style = MaterialTheme.typography.bodyMedium)
+        Text(
+            // The title rule (matchup vs title-cased event name) is the
+            // core's — a leaderboard game has no home side, and hand-building
+            // "away @ home" here rendered " @ " garbage for golf.
+            "${uniffi.app_core.gameTitle(game.away, game.home)} — ${game.detail}",
+            style = MaterialTheme.typography.bodyMedium,
+        )
     }
 }

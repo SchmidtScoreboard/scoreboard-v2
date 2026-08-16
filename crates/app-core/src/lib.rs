@@ -9,6 +9,10 @@ uniffi::setup_scaffolding!();
 /// what belongs there versus on the platform.
 pub mod strings;
 
+/// Game, rotation, and mode rules shared by both platforms — see the module
+/// doc for the charter.
+pub mod rules;
+
 use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use scoreboard_protocol::{

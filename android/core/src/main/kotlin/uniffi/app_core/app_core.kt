@@ -951,6 +951,50 @@ internal open class UniffiVTableCallbackInterfaceClientListener(
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -1075,25 +1119,69 @@ internal interface UniffiLib : Library {
     ): Unit
     fun uniffi_app_core_fn_init_callback_vtable_clientlistener(`vtable`: UniffiVTableCallbackInterfaceClientListener,
     ): Unit
+    fun uniffi_app_core_fn_func_card_highlight(`game`: RustBuffer.ByValue,`focusedGameId`: RustBuffer.ByValue,`nowShowing`: RustBuffer.ByValue,`extraGameIds`: RustBuffer.ByValue,`excludedGameIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_compute_wake_at(`mode`: RustBuffer.ByValue,`modeHours`: RustBuffer.ByValue,`sleepHours`: Int,`nowUnix`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_configured_preview(`path`: RustBuffer.ByValue,`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_current_preview_path(`mode`: RustBuffer.ByValue,`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_default_name_style(`sportId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_demo_games_explainer(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_displayed_now_showing(`games`: RustBuffer.ByValue,`focusedGameId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_effective_mode(`mode`: RustBuffer.ByValue,`quietActive`: Byte,`nowShowingEmpty`: Byte,`offMode`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_fallback_off_modes(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_favorite_abbrev(`sportId`: RustBuffer.ByValue,`away`: RustBuffer.ByValue,`home`: RustBuffer.ByValue,`favoriteTeamIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_game_not_started(`status`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    fun uniffi_app_core_fn_func_game_source(`gameId`: RustBuffer.ByValue,`sportId`: RustBuffer.ByValue,`away`: RustBuffer.ByValue,`home`: RustBuffer.ByValue,`excludedGameIds`: RustBuffer.ByValue,`extraGameIds`: RustBuffer.ByValue,`favoriteTeamIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_game_title(`away`: RustBuffer.ByValue,`home`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_group_leagues(`sports`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_involves_favorite(`sportId`: RustBuffer.ByValue,`away`: RustBuffer.ByValue,`home`: RustBuffer.ByValue,`favoriteTeamIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    fun uniffi_app_core_fn_func_mode_label(`id`: RustBuffer.ByValue,`offModes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_name_style_options(`sportId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_off_mode_value(`mode`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_pickable_modes(`offModes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_picked_rounds_label(`pickedLabels`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_rotation_add(`gameId`: RustBuffer.ByValue,`extraGameIds`: RustBuffer.ByValue,`excludedGameIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_rotation_is_showing(`gameId`: RustBuffer.ByValue,`nowShowing`: RustBuffer.ByValue,`extraGameIds`: RustBuffer.ByValue,`excludedGameIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    fun uniffi_app_core_fn_func_rotation_modified(`focusedGameId`: RustBuffer.ByValue,`extraGameIds`: RustBuffer.ByValue,`excludedGameIds`: RustBuffer.ByValue,`spoilerGameIds`: RustBuffer.ByValue,`revealedGameIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    fun uniffi_app_core_fn_func_rotation_remove(`gameId`: RustBuffer.ByValue,`extraGameIds`: RustBuffer.ByValue,`excludedGameIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_snap_brightness(`value`: Double,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     fun uniffi_app_core_fn_func_spoiler_explainer(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_subscription_summary(`sport`: RustBuffer.ByValue,`favoriteTeamIds`: RustBuffer.ByValue,`pickedRoundIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_team_id(`sportId`: RustBuffer.ByValue,`abbrev`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_troubleshooting_footer(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_troubleshooting_guides(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_troubleshooting_intro(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_visible_off_mode_fields(`mode`: RustBuffer.ByValue,`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun ffi_app_core_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1207,25 +1295,69 @@ internal interface UniffiLib : Library {
     ): Unit
     fun ffi_app_core_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    fun uniffi_app_core_checksum_func_card_highlight(
+    ): Short
+    fun uniffi_app_core_checksum_func_compute_wake_at(
+    ): Short
+    fun uniffi_app_core_checksum_func_configured_preview(
+    ): Short
+    fun uniffi_app_core_checksum_func_current_preview_path(
+    ): Short
     fun uniffi_app_core_checksum_func_default_name_style(
     ): Short
     fun uniffi_app_core_checksum_func_demo_games_explainer(
     ): Short
+    fun uniffi_app_core_checksum_func_displayed_now_showing(
+    ): Short
+    fun uniffi_app_core_checksum_func_effective_mode(
+    ): Short
+    fun uniffi_app_core_checksum_func_fallback_off_modes(
+    ): Short
+    fun uniffi_app_core_checksum_func_favorite_abbrev(
+    ): Short
+    fun uniffi_app_core_checksum_func_game_not_started(
+    ): Short
+    fun uniffi_app_core_checksum_func_game_source(
+    ): Short
+    fun uniffi_app_core_checksum_func_game_title(
+    ): Short
     fun uniffi_app_core_checksum_func_group_leagues(
+    ): Short
+    fun uniffi_app_core_checksum_func_involves_favorite(
+    ): Short
+    fun uniffi_app_core_checksum_func_mode_label(
     ): Short
     fun uniffi_app_core_checksum_func_name_style_options(
     ): Short
+    fun uniffi_app_core_checksum_func_off_mode_value(
+    ): Short
+    fun uniffi_app_core_checksum_func_pickable_modes(
+    ): Short
     fun uniffi_app_core_checksum_func_picked_rounds_label(
+    ): Short
+    fun uniffi_app_core_checksum_func_rotation_add(
+    ): Short
+    fun uniffi_app_core_checksum_func_rotation_is_showing(
+    ): Short
+    fun uniffi_app_core_checksum_func_rotation_modified(
+    ): Short
+    fun uniffi_app_core_checksum_func_rotation_remove(
+    ): Short
+    fun uniffi_app_core_checksum_func_snap_brightness(
     ): Short
     fun uniffi_app_core_checksum_func_spoiler_explainer(
     ): Short
     fun uniffi_app_core_checksum_func_subscription_summary(
+    ): Short
+    fun uniffi_app_core_checksum_func_team_id(
     ): Short
     fun uniffi_app_core_checksum_func_troubleshooting_footer(
     ): Short
     fun uniffi_app_core_checksum_func_troubleshooting_guides(
     ): Short
     fun uniffi_app_core_checksum_func_troubleshooting_intro(
+    ): Short
+    fun uniffi_app_core_checksum_func_visible_off_mode_fields(
     ): Short
     fun uniffi_app_core_checksum_method_scoreboardclient_add_game(
     ): Short
@@ -1372,25 +1504,88 @@ private fun uniffiCheckContractApiVersion(lib: UniffiLib) {
 
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: UniffiLib) {
+    if (lib.uniffi_app_core_checksum_func_card_highlight() != 5739.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_compute_wake_at() != 32537.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_configured_preview() != 38572.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_current_preview_path() != 7060.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_app_core_checksum_func_default_name_style() != 9560.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_demo_games_explainer() != 35237.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_app_core_checksum_func_displayed_now_showing() != 48767.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_effective_mode() != 28114.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_fallback_off_modes() != 1849.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_favorite_abbrev() != 22469.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_game_not_started() != 42164.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_game_source() != 30305.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_game_title() != 18481.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_app_core_checksum_func_group_leagues() != 37891.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_involves_favorite() != 62993.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_mode_label() != 48403.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_name_style_options() != 22961.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_app_core_checksum_func_off_mode_value() != 49163.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_pickable_modes() != 3409.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_app_core_checksum_func_picked_rounds_label() != 32761.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_rotation_add() != 1110.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_rotation_is_showing() != 53519.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_rotation_modified() != 22741.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_rotation_remove() != 58838.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_snap_brightness() != 17678.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_spoiler_explainer() != 7464.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_subscription_summary() != 16059.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_team_id() != 22288.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_troubleshooting_footer() != 62547.toShort()) {
@@ -1400,6 +1595,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_troubleshooting_intro() != 34123.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_visible_off_mode_fields() != 44653.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_method_scoreboardclient_add_game() != 7881.toShort()) {
@@ -1730,6 +1928,29 @@ public object FfiConverterULong: FfiConverter<ULong, Long> {
 
     override fun write(value: ULong, buf: ByteBuffer) {
         buf.putLong(value.toLong())
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterDouble: FfiConverter<Double, Double> {
+    override fun lift(value: Double): Double {
+        return value
+    }
+
+    override fun read(buf: ByteBuffer): Double {
+        return buf.getDouble()
+    }
+
+    override fun lower(value: Double): Double {
+        return value
+    }
+
+    override fun allocationSize(value: Double) = 8UL
+
+    override fun write(value: Double, buf: ByteBuffer) {
+        buf.putDouble(value)
     }
 }
 
@@ -3809,6 +4030,85 @@ public object FfiConverterTypeUiOffModeInput: FfiConverterRustBuffer<UiOffModeIn
 
 
 
+/**
+ * One tile of the Controls mode picker.
+ */
+data class UiPickableMode (
+    var `id`: kotlin.String, 
+    var `label`: kotlin.String, 
+    /**
+     * Complete server path for the tile's preview; None draws a black panel
+     * (an all-black PNG cannot be told apart from a failed load).
+     */
+    var `path`: kotlin.String?
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeUiPickableMode: FfiConverterRustBuffer<UiPickableMode> {
+    override fun read(buf: ByteBuffer): UiPickableMode {
+        return UiPickableMode(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: UiPickableMode) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`label`) +
+            FfiConverterOptionalString.allocationSize(value.`path`)
+    )
+
+    override fun write(value: UiPickableMode, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterString.write(value.`label`, buf)
+            FfiConverterOptionalString.write(value.`path`, buf)
+    }
+}
+
+
+
+/**
+ * The two one-off sets, after a mutation — returned together because the
+ * rules move ids BETWEEN them.
+ */
+data class UiRotationSets (
+    var `extraGameIds`: List<kotlin.String>, 
+    var `excludedGameIds`: List<kotlin.String>
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeUiRotationSets: FfiConverterRustBuffer<UiRotationSets> {
+    override fun read(buf: ByteBuffer): UiRotationSets {
+        return UiRotationSets(
+            FfiConverterSequenceString.read(buf),
+            FfiConverterSequenceString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: UiRotationSets) = (
+            FfiConverterSequenceString.allocationSize(value.`extraGameIds`) +
+            FfiConverterSequenceString.allocationSize(value.`excludedGameIds`)
+    )
+
+    override fun write(value: UiRotationSets, buf: ByteBuffer) {
+            FfiConverterSequenceString.write(value.`extraGameIds`, buf)
+            FfiConverterSequenceString.write(value.`excludedGameIds`, buf)
+    }
+}
+
+
+
 data class UiSport (
     var `id`: kotlin.String, 
     var `name`: kotlin.String, 
@@ -4029,6 +4329,57 @@ public object FfiConverterTypeUiTeam: FfiConverterRustBuffer<UiTeam> {
 
 
 /**
+ * The ring a game's card wears — one source, so no two screens can disagree.
+ *
+ * Deliberately ignores `UiGame.queued` for MEMBERSHIP: the server computes
+ * that flag when it answers a Browse and nothing clears it locally, so a
+ * removed game kept its dashed ring until the next fetch. It is consulted
+ * only for claimed-ness of games past the board state's upcoming cap, where
+ * the flag is stale in one harmless direction (it can't know about a local
+ * removal — the exclusion check covers that).
+ */
+
+enum class UiCardHighlight {
+    
+    NONE,
+    /**
+     * A pin overrides the rotation, so it outranks every other state.
+     */
+    PINNED,
+    /**
+     * Claimed but not started: the dashed ring.
+     */
+    QUEUED,
+    /**
+     * On the panel now: the solid ring.
+     */
+    INCLUDED;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeUiCardHighlight: FfiConverterRustBuffer<UiCardHighlight> {
+    override fun read(buf: ByteBuffer) = try {
+        UiCardHighlight.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: UiCardHighlight) = 4UL
+
+    override fun write(value: UiCardHighlight, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
  * What the panel shows while off / idle.
  * Firmware release channel a board follows (protocol `FwChannel`). Channels
  * are cumulative toward Dev: a beta board may also be offered stable builds
@@ -4057,6 +4408,42 @@ public object FfiConverterTypeUiFwChannel: FfiConverterRustBuffer<UiFwChannel> {
     override fun allocationSize(value: UiFwChannel) = 4UL
 
     override fun write(value: UiFwChannel, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * Why a game is on the board: manually added, or via a favorite. None when
+ * neither applies — a one-off REMOVED game has no active source even if a
+ * preference would otherwise cover it (it reads "Not on scoreboard" until
+ * re-added or Reset).
+ */
+
+enum class UiGameSource {
+    
+    ADDED,
+    FAVORITE;
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeUiGameSource: FfiConverterRustBuffer<UiGameSource> {
+    override fun read(buf: ByteBuffer) = try {
+        UiGameSource.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: UiGameSource) = 4UL
+
+    override fun write(value: UiGameSource, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -4642,6 +5029,38 @@ public object FfiConverterOptionalTypeUiOffModeInput: FfiConverterRustBuffer<UiO
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeUiGameSource: FfiConverterRustBuffer<UiGameSource?> {
+    override fun read(buf: ByteBuffer): UiGameSource? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeUiGameSource.read(buf)
+    }
+
+    override fun allocationSize(value: UiGameSource?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeUiGameSource.allocationSize(value)
+        }
+    }
+
+    override fun write(value: UiGameSource?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeUiGameSource.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeUiNameStyle: FfiConverterRustBuffer<UiNameStyle?> {
     override fun read(buf: ByteBuffer): UiNameStyle? {
         if (buf.get().toInt() == 0) {
@@ -4954,6 +5373,34 @@ public object FfiConverterSequenceTypeUiOffModeField: FfiConverterRustBuffer<Lis
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeUiPickableMode: FfiConverterRustBuffer<List<UiPickableMode>> {
+    override fun read(buf: ByteBuffer): List<UiPickableMode> {
+        val len = buf.getInt()
+        return List<UiPickableMode>(len) {
+            FfiConverterTypeUiPickableMode.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<UiPickableMode>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeUiPickableMode.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<UiPickableMode>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeUiPickableMode.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeUiSport: FfiConverterRustBuffer<List<UiSport>> {
     override fun read(buf: ByteBuffer): List<UiSport> {
         val len = buf.getInt()
@@ -5108,7 +5555,62 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
             FfiConverterString.write(v, buf)
         }
     }
+} fun `cardHighlight`(`game`: UiGame, `focusedGameId`: kotlin.String?, `nowShowing`: List<UiGame>, `extraGameIds`: List<kotlin.String>, `excludedGameIds`: List<kotlin.String>): UiCardHighlight {
+            return FfiConverterTypeUiCardHighlight.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_card_highlight(
+        FfiConverterTypeUiGame.lower(`game`),FfiConverterOptionalString.lower(`focusedGameId`),FfiConverterSequenceTypeUiGame.lower(`nowShowing`),FfiConverterSequenceString.lower(`extraGameIds`),FfiConverterSequenceString.lower(`excludedGameIds`),_status)
 }
+    )
+    }
+    
+
+        /**
+         * The optimistic mirror of the server's `apply_mode` timer rule: hours from
+         * the mode's own setting, falling back to `sleep_hours`; "scores" and 0 run
+         * on no timer; everything else expires `min(hours, 72)` from now. The 72 is
+         * the server's clamp — if these disagreed, the app's countdown would lie
+         * until the next push.
+         */ fun `computeWakeAt`(`mode`: kotlin.String, `modeHours`: Map<kotlin.String, kotlin.UInt>, `sleepHours`: kotlin.UInt, `nowUnix`: kotlin.ULong): kotlin.ULong? {
+            return FfiConverterOptionalULong.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_compute_wake_at(
+        FfiConverterString.lower(`mode`),FfiConverterMapStringUInt.lower(`modeHours`),FfiConverterUInt.lower(`sleepHours`),FfiConverterULong.lower(`nowUnix`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * A mode preview showing THIS board's configuration: the stored params ride
+         * along as a sorted, percent-encoded query. Each mode reads only its own
+         * keys, so passing the whole map to every preview is harmless; sorted so the
+         * URL is stable and the platform image cache can hit.
+         */ fun `configuredPreview`(`path`: kotlin.String?, `params`: Map<kotlin.String, kotlin.String>): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_configured_preview(
+        FfiConverterOptionalString.lower(`path`),FfiConverterMapStringString.lower(`params`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * The preview for a mode: the selected choice's, if any visible choice field
+         * declares one, else the mode's own. Every path comes from the DESCRIPTOR —
+         * the app never builds a preview URL out of an id, or a forked server's
+         * mode stops previewing.
+         */ fun `currentPreviewPath`(`mode`: UiOffMode, `params`: Map<kotlin.String, kotlin.String>): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_current_preview_path(
+        FfiConverterTypeUiOffMode.lower(`mode`),FfiConverterMapStringString.lower(`params`),_status)
+}
+    )
+    }
+    
+
         /**
          * The style a league falls back to when its `name_style` override is unset.
          * Wraps protocol `default_name_style` so the app can preselect it in the
@@ -5137,6 +5639,103 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     
 
         /**
+         * The "Live and Upcoming" panel's order: pinned game, then live, then
+         * upcoming, with cap-bumped games trailing. Within a bucket the SERVER's
+         * order is the actual rotation order — Rust's stable sort preserves it,
+         * which is the tiebreak machinery Swift had to hand-roll.
+         */ fun `displayedNowShowing`(`games`: List<UiGame>, `focusedGameId`: kotlin.String?): List<UiGame> {
+            return FfiConverterSequenceTypeUiGame.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_displayed_now_showing(
+        FfiConverterSequenceTypeUiGame.lower(`games`),FfiConverterOptionalString.lower(`focusedGameId`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * The ring follows the GLASS: what the panel is actually showing, as a
+         * picker id. Quiet hours force Off (the window darkens the panel whatever
+         * the mode says); scores mode with nothing on is showing the idle screen,
+         * with the blank descriptor reading as Off.
+         */ fun `effectiveMode`(`mode`: kotlin.String, `quietActive`: kotlin.Boolean, `nowShowingEmpty`: kotlin.Boolean, `offMode`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_effective_mode(
+        FfiConverterString.lower(`mode`),FfiConverterBoolean.lower(`quietActive`),FfiConverterBoolean.lower(`nowShowingEmpty`),FfiConverterString.lower(`offMode`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * What a board shows before the server's catalog arrives: enough descriptors
+         * to render the idle-screen setting sanely offline. Labels must match the
+         * server's ("Off", not "Nothing" — one darkness, one name).
+         */ fun `fallbackOffModes`(): List<UiOffMode> {
+            return FfiConverterSequenceTypeUiOffMode.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_fallback_off_modes(
+        _status)
+}
+    )
+    }
+    
+
+        /**
+         * The favorited team that puts this game on the board, if one does —
+         * returned as the ABBREV (away checked first); the platform resolves the
+         * display name against its catalog.
+         */ fun `favoriteAbbrev`(`sportId`: kotlin.String, `away`: kotlin.String, `home`: kotlin.String, `favoriteTeamIds`: List<kotlin.String>): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_favorite_abbrev(
+        FfiConverterString.lower(`sportId`),FfiConverterString.lower(`away`),FfiConverterString.lower(`home`),FfiConverterSequenceString.lower(`favoriteTeamIds`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Has this game NOT started? The two feeds spell it differently — missing
+         * one spelling once put a dashed ring on the dashboard and a solid ring on
+         * the same game in All Games.
+         */ fun `gameNotStarted`(`status`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_game_not_started(
+        FfiConverterString.lower(`status`),_status)
+}
+    )
+    }
+    
+ fun `gameSource`(`gameId`: kotlin.String, `sportId`: kotlin.String, `away`: kotlin.String, `home`: kotlin.String, `excludedGameIds`: List<kotlin.String>, `extraGameIds`: List<kotlin.String>, `favoriteTeamIds`: List<kotlin.String>): UiGameSource? {
+            return FfiConverterOptionalTypeUiGameSource.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_game_source(
+        FfiConverterString.lower(`gameId`),FfiConverterString.lower(`sportId`),FfiConverterString.lower(`away`),FfiConverterString.lower(`home`),FfiConverterSequenceString.lower(`excludedGameIds`),FfiConverterSequenceString.lower(`extraGameIds`),FfiConverterSequenceString.lower(`favoriteTeamIds`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * A human title for a game card: "BOS @ TOR" for team games (abbreviations —
+         * full names truncate at card width), or the event name for leaderboard
+         * sports (golf/F1), whose `home` is empty. Event names arrive panel-style
+         * ALL CAPS; the card reads better as "Monaco GP" — words of two letters or
+         * fewer (GP, Q) stay caps.
+         */ fun `gameTitle`(`away`: kotlin.String, `home`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_game_title(
+        FfiConverterString.lower(`away`),FfiConverterString.lower(`home`),_status)
+}
+    )
+    }
+    
+
+        /**
          * Group the catalog into sport sections, sections and leagues both in the
          * server's declared order.
          *
@@ -5150,6 +5749,31 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_app_core_fn_func_group_leagues(
         FfiConverterSequenceTypeUiSport.lower(`sports`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Whether a game involves one of the board's favorited teams.
+         */ fun `involvesFavorite`(`sportId`: kotlin.String, `away`: kotlin.String, `home`: kotlin.String, `favoriteTeamIds`: List<kotlin.String>): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_involves_favorite(
+        FfiConverterString.lower(`sportId`),FfiConverterString.lower(`away`),FfiConverterString.lower(`home`),FfiConverterSequenceString.lower(`favoriteTeamIds`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * A picker id's display label: Scores/Off for the two reserved ids, the
+         * descriptor's label otherwise, capitalized id as the last resort.
+         */ fun `modeLabel`(`id`: kotlin.String, `offModes`: List<UiOffMode>): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_mode_label(
+        FfiConverterString.lower(`id`),FfiConverterSequenceTypeUiOffMode.lower(`offModes`),_status)
 }
     )
     }
@@ -5171,6 +5795,36 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     
 
         /**
+         * Stored value, else the field's declared default, else empty. MUST agree
+         * with `OffModeDescriptor::value` in the protocol crate — the server renders
+         * from that one; `the_app_and_the_server_resolve_off_mode_values_identically`
+         * makes the mirror machine-checked instead of a comment.
+         */ fun `offModeValue`(`mode`: UiOffMode, `key`: kotlin.String, `params`: Map<kotlin.String, kotlin.String>): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_off_mode_value(
+        FfiConverterTypeUiOffMode.lower(`mode`),FfiConverterString.lower(`key`),FfiConverterMapStringString.lower(`params`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Every pickable mode, in display order: Scores first (the resting state),
+         * the server's lit screens, Off last. The dark idle descriptor is excluded —
+         * the Off entry IS that darkness, and two dark tiles with different meanings
+         * is a trap.
+         */ fun `pickableModes`(`offModes`: List<UiOffMode>): List<UiPickableMode> {
+            return FfiConverterSequenceTypeUiPickableMode.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_pickable_modes(
+        FfiConverterSequenceTypeUiOffMode.lower(`offModes`),_status)
+}
+    )
+    }
+    
+
+        /**
          * "Conference Finals +2": name one round, count the rest — four labels
          * joined by separators is not readable at row width. None when nothing is
          * picked.
@@ -5179,6 +5833,75 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_app_core_fn_func_picked_rounds_label(
         FfiConverterSequenceString.lower(`pickedLabels`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Add a game. Adding back a game the user had one-off REMOVED clears the
+         * exclusion rather than creating an extra — that's what the server does,
+         * and mirroring it exactly is what lets the card flip on the tap instead of
+         * on the next push.
+         */ fun `rotationAdd`(`gameId`: kotlin.String, `extraGameIds`: List<kotlin.String>, `excludedGameIds`: List<kotlin.String>): UiRotationSets {
+            return FfiConverterTypeUiRotationSets.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_rotation_add(
+        FfiConverterString.lower(`gameId`),FfiConverterSequenceString.lower(`extraGameIds`),FfiConverterSequenceString.lower(`excludedGameIds`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Whether the board has CLAIMED this game right now — by preference (in the
+         * board's own list and not cap-bumped) or by a one-off add. A one-off
+         * REMOVAL wins over both: the exclusion applies optimistically, so the card
+         * flips on the tap rather than on the server's next push.
+         */ fun `rotationIsShowing`(`gameId`: kotlin.String, `nowShowing`: List<UiGame>, `extraGameIds`: List<kotlin.String>, `excludedGameIds`: List<kotlin.String>): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_rotation_is_showing(
+        FfiConverterString.lower(`gameId`),FfiConverterSequenceTypeUiGame.lower(`nowShowing`),FfiConverterSequenceString.lower(`extraGameIds`),FfiConverterSequenceString.lower(`excludedGameIds`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Whether Reset has anything to undo.
+         */ fun `rotationModified`(`focusedGameId`: kotlin.String?, `extraGameIds`: List<kotlin.String>, `excludedGameIds`: List<kotlin.String>, `spoilerGameIds`: List<kotlin.String>, `revealedGameIds`: List<kotlin.String>): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_rotation_modified(
+        FfiConverterOptionalString.lower(`focusedGameId`),FfiConverterSequenceString.lower(`extraGameIds`),FfiConverterSequenceString.lower(`excludedGameIds`),FfiConverterSequenceString.lower(`spoilerGameIds`),FfiConverterSequenceString.lower(`revealedGameIds`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Remove a game from the rotation regardless of WHY it's there: a one-off
+         * add is un-added; a preference-driven game is EXCLUDED (League Preferences
+         * stay intact — Reset brings exclusions back).
+         */ fun `rotationRemove`(`gameId`: kotlin.String, `extraGameIds`: List<kotlin.String>, `excludedGameIds`: List<kotlin.String>): UiRotationSets {
+            return FfiConverterTypeUiRotationSets.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_rotation_remove(
+        FfiConverterString.lower(`gameId`),FfiConverterSequenceString.lower(`extraGameIds`),FfiConverterSequenceString.lower(`excludedGameIds`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * The knob's detents: steps of 10, floor 10, cap 100 — one scale for the
+         * slider, the physical dial, and the server clamp.
+         */ fun `snapBrightness`(`value`: kotlin.Double): kotlin.UByte {
+            return FfiConverterUByte.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_snap_brightness(
+        FfiConverterDouble.lower(`value`),_status)
 }
     )
     }
@@ -5211,6 +5934,19 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     )
     }
     
+
+        /**
+         * THE team-id convention: `{sport}-{abbrev, lowercased}`. This string was
+         * hand-spelled in three places in Swift; every favorites lookup rides on it.
+         */ fun `teamId`(`sportId`: kotlin.String, `abbrev`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_team_id(
+        FfiConverterString.lower(`sportId`),FfiConverterString.lower(`abbrev`),_status)
+}
+    )
+    }
+    
  fun `troubleshootingFooter`(): kotlin.String {
             return FfiConverterString.lift(
     uniffiRustCall() { _status ->
@@ -5238,6 +5974,20 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_app_core_fn_func_troubleshooting_intro(
         _status)
+}
+    )
+    }
+    
+
+        /**
+         * The fields to draw, honouring one level of conditional visibility against
+         * the RESOLVED value — a condition on a defaulted field works before the
+         * user has touched anything.
+         */ fun `visibleOffModeFields`(`mode`: UiOffMode, `params`: Map<kotlin.String, kotlin.String>): List<UiOffModeField> {
+            return FfiConverterSequenceTypeUiOffModeField.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_visible_off_mode_fields(
+        FfiConverterTypeUiOffMode.lower(`mode`),FfiConverterMapStringString.lower(`params`),_status)
 }
     )
     }

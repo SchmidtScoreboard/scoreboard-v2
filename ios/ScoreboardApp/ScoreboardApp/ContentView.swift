@@ -220,13 +220,7 @@ final class BoardViewModel: ObservableObject {
     var offModes: [UiOffMode] {
         let declared = offModesByServer[serverURL(of: selectedBoardId)] ?? []
         guard declared.isEmpty else { return declared }
-        return [
-            UiOffMode(id: "clock", label: "Clock",
-                      description: "The time, in the scoreboard's timezone.",
-                      preview: "/offmode/clock.png", input: nil, fields: []),
-            UiOffMode(id: "blank", label: "Off",
-                      description: "The panel stays dark.", preview: nil, input: nil, fields: []),
-        ]
+        return fallbackOffModes()
     }
     func applyGames(_ server: String, _ games: [UiGame]) { liveGamesByServer[server] = games }
     /// The firmware menu the server hosts (reply to `listFirmware`) — global to
@@ -636,10 +630,12 @@ final class BoardViewModel: ObservableObject {
         mutate(id) {
             $0.mode = mode
             $0.power = mode != "off"
-            let hours = $0.modeHours[mode] ?? $0.sleepHours
-            $0.wakeAt = (mode == "scores" || hours == 0)
-                ? nil
-                : UInt64(Date().timeIntervalSince1970) + UInt64(min(hours, 72)) * 3600
+            // The timer rule is the core's mirror of the server's apply_mode —
+            // fallback, zero, and the 72h clamp all machine-checked there.
+            $0.wakeAt = computeWakeAt(
+                mode: mode, modeHours: $0.modeHours, sleepHours: $0.sleepHours,
+                nowUnix: UInt64(Date().timeIntervalSince1970)
+            )
         }
         client?.setMode(boardId: id, mode: mode)
     }
@@ -658,65 +654,35 @@ final class BoardViewModel: ObservableObject {
         client?.clearWakeTimer(boardId: id)
     }
 
-    /// Every pickable mode, in display order: Scores first (the resting
-    /// state), the server-declared screens, Off last. The idle darkness
-    /// descriptor ("blank", labelled Off) is excluded — the hardcoded Off tile
-    /// IS that darkness, and two dark tiles would be a trap.
-    struct PickableMode: Identifiable {
-        let id: String
-        let label: String
-        let path: String?
-    }
-
-    var pickableModes: [PickableMode] {
-        var out = [PickableMode(id: "scores", label: "Scores", path: "/sample/plain.png?live=1")]
-        for m in offModes where m.preview != nil {
-            out.append(PickableMode(id: m.id, label: m.label, path: configuredPreview(m.preview)))
+    /// Tiles, configured previews, the follow-the-glass ring, and labels all
+    /// come from the CORE now — the same functions Android reads, so the two
+    /// pickers cannot drift.
+    var pickableModes: [UiPickableMode] {
+        ScoreboardApp.pickableModes(offModes: offModes).map {
+            UiPickableMode(
+                id: $0.id, label: $0.label,
+                path: configuredPreview(path: $0.path, params: current.offModeParams)
+            )
         }
-        out.append(PickableMode(id: "off", label: "Off", path: nil))
-        return out
     }
 
-    /// A mode preview showing THIS board's configuration, not the default: the
-    /// stored params ride along, so a clock set to the word style previews as
-    /// the word clock. Each mode reads only its own keys, so passing the whole
-    /// map to every preview is harmless.
-    private func configuredPreview(_ path: String?) -> String? {
-        guard let path, path.hasPrefix("/offmode/"), !current.offModeParams.isEmpty else { return path }
-        let qs = current.offModeParams.compactMap { k, v -> String? in
-            guard let ek = k.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-                  let ev = v.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return nil }
-            return "\(ek)=\(ev)"
-        }.sorted().joined(separator: "&")
-        return qs.isEmpty ? path : path + (path.contains("?") ? "&" : "?") + qs
-    }
-
-    /// What the PANEL is showing, as a picker id — the tile the ring belongs
-    /// on. In scores mode with nothing on, the panel is showing the idle
-    /// screen, and a ring on "Scores" while weather glows on the wall reads as
-    /// a lie; the ring follows the glass. Tapping Scores still re-picks scores
-    /// mode, and the board announces the idle handoff itself.
     var effectiveMode: String {
-        // Quiet hours darken the panel whatever the mode says, so the ring
-        // sits on Off — the glass is off. `quietActive` is server-derived and
-        // already accounts for tonight's override, and any tap during the
-        // window sets that override, so the ring moves the moment the panel
-        // answers.
-        if current.quietActive { return "off" }
-        if current.mode == "scores" && nowShowing.isEmpty {
-            return current.offMode == "blank" ? "off" : current.offMode
-        }
-        return current.mode
+        ScoreboardApp.effectiveMode(
+            mode: current.mode,
+            quietActive: current.quietActive,
+            nowShowingEmpty: nowShowing.isEmpty,
+            offMode: current.offMode
+        )
     }
 
     func modeLabel(_ id: String) -> String {
-        pickableModes.first(where: { $0.id == id })?.label ?? id.capitalized
+        ScoreboardApp.modeLabel(id: id, offModes: offModes)
     }
 
-    /// Round to the knob's scale (steps of 10, floor 10) so the slider and the
-    /// physical dial move the same value on the same detents.
+    /// The knob's detents, from the core — the slider, the physical dial, and
+    /// Android all snap on the same scale.
     static func snapBrightness(_ v: Double) -> Double {
-        min(100, max(10, (v / 10).rounded() * 10))
+        Double(ScoreboardApp.snapBrightness(value: v))
     }
 
     /// Live UI update while the slider is being dragged — no wire traffic.
@@ -748,13 +714,15 @@ final class BoardViewModel: ObservableObject {
     func addGame(_ gid: String) {
         guard let id = selectedBoardId else { return }
         mutate(id) {
-            // Adding back a game the user had one-off REMOVED clears the
-            // exclusion rather than creating an extra — that's what the server
-            // does, and mirroring it exactly is what lets the card flip to
-            // "on the scoreboard" on the tap instead of on the next push.
-            if $0.excludedGameIds.remove(gid) == nil {
-                $0.extraGameIds.insert(gid)
-            }
+            // The transition rule lives in the core (it mirrors the server's,
+            // which is what lets the card flip on the tap).
+            let sets = rotationAdd(
+                gameId: gid,
+                extraGameIds: Array($0.extraGameIds),
+                excludedGameIds: Array($0.excludedGameIds)
+            )
+            $0.extraGameIds = Set(sets.extraGameIds)
+            $0.excludedGameIds = Set(sets.excludedGameIds)
         }
         client?.addGame(boardId: id, gameId: gid)
     }
@@ -778,8 +746,13 @@ final class BoardViewModel: ObservableObject {
 
     /// Whether Reset has anything to undo: a pin, an addition, or a removal.
     var rotationModified: Bool {
-        current.focusedGameId != nil || !current.extraGameIds.isEmpty || !current.excludedGameIds.isEmpty
-            || !current.spoilerGameIds.isEmpty || !current.revealedGameIds.isEmpty
+        ScoreboardApp.rotationModified(
+            focusedGameId: current.focusedGameId,
+            extraGameIds: Array(current.extraGameIds),
+            excludedGameIds: Array(current.excludedGameIds),
+            spoilerGameIds: Array(current.spoilerGameIds),
+            revealedGameIds: Array(current.revealedGameIds)
+        )
     }
 
     /// Remove a game from the rotation regardless of WHY it's there. A one-off add
@@ -788,10 +761,14 @@ final class BoardViewModel: ObservableObject {
     func removeFromRotation(_ g: UiGame) {
         guard let id = selectedBoardId else { return }
         if focusedGameId == g.id { clearFocus() } // don't leave a pin on a gone game
-        if current.extraGameIds.contains(g.id) {
-            mutate(id) { $0.extraGameIds.remove(g.id) }
-        } else {
-            mutate(id) { $0.excludedGameIds.insert(g.id) }
+        mutate(id) {
+            let sets = rotationRemove(
+                gameId: g.id,
+                extraGameIds: Array($0.extraGameIds),
+                excludedGameIds: Array($0.excludedGameIds)
+            )
+            $0.extraGameIds = Set(sets.extraGameIds)
+            $0.excludedGameIds = Set(sets.excludedGameIds)
         }
         client?.removeGame(boardId: id, gameId: g.id)
     }
@@ -801,8 +778,12 @@ final class BoardViewModel: ObservableObject {
     /// optimistically, so the card flips to "Add" (and drops its ring) on the tap
     /// rather than waiting for the server's next board-state push.
     func isShowing(_ id: String) -> Bool {
-        if current.excludedGameIds.contains(id) { return false }
-        return current.nowShowing.contains { $0.id == id && !$0.bumped } || current.extraGameIds.contains(id)
+        rotationIsShowing(
+            gameId: id,
+            nowShowing: current.nowShowing,
+            extraGameIds: Array(current.extraGameIds),
+            excludedGameIds: Array(current.excludedGameIds)
+        )
     }
 
     /// The ring a game's card wears, derived from the game's OWN status plus its
@@ -814,19 +795,21 @@ final class BoardViewModel: ObservableObject {
     /// dashed ring until the next fetch. Membership comes from `isShowing`, which
     /// the optimistic add/remove updates keep honest.
     func highlight(for g: UiGame) -> GameCardHighlight {
-        // A pin overrides the rotation, so it outranks every other state.
-        if current.focusedGameId == g.id { return .pinned }
-        // Claimed either by membership, or — for a game past the board state's
-        // upcoming cap, which never reaches `nowShowing` — by the server's
-        // browse-time `queued` flag. That flag is only stale in one direction
-        // (it can't know about a local removal), so the exclusion check keeps
-        // the "removing drops the ring instantly" property.
-        let claimed = isShowing(g.id)
-            || (g.queued && !current.excludedGameIds.contains(g.id))
-        guard claimed else { return .none }
-        // Solid teal claims "this is on the panel now", which is only true once
-        // the game has started; a claimed-but-unstarted game gets the dashed ring.
-        return Self.notStarted(g) ? .queued : .included
+        // The precedence lives in the core (pin > claimed > none, with the
+        // one-direction queued-staleness rule); this maps its enum onto the
+        // ring styles.
+        switch cardHighlight(
+            game: g,
+            focusedGameId: current.focusedGameId,
+            nowShowing: current.nowShowing,
+            extraGameIds: Array(current.extraGameIds),
+            excludedGameIds: Array(current.excludedGameIds)
+        ) {
+        case .pinned: return .pinned
+        case .queued: return .queued
+        case .included: return .included
+        case .none: return .none
+        }
     }
 
     /// Has this game NOT started? The two feeds spell it differently — the
@@ -836,13 +819,13 @@ final class BoardViewModel: ObservableObject {
     /// the same game wore a dashed ring on the dashboard and a solid
     /// "on the panel now" ring in All Games.
     static func notStarted(_ g: UiGame) -> Bool {
-        g.status == "upcoming" || g.status == "pregame"
+        gameNotStarted(status: g.status)
     }
 
     /// Resolve a team's display name from the catalog (team id = "{sport}-{abbrev}"),
     /// falling back to the abbreviation until the catalog has loaded.
     func teamName(_ sportId: String, _ abbrev: String) -> String {
-        let id = "\(sportId)-\(abbrev.lowercased())"
+        let id = teamId(sportId: sportId, abbrev: abbrev)
         return sports.first { $0.id == sportId }?
             .teams.first { $0.id == id }?.name ?? abbrev
     }
@@ -852,11 +835,7 @@ final class BoardViewModel: ObservableObject {
     /// sports (golf/F1). Event names arrive panel-style ALL CAPS; the card
     /// title reads better as "Monaco GP" — short words (GP, Q) stay caps.
     func gameTitle(_ g: UiGame) -> String {
-        guard g.home.isEmpty else { return "\(g.away) @ \(g.home)" }
-        return g.away
-            .split(separator: " ")
-            .map { w in w.count <= 2 ? String(w) : w.prefix(1) + w.dropFirst().lowercased() }
-            .joined(separator: " ")
+        ScoreboardApp.gameTitle(away: g.away, home: g.home)
     }
 
     // ---- league preferences (all scoped to the selected board) ----
@@ -1000,10 +979,10 @@ final class BoardViewModel: ObservableObject {
 
     /// Whether a game involves one of this board's favorited teams.
     func involvesFavorite(_ g: UiGame) -> Bool {
-        let favs = current.favorites[g.sportId] ?? []
-        let away = "\(g.sportId)-\(g.away.lowercased())"
-        let home = "\(g.sportId)-\(g.home.lowercased())"
-        return favs.contains(away) || favs.contains(home)
+        ScoreboardApp.involvesFavorite(
+            sportId: g.sportId, away: g.away, home: g.home,
+            favoriteTeamIds: current.favorites[g.sportId] ?? []
+        )
     }
 
     /// Why a game is on the board: manually added or via a favorite team. `nil`
@@ -1013,25 +992,24 @@ final class BoardViewModel: ObservableObject {
     /// about whether the game is actually on the board).
     enum GameSource { case added, favorite }
     func gameSource(_ g: UiGame) -> GameSource? {
-        // A one-off removed game has no active source, even if a preference would
-        // otherwise cover it — it shows as "Not on scoreboard" until re-added/Reset.
-        if current.excludedGameIds.contains(g.id) { return nil }
-        if current.extraGameIds.contains(g.id) { return .added }
-        if involvesFavorite(g) { return .favorite }
-        // Leaderboard sports (golf/F1) have no home side and match by series tag
-        // server-side; the summary carries the EVENT name (e.g. "MONACO GP"), so
-        // team matching can't see it — any favorite in that league counts.
-        if g.home.isEmpty, !(current.favorites[g.sportId] ?? []).isEmpty { return .favorite }
-        return nil
+        switch ScoreboardApp.gameSource(
+            gameId: g.id, sportId: g.sportId, away: g.away, home: g.home,
+            excludedGameIds: Array(current.excludedGameIds),
+            extraGameIds: Array(current.extraGameIds),
+            favoriteTeamIds: current.favorites[g.sportId] ?? []
+        ) {
+        case .added: return .added
+        case .favorite: return .favorite
+        case nil: return nil
+        }
     }
 
     /// The favorited team that puts this game on the board, if one does.
     func favoriteName(_ g: UiGame) -> String? {
-        let favs = current.favorites[g.sportId] ?? []
-        for ab in [g.away, g.home] where favs.contains("\(g.sportId)-\(ab.lowercased())") {
-            return teamName(g.sportId, ab)
-        }
-        return nil
+        favoriteAbbrev(
+            sportId: g.sportId, away: g.away, home: g.home,
+            favoriteTeamIds: current.favorites[g.sportId] ?? []
+        ).map { teamName(g.sportId, $0) }
     }
 
     /// The label of a league's active subscription option ("Every match",
@@ -1281,18 +1259,14 @@ final class BoardViewModel: ObservableObject {
     /// renders from that one. If these disagreed, the panel and the phone would
     /// show different things with nothing to point at.
     func offModeValue(_ mode: UiOffMode, _ key: String) -> String {
-        if let v = current.offModeParams[key] { return v }
-        return mode.fields.first(where: { $0.key == key })?.default ?? ""
+        ScoreboardApp.offModeValue(mode: mode, key: key, params: current.offModeParams)
     }
 
     /// The fields to draw, honouring one level of conditional visibility
     /// against the RESOLVED value — so a condition on a defaulted field works
     /// before the user has touched anything.
     func visibleOffModeFields(_ mode: UiOffMode) -> [UiOffModeField] {
-        mode.fields.filter { f in
-            guard let key = f.visibleWhenKey, let want = f.visibleWhenValue else { return true }
-            return offModeValue(mode, key) == want
-        }
+        ScoreboardApp.visibleOffModeFields(mode: mode, params: current.offModeParams)
     }
 
     /// The preview to show for a mode: the selected choice's, if any choice
@@ -1302,13 +1276,7 @@ final class BoardViewModel: ObservableObject {
     /// preview URL out of an id or a value, because the moment it does, a
     /// forked server's mode stops previewing correctly.
     func currentPreviewPath(_ mode: UiOffMode) -> String? {
-        for f in visibleOffModeFields(mode) where f.kind == "choice" {
-            let picked = offModeValue(mode, f.key)
-            if let opt = f.options.first(where: { $0.value == picked }), let p = opt.preview {
-                return p
-            }
-        }
-        return mode.preview
+        ScoreboardApp.currentPreviewPath(mode: mode, params: current.offModeParams)
     }
 
     func setOffModeParam(_ key: String, _ value: String) {
@@ -1521,22 +1489,9 @@ final class BoardViewModel: ObservableObject {
     /// section's own rotation has to read FIRST: pinned game, then live games,
     /// then upcoming ones, and cap-bumped games trailing at the end.
     var displayedNowShowing: [UiGame] {
-        let games = current.nowShowing
-        let f = current.focusedGameId
-        func rank(_ g: UiGame) -> Int {
-            if g.id == f { return 0 }
-            if g.bumped { return 3 }
-            return g.status == "upcoming" ? 2 : 1
-        }
-        // Sort on (rank, arrival index): Swift's sort isn't stable, and without a
-        // tiebreak the server's within-bucket order (which is the actual rotation
-        // order) could come back permuted.
-        return games.enumerated()
-            .sorted { a, b in
-                let ra = rank(a.element), rb = rank(b.element)
-                return ra != rb ? ra < rb : a.offset < b.offset
-            }
-            .map(\.element)
+        ScoreboardApp.displayedNowShowing(
+            games: current.nowShowing, focusedGameId: current.focusedGameId
+        )
     }
 
     /// Display name for a league id ("nhl" -> "NHL"), from the catalog when loaded.
