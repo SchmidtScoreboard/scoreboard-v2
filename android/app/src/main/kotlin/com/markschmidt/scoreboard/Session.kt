@@ -54,8 +54,9 @@ class Session(context: Context) : ClientListener {
     private val client: ScoreboardClient
 
     /** The hosted server; Advanced-style overrides come later. */
-    private val serverUrl =
-        prefs.getString("server", null) ?: "wss://live-production-118c.up.railway.app/ws"
+    val serverUrl: String =
+        prefs.getString("server", null)
+            ?: uniffi.app_core.serverPresets().first { it.id == "prod" }.url!!
 
     init {
         val boards = prefs.getStringSet("boards", emptySet())!!.toList()

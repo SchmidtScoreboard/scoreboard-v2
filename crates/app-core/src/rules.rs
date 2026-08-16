@@ -478,6 +478,245 @@ pub fn http_base(ws_url: String) -> String {
     u.to_string()
 }
 
+// ---- provisioning: server presets and the pin grammar ----
+
+/// A server the app can point a board at.
+#[derive(uniffi::Record, Clone)]
+pub struct UiServerPreset {
+    pub id: String,
+    pub label: String,
+    /// The websocket URL the PHONE uses. None for "my own server", which has
+    /// no fixed address.
+    pub url: Option<String>,
+    /// The `host:port` the BOARD is given — deliberately NOT derived from the
+    /// phone's URL for a hosted preset: the phone talks to Railway's HTTPS
+    /// edge, and the board needs the raw TCP proxy it can complete a
+    /// pinned-key TLS handshake against. Writing the edge to a board
+    /// provisions an endpoint that answers nothing.
+    pub board_host_port: Option<String>,
+}
+
+#[uniffi::export]
+pub fn server_presets() -> Vec<UiServerPreset> {
+    vec![
+        UiServerPreset {
+            id: "prod".into(),
+            label: "Hosted server".into(),
+            url: Some("wss://live-production-118c.up.railway.app/ws".into()),
+            board_host_port: Some("hayabusa.proxy.rlwy.net:47958".into()),
+        },
+        UiServerPreset {
+            id: "localhost".into(),
+            label: "Localhost".into(),
+            url: Some("ws://127.0.0.1:7878/ws".into()),
+            board_host_port: Some("127.0.0.1:7878".into()),
+        },
+        UiServerPreset {
+            id: "custom".into(),
+            label: "My own server".into(),
+            url: None,
+            // A self-hosted server has exactly ONE address, so the board's
+            // endpoint comes from the phone's URL rather than a second one.
+            board_host_port: None,
+        },
+    ]
+}
+
+/// The `host:port` to write to a board's `server` characteristic, for the
+/// websocket URL the phone is using. Empty means "keep the firmware default".
+#[uniffi::export]
+pub fn host_port_for_board(ws_url: String) -> String {
+    let u = ws_url.trim();
+    if let Some(pinned) =
+        server_presets().into_iter().find(|p| p.url.as_deref() == Some(u)).and_then(|p| p.board_host_port)
+    {
+        return pinned;
+    }
+    let mut host = u;
+    for p in ["ws://", "wss://", "http://", "https://"] {
+        if let Some(rest) = host.strip_prefix(p) {
+            host = rest;
+            break;
+        }
+    }
+    if let Some(slash) = host.find('/') {
+        host = &host[..slash];
+    }
+    if host.is_empty() {
+        return String::new();
+    }
+    if host.contains(':') { host.to_string() } else { format!("{host}:7878") }
+}
+
+/// The bare pin candidate inside whatever was pasted — NOT validated.
+///
+/// `gen-tls-cert` prints the pin on a labelled line, and it also lands in
+/// config files and shell exports, so the clipboard arrives carrying any of
+/// "pin: <hex>", "SERVER_PIN=<hex>", quotes, spaces, a trailing newline, or
+/// upper case. None of that is part of the pin: hex contains no ':' or '=',
+/// so everything through the last one is a label.
+#[uniffi::export]
+pub fn pin_candidate(raw: String) -> String {
+    let s = match raw.rfind([':', '=']) {
+        Some(i) => &raw[i + 1..],
+        None => &raw[..],
+    };
+    s.chars()
+        .filter(|c| !c.is_whitespace() && *c != '"' && *c != '\'')
+        .collect::<String>()
+        .to_lowercase()
+}
+
+/// The canonical lowercase 64-hex pin, or None if the input is not one.
+///
+/// Deliberately the SAME three rules the firmware applies to the write
+/// (`creds::pin_from_hex_str`): 64 hex digits, nothing else, never the
+/// all-zero digest. Anything this accepts and the board does not is a
+/// provisioning that fails on the far side — where there is no text field to
+/// put the complaint in, and the only way back is a physical factory reset.
+///
+/// The alphabet is explicit rather than a library `is_hex_digit`: Swift's
+/// `isHexDigit` also accepts full-width Unicode digits the firmware rejects,
+/// which is exactly the class of divergence this function exists to prevent.
+#[uniffi::export]
+pub fn normalized_pin(raw: String) -> Option<String> {
+    let c = pin_candidate(raw);
+    let hex = |ch: char| "0123456789abcdef".contains(ch);
+    if c.chars().count() == 64 && c.chars().all(hex) && c.chars().any(|ch| ch != '0') {
+        Some(c)
+    } else {
+        None
+    }
+}
+
+/// Why a non-empty pin field is unusable, in words for the person typing — or
+/// None when it is good (or empty, which each screen phrases its own way).
+#[uniffi::export]
+pub fn pin_complaint(raw: String) -> Option<String> {
+    let c = pin_candidate(raw.clone());
+    if c.is_empty() || normalized_pin(raw).is_some() {
+        return None;
+    }
+    if !c.chars().all(|ch| "0123456789abcdef".contains(ch)) {
+        return Some("A pin is hexadecimal — digits and the letters a-f only.".into());
+    }
+    if c.chars().count() != 64 {
+        return Some(format!("A pin is exactly 64 characters; this one has {}.", c.chars().count()));
+    }
+    Some("That's the all-zero placeholder, not a key — use the pin your server printed.".into())
+}
+
+/// One step of the BLE provisioning write sequence: which characteristic, and
+/// the UTF-8 bytes to write.
+///
+/// ORDER IS LOAD-BEARING. The firmware saves and reboots the moment the
+/// PASSWORD lands, so the optional pin and server must be written before it —
+/// a pin written after the password never arrives, and the board refuses the
+/// save as "custom host, no pin" (or worse, provisions against a server it
+/// cannot handshake with). The firmware's own comment says so; this function
+/// is the client half of that contract, shared so neither platform can get
+/// the order wrong.
+#[derive(uniffi::Record, Clone)]
+pub struct UiProvisionStep {
+    /// Characteristic UUID, uppercase.
+    pub uuid: String,
+    pub value: String,
+}
+
+/// The GATT ids, in one place both platforms read.
+pub const BLE_SERVICE_UUID: &str = "21BA0000-5363-6F72-6562-6F6172640001";
+pub const BLE_SSID_UUID: &str = "21BA0000-5363-6F72-6562-6F6172640002";
+pub const BLE_PASS_UUID: &str = "21BA0000-5363-6F72-6562-6F6172640003";
+pub const BLE_SERVER_UUID: &str = "21BA0000-5363-6F72-6562-6F6172640004";
+pub const BLE_NETWORKS_UUID: &str = "21BA0000-5363-6F72-6562-6F6172640005";
+pub const BLE_PIN_UUID: &str = "21BA0000-5363-6F72-6562-6F6172640006";
+
+#[derive(uniffi::Record, Clone)]
+pub struct UiBleContract {
+    pub device_name: String,
+    pub service: String,
+    pub ssid: String,
+    pub password: String,
+    pub server: String,
+    pub networks: String,
+    pub pin: String,
+}
+
+#[uniffi::export]
+pub fn ble_contract() -> UiBleContract {
+    UiBleContract {
+        // The firmware advertises its NAME but not the 128-bit service UUID,
+        // so a client scans broadly and matches on this.
+        device_name: "Scoreboard Setup".into(),
+        service: BLE_SERVICE_UUID.into(),
+        ssid: BLE_SSID_UUID.into(),
+        password: BLE_PASS_UUID.into(),
+        server: BLE_SERVER_UUID.into(),
+        networks: BLE_NETWORKS_UUID.into(),
+        pin: BLE_PIN_UUID.into(),
+    }
+}
+
+/// The whole write sequence for one provisioning, or an error to show the
+/// user. `pin_raw` may be anything pasted; empty means "use the built-in".
+#[uniffi::export]
+pub fn provision_steps(
+    ssid: String,
+    password: String,
+    ws_url: String,
+    pin_raw: String,
+    board_has_pin_characteristic: bool,
+    board_has_server_characteristic: bool,
+) -> Result<Vec<UiProvisionStep>, ProvisionError> {
+    if ssid.is_empty() {
+        return Err(ProvisionError::Refused { why: "Pick a network first.".into() });
+    }
+    let mut steps = Vec::new();
+    let host_port = host_port_for_board(ws_url);
+    if !pin_raw.trim().is_empty() {
+        let Some(pin) = normalized_pin(pin_raw.clone()) else {
+            return Err(ProvisionError::Refused {
+                why: pin_complaint(pin_raw)
+                    .unwrap_or_else(|| "That server pin isn't 64 hex characters".into()),
+            });
+        };
+        if !board_has_pin_characteristic {
+            return Err(ProvisionError::Refused {
+                why: "This board's firmware can't be given a server pin".into(),
+            });
+        }
+        steps.push(UiProvisionStep { uuid: BLE_PIN_UUID.into(), value: pin });
+    }
+    // Old firmware without the characteristic keeps its compiled default.
+    if board_has_server_characteristic && !host_port.is_empty() && host_port.len() <= 96 {
+        steps.push(UiProvisionStep { uuid: BLE_SERVER_UUID.into(), value: host_port });
+    }
+    steps.push(UiProvisionStep { uuid: BLE_SSID_UUID.into(), value: ssid });
+    // LAST, always: this write is what makes the board save and reboot.
+    steps.push(UiProvisionStep { uuid: BLE_PASS_UUID.into(), value: password });
+    Ok(steps)
+}
+
+#[derive(uniffi::Error, Debug, thiserror::Error)]
+pub enum ProvisionError {
+    #[error("{why}")]
+    Refused { why: String },
+}
+
+/// The board's pre-scanned network list, as written to the networks
+/// characteristic: UTF-8 SSIDs joined by '\n', strongest first, deduped,
+/// zero-padded to a fixed size.
+#[uniffi::export]
+pub fn parse_networks(raw: Vec<u8>) -> Vec<String> {
+    String::from_utf8_lossy(&raw)
+        .trim_end_matches('\0')
+        .split('\n')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 // ---- the mode picker ----
 
 /// One tile of the Controls mode picker.
@@ -906,5 +1145,103 @@ mod tests {
         assert_eq!(f[1].id, "blank");
         assert_eq!(f[1].label, "Off");
         assert!(f[1].preview.is_none());
+    }
+}
+
+#[cfg(test)]
+mod provisioning_tests {
+    use super::*;
+
+    /// The pin grammar must match the FIRMWARE's, exactly. Anything the app
+    /// accepts and the board refuses is a provisioning that fails where there
+    /// is no text field to complain in — recoverable only by factory reset.
+    #[test]
+    fn the_pin_grammar_is_the_firmwares() {
+        let good = "a".repeat(64);
+        assert_eq!(normalized_pin(good.clone()), Some(good.clone()));
+        // Labels, quotes, whitespace and case are packaging, not pin.
+        assert_eq!(normalized_pin(format!("  SERVER_PIN=\"{}\"\n", good.to_uppercase())), Some(good.clone()));
+        assert_eq!(normalized_pin(format!("pin: {good}")), Some(good.clone()));
+        // The three refusals.
+        assert_eq!(normalized_pin("0".repeat(64)), None, "the all-zero placeholder is not a key");
+        assert_eq!(normalized_pin("a".repeat(63)), None, "63 is not 64");
+        assert_eq!(normalized_pin(format!("{}g", "a".repeat(63))), None, "g is not hex");
+        // Full-width digits are NOT hex — the firmware's parser rejects them,
+        // and Swift's isHexDigit famously does not.
+        assert_eq!(normalized_pin("１".repeat(64)), None, "full-width digits are refused");
+    }
+
+    #[test]
+    fn pin_complaints_name_the_actual_problem() {
+        assert_eq!(pin_complaint(String::new()), None, "empty is each screen's own phrasing");
+        assert_eq!(pin_complaint("a".repeat(64)), None);
+        assert!(pin_complaint("zz".into()).unwrap().contains("hexadecimal"));
+        assert!(pin_complaint("abc".into()).unwrap().contains("64 characters"));
+        assert!(pin_complaint("0".repeat(64)).unwrap().contains("all-zero"));
+    }
+
+    /// A hosted preset must send the board its TCP PROXY, never the HTTPS edge
+    /// the phone uses — the edge answers nothing on the board's path.
+    #[test]
+    fn a_hosted_board_is_given_the_proxy_not_the_edge() {
+        assert_eq!(
+            host_port_for_board("wss://live-production-118c.up.railway.app/ws".into()),
+            "hayabusa.proxy.rlwy.net:47958"
+        );
+        // A self-hosted server has one address, so it comes from the URL.
+        assert_eq!(host_port_for_board("wss://my.server.example/ws".into()), "my.server.example:7878");
+        assert_eq!(host_port_for_board("ws://10.0.0.5:9000/ws".into()), "10.0.0.5:9000");
+        assert_eq!(host_port_for_board(String::new()), "");
+    }
+
+    /// The password write triggers the board's save-and-reboot, so it MUST be
+    /// last: a pin or server written after it never arrives.
+    #[test]
+    fn the_password_is_always_the_last_write() {
+        let steps = provision_steps(
+            "home-wifi".into(),
+            "hunter2".into(),
+            "wss://my.server.example/ws".into(),
+            "b".repeat(64),
+            true,
+            true,
+        )
+        .unwrap();
+        let uuids: Vec<&str> = steps.iter().map(|s| s.uuid.as_str()).collect();
+        assert_eq!(uuids, [BLE_PIN_UUID, BLE_SERVER_UUID, BLE_SSID_UUID, BLE_PASS_UUID]);
+        assert_eq!(steps.last().unwrap().value, "hunter2");
+    }
+
+    /// Older firmware without the optional characteristics still provisions —
+    /// it keeps its compiled default server.
+    #[test]
+    fn a_board_without_the_optional_characteristics_still_provisions() {
+        let steps =
+            provision_steps("net".into(), "pw".into(), "wss://x/ws".into(), String::new(), false, false)
+                .unwrap();
+        let uuids: Vec<&str> = steps.iter().map(|s| s.uuid.as_str()).collect();
+        assert_eq!(uuids, [BLE_SSID_UUID, BLE_PASS_UUID]);
+        // ...but a pin it cannot accept is refused BEFORE any write, rather
+        // than half-provisioning the board.
+        let err = provision_steps(
+            "net".into(), "pw".into(), "wss://x/ws".into(), "c".repeat(64), false, true,
+        );
+        assert!(err.is_err(), "a pin for firmware that has no pin characteristic must refuse");
+    }
+
+    #[test]
+    fn a_bad_pin_refuses_before_anything_is_written() {
+        let err = provision_steps(
+            "net".into(), "pw".into(), "wss://x/ws".into(), "nope".into(), true, true,
+        );
+        assert!(matches!(err, Err(ProvisionError::Refused { .. })));
+    }
+
+    #[test]
+    fn networks_parse_from_the_padded_characteristic() {
+        let mut raw = b"HomeWiFi\nNeighbour 5G\n".to_vec();
+        raw.resize(180, 0);
+        assert_eq!(parse_networks(raw), ["HomeWiFi", "Neighbour 5G"]);
+        assert!(parse_networks(vec![0u8; 180]).is_empty());
     }
 }

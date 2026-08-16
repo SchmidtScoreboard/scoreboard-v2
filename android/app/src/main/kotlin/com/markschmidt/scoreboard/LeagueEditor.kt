@@ -18,6 +18,24 @@ import uniffi.app_core.leaderboardDepthOptions
 import uniffi.app_core.subscriptionSummary
 import uniffi.app_core.toggleRound
 
+/** A setting whose absence means "the league default" — three states, not a
+ *  switch, because default and off are different answers. */
+@Composable
+private fun TriState(label: String, value: Boolean?, onPick: (Boolean?) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.weight(1f))
+        for ((v, text) in listOf<Pair<Boolean?, String>>(null to "Default", true to "On", false to "Off")) {
+            TextButton(onClick = { onPick(v) }) {
+                Text(
+                    text,
+                    color = if (v == value) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.outline,
+                )
+            }
+        }
+    }
+}
+
 /** The league list: every league the catalog offers, grouped by sport with
  *  its current subscription summarized — the core supplies both. */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
@@ -162,8 +180,33 @@ private fun LeagueEditor(
                     }
                 }
             } else {
+                // Per-league display overrides. Absent means the league
+                // default, which is why each is a THREE-state choice rather
+                // than a switch — "default" is not the same as "off".
                 item {
                     Spacer(Modifier.height(16.dp))
+                    Text(
+                        "Display",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.outline,
+                    )
+                    TriState("Team names", sc?.nameStyle?.let { it != uniffi.app_core.UiNameStyle.NAME }) {
+                        session.setLeagueNameStyle(
+                            boardId, sport.id,
+                            when (it) {
+                                null -> null
+                                true -> uniffi.app_core.UiNameStyle.ABBREV
+                                false -> uniffi.app_core.UiNameStyle.NAME
+                            },
+                        )
+                    }
+                    if (sport.extrasLabel.isNotEmpty()) {
+                        TriState(sport.extrasLabel, sc?.showExtras) {
+                            session.setLeagueShowExtras(boardId, sport.id, it)
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
                     OutlinedTextField(
                         value = search,
                         onValueChange = { search = it },

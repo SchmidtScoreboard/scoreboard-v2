@@ -1522,6 +1522,107 @@ public func FfiConverterTypeGuideCopy_lower(_ value: GuideCopy) -> RustBuffer {
     return FfiConverterTypeGuideCopy.lower(value)
 }
 
+public struct UiBleContract {
+    public var deviceName: String
+    public var service: String
+    public var ssid: String
+    public var password: String
+    public var server: String
+    public var networks: String
+    public var pin: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(deviceName: String, service: String, ssid: String, password: String, server: String, networks: String, pin: String) {
+        self.deviceName = deviceName
+        self.service = service
+        self.ssid = ssid
+        self.password = password
+        self.server = server
+        self.networks = networks
+        self.pin = pin
+    }
+}
+
+extension UiBleContract: Equatable, Hashable {
+    public static func == (lhs: UiBleContract, rhs: UiBleContract) -> Bool {
+        if lhs.deviceName != rhs.deviceName {
+            return false
+        }
+        if lhs.service != rhs.service {
+            return false
+        }
+        if lhs.ssid != rhs.ssid {
+            return false
+        }
+        if lhs.password != rhs.password {
+            return false
+        }
+        if lhs.server != rhs.server {
+            return false
+        }
+        if lhs.networks != rhs.networks {
+            return false
+        }
+        if lhs.pin != rhs.pin {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(deviceName)
+        hasher.combine(service)
+        hasher.combine(ssid)
+        hasher.combine(password)
+        hasher.combine(server)
+        hasher.combine(networks)
+        hasher.combine(pin)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiBleContract: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiBleContract {
+        return
+            try UiBleContract(
+                deviceName: FfiConverterString.read(from: &buf),
+                service: FfiConverterString.read(from: &buf),
+                ssid: FfiConverterString.read(from: &buf),
+                password: FfiConverterString.read(from: &buf),
+                server: FfiConverterString.read(from: &buf),
+                networks: FfiConverterString.read(from: &buf),
+                pin: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UiBleContract, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.deviceName, into: &buf)
+        FfiConverterString.write(value.service, into: &buf)
+        FfiConverterString.write(value.ssid, into: &buf)
+        FfiConverterString.write(value.password, into: &buf)
+        FfiConverterString.write(value.server, into: &buf)
+        FfiConverterString.write(value.networks, into: &buf)
+        FfiConverterString.write(value.pin, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiBleContract_lift(_ buf: RustBuffer) throws -> UiBleContract {
+    return try FfiConverterTypeUiBleContract.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiBleContract_lower(_ value: UiBleContract) -> RustBuffer {
+    return FfiConverterTypeUiBleContract.lower(value)
+}
+
 /**
  * One board's full server-side config, pushed with every BoardState.
  */
@@ -1936,6 +2037,67 @@ public func FfiConverterTypeUiChampOption_lower(_ value: UiChampOption) -> RustB
     return FfiConverterTypeUiChampOption.lower(value)
 }
 
+public struct UiDepthOption {
+    public var rows: UInt32
+    public var label: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(rows: UInt32, label: String) {
+        self.rows = rows
+        self.label = label
+    }
+}
+
+extension UiDepthOption: Equatable, Hashable {
+    public static func == (lhs: UiDepthOption, rhs: UiDepthOption) -> Bool {
+        if lhs.rows != rhs.rows {
+            return false
+        }
+        if lhs.label != rhs.label {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(rows)
+        hasher.combine(label)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiDepthOption: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiDepthOption {
+        return
+            try UiDepthOption(
+                rows: FfiConverterUInt32.read(from: &buf),
+                label: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UiDepthOption, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.rows, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiDepthOption_lift(_ buf: RustBuffer) throws -> UiDepthOption {
+    return try FfiConverterTypeUiDepthOption.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiDepthOption_lower(_ value: UiDepthOption) -> RustBuffer {
+    return FfiConverterTypeUiDepthOption.lower(value)
+}
+
 /**
  * One firmware image the server currently hosts (protocol `FwImage`), as
  * listed for the DEBUG firmware picker. `channel` is a lowercase route name
@@ -2320,6 +2482,96 @@ public func FfiConverterTypeUiLeagueGroup_lift(_ buf: RustBuffer) throws -> UiLe
 #endif
 public func FfiConverterTypeUiLeagueGroup_lower(_ value: UiLeagueGroup) -> RustBuffer {
     return FfiConverterTypeUiLeagueGroup.lower(value)
+}
+
+/**
+ * One league a board follows, resolved against the catalog: the league, the
+ * favorited teams in USER ORDER, and the labels of the rounds it subscribes
+ * to.
+ */
+public struct UiLeaguePref {
+    public var sport: UiSport
+    public var teams: [UiTeam]
+    public var roundLabels: [String]
+    public var leagueSpoiler: Bool
+    public var spoilerTeamIds: [String]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(sport: UiSport, teams: [UiTeam], roundLabels: [String], leagueSpoiler: Bool, spoilerTeamIds: [String]) {
+        self.sport = sport
+        self.teams = teams
+        self.roundLabels = roundLabels
+        self.leagueSpoiler = leagueSpoiler
+        self.spoilerTeamIds = spoilerTeamIds
+    }
+}
+
+extension UiLeaguePref: Equatable, Hashable {
+    public static func == (lhs: UiLeaguePref, rhs: UiLeaguePref) -> Bool {
+        if lhs.sport != rhs.sport {
+            return false
+        }
+        if lhs.teams != rhs.teams {
+            return false
+        }
+        if lhs.roundLabels != rhs.roundLabels {
+            return false
+        }
+        if lhs.leagueSpoiler != rhs.leagueSpoiler {
+            return false
+        }
+        if lhs.spoilerTeamIds != rhs.spoilerTeamIds {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(sport)
+        hasher.combine(teams)
+        hasher.combine(roundLabels)
+        hasher.combine(leagueSpoiler)
+        hasher.combine(spoilerTeamIds)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiLeaguePref: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiLeaguePref {
+        return
+            try UiLeaguePref(
+                sport: FfiConverterTypeUiSport.read(from: &buf),
+                teams: FfiConverterSequenceTypeUiTeam.read(from: &buf),
+                roundLabels: FfiConverterSequenceString.read(from: &buf),
+                leagueSpoiler: FfiConverterBool.read(from: &buf),
+                spoilerTeamIds: FfiConverterSequenceString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UiLeaguePref, into buf: inout [UInt8]) {
+        FfiConverterTypeUiSport.write(value.sport, into: &buf)
+        FfiConverterSequenceTypeUiTeam.write(value.teams, into: &buf)
+        FfiConverterSequenceString.write(value.roundLabels, into: &buf)
+        FfiConverterBool.write(value.leagueSpoiler, into: &buf)
+        FfiConverterSequenceString.write(value.spoilerTeamIds, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiLeaguePref_lift(_ buf: RustBuffer) throws -> UiLeaguePref {
+    return try FfiConverterTypeUiLeaguePref.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiLeaguePref_lower(_ value: UiLeaguePref) -> RustBuffer {
+    return FfiConverterTypeUiLeaguePref.lower(value)
 }
 
 /**
@@ -2877,6 +3129,86 @@ public func FfiConverterTypeUiPickableMode_lower(_ value: UiPickableMode) -> Rus
 }
 
 /**
+ * One step of the BLE provisioning write sequence: which characteristic, and
+ * the UTF-8 bytes to write.
+ *
+ * ORDER IS LOAD-BEARING. The firmware saves and reboots the moment the
+ * PASSWORD lands, so the optional pin and server must be written before it —
+ * a pin written after the password never arrives, and the board refuses the
+ * save as "custom host, no pin" (or worse, provisions against a server it
+ * cannot handshake with). The firmware's own comment says so; this function
+ * is the client half of that contract, shared so neither platform can get
+ * the order wrong.
+ */
+public struct UiProvisionStep {
+    /**
+     * Characteristic UUID, uppercase.
+     */
+    public var uuid: String
+    public var value: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Characteristic UUID, uppercase.
+         */ uuid: String, value: String
+    ) {
+        self.uuid = uuid
+        self.value = value
+    }
+}
+
+extension UiProvisionStep: Equatable, Hashable {
+    public static func == (lhs: UiProvisionStep, rhs: UiProvisionStep) -> Bool {
+        if lhs.uuid != rhs.uuid {
+            return false
+        }
+        if lhs.value != rhs.value {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(uuid)
+        hasher.combine(value)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiProvisionStep: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiProvisionStep {
+        return
+            try UiProvisionStep(
+                uuid: FfiConverterString.read(from: &buf),
+                value: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UiProvisionStep, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.uuid, into: &buf)
+        FfiConverterString.write(value.value, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiProvisionStep_lift(_ buf: RustBuffer) throws -> UiProvisionStep {
+    return try FfiConverterTypeUiProvisionStep.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiProvisionStep_lower(_ value: UiProvisionStep) -> RustBuffer {
+    return FfiConverterTypeUiProvisionStep.lower(value)
+}
+
+/**
  * The two one-off sets, after a mutation — returned together because the
  * rules move ids BETWEEN them.
  */
@@ -2939,6 +3271,109 @@ public func FfiConverterTypeUiRotationSets_lift(_ buf: RustBuffer) throws -> UiR
 #endif
 public func FfiConverterTypeUiRotationSets_lower(_ value: UiRotationSets) -> RustBuffer {
     return FfiConverterTypeUiRotationSets.lower(value)
+}
+
+/**
+ * A server the app can point a board at.
+ */
+public struct UiServerPreset {
+    public var id: String
+    public var label: String
+    /**
+     * The websocket URL the PHONE uses. None for "my own server", which has
+     * no fixed address.
+     */
+    public var url: String?
+    /**
+     * The `host:port` the BOARD is given — deliberately NOT derived from the
+     * phone's URL for a hosted preset: the phone talks to Railway's HTTPS
+     * edge, and the board needs the raw TCP proxy it can complete a
+     * pinned-key TLS handshake against. Writing the edge to a board
+     * provisions an endpoint that answers nothing.
+     */
+    public var boardHostPort: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, label: String,
+                /**
+                    * The websocket URL the PHONE uses. None for "my own server", which has
+                    * no fixed address.
+                    */ url: String?,
+                /**
+                    * The `host:port` the BOARD is given — deliberately NOT derived from the
+                    * phone's URL for a hosted preset: the phone talks to Railway's HTTPS
+                    * edge, and the board needs the raw TCP proxy it can complete a
+                    * pinned-key TLS handshake against. Writing the edge to a board
+                    * provisions an endpoint that answers nothing.
+                    */ boardHostPort: String?)
+    {
+        self.id = id
+        self.label = label
+        self.url = url
+        self.boardHostPort = boardHostPort
+    }
+}
+
+extension UiServerPreset: Equatable, Hashable {
+    public static func == (lhs: UiServerPreset, rhs: UiServerPreset) -> Bool {
+        if lhs.id != rhs.id {
+            return false
+        }
+        if lhs.label != rhs.label {
+            return false
+        }
+        if lhs.url != rhs.url {
+            return false
+        }
+        if lhs.boardHostPort != rhs.boardHostPort {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(label)
+        hasher.combine(url)
+        hasher.combine(boardHostPort)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiServerPreset: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiServerPreset {
+        return
+            try UiServerPreset(
+                id: FfiConverterString.read(from: &buf),
+                label: FfiConverterString.read(from: &buf),
+                url: FfiConverterOptionString.read(from: &buf),
+                boardHostPort: FfiConverterOptionString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UiServerPreset, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterOptionString.write(value.url, into: &buf)
+        FfiConverterOptionString.write(value.boardHostPort, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiServerPreset_lift(_ buf: RustBuffer) throws -> UiServerPreset {
+    return try FfiConverterTypeUiServerPreset.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiServerPreset_lower(_ value: UiServerPreset) -> RustBuffer {
+    return FfiConverterTypeUiServerPreset.lower(value)
 }
 
 public struct UiSport {
@@ -3371,6 +3806,45 @@ public func FfiConverterTypeUiTeam_lift(_ buf: RustBuffer) throws -> UiTeam {
 #endif
 public func FfiConverterTypeUiTeam_lower(_ value: UiTeam) -> RustBuffer {
     return FfiConverterTypeUiTeam.lower(value)
+}
+
+public enum ProvisionError {
+    case Refused(why: String
+    )
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeProvisionError: FfiConverterRustBuffer {
+    typealias SwiftType = ProvisionError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProvisionError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        case 1: return try .Refused(
+                why: FfiConverterString.read(from: &buf)
+            )
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ProvisionError, into buf: inout [UInt8]) {
+        switch value {
+        case let .Refused(why):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(why, into: &buf)
+        }
+    }
+}
+
+extension ProvisionError: Equatable, Hashable {}
+
+extension ProvisionError: Foundation.LocalizedError {
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
 }
 
 // Note that we don't yet support `indirect` for enums.
@@ -4420,6 +4894,31 @@ private struct FfiConverterSequenceTypeUiChampOption: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterSequenceTypeUiDepthOption: FfiConverterRustBuffer {
+    typealias SwiftType = [UiDepthOption]
+
+    static func write(_ value: [UiDepthOption], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeUiDepthOption.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UiDepthOption] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UiDepthOption]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeUiDepthOption.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterSequenceTypeUiFwImage: FfiConverterRustBuffer {
     typealias SwiftType = [UiFwImage]
 
@@ -4487,6 +4986,31 @@ private struct FfiConverterSequenceTypeUiLeagueGroup: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             try seq.append(FfiConverterTypeUiLeagueGroup.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeUiLeaguePref: FfiConverterRustBuffer {
+    typealias SwiftType = [UiLeaguePref]
+
+    static func write(_ value: [UiLeaguePref], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeUiLeaguePref.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UiLeaguePref] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UiLeaguePref]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeUiLeaguePref.read(from: &buf))
         }
         return seq
     }
@@ -4620,6 +5144,56 @@ private struct FfiConverterSequenceTypeUiPickableMode: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterSequenceTypeUiProvisionStep: FfiConverterRustBuffer {
+    typealias SwiftType = [UiProvisionStep]
+
+    static func write(_ value: [UiProvisionStep], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeUiProvisionStep.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UiProvisionStep] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UiProvisionStep]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeUiProvisionStep.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeUiServerPreset: FfiConverterRustBuffer {
+    typealias SwiftType = [UiServerPreset]
+
+    static func write(_ value: [UiServerPreset], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeUiServerPreset.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UiServerPreset] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UiServerPreset]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeUiServerPreset.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterSequenceTypeUiSport: FfiConverterRustBuffer {
     typealias SwiftType = [UiSport]
 
@@ -4742,6 +5316,13 @@ private struct FfiConverterDictionaryStringString: FfiConverterRustBuffer {
         }
         return dict
     }
+}
+
+public func bleContract() -> UiBleContract {
+    return try! FfiConverterTypeUiBleContract.lift(try! rustCall {
+        uniffi_app_core_fn_func_ble_contract($0
+        )
+    })
 }
 
 public func cardHighlight(game: UiGame, focusedGameId: String?, nowShowing: [UiGame], extraGameIds: [String], excludedGameIds: [String]) -> UiCardHighlight {
@@ -4950,6 +5531,36 @@ public func groupLeagues(sports: [UiSport]) -> [UiLeagueGroup] {
 }
 
 /**
+ * The `host:port` to write to a board's `server` characteristic, for the
+ * websocket URL the phone is using. Empty means "keep the firmware default".
+ */
+public func hostPortForBoard(wsUrl: String) -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_host_port_for_board(
+            FfiConverterString.lower(wsUrl), $0
+        )
+    })
+}
+
+/**
+ * The HTTP origin for a board's server, derived from its websocket URL:
+ * drop a trailing `/ws`, then `wss` -> `https` and `ws` -> `http`.
+ *
+ * The scheme mapping is the part to be careful with. Every preview, frame
+ * and guide image the app renders is fetched from this origin, so a rewrite
+ * that lands on `http` for a `wss` server silently downgrades all of it to
+ * cleartext against a server that was speaking TLS — no error, just an
+ * unencrypted fetch. One rule, one place, both platforms.
+ */
+public func httpBase(wsUrl: String) -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_http_base(
+            FfiConverterString.lower(wsUrl), $0
+        )
+    })
+}
+
+/**
  * Whether a game involves one of the board's favorited teams.
  */
 public func involvesFavorite(sportId: String, away: String, home: String, favoriteTeamIds: [String]) -> Bool {
@@ -4959,6 +5570,39 @@ public func involvesFavorite(sportId: String, away: String, home: String, favori
             FfiConverterString.lower(away),
             FfiConverterString.lower(home),
             FfiConverterSequenceString.lower(favoriteTeamIds), $0
+        )
+    })
+}
+
+/**
+ * Leaderboard depth choices for a league: (rows, label). F1 calls the
+ * deepest one "Full field" — a rule iOS was maintaining in three places.
+ */
+public func leaderboardDepthOptions(sportId: String) -> [UiDepthOption] {
+    return try! FfiConverterSequenceTypeUiDepthOption.lift(try! rustCall {
+        uniffi_app_core_fn_func_leaderboard_depth_options(
+            FfiConverterString.lower(sportId), $0
+        )
+    })
+}
+
+/**
+ * The leagues worth showing on the dashboard, in catalog order.
+ *
+ * A league earns a card when it has favorites, subscribed rounds, or ANY
+ * per-league override — a dwell or depth override alone still counts, or it
+ * would be active but invisible (set from Add League without subscribing, or
+ * left behind after the last favorite is removed).
+ *
+ * Favorites come back in the order the config lists them (the user's own
+ * drag order), not catalog order; unknown ids are dropped rather than
+ * faked — configs carry orphans from before the leaderboard-league split.
+ */
+public func leaguePrefs(config: UiBoardConfig, sports: [UiSport]) -> [UiLeaguePref] {
+    return try! FfiConverterSequenceTypeUiLeaguePref.lift(try! rustCall {
+        uniffi_app_core_fn_func_league_prefs(
+            FfiConverterTypeUiBoardConfig.lower(config),
+            FfiConverterSequenceTypeUiSport.lower(sports), $0
         )
     })
 }
@@ -4991,6 +5635,27 @@ public func nameStyleOptions(sportId: String) -> [UiNameStyleOption] {
 }
 
 /**
+ * The canonical lowercase 64-hex pin, or None if the input is not one.
+ *
+ * Deliberately the SAME three rules the firmware applies to the write
+ * (`creds::pin_from_hex_str`): 64 hex digits, nothing else, never the
+ * all-zero digest. Anything this accepts and the board does not is a
+ * provisioning that fails on the far side — where there is no text field to
+ * put the complaint in, and the only way back is a physical factory reset.
+ *
+ * The alphabet is explicit rather than a library `is_hex_digit`: Swift's
+ * `isHexDigit` also accepts full-width Unicode digits the firmware rejects,
+ * which is exactly the class of divergence this function exists to prevent.
+ */
+public func normalizedPin(raw: String) -> String? {
+    return try! FfiConverterOptionString.lift(try! rustCall {
+        uniffi_app_core_fn_func_normalized_pin(
+            FfiConverterString.lower(raw), $0
+        )
+    })
+}
+
+/**
  * Stored value, else the field's declared default, else empty. MUST agree
  * with `OffModeDescriptor::value` in the protocol crate — the server renders
  * from that one; `the_app_and_the_server_resolve_off_mode_values_identically`
@@ -5002,6 +5667,19 @@ public func offModeValue(mode: UiOffMode, key: String, params: [String: String])
             FfiConverterTypeUiOffMode.lower(mode),
             FfiConverterString.lower(key),
             FfiConverterDictionaryStringString.lower(params), $0
+        )
+    })
+}
+
+/**
+ * The board's pre-scanned network list, as written to the networks
+ * characteristic: UTF-8 SSIDs joined by '\n', strongest first, deduped,
+ * zero-padded to a fixed size.
+ */
+public func parseNetworks(raw: Data) -> [String] {
+    return try! FfiConverterSequenceString.lift(try! rustCall {
+        uniffi_app_core_fn_func_parse_networks(
+            FfiConverterData.lower(raw), $0
         )
     })
 }
@@ -5029,6 +5707,52 @@ public func pickedRoundsLabel(pickedLabels: [String]) -> String? {
     return try! FfiConverterOptionString.lift(try! rustCall {
         uniffi_app_core_fn_func_picked_rounds_label(
             FfiConverterSequenceString.lower(pickedLabels), $0
+        )
+    })
+}
+
+/**
+ * The bare pin candidate inside whatever was pasted — NOT validated.
+ *
+ * `gen-tls-cert` prints the pin on a labelled line, and it also lands in
+ * config files and shell exports, so the clipboard arrives carrying any of
+ * "pin: <hex>", "SERVER_PIN=<hex>", quotes, spaces, a trailing newline, or
+ * upper case. None of that is part of the pin: hex contains no ':' or '=',
+ * so everything through the last one is a label.
+ */
+public func pinCandidate(raw: String) -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_pin_candidate(
+            FfiConverterString.lower(raw), $0
+        )
+    })
+}
+
+/**
+ * Why a non-empty pin field is unusable, in words for the person typing — or
+ * None when it is good (or empty, which each screen phrases its own way).
+ */
+public func pinComplaint(raw: String) -> String? {
+    return try! FfiConverterOptionString.lift(try! rustCall {
+        uniffi_app_core_fn_func_pin_complaint(
+            FfiConverterString.lower(raw), $0
+        )
+    })
+}
+
+/**
+ * The whole write sequence for one provisioning, or an error to show the
+ * user. `pin_raw` may be anything pasted; empty means "use the built-in".
+ */
+public func provisionSteps(ssid: String, password: String, wsUrl: String, pinRaw: String, boardHasPinCharacteristic: Bool, boardHasServerCharacteristic: Bool) throws -> [UiProvisionStep] {
+    return try FfiConverterSequenceTypeUiProvisionStep.lift(rustCallWithError(FfiConverterTypeProvisionError.lift) {
+        uniffi_app_core_fn_func_provision_steps(
+            FfiConverterString.lower(ssid),
+            FfiConverterString.lower(password),
+            FfiConverterString.lower(wsUrl),
+            FfiConverterString.lower(pinRaw),
+            FfiConverterBool.lower(boardHasPinCharacteristic),
+            FfiConverterBool.lower(boardHasServerCharacteristic), $0
         )
     })
 }
@@ -5096,6 +5820,13 @@ public func rotationRemove(gameId: String, extraGameIds: [String], excludedGameI
     })
 }
 
+public func serverPresets() -> [UiServerPreset] {
+    return try! FfiConverterSequenceTypeUiServerPreset.lift(try! rustCall {
+        uniffi_app_core_fn_func_server_presets($0
+        )
+    })
+}
+
 /**
  * The knob's detents: steps of 10, floor 10, cap 100 — one scale for the
  * slider, the physical dial, and the server clamp.
@@ -5144,6 +5875,23 @@ public func teamId(sportId: String, abbrev: String) -> String {
         uniffi_app_core_fn_func_team_id(
             FfiConverterString.lower(sportId),
             FfiConverterString.lower(abbrev), $0
+        )
+    })
+}
+
+/**
+ * Toggling one round of a league's subscription.
+ *
+ * Picking the blanket option selects every round (that IS what it means).
+ * Un-picking any single round only removes that round — it must NOT clear
+ * the blanket implication for the others, which is the one-way rule above.
+ */
+public func toggleRound(roundId: String, picked: [String], allRoundIds: [String]) -> [String] {
+    return try! FfiConverterSequenceString.lift(try! rustCall {
+        uniffi_app_core_fn_func_toggle_round(
+            FfiConverterString.lower(roundId),
+            FfiConverterSequenceString.lower(picked),
+            FfiConverterSequenceString.lower(allRoundIds), $0
         )
     })
 }
@@ -5203,6 +5951,9 @@ private var initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if uniffi_app_core_checksum_func_ble_contract() != 45310 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_func_card_highlight() != 5739 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5245,7 +5996,19 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_func_group_leagues() != 37891 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_app_core_checksum_func_host_port_for_board() != 3292 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_http_base() != 21014 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_func_involves_favorite() != 62993 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_leaderboard_depth_options() != 20168 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_league_prefs() != 47967 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_mode_label() != 48403 {
@@ -5254,13 +6017,28 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_func_name_style_options() != 22961 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_app_core_checksum_func_normalized_pin() != 26085 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_func_off_mode_value() != 49163 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_parse_networks() != 61308 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_pickable_modes() != 3409 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_picked_rounds_label() != 32761 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_pin_candidate() != 29170 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_pin_complaint() != 50658 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_provision_steps() != 61375 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_rotation_add() != 1110 {
@@ -5275,6 +6053,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_func_rotation_remove() != 58838 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_app_core_checksum_func_server_presets() != 5410 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_func_snap_brightness() != 17678 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5285,6 +6066,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_team_id() != 22288 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_toggle_round() != 37301 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_troubleshooting_footer() != 62547 {

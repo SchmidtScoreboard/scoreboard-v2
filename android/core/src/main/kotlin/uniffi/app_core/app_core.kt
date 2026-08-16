@@ -1003,6 +1003,22 @@ internal open class UniffiVTableCallbackInterfaceClientListener(
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -1127,6 +1143,8 @@ internal interface UniffiLib : Library {
     ): Unit
     fun uniffi_app_core_fn_init_callback_vtable_clientlistener(`vtable`: UniffiVTableCallbackInterfaceClientListener,
     ): Unit
+    fun uniffi_app_core_fn_func_ble_contract(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_card_highlight(`game`: RustBuffer.ByValue,`focusedGameId`: RustBuffer.ByValue,`nowShowing`: RustBuffer.ByValue,`extraGameIds`: RustBuffer.ByValue,`excludedGameIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_compute_wake_at(`mode`: RustBuffer.ByValue,`modeHours`: RustBuffer.ByValue,`sleepHours`: Int,`nowUnix`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -1155,6 +1173,8 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_group_leagues(`sports`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_host_port_for_board(`wsUrl`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_http_base(`wsUrl`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_involves_favorite(`sportId`: RustBuffer.ByValue,`away`: RustBuffer.ByValue,`home`: RustBuffer.ByValue,`favoriteTeamIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1167,11 +1187,21 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_name_style_options(`sportId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_normalized_pin(`raw`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_off_mode_value(`mode`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_parse_networks(`raw`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_pickable_modes(`offModes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_picked_rounds_label(`pickedLabels`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_pin_candidate(`raw`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_pin_complaint(`raw`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_provision_steps(`ssid`: RustBuffer.ByValue,`password`: RustBuffer.ByValue,`wsUrl`: RustBuffer.ByValue,`pinRaw`: RustBuffer.ByValue,`boardHasPinCharacteristic`: Byte,`boardHasServerCharacteristic`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_rotation_add(`gameId`: RustBuffer.ByValue,`extraGameIds`: RustBuffer.ByValue,`excludedGameIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1180,6 +1210,8 @@ internal interface UniffiLib : Library {
     fun uniffi_app_core_fn_func_rotation_modified(`focusedGameId`: RustBuffer.ByValue,`extraGameIds`: RustBuffer.ByValue,`excludedGameIds`: RustBuffer.ByValue,`spoilerGameIds`: RustBuffer.ByValue,`revealedGameIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     fun uniffi_app_core_fn_func_rotation_remove(`gameId`: RustBuffer.ByValue,`extraGameIds`: RustBuffer.ByValue,`excludedGameIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_server_presets(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_snap_brightness(`value`: Double,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
@@ -1311,6 +1343,8 @@ internal interface UniffiLib : Library {
     ): Unit
     fun ffi_app_core_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
+    fun uniffi_app_core_checksum_func_ble_contract(
+    ): Short
     fun uniffi_app_core_checksum_func_card_highlight(
     ): Short
     fun uniffi_app_core_checksum_func_compute_wake_at(
@@ -1339,6 +1373,8 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_app_core_checksum_func_group_leagues(
     ): Short
+    fun uniffi_app_core_checksum_func_host_port_for_board(
+    ): Short
     fun uniffi_app_core_checksum_func_http_base(
     ): Short
     fun uniffi_app_core_checksum_func_involves_favorite(
@@ -1351,11 +1387,21 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_app_core_checksum_func_name_style_options(
     ): Short
+    fun uniffi_app_core_checksum_func_normalized_pin(
+    ): Short
     fun uniffi_app_core_checksum_func_off_mode_value(
+    ): Short
+    fun uniffi_app_core_checksum_func_parse_networks(
     ): Short
     fun uniffi_app_core_checksum_func_pickable_modes(
     ): Short
     fun uniffi_app_core_checksum_func_picked_rounds_label(
+    ): Short
+    fun uniffi_app_core_checksum_func_pin_candidate(
+    ): Short
+    fun uniffi_app_core_checksum_func_pin_complaint(
+    ): Short
+    fun uniffi_app_core_checksum_func_provision_steps(
     ): Short
     fun uniffi_app_core_checksum_func_rotation_add(
     ): Short
@@ -1364,6 +1410,8 @@ internal interface UniffiLib : Library {
     fun uniffi_app_core_checksum_func_rotation_modified(
     ): Short
     fun uniffi_app_core_checksum_func_rotation_remove(
+    ): Short
+    fun uniffi_app_core_checksum_func_server_presets(
     ): Short
     fun uniffi_app_core_checksum_func_snap_brightness(
     ): Short
@@ -1528,6 +1576,9 @@ private fun uniffiCheckContractApiVersion(lib: UniffiLib) {
 
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: UniffiLib) {
+    if (lib.uniffi_app_core_checksum_func_ble_contract() != 45310.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_app_core_checksum_func_card_highlight() != 5739.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1570,6 +1621,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_app_core_checksum_func_group_leagues() != 37891.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_app_core_checksum_func_host_port_for_board() != 3292.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_app_core_checksum_func_http_base() != 21014.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1588,13 +1642,28 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_app_core_checksum_func_name_style_options() != 22961.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_app_core_checksum_func_normalized_pin() != 26085.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_app_core_checksum_func_off_mode_value() != 49163.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_parse_networks() != 61308.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_pickable_modes() != 3409.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_picked_rounds_label() != 32761.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_pin_candidate() != 29170.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_pin_complaint() != 50658.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_provision_steps() != 61375.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_rotation_add() != 1110.toShort()) {
@@ -1607,6 +1676,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_rotation_remove() != 58838.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_server_presets() != 5410.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_snap_brightness() != 17678.toShort()) {
@@ -3404,6 +3476,58 @@ public object FfiConverterTypeGuideCopy: FfiConverterRustBuffer<GuideCopy> {
 
 
 
+data class UiBleContract (
+    var `deviceName`: kotlin.String, 
+    var `service`: kotlin.String, 
+    var `ssid`: kotlin.String, 
+    var `password`: kotlin.String, 
+    var `server`: kotlin.String, 
+    var `networks`: kotlin.String, 
+    var `pin`: kotlin.String
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeUiBleContract: FfiConverterRustBuffer<UiBleContract> {
+    override fun read(buf: ByteBuffer): UiBleContract {
+        return UiBleContract(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: UiBleContract) = (
+            FfiConverterString.allocationSize(value.`deviceName`) +
+            FfiConverterString.allocationSize(value.`service`) +
+            FfiConverterString.allocationSize(value.`ssid`) +
+            FfiConverterString.allocationSize(value.`password`) +
+            FfiConverterString.allocationSize(value.`server`) +
+            FfiConverterString.allocationSize(value.`networks`) +
+            FfiConverterString.allocationSize(value.`pin`)
+    )
+
+    override fun write(value: UiBleContract, buf: ByteBuffer) {
+            FfiConverterString.write(value.`deviceName`, buf)
+            FfiConverterString.write(value.`service`, buf)
+            FfiConverterString.write(value.`ssid`, buf)
+            FfiConverterString.write(value.`password`, buf)
+            FfiConverterString.write(value.`server`, buf)
+            FfiConverterString.write(value.`networks`, buf)
+            FfiConverterString.write(value.`pin`, buf)
+    }
+}
+
+
+
 /**
  * One board's full server-side config, pushed with every BoardState.
  */
@@ -4191,6 +4315,53 @@ public object FfiConverterTypeUiPickableMode: FfiConverterRustBuffer<UiPickableM
 
 
 /**
+ * One step of the BLE provisioning write sequence: which characteristic, and
+ * the UTF-8 bytes to write.
+ *
+ * ORDER IS LOAD-BEARING. The firmware saves and reboots the moment the
+ * PASSWORD lands, so the optional pin and server must be written before it —
+ * a pin written after the password never arrives, and the board refuses the
+ * save as "custom host, no pin" (or worse, provisions against a server it
+ * cannot handshake with). The firmware's own comment says so; this function
+ * is the client half of that contract, shared so neither platform can get
+ * the order wrong.
+ */
+data class UiProvisionStep (
+    /**
+     * Characteristic UUID, uppercase.
+     */
+    var `uuid`: kotlin.String, 
+    var `value`: kotlin.String
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeUiProvisionStep: FfiConverterRustBuffer<UiProvisionStep> {
+    override fun read(buf: ByteBuffer): UiProvisionStep {
+        return UiProvisionStep(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: UiProvisionStep) = (
+            FfiConverterString.allocationSize(value.`uuid`) +
+            FfiConverterString.allocationSize(value.`value`)
+    )
+
+    override fun write(value: UiProvisionStep, buf: ByteBuffer) {
+            FfiConverterString.write(value.`uuid`, buf)
+            FfiConverterString.write(value.`value`, buf)
+    }
+}
+
+
+
+/**
  * The two one-off sets, after a mutation — returned together because the
  * rules move ids BETWEEN them.
  */
@@ -4221,6 +4392,60 @@ public object FfiConverterTypeUiRotationSets: FfiConverterRustBuffer<UiRotationS
     override fun write(value: UiRotationSets, buf: ByteBuffer) {
             FfiConverterSequenceString.write(value.`extraGameIds`, buf)
             FfiConverterSequenceString.write(value.`excludedGameIds`, buf)
+    }
+}
+
+
+
+/**
+ * A server the app can point a board at.
+ */
+data class UiServerPreset (
+    var `id`: kotlin.String, 
+    var `label`: kotlin.String, 
+    /**
+     * The websocket URL the PHONE uses. None for "my own server", which has
+     * no fixed address.
+     */
+    var `url`: kotlin.String?, 
+    /**
+     * The `host:port` the BOARD is given — deliberately NOT derived from the
+     * phone's URL for a hosted preset: the phone talks to Railway's HTTPS
+     * edge, and the board needs the raw TCP proxy it can complete a
+     * pinned-key TLS handshake against. Writing the edge to a board
+     * provisions an endpoint that answers nothing.
+     */
+    var `boardHostPort`: kotlin.String?
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeUiServerPreset: FfiConverterRustBuffer<UiServerPreset> {
+    override fun read(buf: ByteBuffer): UiServerPreset {
+        return UiServerPreset(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: UiServerPreset) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`label`) +
+            FfiConverterOptionalString.allocationSize(value.`url`) +
+            FfiConverterOptionalString.allocationSize(value.`boardHostPort`)
+    )
+
+    override fun write(value: UiServerPreset, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterString.write(value.`label`, buf)
+            FfiConverterOptionalString.write(value.`url`, buf)
+            FfiConverterOptionalString.write(value.`boardHostPort`, buf)
     }
 }
 
@@ -4441,6 +4666,65 @@ public object FfiConverterTypeUiTeam: FfiConverterRustBuffer<UiTeam> {
             FfiConverterOptionalString.write(value.`color`, buf)
             FfiConverterOptionalString.write(value.`altColor`, buf)
     }
+}
+
+
+
+
+
+sealed class ProvisionException: kotlin.Exception() {
+    
+    class Refused(
+        
+        val `why`: kotlin.String
+        ) : ProvisionException() {
+        override val message
+            get() = "why=${ `why` }"
+    }
+    
+
+    companion object ErrorHandler : UniffiRustCallStatusErrorHandler<ProvisionException> {
+        override fun lift(error_buf: RustBuffer.ByValue): ProvisionException = FfiConverterTypeProvisionError.lift(error_buf)
+    }
+
+    
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeProvisionError : FfiConverterRustBuffer<ProvisionException> {
+    override fun read(buf: ByteBuffer): ProvisionException {
+        
+
+        return when(buf.getInt()) {
+            1 -> ProvisionException.Refused(
+                FfiConverterString.read(buf),
+                )
+            else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: ProvisionException): ULong {
+        return when(value) {
+            is ProvisionException.Refused -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`why`)
+            )
+        }
+    }
+
+    override fun write(value: ProvisionException, buf: ByteBuffer) {
+        when(value) {
+            is ProvisionException.Refused -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.`why`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+    }
+
 }
 
 
@@ -5574,6 +5858,62 @@ public object FfiConverterSequenceTypeUiPickableMode: FfiConverterRustBuffer<Lis
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeUiProvisionStep: FfiConverterRustBuffer<List<UiProvisionStep>> {
+    override fun read(buf: ByteBuffer): List<UiProvisionStep> {
+        val len = buf.getInt()
+        return List<UiProvisionStep>(len) {
+            FfiConverterTypeUiProvisionStep.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<UiProvisionStep>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeUiProvisionStep.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<UiProvisionStep>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeUiProvisionStep.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeUiServerPreset: FfiConverterRustBuffer<List<UiServerPreset>> {
+    override fun read(buf: ByteBuffer): List<UiServerPreset> {
+        val len = buf.getInt()
+        return List<UiServerPreset>(len) {
+            FfiConverterTypeUiServerPreset.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<UiServerPreset>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeUiServerPreset.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<UiServerPreset>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeUiServerPreset.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeUiSport: FfiConverterRustBuffer<List<UiSport>> {
     override fun read(buf: ByteBuffer): List<UiSport> {
         val len = buf.getInt()
@@ -5728,7 +6068,16 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
             FfiConverterString.write(v, buf)
         }
     }
-} fun `cardHighlight`(`game`: UiGame, `focusedGameId`: kotlin.String?, `nowShowing`: List<UiGame>, `extraGameIds`: List<kotlin.String>, `excludedGameIds`: List<kotlin.String>): UiCardHighlight {
+} fun `bleContract`(): UiBleContract {
+            return FfiConverterTypeUiBleContract.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_ble_contract(
+        _status)
+}
+    )
+    }
+    
+ fun `cardHighlight`(`game`: UiGame, `focusedGameId`: kotlin.String?, `nowShowing`: List<UiGame>, `extraGameIds`: List<kotlin.String>, `excludedGameIds`: List<kotlin.String>): UiCardHighlight {
             return FfiConverterTypeUiCardHighlight.lift(
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_app_core_fn_func_card_highlight(
@@ -5928,6 +6277,19 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     
 
         /**
+         * The `host:port` to write to a board's `server` characteristic, for the
+         * websocket URL the phone is using. Empty means "keep the firmware default".
+         */ fun `hostPortForBoard`(`wsUrl`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_host_port_for_board(
+        FfiConverterString.lower(`wsUrl`),_status)
+}
+    )
+    }
+    
+
+        /**
          * The HTTP origin for a board's server, derived from its websocket URL:
          * drop a trailing `/ws`, then `wss` -> `https` and `ws` -> `http`.
          *
@@ -6021,6 +6383,28 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     
 
         /**
+         * The canonical lowercase 64-hex pin, or None if the input is not one.
+         *
+         * Deliberately the SAME three rules the firmware applies to the write
+         * (`creds::pin_from_hex_str`): 64 hex digits, nothing else, never the
+         * all-zero digest. Anything this accepts and the board does not is a
+         * provisioning that fails on the far side — where there is no text field to
+         * put the complaint in, and the only way back is a physical factory reset.
+         *
+         * The alphabet is explicit rather than a library `is_hex_digit`: Swift's
+         * `isHexDigit` also accepts full-width Unicode digits the firmware rejects,
+         * which is exactly the class of divergence this function exists to prevent.
+         */ fun `normalizedPin`(`raw`: kotlin.String): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_normalized_pin(
+        FfiConverterString.lower(`raw`),_status)
+}
+    )
+    }
+    
+
+        /**
          * Stored value, else the field's declared default, else empty. MUST agree
          * with `OffModeDescriptor::value` in the protocol crate — the server renders
          * from that one; `the_app_and_the_server_resolve_off_mode_values_identically`
@@ -6030,6 +6414,20 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_app_core_fn_func_off_mode_value(
         FfiConverterTypeUiOffMode.lower(`mode`),FfiConverterString.lower(`key`),FfiConverterMapStringString.lower(`params`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * The board's pre-scanned network list, as written to the networks
+         * characteristic: UTF-8 SSIDs joined by '\n', strongest first, deduped,
+         * zero-padded to a fixed size.
+         */ fun `parseNetworks`(`raw`: kotlin.ByteArray): List<kotlin.String> {
+            return FfiConverterSequenceString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_parse_networks(
+        FfiConverterByteArray.lower(`raw`),_status)
 }
     )
     }
@@ -6059,6 +6457,51 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_app_core_fn_func_picked_rounds_label(
         FfiConverterSequenceString.lower(`pickedLabels`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * The bare pin candidate inside whatever was pasted — NOT validated.
+         *
+         * `gen-tls-cert` prints the pin on a labelled line, and it also lands in
+         * config files and shell exports, so the clipboard arrives carrying any of
+         * "pin: <hex>", "SERVER_PIN=<hex>", quotes, spaces, a trailing newline, or
+         * upper case. None of that is part of the pin: hex contains no ':' or '=',
+         * so everything through the last one is a label.
+         */ fun `pinCandidate`(`raw`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_pin_candidate(
+        FfiConverterString.lower(`raw`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Why a non-empty pin field is unusable, in words for the person typing — or
+         * None when it is good (or empty, which each screen phrases its own way).
+         */ fun `pinComplaint`(`raw`: kotlin.String): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_pin_complaint(
+        FfiConverterString.lower(`raw`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * The whole write sequence for one provisioning, or an error to show the
+         * user. `pin_raw` may be anything pasted; empty means "use the built-in".
+         */
+    @Throws(ProvisionException::class) fun `provisionSteps`(`ssid`: kotlin.String, `password`: kotlin.String, `wsUrl`: kotlin.String, `pinRaw`: kotlin.String, `boardHasPinCharacteristic`: kotlin.Boolean, `boardHasServerCharacteristic`: kotlin.Boolean): List<UiProvisionStep> {
+            return FfiConverterSequenceTypeUiProvisionStep.lift(
+    uniffiRustCallWithError(ProvisionException) { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_provision_steps(
+        FfiConverterString.lower(`ssid`),FfiConverterString.lower(`password`),FfiConverterString.lower(`wsUrl`),FfiConverterString.lower(`pinRaw`),FfiConverterBoolean.lower(`boardHasPinCharacteristic`),FfiConverterBoolean.lower(`boardHasServerCharacteristic`),_status)
 }
     )
     }
@@ -6115,6 +6558,15 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_app_core_fn_func_rotation_remove(
         FfiConverterString.lower(`gameId`),FfiConverterSequenceString.lower(`extraGameIds`),FfiConverterSequenceString.lower(`excludedGameIds`),_status)
+}
+    )
+    }
+    
+ fun `serverPresets`(): List<UiServerPreset> {
+            return FfiConverterSequenceTypeUiServerPreset.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_server_presets(
+        _status)
 }
     )
     }

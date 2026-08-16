@@ -16,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
 import uniffi.app_core.UiGame
 import uniffi.app_core.cardHighlight
 import uniffi.app_core.displayedNowShowing
@@ -59,6 +60,23 @@ fun Dashboard(
                     }
                 },
                 actions = {
+                    if (state.boardOrder.size > 1) {
+                        var open by remember { mutableStateOf(false) }
+                        TextButton(onClick = { open = true }) { Text("Switch") }
+                        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                            for (id in state.boardOrder) {
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(state.boards[id]?.config?.name ?: "Scoreboard")
+                                    },
+                                    onClick = {
+                                        session.selectBoard(id)
+                                        open = false
+                                    },
+                                )
+                            }
+                        }
+                    }
                     IconButton(onClick = onSettings) {
                         Icon(Icons.Filled.Settings, contentDescription = "Settings")
                     }
@@ -243,6 +261,15 @@ private fun GameCard(session: Session, state: Session.AppState, boardId: String,
                 val hidden = game.id in cfg.spoilerGameIds
                 TextButton(onClick = { session.setGameSpoiler(boardId, game.id, !hidden) }) {
                     Text(if (hidden) "Reveal" else "Hide")
+                }
+                val ctx = androidx.compose.ui.platform.LocalContext.current
+                val scope = androidx.compose.runtime.rememberCoroutineScope()
+                state.frames[game.frameId]?.let { rgba ->
+                    TextButton(onClick = {
+                        scope.launch {
+                            Share.share(ctx, rgba, gameTitle(game.away, game.home))
+                        }
+                    }) { Text("Share") }
                 }
             }
         }

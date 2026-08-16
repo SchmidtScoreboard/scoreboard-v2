@@ -31,8 +31,13 @@ private fun Root(session: Session) {
     var screen by remember { mutableStateOf(Screen.Dashboard) }
     val boardId = state.selected
 
+    var setup by remember { mutableStateOf(false) }
     if (boardId == null) {
-        PairScreen(state) { session.pair(it) }
+        if (setup) {
+            SetupScreen(session, onDone = { setup = false }, onBack = { setup = false })
+        } else {
+            PairScreen(state, onPair = { session.pair(it) }, onSetup = { setup = true })
+        }
         return
     }
     BackHandler(enabled = screen != Screen.Dashboard) { screen = Screen.Dashboard }
@@ -55,7 +60,7 @@ private fun Root(session: Session) {
  * one that works today against an already-provisioned board.
  */
 @Composable
-private fun PairScreen(state: Session.AppState, onPair: (String) -> Unit) {
+private fun PairScreen(state: Session.AppState, onPair: (String) -> Unit, onSetup: () -> Unit) {
     var code by remember { mutableStateOf("") }
     Column(
         Modifier.fillMaxSize().padding(28.dp),
@@ -81,6 +86,20 @@ private fun PairScreen(state: Session.AppState, onPair: (String) -> Unit) {
         state.pairFailure?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         if (!state.connected) {
             Text("Connecting to your server…", color = MaterialTheme.colorScheme.outline)
+        }
+        Spacer(Modifier.height(8.dp))
+        HorizontalDivider()
+        Text(
+            "Brand-new scoreboard?",
+            style = MaterialTheme.typography.titleSmall,
+        )
+        Text(
+            "A scoreboard that has never been on Wi-Fi needs setting up over Bluetooth first.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.outline,
+        )
+        OutlinedButton(onClick = onSetup, modifier = Modifier.fillMaxWidth()) {
+            Text("Set up over Bluetooth")
         }
     }
 }

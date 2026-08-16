@@ -638,6 +638,12 @@ void uniffi_app_core_fn_method_scoreboardclient_update_firmware(void*_Nonnull pt
 void uniffi_app_core_fn_init_callback_vtable_clientlistener(UniffiVTableCallbackInterfaceClientListener* _Nonnull vtable
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_BLE_CONTRACT
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_BLE_CONTRACT
+RustBuffer uniffi_app_core_fn_func_ble_contract(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_CARD_HIGHLIGHT
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_CARD_HIGHLIGHT
 RustBuffer uniffi_app_core_fn_func_card_highlight(RustBuffer game, RustBuffer focused_game_id, RustBuffer now_showing, RustBuffer extra_game_ids, RustBuffer excluded_game_ids, RustCallStatus *_Nonnull out_status
@@ -710,9 +716,29 @@ RustBuffer uniffi_app_core_fn_func_game_title(RustBuffer away, RustBuffer home, 
 RustBuffer uniffi_app_core_fn_func_group_leagues(RustBuffer sports, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HOST_PORT_FOR_BOARD
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HOST_PORT_FOR_BOARD
+RustBuffer uniffi_app_core_fn_func_host_port_for_board(RustBuffer ws_url, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HTTP_BASE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HTTP_BASE
+RustBuffer uniffi_app_core_fn_func_http_base(RustBuffer ws_url, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_INVOLVES_FAVORITE
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_INVOLVES_FAVORITE
 int8_t uniffi_app_core_fn_func_involves_favorite(RustBuffer sport_id, RustBuffer away, RustBuffer home, RustBuffer favorite_team_ids, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_LEADERBOARD_DEPTH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_LEADERBOARD_DEPTH_OPTIONS
+RustBuffer uniffi_app_core_fn_func_leaderboard_depth_options(RustBuffer sport_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_LEAGUE_PREFS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_LEAGUE_PREFS
+RustBuffer uniffi_app_core_fn_func_league_prefs(RustBuffer config, RustBuffer sports, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_MODE_LABEL
@@ -725,9 +751,19 @@ RustBuffer uniffi_app_core_fn_func_mode_label(RustBuffer id, RustBuffer off_mode
 RustBuffer uniffi_app_core_fn_func_name_style_options(RustBuffer sport_id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_NORMALIZED_PIN
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_NORMALIZED_PIN
+RustBuffer uniffi_app_core_fn_func_normalized_pin(RustBuffer raw, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_OFF_MODE_VALUE
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_OFF_MODE_VALUE
 RustBuffer uniffi_app_core_fn_func_off_mode_value(RustBuffer mode, RustBuffer key, RustBuffer params, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_PARSE_NETWORKS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_PARSE_NETWORKS
+RustBuffer uniffi_app_core_fn_func_parse_networks(RustBuffer raw, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_PICKABLE_MODES
@@ -738,6 +774,21 @@ RustBuffer uniffi_app_core_fn_func_pickable_modes(RustBuffer off_modes, RustCall
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_PICKED_ROUNDS_LABEL
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_PICKED_ROUNDS_LABEL
 RustBuffer uniffi_app_core_fn_func_picked_rounds_label(RustBuffer picked_labels, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_PIN_CANDIDATE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_PIN_CANDIDATE
+RustBuffer uniffi_app_core_fn_func_pin_candidate(RustBuffer raw, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_PIN_COMPLAINT
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_PIN_COMPLAINT
+RustBuffer uniffi_app_core_fn_func_pin_complaint(RustBuffer raw, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_PROVISION_STEPS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_PROVISION_STEPS
+RustBuffer uniffi_app_core_fn_func_provision_steps(RustBuffer ssid, RustBuffer password, RustBuffer ws_url, RustBuffer pin_raw, int8_t board_has_pin_characteristic, int8_t board_has_server_characteristic, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_ROTATION_ADD
@@ -760,6 +811,12 @@ int8_t uniffi_app_core_fn_func_rotation_modified(RustBuffer focused_game_id, Rus
 RustBuffer uniffi_app_core_fn_func_rotation_remove(RustBuffer game_id, RustBuffer extra_game_ids, RustBuffer excluded_game_ids, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_SERVER_PRESETS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_SERVER_PRESETS
+RustBuffer uniffi_app_core_fn_func_server_presets(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_SNAP_BRIGHTNESS
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_SNAP_BRIGHTNESS
 uint8_t uniffi_app_core_fn_func_snap_brightness(double value, RustCallStatus *_Nonnull out_status
@@ -779,6 +836,11 @@ RustBuffer uniffi_app_core_fn_func_subscription_summary(RustBuffer sport, RustBu
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_TEAM_ID
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_TEAM_ID
 RustBuffer uniffi_app_core_fn_func_team_id(RustBuffer sport_id, RustBuffer abbrev, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_TOGGLE_ROUND
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_TOGGLE_ROUND
+RustBuffer uniffi_app_core_fn_func_toggle_round(RustBuffer round_id, RustBuffer picked, RustBuffer all_round_ids, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_TROUBLESHOOTING_FOOTER
@@ -1084,6 +1146,12 @@ void ffi_app_core_rust_future_free_void(uint64_t handle
 void ffi_app_core_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_BLE_CONTRACT
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_BLE_CONTRACT
+uint16_t uniffi_app_core_checksum_func_ble_contract(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_CARD_HIGHLIGHT
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_CARD_HIGHLIGHT
 uint16_t uniffi_app_core_checksum_func_card_highlight(void
@@ -1168,9 +1236,33 @@ uint16_t uniffi_app_core_checksum_func_group_leagues(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HOST_PORT_FOR_BOARD
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HOST_PORT_FOR_BOARD
+uint16_t uniffi_app_core_checksum_func_host_port_for_board(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HTTP_BASE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HTTP_BASE
+uint16_t uniffi_app_core_checksum_func_http_base(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_INVOLVES_FAVORITE
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_INVOLVES_FAVORITE
 uint16_t uniffi_app_core_checksum_func_involves_favorite(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_LEADERBOARD_DEPTH_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_LEADERBOARD_DEPTH_OPTIONS
+uint16_t uniffi_app_core_checksum_func_leaderboard_depth_options(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_LEAGUE_PREFS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_LEAGUE_PREFS
+uint16_t uniffi_app_core_checksum_func_league_prefs(void
     
 );
 #endif
@@ -1186,9 +1278,21 @@ uint16_t uniffi_app_core_checksum_func_name_style_options(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_NORMALIZED_PIN
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_NORMALIZED_PIN
+uint16_t uniffi_app_core_checksum_func_normalized_pin(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_OFF_MODE_VALUE
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_OFF_MODE_VALUE
 uint16_t uniffi_app_core_checksum_func_off_mode_value(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_PARSE_NETWORKS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_PARSE_NETWORKS
+uint16_t uniffi_app_core_checksum_func_parse_networks(void
     
 );
 #endif
@@ -1201,6 +1305,24 @@ uint16_t uniffi_app_core_checksum_func_pickable_modes(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_PICKED_ROUNDS_LABEL
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_PICKED_ROUNDS_LABEL
 uint16_t uniffi_app_core_checksum_func_picked_rounds_label(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_PIN_CANDIDATE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_PIN_CANDIDATE
+uint16_t uniffi_app_core_checksum_func_pin_candidate(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_PIN_COMPLAINT
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_PIN_COMPLAINT
+uint16_t uniffi_app_core_checksum_func_pin_complaint(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_PROVISION_STEPS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_PROVISION_STEPS
+uint16_t uniffi_app_core_checksum_func_provision_steps(void
     
 );
 #endif
@@ -1228,6 +1350,12 @@ uint16_t uniffi_app_core_checksum_func_rotation_remove(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_SERVER_PRESETS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_SERVER_PRESETS
+uint16_t uniffi_app_core_checksum_func_server_presets(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_SNAP_BRIGHTNESS
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_SNAP_BRIGHTNESS
 uint16_t uniffi_app_core_checksum_func_snap_brightness(void
@@ -1249,6 +1377,12 @@ uint16_t uniffi_app_core_checksum_func_subscription_summary(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_TEAM_ID
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_TEAM_ID
 uint16_t uniffi_app_core_checksum_func_team_id(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_TOGGLE_ROUND
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_TOGGLE_ROUND
+uint16_t uniffi_app_core_checksum_func_toggle_round(void
     
 );
 #endif

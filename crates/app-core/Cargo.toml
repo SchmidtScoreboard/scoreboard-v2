@@ -12,6 +12,7 @@ name = "uniffi-bindgen"
 path = "src/bin/uniffi-bindgen.rs"
 
 [dependencies]
+thiserror = "2"
 scoreboard-protocol = { path = "../protocol" }
 uniffi = { version = "0.28", features = ["cli"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
