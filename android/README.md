@@ -59,9 +59,22 @@ Then:
 version number as the entire error message. `run.sh` defaults `JAVA_HOME` to
 the brew `openjdk@21`.
 
-**Testing on your phone**: enable Developer options > USB debugging, plug in,
-accept the RSA prompt, then `./run.sh`. The app talks to the hosted server
+**Testing on your phone**: `./run.sh` picks the phone over a running emulator
+automatically; `--device SERIAL` overrides. The app talks to the hosted server
 over TLS, so the phone needs no special network setup.
+
+If `adb devices` does not list the phone, all four of these must be true —
+the first three are the usual culprits:
+
+1. Developer options on (tap Build number 7x in Settings > About phone)
+2. USB debugging on (Settings > System > Developer options)
+3. a DATA cable, plugged into the Mac itself — many cables are charge-only,
+   and a charger port never enumerates
+4. USB mode set to File transfer / MTP, not "No data transfer"
+
+Then accept the "Allow USB debugging?" prompt on the phone (tick *always
+allow*). A phone that appears as `unauthorized` in `adb devices` is stuck on
+exactly that prompt.
 
 `build-core.sh` is the only correct way to refresh the core — the same rule
 as `ios/build-core.sh`.

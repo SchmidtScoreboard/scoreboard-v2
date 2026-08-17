@@ -1,45 +1,110 @@
 #!/usr/bin/env bash
-# Build, install, and launch on whatever is attached — the emulator if one is
-# running, your phone if it is plugged in with USB debugging on.
+# Build, install, and launch on a device.
 #
-#   ./run.sh            build + install + launch
-#   ./run.sh --emu      boot the "scoreboard" AVD first (creates it if needed)
-#   ./run.sh --logs     follow the app's logcat after launching
+#   ./run.sh                 the attached phone, else a running emulator
+#   ./run.sh --emu           force the emulator (booting it if needed)
+#   ./run.sh --device SERIAL a specific one (see: adb devices)
+#   ./run.sh --logs          follow the app's log after launching
+#   ./run.sh --clean         wipe build/ first (see the dex note below)
 #
-# The Rust core is NOT rebuilt here — run ./build-core.sh after any change to
+# The Rust core is NOT rebuilt here — run ./build-core.sh after changing
 # crates/app-core or crates/protocol.
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# AGP accepts JDK 17-21 and reports a newer one as a bare version number with
+# no other text, so pin it rather than inherit whatever `java` is.
 export JAVA_HOME="${JAVA_HOME:-/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home}"
 export ANDROID_HOME="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
 export PATH="$JAVA_HOME/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
 APP=com.markschmidt.scoreboard
 
-# Gradle needs a JDK 17-21; the brew default is newer than AGP accepts and
-# fails with a bare version number for an error message.
-java -version 2>&1 | head -1
-
-if [[ "${1:-}" == "--emu" ]]; then
-    if ! adb devices | grep -q emulator; then
-        "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" list avd | grep -q "Name: scoreboard" || \
-            echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd \
-                -n scoreboard -k "system-images;android-35;google_apis;arm64-v8a" --force
-        nohup emulator -avd scoreboard -no-snapshot -no-boot-anim -gpu swiftshader_indirect >/tmp/emu.log 2>&1 &
-        adb wait-for-device
-        until [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]]; do sleep 3; done
-    fi
+WANT_EMU=0; WANT_LOGS=0; WANT_CLEAN=0; SERIAL=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --emu) WANT_EMU=1 ;;
+        --logs) WANT_LOGS=1 ;;
+        --clean) WANT_CLEAN=1 ;;
+        --device) SERIAL="${2:-}"; shift ;;
+        *) echo "unknown option: $1" >&2; exit 2 ;;
+    esac
     shift
+done
+
+if [[ "$WANT_EMU" == 1 && -z "$SERIAL" ]] && ! adb devices | grep -q "^emulator-"; then
+    AVDM="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
+    "$AVDM" list avd 2>/dev/null | grep -q "Name: scoreboard" || \
+        echo no | "$AVDM" create avd -n scoreboard \
+            -k "system-images;android-35;google_apis;arm64-v8a" --force >/dev/null
+    nohup emulator -avd scoreboard -no-snapshot -no-boot-anim -gpu swiftshader_indirect \
+        >/tmp/emu.log 2>&1 &
+    echo "booting the emulator…"
+    adb wait-for-device
+    until [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]]; do sleep 3; done
 fi
 
-adb get-state >/dev/null 2>&1 || { echo "no device: plug in a phone (USB debugging on) or run ./run.sh --emu" >&2; exit 1; }
+# Pick a target. `adb install` refuses to guess when several are attached, so
+# resolve the serial HERE and pass -s to everything.
+# bash 3.2 (what macOS ships) has no mapfile — read the list portably.
+DEVICES=()
+while IFS= read -r line; do
+    [[ -n "$line" ]] && DEVICES+=("$line")
+done < <(adb devices | awk '/\tdevice$/ {print $1}')
+UNAUTH="$(adb devices | awk '/\tunauthorized$/ {print $1}')"
+if [[ -n "$SERIAL" ]]; then
+    :
+elif [[ "$WANT_EMU" == 1 ]]; then
+    SERIAL="$(printf '%s\n' "${DEVICES[@]}" | grep '^emulator-' | head -1 || true)"
+elif [[ ${#DEVICES[@]:-0} -eq 1 ]]; then
+    SERIAL="${DEVICES[0]}"
+elif [[ ${#DEVICES[@]:-0} -gt 1 ]]; then
+    # A phone outranks an emulator: if one is plugged in, it is what you meant.
+    SERIAL="$(printf '%s\n' "${DEVICES[@]}" | grep -v '^emulator-' | head -1 || true)"
+    [[ -n "$SERIAL" ]] || SERIAL="${DEVICES[0]}"
+    echo "several devices attached; using $SERIAL (override with --device)"
+fi
+
+if [[ -z "${SERIAL:-}" ]]; then
+    echo "no usable device." >&2
+    if [[ -n "$UNAUTH" ]]; then
+        echo "  $UNAUTH is UNAUTHORIZED — unlock the phone and accept the" >&2
+        echo "  'Allow USB debugging?' prompt (tick 'always allow')." >&2
+    else
+        cat >&2 <<'HELP'
+  For a phone, all four must be true:
+    1. Developer options on   (tap Build number 7x in Settings > About phone)
+    2. USB debugging on       (Settings > System > Developer options)
+    3. a DATA cable, into the Mac directly (many cables are charge-only,
+       and a charger port will never enumerate)
+    4. the USB mode set to File transfer / MTP, not "No data transfer"
+  Then: adb devices   — it should list the phone (accept the RSA prompt).
+  Or run against the emulator instead:  ./run.sh --emu
+HELP
+    fi
+    exit 1
+fi
+
+[[ "$WANT_CLEAN" == 1 ]] && ./gradlew clean -q
 
 echo "sdk.dir=$ANDROID_HOME" > local.properties
-./gradlew assembleDebug -q
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-adb shell am start -n "$APP/.MainActivity" >/dev/null
-echo "launched on $(adb devices | sed -n 2p | cut -f1)"
+# Incremental dexing occasionally leaves a stale archive behind and fails with
+# "Type ... is defined multiple times". A clean is the fix, and retrying it
+# automatically beats making that someone else's puzzle.
+if ! ./gradlew assembleDebug -q 2>/tmp/gradle-err.txt; then
+    if grep -q "is defined multiple times" /tmp/gradle-err.txt; then
+        echo "stale dex archive — cleaning and retrying…"
+        ./gradlew clean -q
+        ./gradlew assembleDebug -q
+    else
+        cat /tmp/gradle-err.txt >&2
+        exit 1
+    fi
+fi
 
-if [[ "${1:-}" == "--logs" ]]; then
-    adb logcat --pid="$(adb shell pidof "$APP")"
+adb -s "$SERIAL" install -r app/build/outputs/apk/debug/app-debug.apk
+adb -s "$SERIAL" shell am start -n "$APP/.MainActivity" >/dev/null
+echo "launched on $SERIAL"
+
+if [[ "$WANT_LOGS" == 1 ]]; then
+    adb -s "$SERIAL" logcat --pid="$(adb -s "$SERIAL" shell pidof "$APP" | tr -d '\r')"
 fi
