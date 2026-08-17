@@ -63,7 +63,20 @@ the brew `openjdk@21`.
 automatically; `--device SERIAL` overrides. The app talks to the hosted server
 over TLS, so the phone needs no special network setup.
 
-If `adb devices` does not list the phone, all four of these must be true —
+`adb` ships inside the SDK and is **not on a normal PATH**, so
+`./run.sh --devices` is the way to ask what it can see without setting one up:
+
+```bash
+./run.sh --devices
+```
+
+To get `adb` itself on your PATH (optional — nothing here needs it):
+
+```bash
+echo 'export PATH="$HOME/Library/Android/sdk/platform-tools:$PATH"' >> ~/.zshrc
+```
+
+If the phone is not listed, all four of these must be true —
 the first three are the usual culprits:
 
 1. Developer options on (tap Build number 7x in Settings > About phone)

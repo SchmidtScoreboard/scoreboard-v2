@@ -6,6 +6,7 @@
 #   ./run.sh --device SERIAL a specific one (see: adb devices)
 #   ./run.sh --logs          follow the app's log after launching
 #   ./run.sh --clean         wipe build/ first (see the dex note below)
+#   ./run.sh --devices       what adb can see (no PATH setup needed)
 #
 # The Rust core is NOT rebuilt here — run ./build-core.sh after changing
 # crates/app-core or crates/protocol.
@@ -22,6 +23,9 @@ APP=com.markschmidt.scoreboard
 WANT_EMU=0; WANT_LOGS=0; WANT_CLEAN=0; SERIAL=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        # adb lives in the SDK, which is not on a normal PATH — so asking
+        # "what does adb see?" has to be possible without setting one up.
+        --devices) adb devices -l; exit 0 ;;
         --emu) WANT_EMU=1 ;;
         --logs) WANT_LOGS=1 ;;
         --clean) WANT_CLEAN=1 ;;
@@ -77,7 +81,8 @@ if [[ -z "${SERIAL:-}" ]]; then
     3. a DATA cable, into the Mac directly (many cables are charge-only,
        and a charger port will never enumerate)
     4. the USB mode set to File transfer / MTP, not "No data transfer"
-  Then: adb devices   — it should list the phone (accept the RSA prompt).
+  Then: ./run.sh --devices   — it should list the phone (adb is inside the
+  SDK, so it is not on a normal PATH; that flag needs no setup).
   Or run against the emulator instead:  ./run.sh --emu
 HELP
     fi
