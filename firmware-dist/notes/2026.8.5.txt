@@ -1,0 +1,6 @@
+- One menu now. Tap the knob and you get everything in one list: what the scoreboard is showing at the top — Scores, Clock, Weather, Off — and the settings underneath it.
+- No more remembering which press did what. A double-press still opens the same menu, so the old habit keeps working.
+- The menu opens already pointing at the choice you probably want: Off while the scoreboard is lit, Scores while it's dark. Two taps, same as the old on/off press.
+- A dot on the right marks what the scoreboard is showing right now.
+- The knob still works with no internet: picking Off darkens the panel straight away and tells the server when it reconnects.
+- Holding the knob still erases the scoreboard, exactly as before.

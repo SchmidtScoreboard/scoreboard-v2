@@ -29,7 +29,7 @@ use embedded_graphics::{
     text::{Alignment, Baseline, Text, TextStyleBuilder},
 };
 use scoreboard_protocol::{
-    decode_frame_payload, frame_payload_is_legacy_raw, rgb565_to_888, ClientMsg, FrameId, Manifest, FRAME_CODEC_PAL_RLE,
+    decode_frame_payload, frame_payload_is_legacy_raw, rgb565_to_888, ClientMsg, FrameId, Manifest, ModeEntry, FRAME_CODEC_PAL_RLE,
     FRAME_CODEC_RAW, FRAME_HEIGHT, FRAME_PIXELS, FRAME_WIDTH,
 };
 
@@ -141,11 +141,6 @@ enum MenuScreen {
     DebugInfo,
     ResetConfirm,
     UpdateConfirm,
-    /// The single-press mode picker: what the panel should be DOING, chosen
-    /// on the panel. Rows come from `Manifest.modes` (server-authored), so a
-    /// fork's screens appear with no firmware change. Distinct from Root — the
-    /// admin menu stays on the double tap.
-    ModePicker,
 }
 
 struct MenuState {
@@ -156,20 +151,29 @@ struct MenuState {
     last_interaction: u64, // any knob activity; 120s of silence closes the menu
 }
 
-// Root menu rows, in owner-specified order. EXIT is first so the common case
-// (peeked at the menu, done now) is the default selection plus one tap.
-const MENU_EXIT: usize = 0;
-const MENU_UPDATE: usize = 1;
-const MENU_PAIR: usize = 2;
-const MENU_DEBUG: usize = 3;
-const MENU_RESET: usize = 4;
-const MENU_ITEM_COUNT: usize = 5;
-// The debug-info screen shows this many FONT_4X6 rows at once (5 × 6px + 1px
-// top margin fills the 32px panel); the rest scroll.
-const DEBUG_INFO_VISIBLE: usize = 5;
-// Same geometry for the mode picker: 5 rows visible, window scrolls with the
-// cursor when a forked server offers more.
-const PICKER_VISIBLE: usize = 5;
+/// One row of the single menu a tap opens.
+///
+/// There used to be TWO menus — a tap picked what the panel shows, a
+/// double-tap reached the settings — which meant remembering which gesture
+/// held the thing you wanted. They are one list now: what the board is
+/// SHOWING at the top, because that is what people come for, then the
+/// settings below it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MenuRow {
+    /// Index into `Manifest.modes`.
+    Mode(usize),
+    Exit,
+    Update,
+    PairCode,
+    DebugInfo,
+    Reset,
+}
+
+// The panel shows this many FONT_4X6 rows at once (5 × 6px + 1px top margin
+// fills the 32px panel); the rest scroll. One constant now — the menu, the
+// debug info, and anything else windowed all use the same geometry.
+const MENU_VISIBLE: usize = 5;
+const DEBUG_INFO_VISIBLE: usize = MENU_VISIBLE;
 // Menu selection fills: deep blue for the ordinary selection, the deep-red
 // member of the danger family for ERASE. Row text stays WHITE on top of them.
 // Both values are picked for brightness 10, the worst case: the fill is still
@@ -1007,17 +1011,14 @@ impl Board {
                     self.reprovision = true;
                     return;
                 }
-                if self.online && matches!(self.mode, Mode::Running) {
-                    // A server that lists modes gets a PICKER; one that
-                    // predates them keeps the legacy press-and-let-the-server
-                    // -decide. The empty-list fallback is also what keeps the
-                    // button alive against a rolled-back server.
-                    if self.manifest.as_ref().is_some_and(|m| !m.modes.is_empty()) {
-                        self.open_mode_picker();
-                    } else {
-                        self.outbox.push(ClientMsg::ButtonPress);
-                    }
-                } else if matches!(self.mode, Mode::Running | Mode::Asleep) {
+                if matches!(self.mode, Mode::Running | Mode::Asleep) {
+                    // ONE menu, opened by a tap: what the panel is showing at
+                    // the top, the settings below. It works offline and while
+                    // asleep too — DEBUG INFO and ERASE are most wanted
+                    // exactly when the server is unreachable, and the mode
+                    // rows still queue.
+                    self.open_menu();
+                } else if false {
                     // Sleep toggle only makes sense between running and asleep;
                     // a press on the setup/pairing screens must NOT yank the
                     // board out of provisioning (the hold-to-reset still works
@@ -1042,11 +1043,9 @@ impl Board {
                     self.sticky_pairing = false;
                 }
             }
-            // double press: toggles the settings menu (open, since it's closed
-            // here). This was a reserved no-op after the pairing screen moved
-            // into the menu; the menu itself moved here from the old 3s hold,
-            // which is erase-only now. Never reaches the sleep toggle — a
-            // fumbled double tap must not flash the panel off-and-on.
+            // double press: the SAME menu. It used to be the only way to the
+            // settings, so it keeps working rather than becoming a dead
+            // gesture for everyone with the habit — a tap gets there now.
             Gesture::Double => self.open_menu(),
             // long press: factory reset -> setup
             Gesture::Long => self.enter_setup(),
@@ -1067,50 +1066,68 @@ impl Board {
         self.mode = Mode::Setup;
     }
 
-    /// Open the single-press mode picker. The cursor starts on the OBVIOUS
-    /// next mode — Off when anything is lit, Scores when off — so press-press
-    /// approximates the old toggle, while rotation reaches everything else.
-    fn open_mode_picker(&mut self) {
-        if self.menu.is_some() {
-            return;
-        }
-        let (cursor, count) = self
-            .manifest
-            .as_ref()
-            .map(|man| {
-                let modes = &man.modes;
-                let target = if man.mode == "off" {
-                    modes.iter().position(|e| e.id == "scores")
-                } else {
-                    modes.iter().position(|e| e.id == "off")
-                };
-                (target.unwrap_or(0), modes.len())
-            })
-            .unwrap_or((0, 0));
-        if count == 0 {
-            return;
-        }
-        self.menu = Some(MenuState {
-            screen: MenuScreen::ModePicker,
-            selected: cursor,
-            // Window the cursor into view from the start (a default of Off on
-            // a 6-row fork list must not open scrolled to the top with the
-            // cursor off-screen).
-            scroll: cursor.saturating_sub(PICKER_VISIBLE - 1),
-            confirm_selected: false,
-            last_interaction: self.clock,
-        });
+/// The menu's rows: every mode the server offers, then the settings.
+    ///
+    /// Built fresh each time rather than stored, because the mode list arrives
+    /// with the manifest and can change under an open menu. A server that
+    /// offers no modes (one that predates them) simply yields the settings —
+    /// the menu is never empty, so a tap always does something.
+    fn menu_rows(&self) -> Vec<MenuRow> {
+        // Two rows minimum, ALWAYS — see `menu_modes`.
+        let mut rows: Vec<MenuRow> = (0..self.menu_modes().len()).map(MenuRow::Mode).collect();
+        rows.extend([
+            MenuRow::Exit,
+            MenuRow::Update,
+            MenuRow::PairCode,
+            MenuRow::DebugInfo,
+            MenuRow::Reset,
+        ]);
+        rows
     }
 
-    /// Open the settings menu (the double-tap toggle). The mode machine is
-    /// left exactly as it stands — the menu is an overlay, and dropping it
-    /// later is the whole "restore the prior state" story.
+    /// The modes the menu offers: the server's list, or — when there is none
+    /// (no manifest yet, or a server that predates modes) — the two universal
+    /// ones.
+    ///
+    /// The fallback is what keeps the knob from becoming a dead end. Before
+    /// the menus merged, a press with no server did a LOCAL dark toggle; with
+    /// one menu and an empty mode list there would have been no way to darken
+    /// an offline panel at all. Selecting these offline flips the panel
+    /// immediately and queues the message for the reconnect.
+    fn menu_modes(&self) -> Vec<ModeEntry> {
+        match self.manifest.as_ref().map(|m| m.modes.clone()) {
+            Some(modes) if !modes.is_empty() => modes,
+            _ => vec![
+                ModeEntry { id: "scores".into(), label: "SCORES".into() },
+                ModeEntry { id: "off".into(), label: "OFF".into() },
+            ],
+        }
+    }
+
+    /// Open the menu. The cursor starts on the OBVIOUS next mode — Off when
+    /// anything is lit, Scores when off — so tap-tap still approximates the
+    /// old on/off toggle, while rotation reaches everything else.
     fn open_menu(&mut self) {
         if self.menu.is_none() {
+            let rows = self.menu_rows();
+            // What the panel is doing now decides what the tap most likely
+            // wants next. Offline the manifest may be absent — fall back to
+            // the LOCAL mode, which is the honest answer there.
+            let showing_off = match self.manifest.as_ref() {
+                Some(man) if !man.mode.is_empty() => man.mode == "off",
+                _ => self.mode == Mode::Asleep,
+            };
+            let want = if showing_off { "scores" } else { "off" };
+            let cursor = self
+                .menu_modes()
+                .iter()
+                .position(|e| e.id == want)
+                .unwrap_or_else(|| rows.iter().position(|r| *r == MenuRow::Exit).unwrap_or(0));
             self.menu = Some(MenuState {
                 screen: MenuScreen::Root,
-                selected: 0,
-                scroll: 0,
+                // Window the cursor into view from the start.
+                scroll: cursor.saturating_sub(MENU_VISIBLE - 1),
+                selected: cursor,
                 confirm_selected: false,
                 last_interaction: self.clock,
             });
@@ -1130,8 +1147,16 @@ impl Board {
         m.last_interaction = clock;
         match m.screen {
             MenuScreen::Root => {
-                m.selected = (m.selected as i32 - delta).clamp(0, MENU_ITEM_COUNT as i32 - 1)
-                    as usize;
+                let count = self.menu_rows().len();
+                let m = self.menu.as_mut().unwrap();
+                m.selected =
+                    (m.selected as i32 - delta).clamp(0, count.saturating_sub(1) as i32) as usize;
+                // Keep the cursor inside the visible window.
+                if m.selected < m.scroll {
+                    m.scroll = m.selected;
+                } else if m.selected >= m.scroll + MENU_VISIBLE {
+                    m.scroll = m.selected + 1 - MENU_VISIBLE;
+                }
             }
             // The code screen has nothing to scroll; the turn only counts as
             // presence (it keeps the 120s timeout from closing mid-pairing).
@@ -1148,31 +1173,44 @@ impl Board {
             MenuScreen::ResetConfirm | MenuScreen::UpdateConfirm => {
                 m.confirm_selected = delta < 0
             }
-            MenuScreen::ModePicker => {
-                let count = self.manifest.as_ref().map(|man| man.modes.len()).unwrap_or(0);
-                let m = self.menu.as_mut().unwrap();
-                m.selected = (m.selected as i32 - delta)
-                    .clamp(0, count.saturating_sub(1) as i32) as usize;
-                // Keep the cursor inside the visible window.
-                if m.selected < m.scroll {
-                    m.scroll = m.selected;
-                } else if m.selected >= m.scroll + PICKER_VISIBLE {
-                    m.scroll = m.selected + 1 - PICKER_VISIBLE;
-                }
-            }
         }
     }
 
     /// Tap while the menu is up.
     fn menu_select(&mut self) {
         let clock = self.clock;
+        // Resolve the row BEFORE taking the mutable borrow: the row list is
+        // derived from the manifest, and `&mut self.menu` would lock `self`.
+        let picked = self
+            .menu
+            .as_ref()
+            .filter(|m| m.screen == MenuScreen::Root)
+            .and_then(|m| self.menu_rows().get(m.selected).copied());
         let Some(m) = &mut self.menu else { return };
         m.last_interaction = clock;
         match m.screen {
-            MenuScreen::Root => match m.selected {
-                // The default selection: one tap in, one tap out.
-                MENU_EXIT => self.menu = None,
-                MENU_UPDATE => {
+            MenuScreen::Root => match picked {
+                // A mode row: tell the server, close, and let the next
+                // manifest be the answer. Selecting the CURRENT mode is still
+                // a real pick — during quiet hours it is the override gesture.
+                Some(MenuRow::Mode(i)) => {
+                    let chosen = self.menu_modes().get(i).map(|e| e.id.clone());
+                    if let Some(mode) = chosen {
+                        // Offline, "off" still darkens the panel immediately —
+                        // the knob has to work with no server, which is what
+                        // the old local sleep flip was for. The queued message
+                        // reconciles when the socket returns.
+                        if !self.online {
+                            self.mode = if mode == "off" { Mode::Asleep } else { Mode::Running };
+                        }
+                        self.outbox.push(ClientMsg::SelectMode { mode });
+                    }
+                    self.menu = None;
+                }
+                // The default selection when there are no modes: one tap in,
+                // one tap out.
+                Some(MenuRow::Exit) => self.menu = None,
+                Some(MenuRow::Update) => {
                     // Armed only when the server has said a newer image exists;
                     // with nothing offered the row reads UP TO DATE and the tap
                     // is a no-op. The request itself sits behind a confirm
@@ -1185,18 +1223,18 @@ impl Board {
                         m.confirm_selected = false;
                     }
                 }
-                MENU_PAIR => m.screen = MenuScreen::PairCode,
-                MENU_DEBUG => {
+                Some(MenuRow::PairCode) => m.screen = MenuScreen::PairCode,
+                Some(MenuRow::DebugInfo) => {
                     m.screen = MenuScreen::DebugInfo;
                     m.scroll = 0;
                 }
-                MENU_RESET => {
+                Some(MenuRow::Reset) => {
                     m.screen = MenuScreen::ResetConfirm;
                     // CANCEL every visit — a stale ERASE from a backed-out
                     // attempt must never be one tap from firing.
                     m.confirm_selected = false;
                 }
-                _ => {}
+                None => {}
             },
             // The sub-screens tap back to the menu root.
             MenuScreen::PairCode | MenuScreen::DebugInfo => m.screen = MenuScreen::Root,
@@ -1223,22 +1261,6 @@ impl Board {
                 } else {
                     m.screen = MenuScreen::Root;
                 }
-            }
-            MenuScreen::ModePicker => {
-                // Tap = pick the row under the cursor. Queued like every other
-                // outbound (sent on reconnect if the socket just dropped), and
-                // the menu closes — the next manifest is the answer. Selecting
-                // the CURRENT mode is still a real pick: during quiet hours it
-                // is the override gesture, and the server treats it as one.
-                let chosen = self
-                    .manifest
-                    .as_ref()
-                    .and_then(|man| man.modes.get(m.selected))
-                    .map(|e| e.id.clone());
-                if let Some(mode) = chosen {
-                    self.outbox.push(ClientMsg::SelectMode { mode });
-                }
-                self.menu = None;
             }
         }
     }
@@ -1272,7 +1294,6 @@ impl Board {
                 MenuScreen::DebugInfo => self.screen_debug_info(m),
                 MenuScreen::ResetConfirm => self.screen_reset_confirm(m),
                 MenuScreen::UpdateConfirm => self.screen_update_confirm(m),
-                MenuScreen::ModePicker => self.screen_mode_picker(m),
             };
             scale_buf(&mut buf, self.local_brightness);
             return buf;
@@ -1569,48 +1590,60 @@ impl Board {
     /// scrolling. The blue is picked to stay visibly blue, with the white
     /// text still brighter, at brightness 10 (see
     /// `menu_selection_stays_legible_at_min_brightness` and the screen dumps).
-    /// The single-press mode picker: a windowed list of the server's modes,
-    /// the same row geometry and selection bar as the root menu. The CURRENT
-    /// mode wears a 2px amber tick at the right edge — "you are here" must
-    /// survive scrolling, so it marks the row, not a fixed position.
-    fn screen_mode_picker(&self, m: &MenuState) -> Vec<u32> {
-        let mut c = Canvas::new();
-        let Some(man) = &self.manifest else { return c.into_u32() };
-        let amber = Rgb888::new(0xFF, 0x88, 0x00);
-        for (i, e) in man.modes.iter().enumerate().skip(m.scroll).take(PICKER_VISIBLE) {
-            let row = i - m.scroll;
-            let y = 1 + row as i32 * 6;
-            if i == m.selected {
-                Rectangle::new(Point::new(0, y - 1), Size::new(FRAME_WIDTH as u32, 7))
-                    .into_styled(PrimitiveStyle::with_fill(MENU_SELECT_BLUE))
-                    .draw(&mut c)
-                    .ok();
-            }
-            left_text(&mut c, &e.label, 1, y, Rgb888::WHITE);
-            if e.id == man.mode {
-                Rectangle::new(Point::new(FRAME_WIDTH as i32 - 3, y), Size::new(2, 5))
-                    .into_styled(PrimitiveStyle::with_fill(amber))
-                    .draw(&mut c)
-                    .ok();
-            }
-        }
-        c.into_u32()
-    }
-
     fn screen_menu_root(&self, m: &MenuState) -> Vec<u32> {
         let mut c = Canvas::new();
         let update_row = self.update_row_label();
-        let items =
-            ["EXIT", update_row.as_str(), "PAIR CODE", "DEBUG INFO", "RESET BOARD"];
-        for (i, label) in items.iter().enumerate() {
-            let y = 1 + i as i32 * 6;
+        let rows = self.menu_rows();
+        let modes = self.menu_modes();
+        // With no manifest the LOCAL mode is what the panel is actually
+        // doing, so the tick still marks the truth offline.
+        let current: String = match self.manifest.as_ref() {
+            Some(man) if !man.mode.is_empty() => man.mode.clone(),
+            _ => if self.mode == Mode::Asleep { "off".into() } else { "scores".into() },
+        };
+        let amber = Rgb888::new(0xFF, 0x88, 0x00);
+        // Bright enough to read as a divider at brightness 10, dim enough
+        // never to compete with a row label.
+        let rule = Rgb888::new(0x66, 0x66, 0x66);
+
+        for (i, row) in rows.iter().enumerate().skip(m.scroll).take(MENU_VISIBLE) {
+            let slot = i - m.scroll;
+            let y = 1 + slot as i32 * 6;
             if i == m.selected {
                 Rectangle::new(Point::new(0, y - 1), Size::new(FRAME_WIDTH as u32, 7))
                     .into_styled(PrimitiveStyle::with_fill(MENU_SELECT_BLUE))
                     .draw(&mut c)
                     .ok();
             }
+            let label: &str = match row {
+                MenuRow::Mode(mi) => modes.get(*mi).map(|e| e.label.as_str()).unwrap_or(""),
+                MenuRow::Exit => "EXIT",
+                MenuRow::Update => update_row.as_str(),
+                MenuRow::PairCode => "PAIR CODE",
+                MenuRow::DebugInfo => "DEBUG INFO",
+                MenuRow::Reset => "RESET BOARD",
+            };
             left_text(&mut c, label, 1, y, Rgb888::WHITE);
+            // "You are here" marks the ROW, not a fixed position, so it
+            // survives scrolling.
+            if let MenuRow::Mode(mi) = row {
+                if modes.get(*mi).is_some_and(|e| e.id == current) {
+                    Rectangle::new(Point::new(FRAME_WIDTH as i32 - 3, y), Size::new(2, 5))
+                        .into_styled(PrimitiveStyle::with_fill(amber))
+                        .draw(&mut c)
+                        .ok();
+                }
+            }
+            // A hairline where the modes end and the settings begin — the two
+            // groups are one list, but they are not the same kind of thing.
+            let next_starts_settings = matches!(row, MenuRow::Mode(_))
+                && matches!(rows.get(i + 1), Some(MenuRow::Exit));
+            if next_starts_settings && slot + 1 < MENU_VISIBLE {
+                Rectangle::new(Point::new(0, y + 5), Size::new(FRAME_WIDTH as u32, 1))
+                    .into_styled(PrimitiveStyle::with_fill(rule))
+                    .draw(&mut c)
+                    .ok();
+            }
         }
         c.into_u32()
     }
@@ -2089,7 +2122,6 @@ fn overlay_brightness_bar(buf: &mut [u32], brightness: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scoreboard_protocol::ModeEntry;
     use scoreboard_protocol::encode_frame_payload;
 
     /// Wrap pixels the way the wire does: frames reach `on_frame` as
@@ -2108,25 +2140,49 @@ mod tests {
         p
     }
 
-    /// DELIBERATE behavior change (twice over): double-press once toggled the
-    /// pairing screen, then became a reserved no-op — now it TOGGLES the
-    /// settings menu. It must still never alias to two sleep toggles, and it
-    /// must queue nothing for the server, online or off.
+    /// One tap opens the menu (cursor on the obvious next mode), the second
+    /// selects it — the old single-press toggle, now with the choice visible.
+    /// Each tap must clear the double-tap window before it resolves.
+    /// Move the menu cursor onto a given row. Rows shift as the server's
+    /// mode list changes, so tests navigate by what they MEAN.
+    fn goto_row(b: &mut Board, want: MenuRow) {
+        let target = b.menu_rows().iter().position(|r| *r == want).expect("row exists");
+        let from = b.menu.as_ref().expect("menu open").selected;
+        for _ in 0..target.saturating_sub(from) {
+            b.encoder(-1);
+        }
+        for _ in 0..from.saturating_sub(target) {
+            b.encoder(1);
+        }
+        assert_eq!(b.menu.as_ref().unwrap().selected, target);
+    }
+
+    fn tap_tap(b: &mut Board, t0: u64) {
+        for k in 0..2 {
+            let t = t0 + k * (DOUBLE_WINDOW_MS + 200);
+            b.button_down(t);
+            b.button_up(t + 40);
+            b.tick(t + 40 + DOUBLE_WINDOW_MS + 10);
+        }
+    }
+
+    /// DELIBERATE behavior change: a tap used to sleep the board outright and
+    /// now opens the one menu with the cursor on the obvious next mode, so
+    /// tap-tap is the old toggle with the choice made visible. A double press
+    /// reaches the SAME menu (the habit still works) and must never alias to
+    /// two sleep toggles or queue anything by itself.
     #[test]
     fn gestures_drive_mode() {
         let mut b = Board::new();
         b.mode = Mode::Running;
 
-        // single press -> sleep (resolved after the double window)
-        b.button_down(0);
-        b.button_up(50);
-        b.tick(500);
+        // A tap opens the menu with the cursor already on the obvious next
+        // mode, so tap-tap is the old one-press toggle: OFF while lit...
+        tap_tap(&mut b, 0);
         assert_eq!(b.mode(), Mode::Asleep);
 
-        // single press -> wake
-        b.button_down(1000);
-        b.button_up(1050);
-        b.tick(1500);
+        // ...and SCORES while dark.
+        tap_tap(&mut b, 2000);
         assert_eq!(b.mode(), Mode::Running);
 
         // double press: toggles the menu — no sleep flicker, no pairing
@@ -2140,8 +2196,9 @@ mod tests {
             b.button_down(t0 + 120);
             b.button_up(t0 + 160);
             b.tick(t0 + 160 + DOUBLE_WINDOW_MS + 10);
-            assert!(b.menu_open(), "double press opens the menu (online={online})");
-            assert_eq!(b.mode(), Mode::Running, "the mode machine is untouched (online={online})");
+            assert!(b.menu_open(), "double press opens the same menu (online={online})");
+            let was = b.mode();
+            assert!(matches!(was, Mode::Running | Mode::Asleep));
             assert!(
                 b.take_outgoing().is_empty(),
                 "a double press sends nothing (online={online})"
@@ -2153,7 +2210,7 @@ mod tests {
             b.button_up(t0 + 1160);
             b.tick(t0 + 1160 + DOUBLE_WINDOW_MS + 10);
             assert!(!b.menu_open(), "double press closes the menu (online={online})");
-            assert_eq!(b.mode(), Mode::Running, "still no sleep toggle (online={online})");
+            assert_eq!(b.mode(), was, "opening and closing changes nothing (online={online})");
             assert!(b.take_outgoing().is_empty(), "closing sends nothing (online={online})");
         }
     }
@@ -2176,10 +2233,10 @@ mod tests {
         assert_ne!(once, b.framebuffer(), "wall time advances the animation");
     }
 
-    /// A manifest whose `modes` list is non-empty turns the single press into
-    /// the PICKER. Selection reports SelectMode; nothing sends ButtonPress.
+    /// A tap opens the ONE menu: modes at the top, settings below.
+    /// Selecting a mode reports SelectMode; nothing sends ButtonPress.
     #[test]
-    fn single_press_opens_the_picker_and_selection_reports_the_mode() {
+    fn a_tap_opens_one_menu_with_modes_on_top() {
         let mut b = Board::new();
         b.mode = Mode::Running;
         b.set_online(true);
@@ -2203,11 +2260,21 @@ mod tests {
         b.take_outgoing(); // drop the frame requests from the manifest
 
         b.gesture(Gesture::Single);
-        assert!(b.menu.is_some(), "press opens the picker");
-        assert_eq!(b.menu.as_ref().unwrap().screen, MenuScreen::ModePicker);
-        assert!(b.take_outgoing().is_empty(), "no ButtonPress — the picker replaced it");
+        assert!(b.menu.is_some(), "a tap opens the menu");
+        assert_eq!(b.menu.as_ref().unwrap().screen, MenuScreen::Root);
+        assert!(b.take_outgoing().is_empty(), "no ButtonPress — the menu replaced it");
 
-        // Cursor defaulted to Off (the board is lit): press-press ≈ old toggle.
+        // The four modes lead, then the settings — one list.
+        let rows = b.menu_rows();
+        assert_eq!(
+            &rows[..4],
+            &[MenuRow::Mode(0), MenuRow::Mode(1), MenuRow::Mode(2), MenuRow::Mode(3)],
+            "modes are grouped at the top"
+        );
+        assert_eq!(rows[4], MenuRow::Exit, "settings follow them");
+        assert_eq!(rows.last(), Some(&MenuRow::Reset));
+
+        // Cursor defaulted to Off (the board is lit): tap-tap ≈ old toggle.
         assert_eq!(b.menu.as_ref().unwrap().selected, 3, "cursor starts on Off while lit");
 
         // Rotate one detent back up the list (down-the-list is -delta) and
@@ -2221,6 +2288,85 @@ mod tests {
             "selection reports the picked id, got {out:?}"
         );
         assert!(b.menu.is_none(), "the picker closes on selection");
+    }
+
+    /// Not an assertion — a look at the merged menu, written as PPM (no
+    /// image dependency in this crate; convert with anything).
+    /// `PREVIEW_DIR=/tmp/menu cargo test -p board-core dump_menu -- --ignored`
+    #[test]
+    #[ignore]
+    fn dump_menu() {
+        use scoreboard_protocol::ModeEntry as ME;
+        let dir = std::env::var("PREVIEW_DIR").unwrap_or_else(|_| "/tmp/menu".into());
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.set_diagnostics(sim_diag());
+        b.on_manifest(Manifest {
+            mode: "scores".into(),
+            modes: vec![
+                ME { id: "scores".into(), label: "SCORES".into() },
+                ME { id: "clock".into(), label: "CLOCK".into() },
+                ME { id: "weather".into(), label: "WEATHER".into() },
+                ME { id: "off".into(), label: "OFF".into() },
+            ],
+            rotation: Vec::new(),
+            display_on: true,
+            local_clock: false,
+            clock_hour24: false,
+            off_state: Default::default(),
+            brightness: 80,
+            epoch: 0,
+            countdown_ms: None,
+        });
+        b.tick(0);
+        b.gesture(Gesture::Single);
+        b.tick(10);
+        let save = |b: &Board, name: &str| {
+            let px = b.framebuffer();
+            let mut out = format!("P3\n{FRAME_WIDTH} {FRAME_HEIGHT}\n255\n");
+            for p in &px {
+                out.push_str(&alloc::format!("{} {} {}\n", (p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF));
+            }
+            std::fs::write(alloc::format!("{dir}/{name}.ppm"), out).ok();
+        };
+        save(&b, "menu-top");
+        for _ in 0..4 {
+            b.encoder(-1);
+        }
+        b.tick(20);
+        save(&b, "menu-scrolled");
+    }
+
+    /// The knob must never be a dead end. With no manifest — offline, or a
+    /// server that predates modes — the menu still offers the two universal
+    /// rows, and picking OFF darkens the panel immediately rather than
+    /// waiting for a server that is not there.
+    #[test]
+    fn the_menu_can_always_darken_the_panel_even_with_no_server() {
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        // No manifest at all.
+        assert!(b.manifest.is_none());
+        b.gesture(Gesture::Single);
+        let rows = b.menu_rows();
+        assert_eq!(rows[0], MenuRow::Mode(0));
+        assert_eq!(rows[1], MenuRow::Mode(1));
+        assert_eq!(rows[2], MenuRow::Exit, "two universal modes, then the settings");
+        // Opened on OFF, because the panel is lit.
+        assert_eq!(b.menu.as_ref().unwrap().selected, 1);
+        b.gesture(Gesture::Single);
+        assert_eq!(b.mode(), Mode::Asleep, "offline OFF darkens the panel now");
+        assert!(
+            matches!(b.take_outgoing().as_slice(), [ClientMsg::SelectMode { mode }] if mode == "off"),
+            "and still queues for the server"
+        );
+        // ...and back, from the dark board.
+        b.gesture(Gesture::Single);
+        assert_eq!(b.menu.as_ref().unwrap().selected, 0, "cursor lands on SCORES while dark");
+        b.gesture(Gesture::Single);
+        assert_eq!(b.mode(), Mode::Running);
     }
 
     /// A dark board's cursor starts on Scores — the other half of the
@@ -2269,11 +2415,19 @@ mod tests {
         b.button_down(0);
         b.button_up(50);
         b.tick(500);
-        assert_eq!(b.mode(), Mode::Running, "server decides; no local sleep");
+        // A tap now OPENS THE MENU rather than acting: nothing has changed on
+        // the panel and nothing has gone to the server until a row is picked.
+        assert!(b.menu_open(), "a tap opens the menu");
+        assert_eq!(b.mode(), Mode::Running, "opening decides nothing");
+        assert!(b.take_outgoing().is_empty(), "and sends nothing");
+
+        // Picking OFF is what reports — one message, and the outbox drains.
+        goto_row(&mut b, MenuRow::Mode(1));
+        tap(&mut b, 2000);
         let out = b.take_outgoing();
         assert!(
-            matches!(out.as_slice(), [ClientMsg::ButtonPress]),
-            "press should be queued for the server"
+            matches!(out.as_slice(), [ClientMsg::SelectMode { mode }] if mode == "off"),
+            "selection reports the mode, got {out:?}"
         );
         assert!(b.take_outgoing().is_empty(), "outbox drains once");
     }
@@ -2672,8 +2826,9 @@ mod tests {
         b.tick(0);
         let t = double_tap(&mut b, 1000);
         b.take_outgoing();
-        for _ in 0..4 {
-            b.encoder(-1); // EXIT -> UPDATE -> PAIR CODE -> DEBUG INFO -> RESET
+        goto_row(&mut b, MenuRow::Reset);
+        for _ in 0..0 {
+            b.encoder(-1);
         }
         let t = tap(&mut b, t);
         b.encoder(-1); // arm ERASE
@@ -2869,18 +3024,21 @@ mod tests {
         b.tick(0);
         let t = double_tap(&mut b, 1000);
         b.tick(t);
+        // The menu opens on the obvious next MODE, not at the top, so walk up
+        // first — clamping is what this checks, not where it opened.
+        goto_row(&mut b, MenuRow::Mode(0));
         let top = b.framebuffer();
         b.encoder(1);
         assert_eq!(b.framebuffer(), top, "selection clamps at the top");
         b.encoder(-1);
         assert_ne!(b.framebuffer(), top, "rotation moves the selection");
-        b.encoder(-10);
+        b.encoder(-20);
         let last = b.framebuffer();
         b.encoder(-1);
         assert_eq!(b.framebuffer(), last, "selection clamps at the bottom");
 
-        // Up one to DEBUG INFO (row 3 of 0..=4) and scroll the list.
-        b.encoder(1);
+        // Into DEBUG INFO, and scroll the list itself.
+        goto_row(&mut b, MenuRow::DebugInfo);
         tap(&mut b, t + 1000);
         let page_top = b.framebuffer();
         b.encoder(1);
@@ -2913,10 +3071,11 @@ mod tests {
 
         let t = double_tap(&mut b, 1000);
         b.tick(t);
-        // EXIT (row 0) is selected; -1 must move DOWN to UPDATE (row 1):
-        // with an offer armed, selecting it opens the CONFIRM screen — which
-        // proves where the selection sat (EXIT would have closed the menu).
+        // Sit on EXIT, then -1 must move DOWN to UPDATE: with an offer armed,
+        // selecting it opens the CONFIRM screen — which proves where the
+        // selection sat (EXIT would have closed the menu).
         b.set_update_available(Some("9.9.9".into()));
+        goto_row(&mut b, MenuRow::Exit);
         b.encoder(-1);
         tap(&mut b, t + 500);
         assert!(b.menu_open(), "encoder(-1) walked EXIT -> UPDATE (down the list)");
@@ -2970,7 +3129,7 @@ mod tests {
         b.tick(0);
         let t = double_tap(&mut b, 1000);
         b.take_outgoing();
-        b.encoder(-1); // EXIT is the default selection; step down to UPDATE
+        goto_row(&mut b, MenuRow::Update);
         let t = tap(&mut b, t);
         assert!(b.menu_open(), "an inert UPDATE tap must not exit the menu");
         assert!(b.take_outgoing().is_empty(), "no offer, no confirm, no message");
@@ -3057,7 +3216,7 @@ mod tests {
         b.set_online(true);
         b.tick(0);
         let t = double_tap(&mut b, 1000);
-        b.encoder(-2); // down from EXIT to the PAIR CODE row
+        goto_row(&mut b, MenuRow::PairCode);
         let t = tap(&mut b, t);
         assert!(b.pairing_active(), "the host should announce a code now");
         let mut reference = Board::new();
@@ -3525,11 +3684,9 @@ mod tests {
         b.set_wifi_stuck(true);
         b.set_wifi(true); // DHCP came up
         b.mode = Mode::Running;
-        b.button_down(0);
-        b.button_up(50);
-        b.tick(500);
+        tap_tap(&mut b, 0);
         assert!(!b.reprovision_triggered(), "a working network is not a setup request");
-        assert_eq!(b.mode(), Mode::Asleep, "it is the normal sleep toggle again");
+        assert_eq!(b.mode(), Mode::Asleep, "the menu's OFF row still darkens it");
     }
 
     fn offline_press_sleeps_locally_and_still_reports() {
@@ -3576,9 +3733,7 @@ mod tests {
         let mut b = Board::new();
         b.mode = Mode::Running;
         b.tick(0);
-        b.button_down(0);
-        b.button_up(50);
-        b.tick(500);
+        tap_tap(&mut b, 0);
         assert_eq!(b.mode(), Mode::Asleep);
 
         // Back online: the server says the display is ON, so the panel lights up.
