@@ -561,6 +561,14 @@ impl AppState {
     /// swept lazily here and on every pair attempt so no timer task is needed;
     /// and a board's OLD codes die the moment it shows a new one — what's on
     /// the panel is the only code that works.
+    ///
+    /// The stamp is REFRESHED for connected boards by `tick_once`. Without
+    /// that, the TTL was measured from the board's last reconnect while the
+    /// panel went on displaying the code forever: a board up for more than ten
+    /// minutes showed a code the server had already forgotten, and typing it
+    /// in answered "invalid or expired". The map still holds at most one code
+    /// per board, so keeping a CONNECTED board's live costs no extra guessable
+    /// space — and it dies ten minutes after the board goes away.
     pub fn register_pairing_code(&self, code: String, board_id: &str) {
         let now = Instant::now();
         let mut pending = self.pending.lock().unwrap();
@@ -3824,6 +3832,7 @@ pub async fn weather_loop(state: AppState) {
 
 pub fn tick_once(state: &AppState) {
     beat(state, "tick");
+    refresh_pairing_codes(state);
     // Re-anchor every connected board's clock. The board runs its own clock
     // between these; this only corrects drift and carries DST over.
     let connected: Vec<String> = state.devices.lock().unwrap().keys().cloned().collect();
@@ -3914,6 +3923,27 @@ async fn tick_loop(state: AppState) {
     loop {
         interval.tick().await;
         tick_once(&state);
+    }
+}
+
+/// Keep a connected board's pairing code redeemable for as long as its panel
+/// can show it.
+///
+/// The code is registered once, when the board connects (`EnterSetup`), and
+/// the board displays it on demand from its menu — days later, if it has been
+/// up that long. Expiring from the connect instant meant the panel and the
+/// server disagreed about a code the user was looking at.
+fn refresh_pairing_codes(state: &AppState) {
+    let connected: std::collections::HashSet<String> =
+        state.devices.lock().unwrap().keys().cloned().collect();
+    if connected.is_empty() {
+        return;
+    }
+    let now = Instant::now();
+    for (_, (board_id, minted)) in state.pending.lock().unwrap().iter_mut() {
+        if connected.contains(board_id) {
+            *minted = now;
+        }
     }
 }
 
@@ -5233,6 +5263,36 @@ mod tests {
         let m = manifest_for_board(&state, "b1");
         assert!(m.display_on, "the idle screen follows");
         assert!(m.countdown_ms.is_none(), "with no bar left over");
+    }
+
+    /// A code on a connected board's panel must stay redeemable. It is
+    /// registered once at connect, but the panel shows it on demand days
+    /// later — expiring from the connect instant made the panel and the
+    /// server disagree about the code the user was reading.
+    #[test]
+    fn a_connected_boards_code_does_not_expire_under_it() {
+        let state = AppState::new_ephemeral();
+        state.register_pairing_code("424242".into(), "b1");
+        // Age the registration past the TTL, as a board up for an hour does.
+        {
+            let mut pending = state.pending.lock().unwrap();
+            let e = pending.get_mut("424242").unwrap();
+            e.1 = std::time::Instant::now() - (PAIR_CODE_TTL + Duration::from_secs(60));
+        }
+        // Disconnected: it is genuinely stale and must not be redeemable.
+        assert!(try_pair(&state, "424242", "ctrl").is_err(), "a gone board's code expires");
+
+        // Connected: the sweep keeps it live, and it redeems.
+        state.register_pairing_code("515151".into(), "b2");
+        {
+            let mut pending = state.pending.lock().unwrap();
+            let e = pending.get_mut("515151").unwrap();
+            e.1 = std::time::Instant::now() - (PAIR_CODE_TTL + Duration::from_secs(60));
+        }
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        state.devices.lock().unwrap().insert("b2".into(), tx);
+        refresh_pairing_codes(&state);
+        assert_eq!(try_pair(&state, "515151", "ctrl").as_deref(), Ok("b2"));
     }
 
     /// A board reconnecting into a freshly restarted server must not be told
