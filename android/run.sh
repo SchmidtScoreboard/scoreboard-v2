@@ -92,21 +92,22 @@ fi
 [[ "$WANT_CLEAN" == 1 ]] && ./gradlew clean -q
 
 echo "sdk.dir=$ANDROID_HOME" > local.properties
-# Incremental dexing occasionally leaves a stale archive behind and fails with
-# "Type ... is defined multiple times". A clean is the fix, and retrying it
-# automatically beats making that someone else's puzzle.
+# iCloud syncs this repo (it is in ~/Documents) and resolves races by
+# duplicating files as "foo 2.ext". Done to a build tree, that surfaces as
+# "defined multiple times" or "Failed file name validation" — neither of which
+# is a code error. The build tree therefore lives in ~/Library/Caches, which
+# iCloud never touches; see android/build.gradle.kts. Any stragglers from
+# before that change get swept here.
+find . -name "* [0-9].*" -delete 2>/dev/null || true
+
 if ! ./gradlew assembleDebug -q 2>/tmp/gradle-err.txt; then
-    if grep -q "is defined multiple times" /tmp/gradle-err.txt; then
-        echo "stale dex archive — cleaning and retrying…"
-        ./gradlew clean -q
-        ./gradlew assembleDebug -q
-    else
-        cat /tmp/gradle-err.txt >&2
-        exit 1
-    fi
+    cat /tmp/gradle-err.txt >&2
+    exit 1
 fi
 
-adb -s "$SERIAL" install -r app/build/outputs/apk/debug/app-debug.apk
+APK="$HOME/Library/Caches/scoreboard-android/app/outputs/apk/debug/app-debug.apk"
+[[ -f "$APK" ]] || { echo "no APK at $APK" >&2; exit 1; }
+adb -s "$SERIAL" install -r "$APK"
 adb -s "$SERIAL" shell am start -n "$APP/.MainActivity" >/dev/null
 echo "launched on $SERIAL"
 

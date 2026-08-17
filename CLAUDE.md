@@ -47,6 +47,13 @@ These are owner decisions, not preferences. Do not relitigate them silently.
   the deployed cert). Versions are one monotonic space across all channels
   and are never reused.
 - Don't start the demo server, the simulator, or the app unless asked.
+- **This repo is in `~/Documents`, which iCloud syncs** (intentionally, for the
+  source). iCloud duplicates files as `"foo 2.ext"` under contention, which
+  breaks builds in ways that read as code errors ("defined multiple times",
+  "Failed file name validation"). Build trees therefore live OUTSIDE the synced
+  tree: Gradle in `~/Library/Caches/scoreboard-android`, firmware in
+  `firmware-rs/target.nosync`. A filename with a space and a number in a build
+  error is this, not the code.
 
 ## Cross-platform parity (Android)
 
