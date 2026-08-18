@@ -301,15 +301,20 @@ private fun LeagueCard(session: Session, boardId: String, pref: uniffi.app_core.
     }
 }
 
-/** Minutes since the board's local midnight, in the READER's clock format —
- *  formatting is deliberately platform-side (a 24-hour locale must not be
- *  shown "10:00 PM"). */
+/**
+ * Minutes since the board's local midnight, in the READER's clock format.
+ *
+ * Formatting is deliberately platform-side (the core supplies the data): a
+ * 24-hour locale must not be shown "10:00 PM". `DateFormat.getTimeFormat`
+ * honours the system's own 12/24-hour setting, which a bare SimpleDateFormat
+ * does not — and it needs a real Context, which is why this is @Composable.
+ */
+@Composable
 fun clockText(minutes: UShort): String {
+    val context = androidx.compose.ui.platform.LocalContext.current
     val cal = java.util.Calendar.getInstance().apply {
         set(java.util.Calendar.HOUR_OF_DAY, minutes.toInt() / 60)
         set(java.util.Calendar.MINUTE, minutes.toInt() % 60)
     }
-    return android.text.format.DateFormat.getTimeFormat(null).let {
-        java.text.SimpleDateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(cal.time)
-    }
+    return android.text.format.DateFormat.getTimeFormat(context).format(cal.time)
 }

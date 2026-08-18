@@ -36,8 +36,17 @@ object Previews {
                     connectTimeout = 10_000
                     readTimeout = 10_000
                 }
+                val code = c.responseCode
+                if (code != 200) {
+                    // A silent null here is indistinguishable from "no preview
+                    // declared", which is how an empty tile went unexplained.
+                    android.util.Log.w("Previews", "HTTP $code for $url")
+                    c.disconnect()
+                    return@runCatching null
+                }
                 c.inputStream.use { BitmapFactory.decodeStream(it) }
-            }.getOrNull()?.also { cache[url] = it }
+            }.onFailure { android.util.Log.w("Previews", "failed $url", it) }
+                .getOrNull()?.also { cache[url] = it }
         }
     }
 }
