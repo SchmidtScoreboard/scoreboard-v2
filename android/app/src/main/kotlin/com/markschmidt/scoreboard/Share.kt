@@ -27,6 +27,10 @@ object Share {
 
     fun ledImage(rgba: ByteArray): Bitmap? {
         val src = Frames.toBitmap(rgba) ?: return null
+        return ledImageFrom(src)
+    }
+
+    fun ledImageFrom(src: Bitmap): Bitmap {
         val out = Bitmap.createBitmap(
             src.width * PITCH + 2 * BEZEL,
             src.height * PITCH + 2 * BEZEL,
@@ -54,6 +58,14 @@ object Share {
     /** Hand the frame to the system share sheet. */
     suspend fun share(context: Context, rgba: ByteArray, title: String) {
         val bmp = ledImage(rgba) ?: return
+        shareLed(context, bmp, title)
+    }
+
+    /** Same, from an already-decoded 64×32 frame (the HTTP render path). */
+    suspend fun shareBitmap(context: Context, frame: Bitmap, title: String) =
+        shareLed(context, ledImageFrom(frame), title)
+
+    private suspend fun shareLed(context: Context, bmp: Bitmap, title: String) {
         val uri = withContext(Dispatchers.IO) {
             val dir = File(context.cacheDir, "shared").apply { mkdirs() }
             val file = File(dir, "scoreboard.png")

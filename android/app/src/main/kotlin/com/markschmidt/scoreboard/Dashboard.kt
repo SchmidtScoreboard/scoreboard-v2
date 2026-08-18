@@ -1,38 +1,30 @@
 package com.markschmidt.scoreboard
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.launch
-import uniffi.app_core.UiGame
-import uniffi.app_core.cardHighlight
-import uniffi.app_core.displayedNowShowing
-import uniffi.app_core.effectiveMode
-import uniffi.app_core.gameTitle
-import uniffi.app_core.leaguePrefs
-import uniffi.app_core.pickableModes
-import uniffi.app_core.rotationModified
-import uniffi.app_core.snapBrightness
+import uniffi.app_core.*
 
 /**
- * The dashboard: what the board is showing, what it can show, and what it
- * follows. Android-idiom Compose — the parity contract shares the RULES
- * (every derivation here is a core call), never the layout.
+ * The dashboard. Order is the iOS contract: Live and Upcoming, Controls,
+ * league preferences grouped by category, Add League — board settings live
+ * behind the gear.
  */
-@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun Dashboard(
     session: Session,
@@ -40,45 +32,46 @@ fun Dashboard(
     boardId: String,
     onSettings: () -> Unit,
     onBrowse: () -> Unit,
-    onLeagues: () -> Unit,
+    onEditLeague: (String) -> Unit,
+    onAddLeague: () -> Unit,
 ) {
     val board = state.boards[boardId] ?: return
-    val cfg = board.config
+    val cfg = board.config ?: return
+    // One render-URL stamp per dashboard visit — cache-busts without spamming.
+    val refresh = remember { System.currentTimeMillis() / 1000 }
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            Modifier.size(9.dp).background(
-                                if (board.online) Color(0xFF34C759) else MaterialTheme.colorScheme.outline,
-                                CircleShape,
-                            )
-                        )
+                        androidx.compose.foundation.Canvas(Modifier.size(10.dp)) {
+                            drawCircle(if (board.online) Color(0xFF34C759) else Color(0xFF8E8E93))
+                        }
                         Spacer(Modifier.width(8.dp))
-                        Text(cfg?.name ?: "Scoreboard")
+                        Text(cfg.name ?: "Scoreboard", maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 },
                 actions = {
                     if (state.boardOrder.size > 1) {
                         var open by remember { mutableStateOf(false) }
-                        TextButton(onClick = { open = true }) { Text("Switch") }
+                        IconButton(onClick = { open = true }) {
+                            Icon(Icons.Outlined.SwapHoriz, contentDescription = "Switch scoreboard")
+                        }
                         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
                             for (id in state.boardOrder) {
                                 DropdownMenuItem(
-                                    text = {
-                                        Text(state.boards[id]?.config?.name ?: "Scoreboard")
+                                    text = { Text(state.boards[id]?.config?.name ?: "Scoreboard") },
+                                    leadingIcon = {
+                                        if (id == boardId) Icon(Icons.Filled.Check, null, Modifier.size(18.dp))
                                     },
-                                    onClick = {
-                                        session.selectBoard(id)
-                                        open = false
-                                    },
+                                    onClick = { session.selectBoard(id); open = false },
                                 )
                             }
                         }
                     }
                     IconButton(onClick = onSettings) {
-                        Icon(Icons.Filled.Settings, contentDescription = "Settings")
+                        Icon(Icons.Outlined.Settings, contentDescription = "Settings")
                     }
                 },
             )
@@ -86,79 +79,19 @@ fun Dashboard(
     ) { pad ->
         LazyColumn(
             Modifier.padding(pad).fillMaxSize(),
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(20.dp),
+            contentPadding = PaddingValues(bottom = 24.dp),
         ) {
+            item { GamesSection(session, state, boardId, refresh, onBrowse) }
+            item { ControlsSection(session, state, boardId, cfg) }
+            leagueItems(session, state, boardId, cfg, onEditLeague)
             item {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    SectionHeader("Live and Upcoming")
-                    Spacer(Modifier.weight(1f))
-                    TextButton(onClick = onBrowse) { Text("View all") }
-                }
-            }
-            val showing = displayedNowShowing(board.nowShowing, cfg?.focusedGameId)
-            if (showing.isEmpty()) {
-                item {
-                    Card { Box(Modifier.fillMaxWidth().padding(28.dp), Alignment.Center) {
-                        Text("Nothing live or upcoming right now", color = MaterialTheme.colorScheme.outline)
-                    } }
-                }
-            } else {
-                item {
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        items(showing, key = { it.id }) { g ->
-                            Box(Modifier.width(300.dp)) { GameCard(session, state, boardId, g) }
-                        }
-                    }
-                }
-            }
-
-            item { SectionHeader("Controls") }
-            if (cfg != null) {
-                item {
-                    Card {
-                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            BrightnessRow(cfg.brightness) { session.setBrightness(boardId, it) }
-                            ModePicker(session, state, boardId)
-                            if (board.quietActive) {
-                                Text(
-                                    "Quiet hours — the screen is off until " +
-                                        clockText(cfg.quietEndMin ?: 0u) + ".",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.outline,
-                                )
-                            }
-                            if (rotationModified(
-                                    cfg.focusedGameId, cfg.extraGameIds, cfg.excludedGameIds,
-                                    cfg.spoilerGameIds, cfg.revealedGameIds,
-                                )
-                            ) {
-                                TextButton(onClick = { session.resetRotation(boardId) }) {
-                                    Text("Reset rotation")
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // League preferences — grouped by sport, the CORE's grouping and
-            // its earns-a-card rule.
-            if (cfg != null) {
-                val prefs = leaguePrefs(cfg, state.sports)
-                val byId = prefs.associateBy { it.sport.id }
-                item {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        SectionHeader("Leagues")
-                        Spacer(Modifier.weight(1f))
-                        TextButton(onClick = onLeagues) { Text("Edit") }
-                    }
-                }
-                for (group in uniffi.app_core.groupLeagues(prefs.map { it.sport })) {
-                    item { SectionHeader(group.category) }
-                    items(group.sportIds.mapNotNull { byId[it] }, key = { it.sport.id }) { pref ->
-                        LeagueCard(session, boardId, pref)
-                    }
+                Button(
+                    onClick = onAddLeague,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                ) {
+                    Icon(Icons.Filled.Add, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Add League")
                 }
             }
         }
@@ -166,59 +99,175 @@ fun Dashboard(
 }
 
 @Composable
-private fun SectionHeader(text: String) {
-    Text(
-        text,
-        style = MaterialTheme.typography.titleSmall,
-        fontWeight = FontWeight.SemiBold,
-        color = MaterialTheme.colorScheme.outline,
-    )
-}
-
-@Composable
-private fun BrightnessRow(current: UByte, onCommit: (UByte) -> Unit) {
-    var level by remember(current) { mutableStateOf(current.toFloat()) }
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Slider(
-            value = level,
-            onValueChange = { level = it },
-            // The knob's detents live in the core — one scale for this slider,
-            // the iOS slider, and the physical dial.
-            onValueChangeFinished = {
-                val snapped = snapBrightness(level.toDouble())
-                level = snapped.toFloat()
-                onCommit(snapped)
-            },
-            valueRange = 10f..100f,
+private fun SectionHeader(text: String, trailing: (@Composable () -> Unit)? = null) {
+    Row(
+        Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 20.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text,
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.outline,
             modifier = Modifier.weight(1f),
         )
-        Spacer(Modifier.width(12.dp))
-        Text("${level.toInt()}%", style = MaterialTheme.typography.labelLarge)
+        trailing?.invoke()
     }
 }
 
 @Composable
-private fun ModePicker(session: Session, state: Session.AppState, boardId: String) {
+private fun GamesSection(
+    session: Session,
+    state: Session.AppState,
+    boardId: String,
+    refresh: Long,
+    onBrowse: () -> Unit,
+) {
     val board = state.boards[boardId] ?: return
     val cfg = board.config ?: return
+    SectionHeader("Live and Upcoming") {
+        TextButton(onClick = onBrowse) { Text("View all") }
+    }
+    when {
+        state.connected && !board.online -> OfflineStatusCard(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        )
+        board.nowShowing.isEmpty() -> Card(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+        ) {
+            Box(Modifier.fillMaxWidth().heightIn(min = 120.dp), contentAlignment = Alignment.Center) {
+                Text("Nothing live or upcoming right now", color = MaterialTheme.colorScheme.outline)
+            }
+        }
+        else -> {
+            val games = displayedNowShowing(board.nowShowing, cfg.focusedGameId)
+            LazyRow(
+                contentPadding = PaddingValues(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                items(games, key = { it.id }) { game ->
+                    GameCard(
+                        session, state, boardId, game, refresh,
+                        pinNeedsShowing = false,
+                        modifier = Modifier.width(300.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ControlsSection(
+    session: Session,
+    state: Session.AppState,
+    boardId: String,
+    cfg: UiBoardConfig,
+) {
+    val board = state.boards[boardId] ?: return
+    SectionHeader("Controls")
+    Card(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            BrightnessRow(session, boardId, cfg.brightness)
+            ModePicker(session, state, boardId, cfg)
+            ModeFooter(session, boardId, cfg, state)
+            if (board.quietActive) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Outlined.DarkMode, null, Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.outline)
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "Quiet hours — the screen is off until ${clockText(cfg.quietEndMin ?: 0u)}.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** "{Mode} — back to scores in {n}." with Keep, or "{Mode} until changed." */
+@Composable
+private fun ModeFooter(session: Session, boardId: String, cfg: UiBoardConfig, state: Session.AppState) {
+    if (cfg.mode == "scores") return
+    val label = modeLabel(cfg.mode, state.offModes)
+    val wake = cfg.wakeAt?.toLong()
+    // Re-evaluate each minute so the countdown text stays honest.
+    var now by remember { mutableStateOf(System.currentTimeMillis() / 1000) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(60_000)
+            now = System.currentTimeMillis() / 1000
+        }
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        if (wake != null && wake > now) {
+            val mins = ((wake - now) + 59) / 60
+            val span = if (mins >= 120) "${(mins + 30) / 60} hours"
+            else if (mins >= 60) "1 hour" else "$mins min"
+            Text(
+                "$label — back to scores in $span.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = { session.keepMode(boardId) }) { Text("Keep") }
+        } else {
+            Text(
+                "$label until changed.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline,
+            )
+        }
+    }
+}
+
+@Composable
+private fun BrightnessRow(session: Session, boardId: String, brightness: UByte) {
+    var preview by remember(brightness) { mutableStateOf(brightness.toFloat()) }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Icon(Icons.Outlined.WbSunny, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.outline)
+        Slider(
+            value = preview,
+            onValueChange = { preview = it },
+            onValueChangeFinished = {
+                // One commit on release; the drag itself stays off the wire.
+                val snapped = snapBrightness(preview.toDouble())
+                preview = snapped.toFloat()
+                session.setBrightness(boardId, snapped)
+            },
+            valueRange = 10f..100f,
+            modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
+        )
+        Text("${preview.toInt()}%", style = MaterialTheme.typography.labelLarge)
+    }
+}
+
+@Composable
+private fun ModePicker(session: Session, state: Session.AppState, boardId: String, cfg: UiBoardConfig) {
+    val board = state.boards[boardId] ?: return
     val modes = pickableModes(state.offModes)
-    // The ring follows the GLASS, not the mode field: quiet hours and the
-    // scores-with-nothing-on case both show something else on the panel.
-    val effective = effectiveMode(cfg.mode, board.quietActive, board.nowShowing.isEmpty(), cfg.offMode)
+    if (modes.isEmpty()) return
+    val selected = effectiveMode(cfg.mode, board.quietActive, board.nowShowing.isEmpty(), cfg.offMode)
     LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         items(modes, key = { it.id }) { m ->
-            val path = uniffi.app_core.configuredPreview(m.path, cfg.offModeParams)
-            val bmp = rememberPreview(path?.let { session.httpBase + it })
+            val path = m.path?.let { configuredPreview(it, cfg.offModeParams) }
+            val bmp = rememberPreview(path?.let { "${session.httpBase}$it" })
             Column(
                 Modifier.width(128.dp).clickable { session.setMode(boardId, m.id) },
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                LedFrame(bmp, selected = m.id == effective)
+                LedFrame(bmp, selected = m.id == selected)
                 Spacer(Modifier.height(4.dp))
                 Text(
                     m.label,
                     style = MaterialTheme.typography.labelMedium,
-                    color = if (m.id == effective) MaterialTheme.colorScheme.onSurface
+                    color = if (m.id == selected) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.outline,
                 )
             }
@@ -226,50 +275,129 @@ private fun ModePicker(session: Session, state: Session.AppState, boardId: Strin
     }
 }
 
-@Composable
-private fun GameCard(session: Session, state: Session.AppState, boardId: String, game: UiGame) {
-    val cfg = state.boards[boardId]?.config ?: return
-    val board = state.boards[boardId]!!
-    val ring = cardHighlight(
-        game, cfg.focusedGameId, board.nowShowing, cfg.extraGameIds, cfg.excludedGameIds,
-    )
-    val accent = when (ring) {
-        uniffi.app_core.UiCardHighlight.PINNED -> Color(0xFFFFD60A)
-        uniffi.app_core.UiCardHighlight.INCLUDED -> Color(0xFF32D6C6)
-        uniffi.app_core.UiCardHighlight.QUEUED -> Color(0xFF32D6C6).copy(alpha = 0.5f)
-        uniffi.app_core.UiCardHighlight.NONE -> Color.Transparent
-    }
-    Card {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(gameTitle(game.away, game.home), style = MaterialTheme.typography.titleSmall)
-            LedFrame(
-                Frames.toBitmap(state.frames[game.frameId] ?: ByteArray(0)),
-                selected = ring != uniffi.app_core.UiCardHighlight.NONE,
-                accent = accent,
+/**
+ * League preferences: one section per category, league blocks inside — the
+ * league NAME opens its editor, the chip flips its spoiler, override rows
+ * appear only when the override exists. Deliberately NO "Leagues" header and
+ * NO edit button: the blocks are self-serve (same reasoning as iOS).
+ */
+private fun androidx.compose.foundation.lazy.LazyListScope.leagueItems(
+    session: Session,
+    state: Session.AppState,
+    boardId: String,
+    cfg: UiBoardConfig,
+    onEditLeague: (String) -> Unit,
+) {
+    val prefs = leaguePrefs(cfg, state.sports)
+    if (prefs.isEmpty()) {
+        item {
+            SectionHeader("")
+            Text(
+                "No leagues yet — add one to pick favorite teams and big games.",
+                color = MaterialTheme.colorScheme.outline,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             )
-            Text(game.detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                val showing = uniffi.app_core.rotationIsShowing(
-                    game.id, board.nowShowing, cfg.extraGameIds, cfg.excludedGameIds,
-                )
-                TextButton(onClick = {
-                    if (showing) session.removeGame(boardId, game.id) else session.addGame(boardId, game.id)
-                }) { Text(if (showing) "Remove" else "Add") }
-                TextButton(onClick = {
-                    session.focusGame(boardId, if (cfg.focusedGameId == game.id) null else game.id)
-                }) { Text(if (cfg.focusedGameId == game.id) "Unpin" else "Pin") }
-                val hidden = game.id in cfg.spoilerGameIds
-                TextButton(onClick = { session.setGameSpoiler(boardId, game.id, !hidden) }) {
-                    Text(if (hidden) "Reveal" else "Hide")
+        }
+        return
+    }
+    val byId = prefs.associateBy { it.sport.id }
+    for (group in groupLeagues(prefs.map { it.sport })) {
+        val here = group.sportIds.mapNotNull { byId[it] }
+        if (here.isEmpty()) continue
+        item { SectionHeader(group.category) }
+        for (pref in here) {
+            item(key = "league-${pref.sport.id}") {
+                LeagueBlock(session, state, boardId, cfg, pref, onEditLeague)
+            }
+        }
+    }
+}
+
+@Composable
+private fun LeagueBlock(
+    session: Session,
+    state: Session.AppState,
+    boardId: String,
+    cfg: UiBoardConfig,
+    pref: UiLeaguePref,
+    onEditLeague: (String) -> Unit,
+) {
+    val sport = pref.sport
+    val sc = cfg.sports.firstOrNull { it.sportId == sport.id }
+    Card(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+    ) {
+        Column(Modifier.padding(vertical = 4.dp)) {
+            // Header: the name IS the way into the editor.
+            Row(
+                Modifier.fillMaxWidth().clickable { onEditLeague(sport.id) }
+                    .padding(start = 16.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(sport.name, style = MaterialTheme.typography.titleMedium)
+                    pickedRoundsLabel(pref.roundLabels)?.let {
+                        Text(
+                            it, style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.outline,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
-                val ctx = androidx.compose.ui.platform.LocalContext.current
-                val scope = androidx.compose.runtime.rememberCoroutineScope()
-                state.frames[game.frameId]?.let { rgba ->
-                    TextButton(onClick = {
-                        scope.launch {
-                            Share.share(ctx, rgba, gameTitle(game.away, game.home))
-                        }
-                    }) { Text("Share") }
+                SpoilerChip(pref.leagueSpoiler) {
+                    session.setLeagueSpoiler(boardId, sport.id, !pref.leagueSpoiler)
+                }
+                Icon(
+                    Icons.AutoMirrored.Filled.KeyboardArrowRight, null,
+                    tint = MaterialTheme.colorScheme.outline,
+                )
+            }
+            for (team in pref.teams) {
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 24.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TeamBadge(sport.id, team)
+                    Spacer(Modifier.width(10.dp))
+                    Text(team.name, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                    SpoilerChip(team.id in pref.spoilerTeamIds) {
+                        session.setTeamSpoiler(boardId, sport.id, team.id, team.id !in pref.spoilerTeamIds)
+                    }
+                }
+            }
+            // A hidden team that is no longer a favorite must stay visible,
+            // or the rule becomes unclearable.
+            val favoriteIds = pref.teams.map { it.id }.toSet()
+            for (orphan in pref.spoilerTeamIds.filter { it !in favoriteIds }) {
+                val name = sport.teams.firstOrNull { it.id == orphan }?.name ?: orphan
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 24.dp, end = 8.dp, top = 2.dp, bottom = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Filled.VisibilityOff, null, Modifier.size(16.dp), tint = Color(0xFF5E5CE6))
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        "$name — results hidden", Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline,
+                    )
+                    TextButton(onClick = { session.setTeamSpoiler(boardId, sport.id, orphan, false) }) {
+                        Text("Show")
+                    }
+                }
+            }
+            // Override rows: visible only while an override exists.
+            sc?.leaderboardRows?.let { rows ->
+                OverrideRow(
+                    Icons.Outlined.FormatListNumbered,
+                    leaderboardDepthOptions(sport.id).firstOrNull { it.rows == rows }?.label ?: "Top $rows",
+                ) { session.setLeagueRows(boardId, sport.id, null) }
+            }
+            sc?.dwellSecs?.let { secs ->
+                OverrideRow(Icons.Outlined.Timer, "$secs seconds per event") {
+                    session.setLeagueDwell(boardId, sport.id, null)
                 }
             }
         }
@@ -277,27 +405,15 @@ private fun GameCard(session: Session, state: Session.AppState, boardId: String,
 }
 
 @Composable
-private fun LeagueCard(session: Session, boardId: String, pref: uniffi.app_core.UiLeaguePref) {
-    Card {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(pref.sport.name, style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.weight(1f))
-                uniffi.app_core.pickedRoundsLabel(pref.roundLabels)?.let {
-                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
-                }
-            }
-            for (team in pref.teams) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(team.name, style = MaterialTheme.typography.bodyMedium)
-                    Spacer(Modifier.weight(1f))
-                    val hidden = team.id in pref.spoilerTeamIds
-                    TextButton(onClick = {
-                        session.setTeamSpoiler(boardId, pref.sport.id, team.id, !hidden)
-                    }) { Text(if (hidden) "no spoilers" else "spoilers") }
-                }
-            }
-        }
+private fun OverrideRow(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClear: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(start = 24.dp, end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.width(10.dp))
+        Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+        TextButton(onClick = onClear) { Text("Use default") }
     }
 }
 

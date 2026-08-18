@@ -29,6 +29,9 @@ class Session(context: Context) : ClientListener {
         val quietActive: Boolean = false,
         val firmwareVersion: String? = null,
         val updateAvailable: String? = null,
+        /** Set when this phone kicks off an install; cleared when the board
+         *  reports a version again (it reboots into the new image). */
+        val updatingFirmware: Boolean = false,
     )
 
     data class AppState(
@@ -43,9 +46,16 @@ class Session(context: Context) : ClientListener {
         val frames: Map<String, ByteArray> = emptyMap(),
         val pairFailure: String? = null,
         val firmware: List<uniffi.app_core.UiFwImage> = emptyList(),
+        /** One-shot: the settings-export JSON the server answered with. */
+        val exportJson: String? = null,
+        /** One-shot: Some(null) = imported clean, Some(msg) = server refused. */
+        val importResult: ImportOutcome? = null,
     ) {
         val board: BoardSnapshot? get() = selected?.let { boards[it] }
     }
+
+    /** Wrapper so "no result yet" and "succeeded (null error)" stay distinct. */
+    data class ImportOutcome(val error: String?)
 
     private val _state = MutableStateFlow(AppState())
     val state: StateFlow<AppState> = _state
@@ -195,7 +205,27 @@ class Session(context: Context) : ClientListener {
         client.setFwChannel(boardId, channel)
     }
 
-    fun updateFirmware(boardId: String) = client.updateFirmware(boardId)
+    fun updateFirmware(boardId: String) {
+        client.updateFirmware(boardId)
+        mutateBoard(boardId) { it.copy(updatingFirmware = true) }
+    }
+
+    /** "Keep": hold the current mode until changed — clears the wake timer. */
+    fun keepMode(boardId: String) {
+        mutate(boardId) { it.apply { wakeAt = null } }
+        client.clearWakeTimer(boardId)
+    }
+
+    fun exportSettings(boardId: String) = client.exportSettings(boardId)
+    fun importSettings(boardId: String, json: String) = client.importSettings(boardId, json)
+    fun consumeExport() { _state.value = _state.value.copy(exportJson = null) }
+    fun consumeImportResult() { _state.value = _state.value.copy(importResult = null) }
+
+    private fun mutateBoard(boardId: String, f: (BoardSnapshot) -> BoardSnapshot) {
+        val st = _state.value
+        val snap = st.boards[boardId] ?: return
+        _state.value = st.copy(boards = st.boards + (boardId to f(snap)))
+    }
 
     fun addGame(boardId: String, gameId: String) {
         mutate(boardId) { cfg ->
@@ -323,12 +353,22 @@ class Session(context: Context) : ClientListener {
 
     // Not yet surfaced on Android; the core requires the full interface.
     override fun onDebugUrl(boardId: String, url: String) {}
-    override fun onSettingsExport(boardId: String, json: String) {}
-    override fun onImportResult(boardId: String, error: String?) {}
+    override fun onSettingsExport(boardId: String, json: String) {
+        _state.value = _state.value.copy(exportJson = json)
+    }
+    override fun onImportResult(boardId: String, error: String?) {
+        _state.value = _state.value.copy(importResult = ImportOutcome(error))
+    }
     override fun onBoardVersion(boardId: String, version: String?, updateAvailable: String?) {
         val boards = _state.value.boards.toMutableMap()
-        boards[boardId] = (boards[boardId] ?: BoardSnapshot())
-            .copy(firmwareVersion = version, updateAvailable = updateAvailable)
+        val prior = boards[boardId] ?: BoardSnapshot()
+        boards[boardId] = prior.copy(
+            firmwareVersion = version,
+            updateAvailable = updateAvailable,
+            // A fresh version report means the board came back from the
+            // install (or it never left) — either way "updating" is over.
+            updatingFirmware = prior.updatingFirmware && version == prior.firmwareVersion,
+        )
         _state.value = _state.value.copy(boards = boards)
     }
 

@@ -3,235 +3,465 @@ package com.markschmidt.scoreboard
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import uniffi.app_core.UiSport
-import uniffi.app_core.groupLeagues
-import uniffi.app_core.leaderboardDepthOptions
-import uniffi.app_core.subscriptionSummary
-import uniffi.app_core.toggleRound
+import uniffi.app_core.*
 
-/** A setting whose absence means "the league default" — three states, not a
- *  switch, because default and off are different answers. */
+/**
+ * The Add League picker: every league the catalog offers, grouped by the
+ * core's categories, each row telling you what you already follow there.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun TriState(label: String, value: Boolean?, onPick: (Boolean?) -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, Modifier.weight(1f))
-        for ((v, text) in listOf<Pair<Boolean?, String>>(null to "Default", true to "On", false to "Off")) {
-            TextButton(onClick = { onPick(v) }) {
-                Text(
-                    text,
-                    color = if (v == value) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.outline,
-                )
-            }
-        }
-    }
-}
-
-/** The league list: every league the catalog offers, grouped by sport with
- *  its current subscription summarized — the core supplies both. */
-@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
-@Composable
-fun LeagueListScreen(session: Session, state: Session.AppState, boardId: String, onBack: () -> Unit) {
-    var editing by remember { mutableStateOf<UiSport?>(null) }
-    val sport = editing
-    if (sport != null) {
-        LeagueEditor(session, state, boardId, sport) { editing = null }
-        return
-    }
+fun LeaguePickerScreen(
+    session: Session,
+    state: Session.AppState,
+    boardId: String,
+    onBack: () -> Unit,
+    onEditLeague: (String) -> Unit,
+) {
     val cfg = state.boards[boardId]?.config
-    val byId = state.sports.associateBy { it.id }
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("Leagues") },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                    }
+                    IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
                 },
+                actions = { TextButton(onClick = onBack) { Text("Done") } },
             )
         },
     ) { pad ->
-        LazyColumn(Modifier.padding(pad).fillMaxSize(), contentPadding = PaddingValues(16.dp)) {
+        if (state.sports.isEmpty()) {
+            Column(
+                Modifier.padding(pad).fillMaxSize(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                CircularProgressIndicator()
+                Spacer(Modifier.height(10.dp))
+                Text("Loading leagues…", color = MaterialTheme.colorScheme.outline)
+            }
+            return@Scaffold
+        }
+        val byId = state.sports.associateBy { it.id }
+        LazyColumn(Modifier.padding(pad), contentPadding = PaddingValues(bottom = 24.dp)) {
             for (group in groupLeagues(state.sports)) {
-                item(key = "h-${group.category}") {
+                item(key = "cat-${group.category}") {
                     Text(
                         group.category,
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.outline,
-                        modifier = Modifier.padding(top = 14.dp, bottom = 4.dp),
+                        modifier = Modifier.padding(start = 16.dp, top = 20.dp, bottom = 4.dp),
                     )
                 }
-                items(group.sportIds.mapNotNull { byId[it] }, key = { it.id }) { s ->
-                    val sc = cfg?.sports?.firstOrNull { it.sportId == s.id }
-                    ListItem(
-                        headlineContent = { Text(s.name) },
-                        supportingContent = {
-                            subscriptionSummary(
-                                s,
-                                sc?.favoriteTeamIds ?: emptyList(),
-                                sc?.championshipOptionIds ?: emptyList(),
-                            )?.let { Text(it) }
-                        },
-                        modifier = Modifier.clickable { editing = s },
-                    )
-                    HorizontalDivider()
+                for (id in group.sportIds) {
+                    val sport = byId[id] ?: continue
+                    item(key = "league-$id") {
+                        val sc = cfg?.sports?.firstOrNull { it.sportId == id }
+                        ListItem(
+                            headlineContent = { Text(sport.name) },
+                            supportingContent = {
+                                subscriptionSummary(
+                                    sport, sc?.favoriteTeamIds ?: emptyList(),
+                                    sc?.championshipOptionIds ?: emptyList(),
+                                )?.let { Text(it, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                            },
+                            trailingContent = {
+                                Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null,
+                                    tint = MaterialTheme.colorScheme.outline)
+                            },
+                            modifier = Modifier.clickable { onEditLeague(id) },
+                        )
+                        HorizontalDivider(Modifier.padding(start = 16.dp))
+                    }
                 }
             }
         }
     }
 }
 
-/** One league's subscription: which rounds, which teams, and the per-league
- *  display overrides. Every rule — the one-way blanket implication, the depth
- *  labels — is a core call. */
-@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+/** One option of a preview-backed choice: a real rendered frame, so the
+ *  choice shows what the board will actually draw. */
+private data class PreviewOption(val key: String, val label: String, val path: String?)
+
+/**
+ * Two options sit side by side as tiles; three or more stack as rows with
+ * the panel at the left — same layout rule as iOS.
+ */
 @Composable
-private fun LeagueEditor(
+private fun PreviewSelector(
+    session: Session,
+    options: List<PreviewOption>,
+    selectedKey: String,
+    onPick: (String) -> Unit,
+) {
+    if (options.size <= 2) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            for (opt in options) {
+                Column(
+                    Modifier.weight(1f).clickable { onPick(opt.key) },
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    LedFrame(
+                        rememberPreview(opt.path?.let { "${session.httpBase}$it" }),
+                        selected = opt.key == selectedKey,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        opt.label, style = MaterialTheme.typography.labelMedium,
+                        color = if (opt.key == selectedKey) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.outline,
+                    )
+                }
+            }
+        }
+    } else {
+        Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (opt in options) {
+                Row(
+                    Modifier.fillMaxWidth().clickable { onPick(opt.key) },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    LedFrame(
+                        rememberPreview(opt.path?.let { "${session.httpBase}$it" }),
+                        selected = opt.key == selectedKey,
+                        modifier = Modifier.width(128.dp),
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        opt.label,
+                        color = if (opt.key == selectedKey) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EditorHeader(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.titleSmall,
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.outline,
+        modifier = Modifier.padding(start = 16.dp, top = 20.dp, bottom = 6.dp),
+    )
+}
+
+private val LEADERBOARD_IDS = setOf("pga", "lpga", "f1")
+private val GOLF_IDS = setOf("pga", "lpga")
+private const val WHOLE_LEAGUE = "all"
+
+/**
+ * The per-league editor. Teams and rounds are BUFFERED and committed as one
+ * setSportConfig when the screen closes (and only if changed); everything
+ * else applies on tap. The full rounds list is always sent — an absent list
+ * reads as "legacy app" to the server and would re-expand the legacy field.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun LeagueEditorScreen(
     session: Session,
     state: Session.AppState,
     boardId: String,
-    sport: UiSport,
+    sportId: String,
     onBack: () -> Unit,
 ) {
-    val cfg = state.boards[boardId]?.config
-    val sc = cfg?.sports?.firstOrNull { it.sportId == sport.id }
-    var teams by remember(sport.id) { mutableStateOf(sc?.favoriteTeamIds ?: emptyList()) }
-    var rounds by remember(sport.id) { mutableStateOf(sc?.championshipOptionIds ?: emptyList()) }
-    var search by remember { mutableStateOf("") }
+    val sport = state.sports.firstOrNull { it.id == sportId } ?: return
+    val cfg = state.boards[boardId]?.config ?: return
+    val sc = cfg.sports.firstOrNull { it.sportId == sportId }
 
-    fun commit() = session.setSportConfig(boardId, sport.id, teams, rounds)
+    var teamIds by remember { mutableStateOf(sc?.favoriteTeamIds ?: emptyList()) }
+    var roundIds by remember { mutableStateOf(sc?.championshipOptionIds ?: emptyList()) }
+    var confirmAll by remember { mutableStateOf(false) }
+    var search by remember { mutableStateOf("") }
+    val original = remember { (sc?.favoriteTeamIds ?: emptyList()) to (sc?.championshipOptionIds ?: emptyList()) }
+
+    val commit = {
+        if (teamIds to roundIds != original) {
+            // Surviving favorites keep the user's order; new picks append in
+            // catalog order (the buffer already preserves insertion order).
+            session.setSportConfig(boardId, sportId, teamIds, roundIds)
+        }
+        onBack()
+    }
+    androidx.activity.compose.BackHandler { commit() }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text(sport.name) },
                 navigationIcon = {
-                    IconButton(onClick = { commit(); onBack() }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                    }
+                    IconButton(onClick = commit) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
                 },
             )
         },
     ) { pad ->
-        LazyColumn(Modifier.padding(pad).fillMaxSize(), contentPadding = PaddingValues(16.dp)) {
-            if (sport.championshipRounds.isNotEmpty()) {
+        LazyColumn(Modifier.padding(pad), contentPadding = PaddingValues(bottom = 24.dp)) {
+            // Rounds
+            if (sport.championshipOptions.isNotEmpty()) {
+                val rounds = sport.championshipRounds
                 item {
-                    Text(
-                        if (sport.championshipRounds.size == 1) "All matches" else "Big games",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.outline,
+                    EditorHeader(
+                        when {
+                            sportId in GOLF_IDS -> "Events"
+                            sportId == "f1" -> "Sessions"
+                            sportId == "wc" -> "Matches"
+                            rounds.size == 1 -> "All matches"
+                            else -> "Big games"
+                        },
                     )
                 }
-                items(sport.championshipRounds, key = { it.id }) { r ->
-                    Row(
-                        Modifier.fillMaxWidth().clickable {
-                            // The blanket option implies every round; un-picking
-                            // one must NOT clear the others. The core owns that
-                            // asymmetry — inferring the converse once turned a
-                            // majors-only subscription into a whole season.
-                            rounds = toggleRound(r.id, rounds, sport.championshipRounds.map { it.id })
-                            commit()
-                        }.padding(vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Checkbox(checked = r.id in rounds, onCheckedChange = null)
-                        Spacer(Modifier.width(10.dp))
-                        Text(r.label)
+                if (rounds.size == 1) {
+                    val round = rounds.first()
+                    item {
+                        ListItem(
+                            headlineContent = { Text(round.label) },
+                            trailingContent = {
+                                Switch(
+                                    checked = round.id in roundIds,
+                                    onCheckedChange = { on ->
+                                        if (on && round.id == WHOLE_LEAGUE && sportId !in LEADERBOARD_IDS) {
+                                            confirmAll = true
+                                        } else {
+                                            roundIds = toggleRound(round.id, roundIds, rounds.map { it.id })
+                                        }
+                                    },
+                                )
+                            },
+                        )
+                    }
+                } else {
+                    for (round in rounds) {
+                        item(key = "round-${round.id}") {
+                            val picked = round.id in roundIds
+                            ListItem(
+                                headlineContent = { Text(round.label) },
+                                leadingContent = {
+                                    Icon(
+                                        if (picked) Icons.Filled.CheckCircle
+                                        else Icons.Filled.RadioButtonUnchecked,
+                                        null,
+                                        tint = if (picked) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.outline,
+                                    )
+                                },
+                                modifier = Modifier.clickable {
+                                    if (!picked && round.id == WHOLE_LEAGUE && sportId !in LEADERBOARD_IDS) {
+                                        confirmAll = true
+                                    } else {
+                                        roundIds = toggleRound(round.id, roundIds, rounds.map { it.id })
+                                    }
+                                },
+                            )
+                        }
                     }
                 }
             }
 
-            // Leaderboard leagues (golf/F1) have no team list — they get depth.
-            if (sport.teams.isEmpty()) {
-                item {
-                    Spacer(Modifier.height(16.dp))
-                    Text(
-                        "Leaderboard depth",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.outline,
-                    )
-                    for (opt in leaderboardDepthOptions(sport.id)) {
-                        Row(
-                            Modifier.fillMaxWidth().clickable {
-                                session.setLeagueRows(boardId, sport.id, opt.rows)
-                            }.padding(vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            RadioButton(
-                                selected = (sc?.leaderboardRows ?: 10u) == opt.rows,
-                                onClick = null,
-                            )
-                            Spacer(Modifier.width(10.dp))
-                            Text(opt.label)
-                        }
-                    }
-                }
-            } else {
-                // Per-league display overrides. Absent means the league
-                // default, which is why each is a THREE-state choice rather
-                // than a switch — "default" is not the same as "off".
-                item {
-                    Spacer(Modifier.height(16.dp))
-                    Text(
-                        "Display",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.outline,
-                    )
-                    TriState("Team names", sc?.nameStyle?.let { it != uniffi.app_core.UiNameStyle.NAME }) {
-                        session.setLeagueNameStyle(
-                            boardId, sport.id,
-                            when (it) {
-                                null -> null
-                                true -> uniffi.app_core.UiNameStyle.ABBREV
-                                false -> uniffi.app_core.UiNameStyle.NAME
+            // Spoilers — every league has the choice.
+            item { EditorHeader("Spoilers") }
+            item {
+                PreviewSelector(
+                    session,
+                    listOf(
+                        PreviewOption("show", "Show", "/sample/plain.png?sport=$sportId&live=1"),
+                        PreviewOption("hide", "Hide", "/sample/normal.png?sport=$sportId"),
+                    ),
+                    selectedKey = if (sc?.spoiler == true) "hide" else "show",
+                ) { session.setLeagueSpoiler(boardId, sportId, it == "hide") }
+            }
+
+            // Leaderboard depth
+            if (sportId in LEADERBOARD_IDS) {
+                item { EditorHeader("Leaderboard depth") }
+                val current = sc?.leaderboardRows ?: 10u
+                for (opt in leaderboardDepthOptions(sportId)) {
+                    item(key = "depth-${opt.rows}") {
+                        ListItem(
+                            headlineContent = { Text(opt.label) },
+                            leadingContent = {
+                                RadioButton(
+                                    selected = opt.rows == current,
+                                    onClick = { session.setLeagueRows(boardId, sportId, if (opt.rows == 10u) null else opt.rows) },
+                                )
+                            },
+                            modifier = Modifier.clickable {
+                                session.setLeagueRows(boardId, sportId, if (opt.rows == 10u) null else opt.rows)
                             },
                         )
                     }
-                    if (sport.extrasLabel.isNotEmpty()) {
-                        TriState(sport.extrasLabel, sc?.showExtras) {
-                            session.setLeagueShowExtras(boardId, sport.id, it)
-                        }
+                }
+            }
+
+            // Round number on golf frames
+            if (sportId in GOLF_IDS) {
+                item { EditorHeader("Round") }
+                item {
+                    PreviewSelector(
+                        session,
+                        listOf(
+                            PreviewOption("show", "Show", "/sample/plain.png?sport=$sportId"),
+                            PreviewOption("hide", "Hide", "/sample/plain.png?sport=$sportId&round=off"),
+                        ),
+                        selectedKey = if (sc?.showRound == false) "hide" else "show",
+                    ) { session.setLeagueShowRound(boardId, sportId, if (it == "hide") false else null) }
+                }
+            }
+
+            // Extras — the server names them ("Hits and errors"); no label, no section.
+            if (sport.extrasLabel.isNotEmpty()) {
+                item { EditorHeader(sport.extrasLabel) }
+                item {
+                    PreviewSelector(
+                        session,
+                        listOf(
+                            PreviewOption("show", "Show", "/sample/plain.png?sport=$sportId&extras=on"),
+                            PreviewOption("hide", "Hide", "/sample/plain.png?sport=$sportId&extras=off"),
+                        ),
+                        selectedKey = if (sc?.showExtras == false) "hide" else "show",
+                    ) { session.setLeagueShowExtras(boardId, sportId, if (it == "hide") false else null) }
+                }
+            }
+
+            // Dwell
+            item { EditorHeader("Seconds per screen") }
+            item {
+                val current = sc?.dwellSecs
+                var open by remember { mutableStateOf(false) }
+                ListItem(
+                    headlineContent = {
+                        Text(current?.let { "$it seconds" } ?: "Board default (${cfg.dwellSecs}s)")
+                    },
+                    trailingContent = { Icon(Icons.Filled.ArrowDropDown, null) },
+                    modifier = Modifier.clickable { open = true },
+                )
+                DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Board default (${cfg.dwellSecs}s)") },
+                        onClick = { session.setLeagueDwell(boardId, sportId, null); open = false },
+                    )
+                    for (s in listOf(5u, 7u, 10u, 15u, 20u, 30u)) {
+                        DropdownMenuItem(
+                            text = { Text("$s seconds") },
+                            leadingIcon = {
+                                if (current == s) Icon(Icons.Filled.Check, null, Modifier.size(18.dp))
+                            },
+                            onClick = { session.setLeagueDwell(boardId, sportId, s); open = false },
+                        )
                     }
-                    Spacer(Modifier.height(8.dp))
+                }
+            }
+
+            // Name style — previews show exactly what each style draws.
+            val styleOptions = nameStyleOptions(sportId)
+            if (styleOptions.isNotEmpty()) {
+                item { EditorHeader("Names") }
+                item {
+                    val default = defaultNameStyle(sportId)
+                    val current = sc?.nameStyle ?: default
+                    PreviewSelector(
+                        session,
+                        styleOptions.map {
+                            PreviewOption(
+                                it.style.name, it.label,
+                                "/sample/plain.png?sport=$sportId&style=${styleParam(it.style)}",
+                            )
+                        },
+                        selectedKey = current.name,
+                    ) { key ->
+                        val style = UiNameStyle.valueOf(key)
+                        session.setLeagueNameStyle(boardId, sportId, if (style == default) null else style)
+                    }
+                }
+            }
+
+            // Teams
+            if (sport.teams.isNotEmpty()) {
+                item { EditorHeader("Teams") }
+                item {
                     OutlinedTextField(
                         value = search,
                         onValueChange = { search = it },
-                        label = { Text("Search teams") },
+                        placeholder = { Text("Search teams") },
+                        leadingIcon = { Icon(Icons.Filled.Search, null) },
                         singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                     )
                 }
-                val shown = sport.teams.filter {
-                    search.isBlank() || it.name.contains(search, true) || it.abbrev.contains(search, true)
-                }
-                items(shown, key = { it.id }) { team ->
-                    Row(
-                        Modifier.fillMaxWidth().clickable {
-                            teams = if (team.id in teams) teams - team.id else teams + team.id
-                            commit()
-                        }.padding(vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Checkbox(checked = team.id in teams, onCheckedChange = null)
-                        Spacer(Modifier.width(10.dp))
-                        Text(team.name)
+                val q = search.trim().lowercase()
+                val visible = if (q.isEmpty()) sport.teams
+                else sport.teams.filter { q in it.name.lowercase() || q in it.abbrev.lowercase() }
+                for (team in visible) {
+                    item(key = "team-${team.id}") {
+                        val selected = team.id in teamIds
+                        val spoiled = sc?.spoilerTeamIds?.contains(team.id) == true
+                        ListItem(
+                            headlineContent = { Text(team.name) },
+                            leadingContent = { TeamBadge(sportId, team) },
+                            trailingContent = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (selected) {
+                                        SpoilerChip(spoiled) {
+                                            session.setTeamSpoiler(boardId, sportId, team.id, !spoiled)
+                                        }
+                                        Icon(Icons.Filled.Check, null, tint = MaterialTheme.colorScheme.primary)
+                                    }
+                                }
+                            },
+                            modifier = Modifier.clickable {
+                                teamIds = if (selected) teamIds - team.id else teamIds + team.id
+                            },
+                        )
                     }
                 }
             }
         }
     }
+
+    if (confirmAll) {
+        AlertDialog(
+            onDismissRequest = { confirmAll = false },
+            title = { Text("Show every match?") },
+            text = {
+                Text(
+                    "Every match can be a lot of games — on a busy night the scoreboard " +
+                        "shows the first 20 and lists the rest as bumped. You can always " +
+                        "pick a narrower option.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    // Confirm selects every round id, so the checkmarks stay honest.
+                    roundIds = sport.championshipRounds.map { it.id }
+                    confirmAll = false
+                }) { Text("Continue") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmAll = false }) { Text("Cancel") }
+            },
+        )
+    }
+}
+
+private fun styleParam(style: UiNameStyle): String = when (style) {
+    UiNameStyle.LOCATION -> "location"
+    UiNameStyle.NAME -> "name"
+    UiNameStyle.ABBREV -> "abbrev"
 }

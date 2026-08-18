@@ -19,7 +19,11 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        // Settings needs BuildConfig.DEBUG for the dev-channel gate.
+        buildConfig = true
+    }
 }
 
 dependencies {
@@ -29,6 +33,9 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime)
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.material3)
+    // The full Material icon set (PushPin, DarkMode, …). Debug builds carry
+    // it whole; R8 strips the unused ones from release.
+    implementation("androidx.compose.material:material-icons-extended")
     implementation(libs.compose.ui)
     implementation(libs.security.crypto)
     implementation(libs.coroutines.core)

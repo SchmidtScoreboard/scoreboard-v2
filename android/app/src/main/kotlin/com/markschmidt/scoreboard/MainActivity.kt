@@ -23,7 +23,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Screen { Dashboard, Settings, Browse, Leagues }
+private enum class Screen { Dashboard, Settings, Browse, LeaguePicker }
 
 @Composable
 private fun Root(session: Session) {
@@ -40,17 +40,35 @@ private fun Root(session: Session) {
         }
         return
     }
-    BackHandler(enabled = screen != Screen.Dashboard) { screen = Screen.Dashboard }
+    // The league editor overlays whatever screen opened it, so Browse's
+    // shortcut and the picker both come back to where the user was.
+    var editingSport by remember { mutableStateOf<String?>(null) }
+    BackHandler(enabled = screen != Screen.Dashboard || editingSport != null) {
+        if (editingSport != null) editingSport = null else screen = Screen.Dashboard
+    }
+    editingSport?.let { sportId ->
+        LeagueEditorScreen(session, state, boardId, sportId) { editingSport = null }
+        return
+    }
     when (screen) {
         Screen.Dashboard -> Dashboard(
             session, state, boardId,
             onSettings = { screen = Screen.Settings },
             onBrowse = { screen = Screen.Browse },
-            onLeagues = { screen = Screen.Leagues },
+            onEditLeague = { editingSport = it },
+            onAddLeague = { screen = Screen.LeaguePicker },
         )
         Screen.Settings -> SettingsScreen(session, state, boardId) { screen = Screen.Dashboard }
-        Screen.Browse -> BrowseScreen(session, state, boardId) { screen = Screen.Dashboard }
-        Screen.Leagues -> LeagueListScreen(session, state, boardId) { screen = Screen.Dashboard }
+        Screen.Browse -> BrowseScreen(
+            session, state, boardId,
+            onBack = { screen = Screen.Dashboard },
+            onEditLeague = { editingSport = it },
+        )
+        Screen.LeaguePicker -> LeaguePickerScreen(
+            session, state, boardId,
+            onBack = { screen = Screen.Dashboard },
+            onEditLeague = { editingSport = it },
+        )
     }
 }
 
