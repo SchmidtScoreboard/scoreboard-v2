@@ -285,8 +285,8 @@ private fun CardMenu(
                 },
             )
         }
-        val startLabel = scheduleLabel(game.startTime, game.sportId, isEnd = false)
-        val endLabel = scheduleLabel(game.endTime, game.sportId, isEnd = true)
+        val startLabel = scheduleLabel(ctx, game.startTime, game.sportId, isEnd = false)
+        val endLabel = scheduleLabel(ctx, game.endTime, game.sportId, isEnd = true)
         if (startLabel != null || endLabel != null) {
             HorizontalDivider()
             startLabel?.let { (tense, text) ->
@@ -334,7 +334,12 @@ private suspend fun fetchRenderBitmap(
  * US Eastern (ESPN's boundary is midnight Eastern, not a clock time).
  * Formatting is deliberately platform-side: locale + 24-hour setting.
  */
-private fun scheduleLabel(rfc3339: String?, sportId: String, isEnd: Boolean): Pair<String, String>? {
+private fun scheduleLabel(
+    context: android.content.Context,
+    rfc3339: String?,
+    sportId: String,
+    isEnd: Boolean,
+): Pair<String, String>? {
     if (rfc3339 == null) return null
     val instant = runCatching { java.time.Instant.parse(rfc3339) }.getOrNull() ?: return null
     val past = instant.isBefore(java.time.Instant.now())
@@ -342,19 +347,22 @@ private fun scheduleLabel(rfc3339: String?, sportId: String, isEnd: Boolean): Pa
         isEnd && past -> "Ended"; isEnd -> "Ends"
         past -> "Started"; else -> "Starts"
     }
+    val date = java.util.Date.from(instant)
     if (isEnd && (sportId == "pga" || sportId == "lpga")) {
+        // A golf end is a DATE with a midnight-Eastern boundary, not a time.
         val fmt = java.text.SimpleDateFormat("MMM d", java.util.Locale.getDefault())
         fmt.timeZone = java.util.TimeZone.getTimeZone("America/New_York")
-        return tense to fmt.format(java.util.Date.from(instant))
+        return tense to fmt.format(date)
     }
+    // getTimeFormat honours the system 12/24-hour setting — and it demands a
+    // REAL Context. A null one compiles and then dies at the first render;
+    // that exact mistake has now been made twice in this file's history, so:
+    // never call a DateFormat helper here without threading the Context in.
+    val timeText = android.text.format.DateFormat.getTimeFormat(context).format(date)
     val zone = java.time.ZoneId.systemDefault()
-    val local = instant.atZone(zone)
-    val time = java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault())
-        .apply { if (android.text.format.DateFormat.is24HourFormat(null as android.content.Context?)) applyPattern("H:mm") }
-    val timeText = time.format(java.util.Date.from(instant))
-    val today = local.toLocalDate() == java.time.ZonedDateTime.now(zone).toLocalDate()
+    val today = instant.atZone(zone).toLocalDate() == java.time.ZonedDateTime.now(zone).toLocalDate()
     return tense to if (today) timeText else {
-        "$timeText " + java.text.SimpleDateFormat("EEE", java.util.Locale.getDefault()).format(java.util.Date.from(instant))
+        "$timeText " + java.text.SimpleDateFormat("EEE", java.util.Locale.getDefault()).format(date)
     }
 }
 
