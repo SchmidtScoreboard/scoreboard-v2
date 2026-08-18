@@ -46,10 +46,12 @@ fun BrowseScreen(
                     IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
                 },
                 actions = {
-                    val modified = cfg != null && rotationModified(
-                        cfg.focusedGameId, cfg.extraGameIds, cfg.excludedGameIds,
-                        cfg.spoilerGameIds, cfg.revealedGameIds,
-                    )
+                    val modified = cfg != null && remember(cfg) {
+                        rotationModified(
+                            cfg.focusedGameId, cfg.extraGameIds, cfg.excludedGameIds,
+                            cfg.spoilerGameIds, cfg.revealedGameIds,
+                        )
+                    }
                     TextButton(
                         onClick = { session.resetRotation(boardId) },
                         enabled = modified,
@@ -77,7 +79,9 @@ fun BrowseScreen(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
             )
 
-            val sections = filteredSections(state, query)
+            val sections = remember(state.games, state.sports, query) {
+                filteredSections(state, query)
+            }
             when {
                 state.games.isEmpty() -> BrowseEmpty(
                     Icons.Outlined.SportsBaseball, "No live games", "Tap refresh to check again.",

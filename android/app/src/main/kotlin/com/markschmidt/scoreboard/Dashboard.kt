@@ -141,7 +141,9 @@ private fun GamesSection(
             }
         }
         else -> {
-            val games = displayedNowShowing(board.nowShowing, cfg.focusedGameId)
+            val games = remember(board.nowShowing, cfg.focusedGameId) {
+                displayedNowShowing(board.nowShowing, cfg.focusedGameId)
+            }
             LazyRow(
                 contentPadding = PaddingValues(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -195,7 +197,7 @@ private fun ControlsSection(
 @Composable
 private fun ModeFooter(session: Session, boardId: String, cfg: UiBoardConfig, state: Session.AppState) {
     if (cfg.mode == "scores") return
-    val label = modeLabel(cfg.mode, state.offModes)
+    val label = remember(cfg.mode, state.offModes) { modeLabel(cfg.mode, state.offModes) }
     val wake = cfg.wakeAt?.toLong()
     // Re-evaluate each minute so the countdown text stays honest.
     var now by remember { mutableStateOf(System.currentTimeMillis() / 1000) }
@@ -251,12 +253,17 @@ private fun BrightnessRow(session: Session, boardId: String, brightness: UByte) 
 @Composable
 private fun ModePicker(session: Session, state: Session.AppState, boardId: String, cfg: UiBoardConfig) {
     val board = state.boards[boardId] ?: return
-    val modes = pickableModes(state.offModes)
+    val modes = remember(state.offModes) { pickableModes(state.offModes) }
     if (modes.isEmpty()) return
-    val selected = effectiveMode(cfg.mode, board.quietActive, board.nowShowing.isEmpty(), cfg.offMode)
+    val nothingShowing = board.nowShowing.isEmpty()
+    val selected = remember(cfg.mode, board.quietActive, nothingShowing, cfg.offMode) {
+        effectiveMode(cfg.mode, board.quietActive, nothingShowing, cfg.offMode)
+    }
     LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         items(modes, key = { it.id }) { m ->
-            val path = m.path?.let { configuredPreview(it, cfg.offModeParams) }
+            val path = remember(m.path, cfg.offModeParams) {
+                m.path?.let { configuredPreview(it, cfg.offModeParams) }
+            }
             val bmp = rememberPreview(path?.let { "${session.httpBase}$it" })
             Column(
                 Modifier.width(128.dp).clickable { session.setMode(boardId, m.id) },
@@ -276,6 +283,31 @@ private fun ModePicker(session: Session, state: Session.AppState, boardId: Strin
 }
 
 /**
+ * `leagueItems` runs inside LazyListScope, outside any remember scope — so
+ * its two FFI passes memoize here instead, keyed on their actual inputs.
+ * The maps hold ONE entry: the previous answer.
+ */
+private val leaguePrefsMemo =
+    java.util.concurrent.atomic.AtomicReference<Triple<UiBoardConfig, List<UiSport>, List<UiLeaguePref>>?>(null)
+
+private fun leaguePrefsCache(cfg: UiBoardConfig, sports: List<UiSport>): List<UiLeaguePref> {
+    leaguePrefsMemo.get()?.let { (c, s, answer) -> if (c == cfg && s == sports) return answer }
+    val answer = leaguePrefs(cfg, sports)
+    leaguePrefsMemo.set(Triple(cfg, sports, answer))
+    return answer
+}
+
+private val groupLeaguesMemo =
+    java.util.concurrent.atomic.AtomicReference<Pair<List<UiSport>, List<UiLeagueGroup>>?>(null)
+
+private fun groupLeaguesCache(sports: List<UiSport>): List<UiLeagueGroup> {
+    groupLeaguesMemo.get()?.let { (s, answer) -> if (s == sports) return answer }
+    val answer = groupLeagues(sports)
+    groupLeaguesMemo.set(sports to answer)
+    return answer
+}
+
+/**
  * League preferences: one section per category, league blocks inside — the
  * league NAME opens its editor, the chip flips its spoiler, override rows
  * appear only when the override exists. Deliberately NO "Leagues" header and
@@ -288,7 +320,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.leagueItems(
     cfg: UiBoardConfig,
     onEditLeague: (String) -> Unit,
 ) {
-    val prefs = leaguePrefs(cfg, state.sports)
+    val prefs = leaguePrefsCache(cfg, state.sports)
     if (prefs.isEmpty()) {
         item {
             SectionHeader("")
@@ -302,7 +334,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.leagueItems(
         return
     }
     val byId = prefs.associateBy { it.sport.id }
-    for (group in groupLeagues(prefs.map { it.sport })) {
+    for (group in groupLeaguesCache(prefs.map { it.sport })) {
         val here = group.sportIds.mapNotNull { byId[it] }
         if (here.isEmpty()) continue
         item { SectionHeader(group.category) }
@@ -338,7 +370,7 @@ private fun LeagueBlock(
             ) {
                 Column(Modifier.weight(1f)) {
                     Text(sport.name, style = MaterialTheme.typography.titleMedium)
-                    pickedRoundsLabel(pref.roundLabels)?.let {
+                    remember(pref.roundLabels) { pickedRoundsLabel(pref.roundLabels) }?.let {
                         Text(
                             it, style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.outline,

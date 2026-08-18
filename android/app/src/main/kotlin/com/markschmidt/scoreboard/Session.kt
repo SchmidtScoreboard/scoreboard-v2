@@ -291,6 +291,8 @@ class Session(context: Context) : ClientListener {
     }
 
     override fun onBoardState(boardId: String, nowShowing: List<UiGame>, online: Boolean) {
+        val prior = _state.value.boards[boardId]
+        if (prior != null && prior.nowShowing == nowShowing && prior.online == online) return
         val boards = _state.value.boards.toMutableMap()
         val prev = boards[boardId] ?: BoardSnapshot()
         boards[boardId] = prev.copy(nowShowing = nowShowing, online = online)
@@ -304,30 +306,38 @@ class Session(context: Context) : ClientListener {
     }
 
     override fun onConfig(boardId: String, config: UiBoardConfig) {
+        if (_state.value.boards[boardId]?.config == config) return
         val boards = _state.value.boards.toMutableMap()
         boards[boardId] = (boards[boardId] ?: BoardSnapshot()).copy(config = config)
         _state.value = _state.value.copy(boards = boards)
     }
 
     override fun onQuietActive(boardId: String, active: Boolean) {
+        if (_state.value.boards[boardId]?.quietActive == active) return
         val boards = _state.value.boards.toMutableMap()
         boards[boardId] = (boards[boardId] ?: BoardSnapshot()).copy(quietActive = active)
         _state.value = _state.value.copy(boards = boards)
     }
 
     override fun onCatalog(sports: List<UiSport>) {
+        if (_state.value.sports == sports) return
         _state.value = _state.value.copy(sports = sports)
     }
 
     override fun onOffModes(modes: List<UiOffMode>) {
+        if (_state.value.offModes == modes) return
         _state.value = _state.value.copy(offModes = modes)
     }
 
     override fun onGames(games: List<UiGame>) {
+        if (_state.value.games == games) return
         _state.value = _state.value.copy(games = games)
     }
 
     override fun onFrame(frameId: String, rgba: ByteArray) {
+        // The id IS the content hash — a re-push of a cached frame carries
+        // nothing new, and emitting it would recompose every screen.
+        if (frameId in _state.value.frames) return
         // Bounded: keep only frames the now-showing lists still reference,
         // plus the newcomer — the same eviction idea the board itself uses.
         val referenced = _state.value.boards.values

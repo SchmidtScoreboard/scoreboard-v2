@@ -7,6 +7,8 @@
 #   ./run.sh --logs          follow the app's log after launching
 #   ./run.sh --clean         wipe build/ first (see the dex note below)
 #   ./run.sh --devices       what adb can see (no PATH setup needed)
+#   ./run.sh --release       R8-optimized build — how performance should be
+#                            judged; debug Compose is several times slower
 #
 # The Rust core is NOT rebuilt here — run ./build-core.sh after changing
 # crates/app-core or crates/protocol.
@@ -20,7 +22,7 @@ export ANDROID_HOME="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
 export PATH="$JAVA_HOME/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
 APP=com.markschmidt.scoreboard
 
-WANT_EMU=0; WANT_LOGS=0; WANT_CLEAN=0; SERIAL=""
+WANT_EMU=0; WANT_LOGS=0; WANT_CLEAN=0; WANT_RELEASE=0; SERIAL=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         # adb lives in the SDK, which is not on a normal PATH — so asking
@@ -29,6 +31,7 @@ while [[ $# -gt 0 ]]; do
         --emu) WANT_EMU=1 ;;
         --logs) WANT_LOGS=1 ;;
         --clean) WANT_CLEAN=1 ;;
+        --release) WANT_RELEASE=1 ;;
         --device) SERIAL="${2:-}"; shift ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
@@ -100,12 +103,14 @@ echo "sdk.dir=$ANDROID_HOME" > local.properties
 # before that change get swept here.
 find . -name "* [0-9].*" -delete 2>/dev/null || true
 
-if ! ./gradlew assembleDebug -q 2>/tmp/gradle-err.txt; then
+VARIANT=Debug; APKDIR=debug; APKNAME=app-debug.apk
+if [[ "$WANT_RELEASE" == 1 ]]; then VARIANT=Release; APKDIR=release; APKNAME=app-release.apk; fi
+if ! ./gradlew "assemble$VARIANT" -q 2>/tmp/gradle-err.txt; then
     cat /tmp/gradle-err.txt >&2
     exit 1
 fi
 
-APK="$HOME/Library/Caches/scoreboard-android/app/outputs/apk/debug/app-debug.apk"
+APK="$HOME/Library/Caches/scoreboard-android/app/outputs/apk/$APKDIR/$APKNAME"
 [[ -f "$APK" ]] || { echo "no APK at $APK" >&2; exit 1; }
 adb -s "$SERIAL" install -r "$APK"
 adb -s "$SERIAL" shell am start -n "$APP/.MainActivity" >/dev/null

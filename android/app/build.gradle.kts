@@ -19,6 +19,15 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+    buildTypes {
+        release {
+            // Personal-device build, not a store build: R8 on, signed with
+            // the debug key so `adb install` over the debug flow still works.
+            isMinifyEnabled = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.getByName("debug")
+        }
+    }
     buildFeatures {
         compose = true
         // Settings needs BuildConfig.DEBUG for the dev-channel gate.

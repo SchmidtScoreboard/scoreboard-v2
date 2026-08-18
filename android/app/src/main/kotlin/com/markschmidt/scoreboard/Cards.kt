@@ -67,7 +67,8 @@ fun rememberGameFrame(
     boardId: String,
     refresh: Long,
 ): Pair<Bitmap?, Boolean> {
-    val pushed = state.frames[game.frameId]?.let { Frames.toBitmap(it) }
+    val bytes = state.frames[game.frameId]
+    val pushed = remember(game.frameId, bytes != null) { bytes?.let { Frames.toBitmap(it) } }
     if (pushed != null) return pushed to false
     // v mirrors iOS: any content or spoiler change busts the HTTP cache.
     val v = "${game.awayScore}-${game.homeScore}-${game.status}-${game.detail}-${game.spoiled}"
@@ -95,12 +96,16 @@ fun GameCard(
 ) {
     val cfg = state.boards[boardId]?.config ?: return
     val nowShowing = state.boards[boardId]?.nowShowing ?: emptyList()
-    val highlight = uniffi.app_core.cardHighlight(
-        game, cfg.focusedGameId, nowShowing, cfg.extraGameIds, cfg.excludedGameIds,
-    )
-    val showing = uniffi.app_core.rotationIsShowing(
-        game.id, nowShowing, cfg.extraGameIds, cfg.excludedGameIds,
-    )
+    val highlight = remember(game, cfg.focusedGameId, nowShowing, cfg.extraGameIds, cfg.excludedGameIds) {
+        uniffi.app_core.cardHighlight(
+            game, cfg.focusedGameId, nowShowing, cfg.extraGameIds, cfg.excludedGameIds,
+        )
+    }
+    val showing = remember(game.id, nowShowing, cfg.extraGameIds, cfg.excludedGameIds) {
+        uniffi.app_core.rotationIsShowing(
+            game.id, nowShowing, cfg.extraGameIds, cfg.excludedGameIds,
+        )
+    }
     val pinned = highlight == UiCardHighlight.PINNED
     // While any pin is active every other card steps back.
     val dimmed = cfg.focusedGameId != null && !pinned
@@ -140,7 +145,7 @@ fun GameCard(
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
-                    gameTitle(game.away, game.home),
+                    remember(game.away, game.home) { gameTitle(game.away, game.home) },
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
