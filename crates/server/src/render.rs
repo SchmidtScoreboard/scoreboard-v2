@@ -1196,17 +1196,14 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
     // F1 wears race-day chrome: white event title between checkered flags.
     let title_color = if f1 { WHITE } else { accent };
     let title_w = text_width(&lb.name, false);
-    // Golf titles with a round share the row: the title centers in the space
-    // LEFT of the marker instead of the whole panel, because panel-centering
-    // let any name wider than ~8 characters push the round off the frame.
-    // The name budget already reserves the marker's corner (see
-    // `clean_golf_name`), so by construction both fit.
-    let tx = if !f1 && !g.ordinal.is_empty() {
-        let avail_right = 61 - text_width(&g.ordinal, false);
-        ((avail_right - title_w) / 2).max(0)
-    } else {
-        32 - title_w / 2
-    };
+    // Golf titles that can share the row with the round LEFT-ALIGN instead of
+    // centering: centering wasted the left margin and let any name past ~8
+    // characters evict the round. Left-aligned, names up to ~10 characters
+    // keep both. Wider names still center and keep the row to themselves —
+    // the name is the identity; the round is chrome.
+    let round_w = text_width(&g.ordinal, false);
+    let shares_row = !f1 && !g.ordinal.is_empty() && title_w <= 61 - round_w;
+    let tx = if shares_row { 0 } else { 32 - title_w / 2 };
     draw_text(&mut c, &lb.name, tx, 5, false, title_color);
     if f1 {
         // Flags only when the title clears them by 2px on both sides — a long
@@ -3670,10 +3667,10 @@ mod wx_tests {
 
 #[cfg(test)]
 mod wx_dump {
-    /// A tournament name as wide as the panel used to evict the round marker
-    /// entirely — "CPKC WOMENS" showed no R3 while "BMW" did. The name budget
-    /// now reserves the marker's corner, so the round must survive ANY name
-    /// the espn layer produces.
+    /// Panel-centering let any title past ~8 characters evict the round
+    /// marker — "CPKC WOMENS" showed no R3 while "BMW" did. Sharing titles
+    /// left-align now, which buys the marker back for names up to ~10
+    /// characters ("CPKC OPEN" via the name map).
     #[test]
     fn the_round_marker_survives_a_wide_tournament_name() {
         let golf = crate::model::Game {
@@ -3687,8 +3684,9 @@ mod wx_dump {
             start_time: "2026-08-22T11:00Z".into(),
             end_time: None,
             leaderboard: Some(crate::model::Leaderboard {
-                // 10 chars — the widest clean_golf_name can now emit (52px).
-                name: "CPKC WOMEN".into(),
+                // 9 chars, 44px: what the name map emits for this event —
+                // wide enough that panel-centering used to evict the round.
+                name: "CPKC OPEN".into(),
                 rows: vec![crate::model::LeaderRow {
                     name: "YAMASHITA".into(),
                     value: "-14".into(),

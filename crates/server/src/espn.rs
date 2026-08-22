@@ -1008,16 +1008,8 @@ fn clean_golf_name(short: &str) -> String {
     // "STANDARD PORTLAND" -> "PORTLAND" names the tournament, and dropping from
     // the other end would not. `fit_words` keeps a two-word tail whatever
     // happens, so a name is never reduced to a single sponsor.
-    // ...minus the round marker's corner. The round is user-facing state (and
-    // now a setting): a name wide enough to evict it meant most tournaments
-    // never showed their round at all — only three-letter titles like "BMW"
-    // left it room. "R4" plus clearance costs 12px; the name yields.
-    fit_words_px(&name, crate::protocol_frame_width() - GOLF_ROUND_RESERVE_PX)
+    fit_words_px(&name, crate::protocol_frame_width())
 }
-
-/// Pixels the golf title leaves for the round marker: "R4" (9px in FONT_4X6)
-/// plus the 2px clearance `draw_round_marker` demands, plus 1px of margin.
-pub(crate) const GOLF_ROUND_RESERVE_PX: i32 = 12;
 
 /// Fit `text` to `max_px` for the panel, preferring whole words to fragments.
 ///
@@ -1095,7 +1087,7 @@ fn golf_name_map(name: &str) -> Option<&'static str> {
         "PUERTO RICO OPEN" => "PUERTO RICO",
         "THE ANNIKA DRIVEN BY GAINBRIDGE AT PELICAN" => "THE ANNIKA",
         "ISPS HANDA WOMEN'S SCOTTISH OPEN" => "WOMENS SCOTTISH",
-        "CPKC WOMEN'S OPEN" => "CPKC WOMENS",
+        "CPKC WOMEN'S OPEN" => "CPKC OPEN",
         _ => return None,
     })
 }
