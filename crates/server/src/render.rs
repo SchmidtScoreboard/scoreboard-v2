@@ -1196,7 +1196,17 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
     // F1 wears race-day chrome: white event title between checkered flags.
     let title_color = if f1 { WHITE } else { accent };
     let title_w = text_width(&lb.name, false);
-    let tx = 32 - title_w / 2;
+    // Golf titles with a round share the row: the title centers in the space
+    // LEFT of the marker instead of the whole panel, because panel-centering
+    // let any name wider than ~8 characters push the round off the frame.
+    // The name budget already reserves the marker's corner (see
+    // `clean_golf_name`), so by construction both fit.
+    let tx = if !f1 && !g.ordinal.is_empty() {
+        let avail_right = 61 - text_width(&g.ordinal, false);
+        ((avail_right - title_w) / 2).max(0)
+    } else {
+        32 - title_w / 2
+    };
     draw_text(&mut c, &lb.name, tx, 5, false, title_color);
     if f1 {
         // Flags only when the title clears them by 2px on both sides — a long
@@ -1209,9 +1219,8 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
     } else {
         // Golf's round, right-aligned on the title row — the one thing the
         // leaderboard itself cannot tell you, since Thursday and Sunday look
-        // the same. Drawn only when it clears the centered title by 2px, the
-        // same rule the flags follow: a long tournament name keeps the name
-        // and drops the round rather than overprinting it.
+        // the same. The clearance check stays as the last guard, but the
+        // shared budget above means it holds for every real name now.
         draw_round_marker(&mut c, &g.ordinal, tx, title_w, accent);
     }
 
@@ -3661,6 +3670,49 @@ mod wx_tests {
 
 #[cfg(test)]
 mod wx_dump {
+    /// A tournament name as wide as the panel used to evict the round marker
+    /// entirely — "CPKC WOMENS" showed no R3 while "BMW" did. The name budget
+    /// now reserves the marker's corner, so the round must survive ANY name
+    /// the espn layer produces.
+    #[test]
+    fn the_round_marker_survives_a_wide_tournament_name() {
+        let golf = crate::model::Game {
+            id: "t".into(),
+            sport_id: "lpga".into(),
+            away: crate::model::TeamSide::empty("LPGA"),
+            home: crate::model::TeamSide::empty(""),
+            status: crate::model::GameStatus::Active,
+            ordinal: "R3".into(),
+            clock: String::new(),
+            start_time: "2026-08-22T11:00Z".into(),
+            end_time: None,
+            leaderboard: Some(crate::model::Leaderboard {
+                // 10 chars — the widest clean_golf_name can now emit (52px).
+                name: "CPKC WOMEN".into(),
+                rows: vec![crate::model::LeaderRow {
+                    name: "YAMASHITA".into(),
+                    value: "-14".into(),
+                    ..Default::default()
+                }],
+            }),
+            champ: None,
+            series: None,
+            session: None,
+            situation: None,
+            pregame: None,
+        };
+        let (_, px) = render_frame(&golf, None, None, scoreboard_protocol::NameStyle::Name);
+        // The marker draws right-aligned at x=63 on the title row (y 5..11).
+        // Any lit pixel in that corner is the round; a black corner is the bug.
+        let lit = (54..64)
+            .flat_map(|x| (5..11).map(move |y| (x, y)))
+            .any(|(x, y)| {
+                let i = (y * 64 + x) * 2;
+                u16::from_le_bytes([px[i], px[i + 1]]) != 0
+            });
+        assert!(lit, "the round marker must survive a panel-wide name");
+    }
+
     use super::*;
     #[test]
     #[ignore = "writes weather previews; run with --ignored"]
