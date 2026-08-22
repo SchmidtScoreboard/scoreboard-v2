@@ -40,7 +40,12 @@ pub fn game_title(away: String, home: String) -> String {
     }
     away.split(' ')
         .map(|w| {
-            if w.chars().count() <= 2 {
+            // Short words stay caps ("GP", "US") — and so does any word with
+            // no vowel: "BMW" and "CPKC" are initialisms, and "Bmw" reads as
+            // a typo. Y counts as a vowel so "LYNX"-shaped words still fold.
+            let vowelless =
+                !w.chars().any(|c| matches!(c.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u' | 'y'));
+            if w.chars().count() <= 2 || vowelless {
                 w.to_string()
             } else {
                 let mut cs = w.chars();
@@ -765,12 +770,14 @@ pub fn pickable_modes(off_modes: Vec<UiOffMode>) -> Vec<UiPickableMode> {
         label: "Scores".into(),
         path: Some("/sample/plain.png?live=1".into()),
     }];
+    // Off comes second, matching the Screen settings page where Off leads
+    // the idle-screen list — the two orderings must read as one system.
+    out.push(UiPickableMode { id: "off".into(), label: "Off".into(), path: None });
     for m in off_modes {
         if m.preview.is_some() {
             out.push(UiPickableMode { id: m.id, label: m.label, path: m.preview });
         }
     }
-    out.push(UiPickableMode { id: "off".into(), label: "Off".into(), path: None });
     out
 }
 
@@ -1057,15 +1064,29 @@ mod tests {
         assert_eq!(compute_wake_at("off".into(), big, 24, 1000), Some(1000 + 72 * 3600), "clamped like the server");
     }
 
+    /// "BMW CHAMPIONSHIP" must not become "Bmw Championship" — a word with
+    /// no vowel is an initialism and keeps its caps (MAR-109). Y is a vowel
+    /// here so pronounceable consonant-heavy names still fold.
     #[test]
-    fn the_picker_is_scores_first_off_last_no_dark_double() {
+    fn initialisms_keep_their_caps_in_event_titles() {
+        assert_eq!(game_title("BMW CHAMPIONSHIP".into(), String::new()), "BMW Championship");
+        assert_eq!(game_title("CPKC WOMENS OPEN".into(), String::new()), "CPKC Womens Open");
+        assert_eq!(game_title("DUTCH GP".into(), String::new()), "Dutch GP");
+        assert_eq!(game_title("MONACO GP".into(), String::new()), "Monaco GP");
+    }
+
+    #[test]
+    fn the_picker_is_scores_then_off_no_dark_double() {
         let modes = vec![
             UiOffMode { id: "blank".into(), label: "Off".into(), description: String::new(), preview: None, input: None, fields: vec![] },
             UiOffMode { id: "clock".into(), label: "Clock".into(), description: String::new(), preview: Some("/offmode/clock.png".into()), input: None, fields: vec![] },
         ];
         let p = pickable_modes(modes);
         let ids: Vec<&str> = p.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, ["scores", "clock", "off"], "blank never becomes a second dark tile");
+        // Off second, matching the settings page where Off leads the idle
+        // list (MAR-110); the blank descriptor still never becomes a second
+        // dark tile.
+        assert_eq!(ids, ["scores", "off", "clock"], "blank never becomes a second dark tile");
     }
 
     #[test]

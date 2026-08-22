@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.*
@@ -259,7 +260,15 @@ private fun ModePicker(session: Session, state: Session.AppState, boardId: Strin
     val selected = remember(cfg.mode, board.quietActive, nothingShowing, cfg.offMode) {
         effectiveMode(cfg.mode, board.quietActive, nothingShowing, cfg.offMode)
     }
-    LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+    // Opens scrolled to the SELECTED tile — a rail whose selection sits
+    // off-screen reads as "nothing is selected" (MAR-110). Once, on entry;
+    // after that the user owns the scroll position.
+    val listState = rememberLazyListState()
+    LaunchedEffect(Unit) {
+        val i = modes.indexOfFirst { it.id == selected }
+        if (i > 0) listState.scrollToItem(i)
+    }
+    LazyRow(state = listState, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         items(modes, key = { it.id }) { m ->
             val path = remember(m.path, cfg.offModeParams) {
                 m.path?.let { configuredPreview(it, cfg.offModeParams) }

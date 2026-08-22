@@ -2473,10 +2473,18 @@ struct DashboardView: View {
     /// because a picture of what the panel will do is the app's language for
     /// choices like this.
     private var modePicker: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            modePickerTiles
+        // Opens scrolled to the SELECTED tile: with four-plus modes the
+        // current one can sit off-screen, and a rail with no visible
+        // selection reads as "nothing is selected" (MAR-110).
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                modePickerTiles
+            }
+            .contentMargins(.horizontal, 20, for: .scrollContent)
+            .onAppear {
+                proxy.scrollTo(model.effectiveMode, anchor: .center)
+            }
         }
-        .contentMargins(.horizontal, 20, for: .scrollContent)
     }
 
     private var modePickerTiles: some View {
