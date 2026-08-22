@@ -848,6 +848,15 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) -> O
                     cfg.sports.push(SportConfig { sport_id, show_round: show, ..Default::default() });
                 }
             }
+            // Golf's holes-played column. Same upsert shape as the round
+            // indicator above, and the same absent-means-shown default.
+            Command::SetLeagueShowThru { sport_id, show } => {
+                if let Some(s) = cfg.sports.iter_mut().find(|s| s.sport_id == sport_id) {
+                    s.show_thru = show;
+                } else if show.is_some() {
+                    cfg.sports.push(SportConfig { sport_id, show_thru: show, ..Default::default() });
+                }
+            }
             // The box-score extras beside the score. Same upsert shape, and the
             // same default: absent means shown, so a league nobody has touched
             // draws what it always drew.
@@ -1344,6 +1353,7 @@ mod tests {
                 dwell_secs: Some(30),
                 leaderboard_rows: None,
                 show_round: None,
+                show_thru: None,
                 show_extras: None,
                 spoiler: true,
                 spoiler_team_ids: vec!["nhl-tor".into()],

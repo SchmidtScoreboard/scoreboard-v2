@@ -1224,6 +1224,16 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
         // + 4 rows = 5 rows fit the 32px panel (the original fit 5, not 4). The whole
         // block sits one pixel down from the top so the gap is even (1px) top + bottom.
         let mut by = 12;
+        // The thru column is a COLUMN: anchored off the widest score on the
+        // screen, not each row's own. Per-row anchoring made the digits
+        // zigzag whenever -11 sat above -9.
+        let widest_value = lb
+            .rows
+            .iter()
+            .take(max_rows.max(5))
+            .map(|r| text_width(&r.value, false))
+            .max()
+            .unwrap_or(0);
         for row in lb.rows.iter().take(max_rows.max(5)) {
             // Leaderboard rows draw the team/driver color as ink on the BLACK
             // panel — a dark team color (deep blue, maroon) would be unreadable,
@@ -1245,7 +1255,7 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
             // all and the name gets the width back.
             let value_w = text_width(&row.value, false);
             let name_max_right = if let Some(thru) = &row.thru {
-                let thru_right = value_right - value_w - 3;
+                let thru_right = value_right - widest_value - 3;
                 draw_text_right(&mut c, thru, thru_right, by, false, GREY);
                 thru_right - text_width(thru, false) - 2
             } else {

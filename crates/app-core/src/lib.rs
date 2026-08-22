@@ -150,6 +150,8 @@ pub struct UiSportConfig {
     pub leaderboard_rows: Option<u32>,
     /// Golf's round indicator; None = the default, which is shown.
     pub show_round: Option<bool>,
+    /// Golf's holes-played column ("thru"). None = the default, which is ON.
+    pub show_thru: Option<bool>,
     /// Box-score extras (baseball H/E, NHL shots, soccer shootout/aggregate).
     /// None = the default, ON.
     pub show_extras: Option<bool>,
@@ -754,6 +756,10 @@ impl ScoreboardClient {
         let _ = self.tx.send(Out::Command(board_id, Command::SetLeagueShowRound { sport_id, show }));
     }
 
+    pub fn set_league_show_thru(&self, board_id: String, sport_id: String, show: Option<bool>) {
+        let _ = self.tx.send(Out::Command(board_id, Command::SetLeagueShowThru { sport_id, show }));
+    }
+
     /// The box-score extras beside the score — baseball's hits and errors, NHL
     /// shots on goal, a soccer shootout or aggregate. None reverts to the
     /// default, which is shown.
@@ -1115,6 +1121,7 @@ fn to_ui_configs(sports: Vec<PSportConfig>) -> Vec<UiSportConfig> {
             dwell_secs: s.dwell_secs,
             leaderboard_rows: s.leaderboard_rows,
             show_round: s.show_round,
+            show_thru: s.show_thru,
             show_extras: s.show_extras,
             name_style: s.name_style.map(UiNameStyle::from),
             spoiler: s.spoiler,

@@ -547,6 +547,12 @@ pub struct SportConfig {
     /// says otherwise. Only golf reads this — no other league has rounds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_round: Option<bool>,
+    /// Whether a golf leaderboard shows the holes-played column ("thru").
+    /// `None` = the default, which is ON — mid-round, -9 thru 7 and -9 thru 16
+    /// are different scores, so the column earns its pixels until someone says
+    /// otherwise. Same absence-means-show compatibility story as `show_round`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_thru: Option<bool>,
     /// Whether this league draws the box-score extras beside the score: hits
     /// and errors on a baseball final, shots on goal on a live NHL frame, a
     /// shootout or aggregate score on a soccer knockout.
@@ -1189,6 +1195,7 @@ pub enum Command {
     /// Golf's round indicator on/off for one league. `None` reverts to the
     /// default (shown).
     SetLeagueShowRound { sport_id: String, show: Option<bool> },
+    SetLeagueShowThru { sport_id: String, show: Option<bool> },
     /// Box-score extras for a league (baseball H/E, NHL shots, soccer
     /// shootout/aggregate). `None` reverts to the default, which is shown.
     SetLeagueShowExtras { sport_id: String, show: Option<bool> },

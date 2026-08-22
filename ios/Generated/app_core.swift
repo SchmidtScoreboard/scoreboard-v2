@@ -730,6 +730,8 @@ public protocol ScoreboardClientProtocol: AnyObject {
      */
     func setLeagueShowRound(boardId: String, sportId: String, show: Bool?)
 
+    func setLeagueShowThru(boardId: String, sportId: String, show: Bool?)
+
     /**
      * Spoiler-protect a whole league.
      */
@@ -1208,6 +1210,14 @@ open class ScoreboardClient:
                                                                          FfiConverterString.lower(boardId),
                                                                          FfiConverterString.lower(sportId),
                                                                          FfiConverterOptionBool.lower(show), $0)
+    }
+    }
+
+    open func setLeagueShowThru(boardId: String, sportId: String, show: Bool?) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_set_league_show_thru(self.uniffiClonePointer(),
+                                                                        FfiConverterString.lower(boardId),
+                                                                        FfiConverterString.lower(sportId),
+                                                                        FfiConverterOptionBool.lower(show), $0)
     }
     }
 
@@ -3549,6 +3559,10 @@ public struct UiSportConfig {
      */
     public var showRound: Bool?
     /**
+     * Golf's holes-played column ("thru"). None = the default, which is ON.
+     */
+    public var showThru: Bool?
+    /**
      * Box-score extras (baseball H/E, NHL shots, soccer shootout/aggregate).
      * None = the default, ON.
      */
@@ -3585,6 +3599,9 @@ public struct UiSportConfig {
                     * Golf's round indicator; None = the default, which is shown.
                     */ showRound: Bool?,
                 /**
+                    * Golf's holes-played column ("thru"). None = the default, which is ON.
+                    */ showThru: Bool?,
+                /**
                     * Box-score extras (baseball H/E, NHL shots, soccer shootout/aggregate).
                     * None = the default, ON.
                     */ showExtras: Bool?,
@@ -3606,6 +3623,7 @@ public struct UiSportConfig {
         self.dwellSecs = dwellSecs
         self.leaderboardRows = leaderboardRows
         self.showRound = showRound
+        self.showThru = showThru
         self.showExtras = showExtras
         self.nameStyle = nameStyle
         self.spoiler = spoiler
@@ -3633,6 +3651,9 @@ extension UiSportConfig: Equatable, Hashable {
         if lhs.showRound != rhs.showRound {
             return false
         }
+        if lhs.showThru != rhs.showThru {
+            return false
+        }
         if lhs.showExtras != rhs.showExtras {
             return false
         }
@@ -3655,6 +3676,7 @@ extension UiSportConfig: Equatable, Hashable {
         hasher.combine(dwellSecs)
         hasher.combine(leaderboardRows)
         hasher.combine(showRound)
+        hasher.combine(showThru)
         hasher.combine(showExtras)
         hasher.combine(nameStyle)
         hasher.combine(spoiler)
@@ -3675,6 +3697,7 @@ public struct FfiConverterTypeUiSportConfig: FfiConverterRustBuffer {
                 dwellSecs: FfiConverterOptionUInt32.read(from: &buf),
                 leaderboardRows: FfiConverterOptionUInt32.read(from: &buf),
                 showRound: FfiConverterOptionBool.read(from: &buf),
+                showThru: FfiConverterOptionBool.read(from: &buf),
                 showExtras: FfiConverterOptionBool.read(from: &buf),
                 nameStyle: FfiConverterOptionTypeUiNameStyle.read(from: &buf),
                 spoiler: FfiConverterBool.read(from: &buf),
@@ -3689,6 +3712,7 @@ public struct FfiConverterTypeUiSportConfig: FfiConverterRustBuffer {
         FfiConverterOptionUInt32.write(value.dwellSecs, into: &buf)
         FfiConverterOptionUInt32.write(value.leaderboardRows, into: &buf)
         FfiConverterOptionBool.write(value.showRound, into: &buf)
+        FfiConverterOptionBool.write(value.showThru, into: &buf)
         FfiConverterOptionBool.write(value.showExtras, into: &buf)
         FfiConverterOptionTypeUiNameStyle.write(value.nameStyle, into: &buf)
         FfiConverterBool.write(value.spoiler, into: &buf)
@@ -6174,6 +6198,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_league_show_round() != 59263 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_scoreboardclient_set_league_show_thru() != 5180 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_league_spoiler() != 26835 {

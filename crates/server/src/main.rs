@@ -1686,6 +1686,14 @@ async fn get_sample(
     if q.get("round").is_some_and(|v| v == "off") {
         g.ordinal.clear();
     }
+    // `?thru=off` previews the holes-played switch the same way.
+    if q.get("thru").is_some_and(|v| v == "off") {
+        if let Some(lb) = g.leaderboard.as_mut() {
+            for row in &mut lb.rows {
+                row.thru = None;
+            }
+        }
+    }
     // `?style=` previews a name style without storing it. Falls back to the
     // league default rather than erroring on a style this binary does not know.
     let style = q
@@ -1952,17 +1960,30 @@ pub(crate) fn board_view<'a>(cfg: &BoardConfig, g: &'a Game) -> std::borrow::Cow
     // Default ON: a leaderboard looks the same on Thursday as on Sunday, so the
     // round earns its corner until someone turns it off.
     let show_round = league.and_then(|s| s.show_round).unwrap_or(true);
+    // Default ON: mid-round, -9 thru 7 and -9 thru 16 are different scores.
+    let show_thru = league.and_then(|s| s.show_thru).unwrap_or(true);
     // Default ON for the same reason: the extras were what the panel drew
     // before anyone could turn them off, so absence has to mean "as before".
     let show_extras = league.and_then(|s| s.show_extras).unwrap_or(true);
     let drop_round = !show_round && !g.ordinal.is_empty();
     let drop_extras = !show_extras && game_has_extras(g);
-    if !drop_round && !drop_extras {
+    let drop_thru = !show_thru
+        && g.leaderboard.as_ref().is_some_and(|lb| lb.rows.iter().any(|r| r.thru.is_some()));
+    if !drop_round && !drop_extras && !drop_thru {
         return std::borrow::Cow::Borrowed(g);
     }
     let mut hidden = g.clone();
     if drop_round {
         hidden.ordinal.clear();
+    }
+    if drop_thru {
+        // Clearing the DATA, same as the round: the renderer already draws
+        // nothing (and returns the width to the name) when thru is None.
+        if let Some(lb) = hidden.leaderboard.as_mut() {
+            for row in &mut lb.rows {
+                row.thru = None;
+            }
+        }
     }
     if drop_extras {
         // Clearing the DATA rather than passing a flag down: `strip_sub_line`
@@ -5574,6 +5595,7 @@ mod tests {
                         dwell_secs: None,
                         leaderboard_rows: None,
                         show_round: None,
+                show_thru: None,
                         show_extras: None,
                         spoiler: false,
                         spoiler_team_ids: vec![],
@@ -5587,6 +5609,7 @@ mod tests {
                         dwell_secs: None,
                         leaderboard_rows: None,
                         show_round: None,
+                show_thru: None,
                         show_extras: None,
                         spoiler: false,
                         spoiler_team_ids: vec![],
@@ -5600,6 +5623,7 @@ mod tests {
                         dwell_secs: None,
                         leaderboard_rows: None,
                         show_round: None,
+                show_thru: None,
                         show_extras: None,
                         spoiler: false,
                         spoiler_team_ids: vec![],
@@ -5652,6 +5676,7 @@ mod tests {
                 dwell_secs: None,
                 leaderboard_rows: None,
                 show_round: None,
+                show_thru: None,
                 show_extras: None,
                 spoiler: false,
                 spoiler_team_ids: vec![],
@@ -5740,6 +5765,7 @@ mod tests {
                 dwell_secs: None,
                 leaderboard_rows: None,
                 show_round: None,
+                show_thru: None,
                 show_extras: None,
                 spoiler: false,
                 spoiler_team_ids: vec![],
@@ -6327,6 +6353,76 @@ mod tests {
         // the common case doesn't clone.
         let f1 = Game { sport_id: "f1".into(), ordinal: String::new(), ..golf.clone() };
         assert!(matches!(board_view(&cfg, &f1), std::borrow::Cow::Borrowed(_)), "no needless clone");
+    }
+
+    /// The holes-played column follows the same switch shape as the round:
+    /// absent means shown, off clears the DATA so the renderer never learns a
+    /// preference exists — and the untouched case must not clone.
+    #[test]
+    fn the_thru_toggle_clears_the_column_data() {
+        let golf = Game {
+            id: "402".into(),
+            sport_id: "pga".into(),
+            away: crate::model::TeamSide::empty("PGA"),
+            home: crate::model::TeamSide::empty(""),
+            status: GameStatus::Active,
+            ordinal: "R3".into(),
+            clock: String::new(),
+            start_time: "2026-08-22T11:00Z".into(),
+            end_time: None,
+            leaderboard: Some(crate::model::Leaderboard {
+                name: "BMW".into(),
+                rows: vec![
+                    crate::model::LeaderRow {
+                        name: "CLARK".into(),
+                        value: "-11".into(),
+                        thru: Some("6".into()),
+                        ..Default::default()
+                    },
+                    crate::model::LeaderRow {
+                        name: "SPAUN".into(),
+                        value: "-9".into(),
+                        thru: Some("7".into()),
+                        ..Default::default()
+                    },
+                ],
+            }),
+            champ: None,
+            series: None,
+            session: None,
+            situation: None,
+            pregame: None,
+        };
+        let cfg_with = |show: Option<bool>| BoardConfig {
+            sports: vec![SportConfig { sport_id: "pga".into(), show_thru: show, ..Default::default() }],
+            ..Default::default()
+        };
+
+        // Default (nothing stored) shows it, as does an explicit yes — and
+        // neither clones.
+        for cfg in [BoardConfig::default(), cfg_with(None), cfg_with(Some(true))] {
+            let view = board_view(&cfg, &golf);
+            assert!(matches!(view, std::borrow::Cow::Borrowed(_)), "no needless clone");
+            let rows = &view.leaderboard.as_ref().unwrap().rows;
+            assert_eq!(rows[0].thru.as_deref(), Some("6"), "shown unless turned off");
+        }
+
+        // Off: the column data is simply gone; scores stay.
+        let view = board_view(&cfg_with(Some(false)), &golf);
+        let rows = &view.leaderboard.as_ref().unwrap().rows;
+        assert!(rows.iter().all(|r| r.thru.is_none()), "no thru left to draw");
+        assert_eq!(rows[0].value, "-11", "the score is untouched");
+
+        // A finished round has no thru anywhere — turning the switch off then
+        // must not clone either.
+        let mut done = golf.clone();
+        for r in &mut done.leaderboard.as_mut().unwrap().rows {
+            r.thru = None;
+        }
+        assert!(
+            matches!(board_view(&cfg_with(Some(false)), &done), std::borrow::Cow::Borrowed(_)),
+            "nothing to strip, nothing to clone"
+        );
     }
 
     /// A team sport gets no end time from ESPN — the scoreboard feed carries
@@ -7704,6 +7800,7 @@ mod tests {
             dwell_secs: None,
             leaderboard_rows: None,
             show_round: None,
+                show_thru: None,
             show_extras: None,
             spoiler: false,
             spoiler_team_ids: vec![],
@@ -7935,6 +8032,7 @@ mod tests {
             dwell_secs: None,
             leaderboard_rows: None,
             show_round: None,
+                show_thru: None,
             show_extras: None,
             spoiler: false,
             spoiler_team_ids: vec![],

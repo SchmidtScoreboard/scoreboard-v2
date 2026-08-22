@@ -146,6 +146,7 @@ struct BoardInfo {
     var leagueDwell: [String: UInt32] = [:]     // sportId -> per-league override
     var leagueRows: [String: UInt32] = [:]      // sportId -> leaderboard depth (golf/F1)
     var leagueShowRound: [String: Bool] = [:]   // sportId -> golf round indicator (absent = shown)
+    var leagueShowThru: [String: Bool] = [:]    // sportId -> golf holes-played column (absent = shown)
     var leagueShowExtras: [String: Bool] = [:] // sportId -> box-score extras (absent = shown)
     var leagueNameStyle: [String: UiNameStyle] = [:] // sportId -> name-style override (absent = league default)
     var strictSpoilers = false                   // spoiled games: strict vs normal display
@@ -1169,6 +1170,7 @@ final class BoardViewModel: ObservableObject {
         var dwell: [String: UInt32] = [:]
         var rows: [String: UInt32] = [:]
         var showRound: [String: Bool] = [:]
+        var showThru: [String: Bool] = [:]
         var showExtras: [String: Bool] = [:]
         var nameStyle: [String: UiNameStyle] = [:]
         var lspoil: [String: Bool] = [:]
@@ -1179,6 +1181,7 @@ final class BoardViewModel: ObservableObject {
             if let d = s.dwellSecs { dwell[s.sportId] = d }
             if let r = s.leaderboardRows { rows[s.sportId] = r }
             if let sr = s.showRound { showRound[s.sportId] = sr }
+            if let st = s.showThru { showThru[s.sportId] = st }
             if let se = s.showExtras { showExtras[s.sportId] = se }
             if let n = s.nameStyle { nameStyle[s.sportId] = n }
             if s.spoiler { lspoil[s.sportId] = true }
@@ -1205,6 +1208,7 @@ final class BoardViewModel: ObservableObject {
             $0.leagueDwell = dwell
             $0.leagueRows = rows
             $0.leagueShowRound = showRound
+            $0.leagueShowThru = showThru
             $0.leagueShowExtras = showExtras
             $0.leagueNameStyle = nameStyle
             $0.strictSpoilers = c.strictSpoilers
@@ -1364,6 +1368,20 @@ final class BoardViewModel: ObservableObject {
             else { $0.leagueShowRound.removeValue(forKey: sportId) }
         }
         client?.setLeagueShowRound(boardId: id, sportId: sportId, show: stored)
+    }
+
+    /// Golf's holes-played column. Same default and same absent-means-shown
+    /// storage as the round indicator: mid-round, -9 thru 7 and -9 thru 16 are
+    /// different scores, so the column earns its pixels until turned off.
+    func leagueShowThru(_ sportId: String) -> Bool { current.leagueShowThru[sportId] ?? true }
+    func setLeagueShowThru(_ sportId: String, _ show: Bool) {
+        guard let id = selectedBoardId else { return }
+        let stored: Bool? = show ? nil : false
+        mutate(id) {
+            if let stored { $0.leagueShowThru[sportId] = stored }
+            else { $0.leagueShowThru.removeValue(forKey: sportId) }
+        }
+        client?.setLeagueShowThru(boardId: id, sportId: sportId, show: stored)
     }
 
     /// The box-score extras beside the score — baseball's hits and errors, NHL
@@ -4152,6 +4170,19 @@ struct LeagueEditorView: View {
                     ) { model.setLeagueShowRound(sport.id, $0) }
                 } header: {
                     Text("Round")
+                }
+                // Holes played ("thru") — same switch shape, on by default.
+                Section {
+                    PreviewSelector(
+                        options: [
+                            .init(true, "Show", "/sample/plain.png?sport=\(sport.id)"),
+                            .init(false, "Hide", "/sample/plain.png?sport=\(sport.id)&thru=off"),
+                        ],
+                        selected: model.leagueShowThru(sport.id),
+                        httpBase: model.httpBase
+                    ) { model.setLeagueShowThru(sport.id, $0) }
+                } header: {
+                    Text("Holes played")
                 }
             }
             // Only for leagues that actually draw extras. The server says which,

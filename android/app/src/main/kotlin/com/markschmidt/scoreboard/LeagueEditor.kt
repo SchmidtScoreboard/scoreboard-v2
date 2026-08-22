@@ -323,6 +323,18 @@ fun LeagueEditorScreen(
                         selectedKey = if (sc?.showRound == false) "hide" else "show",
                     ) { session.setLeagueShowRound(boardId, sportId, if (it == "hide") false else null) }
                 }
+                // Holes played ("thru") — same switch shape, on by default.
+                item { EditorHeader("Holes played") }
+                item {
+                    PreviewSelector(
+                        session,
+                        listOf(
+                            PreviewOption("show", "Show", "/sample/plain.png?sport=$sportId"),
+                            PreviewOption("hide", "Hide", "/sample/plain.png?sport=$sportId&thru=off"),
+                        ),
+                        selectedKey = if (sc?.showThru == false) "hide" else "show",
+                    ) { session.setLeagueShowThru(boardId, sportId, if (it == "hide") false else null) }
+                }
             }
 
             // Extras — the server names them ("Hits and errors"); no label, no section.

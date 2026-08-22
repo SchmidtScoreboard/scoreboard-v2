@@ -1019,6 +1019,8 @@ internal open class UniffiVTableCallbackInterfaceClientListener(
 
 
 
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -1106,6 +1108,8 @@ internal interface UniffiLib : Library {
     fun uniffi_app_core_fn_method_scoreboardclient_set_league_show_extras(`ptr`: Pointer,`boardId`: RustBuffer.ByValue,`sportId`: RustBuffer.ByValue,`show`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_app_core_fn_method_scoreboardclient_set_league_show_round(`ptr`: Pointer,`boardId`: RustBuffer.ByValue,`sportId`: RustBuffer.ByValue,`show`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_app_core_fn_method_scoreboardclient_set_league_show_thru(`ptr`: Pointer,`boardId`: RustBuffer.ByValue,`sportId`: RustBuffer.ByValue,`show`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_app_core_fn_method_scoreboardclient_set_league_spoiler(`ptr`: Pointer,`boardId`: RustBuffer.ByValue,`sportId`: RustBuffer.ByValue,`on`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1493,6 +1497,8 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_app_core_checksum_method_scoreboardclient_set_league_show_round(
     ): Short
+    fun uniffi_app_core_checksum_method_scoreboardclient_set_league_show_thru(
+    ): Short
     fun uniffi_app_core_checksum_method_scoreboardclient_set_league_spoiler(
     ): Short
     fun uniffi_app_core_checksum_method_scoreboardclient_set_listener(
@@ -1799,6 +1805,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_method_scoreboardclient_set_league_show_round() != 59263.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_method_scoreboardclient_set_league_show_thru() != 5180.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_method_scoreboardclient_set_league_spoiler() != 26835.toShort()) {
@@ -2496,6 +2505,8 @@ public interface ScoreboardClientInterface {
      */
     fun `setLeagueShowRound`(`boardId`: kotlin.String, `sportId`: kotlin.String, `show`: kotlin.Boolean?)
     
+    fun `setLeagueShowThru`(`boardId`: kotlin.String, `sportId`: kotlin.String, `show`: kotlin.Boolean?)
+    
     /**
      * Spoiler-protect a whole league.
      */
@@ -3139,6 +3150,17 @@ open class ScoreboardClient: Disposable, AutoCloseable, ScoreboardClientInterfac
     callWithPointer {
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_app_core_fn_method_scoreboardclient_set_league_show_round(
+        it, FfiConverterString.lower(`boardId`),FfiConverterString.lower(`sportId`),FfiConverterOptionalBoolean.lower(`show`),_status)
+}
+    }
+    
+    
+
+    override fun `setLeagueShowThru`(`boardId`: kotlin.String, `sportId`: kotlin.String, `show`: kotlin.Boolean?)
+        = 
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_method_scoreboardclient_set_league_show_thru(
         it, FfiConverterString.lower(`boardId`),FfiConverterString.lower(`sportId`),FfiConverterOptionalBoolean.lower(`show`),_status)
 }
     }
@@ -4549,6 +4571,10 @@ data class UiSportConfig (
      */
     var `showRound`: kotlin.Boolean?, 
     /**
+     * Golf's holes-played column ("thru"). None = the default, which is ON.
+     */
+    var `showThru`: kotlin.Boolean?, 
+    /**
      * Box-score extras (baseball H/E, NHL shots, soccer shootout/aggregate).
      * None = the default, ON.
      */
@@ -4585,6 +4611,7 @@ public object FfiConverterTypeUiSportConfig: FfiConverterRustBuffer<UiSportConfi
             FfiConverterOptionalUInt.read(buf),
             FfiConverterOptionalBoolean.read(buf),
             FfiConverterOptionalBoolean.read(buf),
+            FfiConverterOptionalBoolean.read(buf),
             FfiConverterOptionalTypeUiNameStyle.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterSequenceString.read(buf),
@@ -4598,6 +4625,7 @@ public object FfiConverterTypeUiSportConfig: FfiConverterRustBuffer<UiSportConfi
             FfiConverterOptionalUInt.allocationSize(value.`dwellSecs`) +
             FfiConverterOptionalUInt.allocationSize(value.`leaderboardRows`) +
             FfiConverterOptionalBoolean.allocationSize(value.`showRound`) +
+            FfiConverterOptionalBoolean.allocationSize(value.`showThru`) +
             FfiConverterOptionalBoolean.allocationSize(value.`showExtras`) +
             FfiConverterOptionalTypeUiNameStyle.allocationSize(value.`nameStyle`) +
             FfiConverterBoolean.allocationSize(value.`spoiler`) +
@@ -4611,6 +4639,7 @@ public object FfiConverterTypeUiSportConfig: FfiConverterRustBuffer<UiSportConfi
             FfiConverterOptionalUInt.write(value.`dwellSecs`, buf)
             FfiConverterOptionalUInt.write(value.`leaderboardRows`, buf)
             FfiConverterOptionalBoolean.write(value.`showRound`, buf)
+            FfiConverterOptionalBoolean.write(value.`showThru`, buf)
             FfiConverterOptionalBoolean.write(value.`showExtras`, buf)
             FfiConverterOptionalTypeUiNameStyle.write(value.`nameStyle`, buf)
             FfiConverterBoolean.write(value.`spoiler`, buf)
