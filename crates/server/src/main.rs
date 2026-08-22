@@ -1503,9 +1503,15 @@ fn sample_game_for(sport_id: &str, extras: bool, live: bool) -> model::Game {
                 name: title.into(),
                 rows: rows
                     .into_iter()
-                    .map(|(name, value)| model::LeaderRow {
+                    .enumerate()
+                    .map(|(i, (name, value))| model::LeaderRow {
                         name: name.into(),
                         value: value.into(),
+                        // Golf rows carry mid-round thru values — UNEVEN ones
+                        // (a 6 above a 14) so the "Holes played" preview also
+                        // demonstrates that the column stays a column. F1 has
+                        // no thru.
+                        thru: (sport_id != "f1").then(|| ["14", "6", "9", "11"][i % 4].into()),
                         ..Default::default()
                     })
                     .collect(),
