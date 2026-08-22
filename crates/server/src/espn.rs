@@ -109,11 +109,17 @@ pub(crate) fn league_name(sport_id: &'static str) -> &'static str {
 pub struct EspnSource {
     client: reqwest::Client,
     leagues: Vec<League>,
+    /// Final gaps for FINISHED F1 race sessions, keyed by competition id →
+    /// (competitor id → gap). A finished race's gaps never change, and
+    /// without this every poll would re-fan-out 20 requests for the rest of
+    /// the weekend the event stays on ESPN's scoreboard.
+    f1_gap_cache: tokio::sync::Mutex<std::collections::HashMap<String, std::collections::HashMap<String, String>>>,
 }
 
 impl EspnSource {
     pub fn new() -> Self {
         Self {
+            f1_gap_cache: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             // A hard timeout so one hung upstream (ESPN or the NHL API) can't
             // stall the poll loop — a lost cycle beats a frozen slate.
             client: reqwest::Client::builder()
@@ -267,7 +273,10 @@ pub(crate) fn parse_feed(feed: &str, raw: &str) -> Result<Vec<Game>, String> {
         }
         "f1" => {
             let r: LeaderboardResponse = serde_json::from_str(raw).map_err(|e| e.to_string())?;
-            Ok(r.events.into_iter().flat_map(parse_f1).collect())
+            // The debug/TUI path shows the scoreboard feed as-is; the
+            // per-driver gap fan-out belongs to the live poll only.
+            let no_gaps = std::collections::HashMap::new();
+            Ok(r.events.into_iter().flat_map(|ev| parse_f1(ev, &no_gaps)).collect())
         }
         _ => {
             let sport_id = FEEDS
@@ -507,8 +516,144 @@ impl EspnSource {
                 return Vec::new();
             }
         };
-        events.into_iter().flat_map(parse_f1).collect()
+        let mut out = Vec::new();
+        for ev in events {
+            let gaps = self.f1_gaps_for_event(&ev).await;
+            out.extend(parse_f1(ev, &gaps));
+        }
+        out
     }
+
+    /// Live gaps for an event's RACE sessions (grand prix and sprint), keyed
+    /// (competition id, competitor id) → "+0.287".
+    ///
+    /// The scoreboard inlines an empty `statistics` for every session, but
+    /// the same data exists per-competitor in ESPN's core API — one request
+    /// per driver, which is why this is bounded to the rows the board can
+    /// draw and to sessions where a gap means something. QUALIFYING IS
+    /// DELIBERATELY EXCLUDED: ESPN resets gaps per Q1/Q2/Q3 segment while
+    /// positions span the whole hour, so its own site shows P8 nearer than
+    /// P2 mid-session — rendered on the panel that reads as our bug.
+    ///
+    /// Failures degrade to the blank value column this render always had.
+    async fn f1_gaps_for_event(
+        &self,
+        ev: &LeaderEvent,
+    ) -> std::collections::HashMap<(String, String), String> {
+        let mut out = std::collections::HashMap::new();
+        for comp in &ev.competitions {
+            if !f1_session_wants_gaps(comp) {
+                continue;
+            }
+            let done = matches!(map_status(&comp.status.type_), Some(GameStatus::Final));
+            // A finished race's gaps are frozen — serve the cache, fetch once.
+            if done {
+                if let Some(cached) = self.f1_gap_cache.lock().await.get(&comp.id) {
+                    for (cid, gap) in cached {
+                        out.insert((comp.id.clone(), cid.clone()), gap.clone());
+                    }
+                    continue;
+                }
+            }
+            // Top rows only, in running order — the panel never draws more.
+            let mut ids: Vec<(i64, String)> = comp
+                .competitors
+                .iter()
+                .filter(|c| !c.id.is_empty())
+                .map(|c| (c.order, c.id.clone()))
+                .collect();
+            ids.sort();
+            ids.truncate(crate::render::LEADERBOARD_MAX_ROWS);
+
+            let fetched = futures_util::future::join_all(ids.into_iter().map(|(_, cid)| {
+                let url = format!(
+                    "https://sports.core.api.espn.com/v2/sports/racing/leagues/f1/events/{}/competitions/{}/competitors/{}/statistics?lang=en&region=us",
+                    ev.id, comp.id, cid
+                );
+                let client = self.client.clone();
+                async move {
+                    let stats: CoreStatistics = client.get(&url).send().await.ok()?.json().await.ok()?;
+                    Some((cid, extract_gap(&stats)?))
+                }
+            }))
+            .await;
+
+            let mut session: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+            for (cid, gap) in fetched.into_iter().flatten() {
+                session.insert(cid, gap);
+            }
+            if !session.is_empty() {
+                tracing::info!("f1 gaps: {} rows for session {}", session.len(), comp.id);
+                for (cid, gap) in &session {
+                    out.insert((comp.id.clone(), cid.clone()), gap.clone());
+                }
+                // Cache live results too: if the one poll that sees Final
+                // hits a network blip, the race still keeps its last gaps.
+                self.f1_gap_cache.lock().await.insert(comp.id.clone(), session);
+            }
+        }
+        out
+    }
+}
+
+/// Which sessions earn the per-driver gap fan-out: RACES (grand prix and
+/// sprint), live or finished. Qualifying never — see `f1_gaps_for_event` —
+/// and pregame never (there is nothing to fetch yet).
+fn f1_session_wants_gaps(comp: &LeaderComp) -> bool {
+    let is_race = matches!(
+        comp.type_.as_ref().map(|t| t.abbreviation.as_str()),
+        Some("Race") | Some("SR")
+    );
+    is_race
+        && !comp.id.is_empty()
+        && matches!(
+            map_status(&comp.status.type_),
+            Some(GameStatus::Active | GameStatus::Intermission | GameStatus::Final)
+        )
+}
+
+/// The core API statistics resource: categories of name/displayValue stats.
+#[derive(Deserialize)]
+struct CoreStatistics {
+    #[serde(default)]
+    splits: Option<CoreSplits>,
+}
+#[derive(Deserialize)]
+struct CoreSplits {
+    #[serde(default)]
+    categories: Vec<CoreCategory>,
+}
+#[derive(Deserialize)]
+struct CoreCategory {
+    #[serde(default)]
+    stats: Vec<CoreStat>,
+}
+#[derive(Deserialize)]
+struct CoreStat {
+    #[serde(default)]
+    name: String,
+    #[serde(default, rename = "displayValue")]
+    display_value: String,
+}
+
+/// The gap the timing tower shows. Field names verified live during the 2026
+/// Dutch GP: qualifying carries `gapToLeader`; the race is expected to carry
+/// the same or `behindTime`/`behindLaps` (ESPN's older racing vocabulary), so
+/// all three are accepted in that order. The leader carries none and keeps a
+/// blank column. "+1 Lap" style values are tightened to "+1L" for the panel.
+fn extract_gap(stats: &CoreStatistics) -> Option<String> {
+    let categories = &stats.splits.as_ref()?.categories;
+    for wanted in ["gapToLeader", "behindTime", "behindLaps"] {
+        for cat in categories {
+            for st in &cat.stats {
+                if st.name == wanted && !st.display_value.is_empty() && st.display_value != "0" && st.display_value != "0.000" {
+                    let v = st.display_value.replace(" Laps", "L").replace(" Lap", "L");
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// A leaderboard "event" (especially an F1 race weekend) can carry several
@@ -691,7 +836,10 @@ fn first_tee_time(comp: &LeaderComp) -> Option<String> {
 /// One F1 event is a whole race weekend; each session the user can subscribe to
 /// (race / qualifying / sprint / sprint qualifying) becomes its OWN game with its
 /// own schedule, status, and standings. Practice sessions are never shown.
-fn parse_f1(ev: LeaderEvent) -> Vec<Game> {
+fn parse_f1(
+    ev: LeaderEvent,
+    gaps: &std::collections::HashMap<(String, String), String>,
+) -> Vec<Game> {
     let base = clean_f1_name(&ev.short_name);
     ev.competitions
         .into_iter()
@@ -712,11 +860,19 @@ fn parse_f1(ev: LeaderEvent) -> Vec<Game> {
                 .filter_map(|(i, c)| {
                     let code = f1_code(&c.athlete.as_ref()?.display_name);
                     let order = if c.order > 0 { c.order } else { i as i64 + 1 };
-                    let value = c
-                        .statistics
-                        .first()
-                        .map(|s| s.display_value.clone())
-                        .filter(|v| !v.is_empty())
+                    // The scoreboard's inline statistics have been empty for
+                    // every session all weekend; the per-driver core fetch is
+                    // where gaps actually live. Inline stays as fallback in
+                    // case ESPN ever starts populating it.
+                    let value = gaps
+                        .get(&(comp.id.clone(), c.id.clone()))
+                        .cloned()
+                        .or_else(|| {
+                            c.statistics
+                                .first()
+                                .map(|s| s.display_value.clone())
+                                .filter(|v| !v.is_empty())
+                        })
                         .unwrap_or_default();
                     // Broadcast timing-tower style: rank centered in a fixed
                     // column, three-letter code in the team's color, gap/lap
@@ -998,6 +1154,8 @@ struct LeaderEvent {
 #[derive(Deserialize)]
 struct LeaderComp {
     #[serde(default)]
+    id: String,
+    #[serde(default)]
     date: String,
     status: Status,
     #[serde(default)]
@@ -1014,6 +1172,8 @@ struct LeaderCompType {
 }
 #[derive(Deserialize)]
 struct LeaderCompetitor {
+    #[serde(default)]
+    id: String,
     #[serde(default, deserialize_with = "de_flexible_i64")]
     order: i64,
     athlete: Option<LeaderAthlete>,
@@ -2468,6 +2628,94 @@ mod espn_url_tests {
 
 #[cfg(test)]
 mod leader_tests {
+    use std::collections::HashMap;
+
+    /// The gap extraction reads the exact JSON shape ESPN's core API served
+    /// during the 2026 Dutch GP (captured live). The leader carries no gap
+    /// stat and must stay blank; "Lap" spellings tighten for the panel.
+    #[test]
+    fn f1_gap_extraction_matches_the_core_api_shape() {
+        let trailing: CoreStatistics = serde_json::from_str(
+            r#"{"splits":{"categories":[{"stats":[
+                {"name":"lapsCompleted","displayValue":"15"},
+                {"name":"place","displayValue":"3"},
+                {"name":"gapToLeader","displayValue":"+0.287"},
+                {"name":"lastUpdated","displayValue":"2026-08-22T14:49:06Z"}
+            ]}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(extract_gap(&trailing).as_deref(), Some("+0.287"));
+
+        let leader: CoreStatistics = serde_json::from_str(
+            r#"{"splits":{"categories":[{"stats":[
+                {"name":"lapsCompleted","displayValue":"16"},
+                {"name":"place","displayValue":"1"}
+            ]}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(extract_gap(&leader), None, "the leader keeps a blank column");
+
+        let lapped: CoreStatistics = serde_json::from_str(
+            r#"{"splits":{"categories":[{"stats":[{"name":"behindLaps","displayValue":"+2 Laps"}]}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(extract_gap(&lapped).as_deref(), Some("+2L"), "lap gaps tighten for 64px");
+
+        let zeroed: CoreStatistics = serde_json::from_str(
+            r#"{"splits":{"categories":[{"stats":[{"name":"gapToLeader","displayValue":"0.000"}]}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(extract_gap(&zeroed), None, "a zero gap is the leader, not data");
+    }
+
+    /// Only RACES get the per-driver fan-out — the grand prix and the sprint,
+    /// live or final. Qualifying is excluded on purpose: ESPN resets its gaps
+    /// per Q1/Q2/Q3 segment while positions span the hour, so the numbers
+    /// contradict the order they sit next to.
+    #[test]
+    fn f1_gap_fanout_is_races_only() {
+        let comp = |abbr: &str, status: &str| -> LeaderComp {
+            serde_json::from_str(&format!(
+                r#"{{"id":"401839097","type":{{"abbreviation":"{abbr}"}},
+                    "status":{{"type":{{"name":"{status}"}}}},"competitors":[]}}"#,
+            ))
+            .unwrap()
+        };
+        assert!(f1_session_wants_gaps(&comp("Race", "STATUS_IN_PROGRESS")));
+        assert!(f1_session_wants_gaps(&comp("Race", "STATUS_FINAL")));
+        assert!(f1_session_wants_gaps(&comp("SR", "STATUS_IN_PROGRESS")), "a sprint is a race");
+        assert!(!f1_session_wants_gaps(&comp("Race", "STATUS_SCHEDULED")), "nothing to fetch pregame");
+        assert!(!f1_session_wants_gaps(&comp("Qual", "STATUS_IN_PROGRESS")), "quali gaps mislead");
+        assert!(!f1_session_wants_gaps(&comp("SS", "STATUS_IN_PROGRESS")), "sprint quali too");
+        assert!(!f1_session_wants_gaps(&comp("FP1", "STATUS_IN_PROGRESS")));
+    }
+
+    /// parse_f1 joins fetched gaps onto rows by (competition, competitor) id;
+    /// drivers the fetch missed keep the blank value they always had.
+    #[test]
+    fn f1_rows_carry_fetched_gaps() {
+        let ev: LeaderEvent = serde_json::from_str(
+            r#"{"id":"600057441","shortName":"Dutch GP","competitions":[{
+                "id":"401839097",
+                "type":{"abbreviation":"Race"},
+                "status":{"type":{"name":"STATUS_IN_PROGRESS"}},
+                "competitors":[
+                    {"id":"4665","order":1,"athlete":{"displayName":"Max Verstappen"}},
+                    {"id":"5829","order":2,"athlete":{"displayName":"Kimi Antonelli"}},
+                    {"id":"4472","order":3,"athlete":{"displayName":"Lando Norris"}}
+                ]}]}"#,
+        )
+        .unwrap();
+        let mut gaps = HashMap::new();
+        gaps.insert(("401839097".to_string(), "5829".to_string()), "+0.287".to_string());
+        let games = parse_f1(ev, &gaps);
+        assert_eq!(games.len(), 1);
+        let rows = &games[0].leaderboard.as_ref().unwrap().rows;
+        assert_eq!(rows[0].value, "", "leader blank");
+        assert_eq!(rows[1].value, "+0.287", "fetched gap lands on the right driver");
+        assert_eq!(rows[2].value, "", "a missed fetch degrades to blank, not an error");
+    }
+
     use super::*;
 
     /// An F1 weekend fans out into per-session games (practice skipped), each
@@ -2493,7 +2741,7 @@ mod leader_tests {
             ]
         }"#;
         let ev: LeaderEvent = serde_json::from_str(json).expect("deserialize event");
-        let games = parse_f1(ev);
+        let games = parse_f1(ev, &HashMap::new());
         assert_eq!(games.len(), 2, "practice is skipped; quali + race emitted");
 
         let quali = games.iter().find(|g| g.session.as_deref() == Some("quali")).unwrap();
@@ -2556,7 +2804,7 @@ mod leader_tests {
             ]
         }"#;
         let ev: LeaderEvent = serde_json::from_str(f1).unwrap();
-        let games = parse_f1(ev);
+        let games = parse_f1(ev, &HashMap::new());
         let race = games.iter().find(|g| g.session.as_deref() == Some("race")).unwrap();
         assert_eq!(race.end_time.as_deref(), Some("2026-07-19T13:00Z"));
         let quali = games.iter().find(|g| g.session.as_deref() == Some("quali")).unwrap();
