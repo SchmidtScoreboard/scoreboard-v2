@@ -5126,6 +5126,13 @@ struct SettingsView: View {
             // every model push (frames land every few seconds), and a sheet
             // attached to one is torn down with it — it opened and instantly
             // closed. The stack outlives the rebuilds.
+            // The export share sheet rides the same anchor for the same
+            // reason — it is item-driven off an async server reply, exactly
+            // the shape the rule above exists for. (MAR-108: previously on
+            // the Transfer Section, two pushes deep.)
+            .sheet(item: $model.settingsExport) { export in
+                SettingsExportSheet(json: export.json)
+            }
             .sheet(item: $notesTarget) { t in
                 FirmwareNotesSheet(
                     version: t.version,
@@ -5578,9 +5585,6 @@ struct SettingsView: View {
             Text(model.connected
                 ? "Exports league preferences, spoiler rules, brightness, and timing for another scoreboard."
                 : "Unavailable while disconnected from this scoreboard's server.")
-        }
-        .sheet(item: $model.settingsExport) { export in
-            SettingsExportSheet(json: export.json)
         }
         .alert("Nothing to import", isPresented: $showImportEmptyAlert) {
             Button("OK", role: .cancel) {}
