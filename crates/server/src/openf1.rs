@@ -217,10 +217,13 @@ struct Position {
 #[derive(Deserialize)]
 struct Interval {
     driver_number: u32,
-    /// Number of seconds, or a string like "+1 LAP" for lapped cars, or null
-    /// for the leader. serde_json::Value covers all three honestly.
+    /// Seconds to the CAR AHEAD — the broadcast tower's number, and the one
+    /// the panel shows for a live race: it says who is actually racing whom,
+    /// where gap-to-leader turns the midfield into large meaningless numbers.
+    /// A number, or a string like "+1 LAP" for lapped cars, or null for the
+    /// leader. serde_json::Value covers all three honestly.
     #[serde(default)]
-    gap_to_leader: serde_json::Value,
+    interval: serde_json::Value,
     #[serde(default)]
     date: String,
 }
@@ -300,20 +303,33 @@ fn track_flag(msgs: &[RaceControl]) -> Option<&'static str> {
             && (up.contains("RESUM") || up.contains("START") || up.contains("GREEN")))
             || up.contains("GREEN LIGHT")
             || up.contains("GREEN FLAG")
+            || (is_flag && track && m.flag.as_deref() == Some("GREEN"))
         {
             if d > last_session_green {
                 last_session_green = d;
             }
         }
-        if m.category == "SafetyCar" {
-            if up.contains("IN THIS LAP") || up.contains("ENDING") {
-                if d > last_sc_off {
-                    last_sc_off = d;
-                }
-            } else if up.contains("DEPLOYED") {
-                if d > last_sc_on {
-                    last_sc_on = d;
-                }
+        // Safety car signals arrive BOTH as a SafetyCar category and as plain
+        // "Other" messages — the 2026 Dutch GP restarted behind the SC with
+        // nothing but "SAFETY CAR LIGHTS ON" (category Other). "RACE WILL
+        // RESUME AT .." is an announcement made DURING the stoppage, so it is
+        // deliberately not a resume signal.
+        let sc_end = up.contains("IN THIS LAP")
+            || up.contains("ENDING")
+            || up.contains("LIGHTS OFF")
+            // The green flag IS the restart — it ends the SC period too.
+            || (is_flag && track && m.flag.as_deref() == Some("GREEN"));
+        let sc_start = up.contains("SAFETY CAR DEPLOYED")
+            || up.contains("VIRTUAL SAFETY CAR DEPLOYED")
+            || up.contains("SAFETY CAR LIGHTS ON")
+            || (m.category == "SafetyCar" && !sc_end);
+        if sc_end {
+            if d > last_sc_off {
+                last_sc_off = d;
+            }
+        } else if sc_start {
+            if d > last_sc_on {
+                last_sc_on = d;
             }
         }
         if is_flag && track {
@@ -332,7 +348,11 @@ fn track_flag(msgs: &[RaceControl]) -> Option<&'static str> {
             }
         }
     }
-    if !last_red.is_empty() && last_red > last_session_green {
+    // A safety car LEADING CARS means the race is running — under yellow,
+    // but running. That is how a red actually ends when the restart is
+    // behind the SC (no session-resume message ever arrives).
+    let red_over = [last_session_green, last_sc_on].into_iter().max().unwrap_or("");
+    if !last_red.is_empty() && last_red > red_over {
         return Some("red");
     }
     if !last_sc_on.is_empty() && last_sc_on > last_sc_off {
@@ -435,9 +455,9 @@ fn rows_from_live(
     }
     let mut gap: HashMap<u32, (&str, &serde_json::Value)> = HashMap::new();
     for i in intervals {
-        let e = gap.entry(i.driver_number).or_insert((i.date.as_str(), &i.gap_to_leader));
+        let e = gap.entry(i.driver_number).or_insert((i.date.as_str(), &i.interval));
         if i.date.as_str() >= e.0 {
-            *e = (i.date.as_str(), &i.gap_to_leader);
+            *e = (i.date.as_str(), &i.interval);
         }
     }
     let mut tire: HashMap<u32, (u32, Option<&str>)> = HashMap::new();
@@ -534,9 +554,9 @@ mod tests {
         )
         .unwrap();
         let intervals: Vec<Interval> = serde_json::from_str(
-            r#"[{"driver_number":63,"gap_to_leader":1.36,"date":"2026-08-23T13:05:00+00:00"},
-                {"driver_number":12,"gap_to_leader":"+1 LAP","date":"2026-08-23T13:05:00+00:00"},
-                {"driver_number":1,"gap_to_leader":null,"date":"2026-08-23T13:05:00+00:00"}]"#,
+            r#"[{"driver_number":63,"gap_to_leader":50.038,"interval":1.36,"date":"2026-08-23T13:05:00+00:00"},
+                {"driver_number":12,"gap_to_leader":"+1 LAP","interval":"+1 LAP","date":"2026-08-23T13:05:00+00:00"},
+                {"driver_number":1,"gap_to_leader":null,"interval":null,"date":"2026-08-23T13:05:00+00:00"}]"#,
         )
         .unwrap();
         let stints: Vec<Stint> = serde_json::from_str(
@@ -550,7 +570,7 @@ mod tests {
         assert_eq!(rows[0].value, "", "leader gap blank");
         assert_eq!(rows[0].tire, Some('S'), "latest stint's compound");
         assert_eq!(rows[1].name, "RUS");
-        assert_eq!(rows[1].value, "+1.360");
+        assert_eq!(rows[1].value, "+1.360", "the INTERVAL to the car ahead, not the 50s gap to the leader");
         assert_eq!(rows[1].tire, Some('H'));
         assert_eq!(rows[2].value, "+1L", "lapped cars tighten for 64px");
     }
@@ -586,6 +606,31 @@ mod tests {
             r#"{"category":"SessionStatus","message":"SESSION RESUMED","date":"2026-08-23T13:40:00","flag":null,"scope":null}"#,
         ).unwrap());
         assert_eq!(track_flag(&resumed), None, "a resume clears the red");
+    }
+
+    /// The 2026 Dutch GP restart, verbatim: the red ended with nothing but
+    /// "SAFETY CAR LIGHTS ON" (category Other) — no session resume ever came.
+    /// A safety car leading cars means running-under-yellow, not stopped;
+    /// and the "RACE WILL RESUME AT .." announcement during the stoppage
+    /// must not count as the resume.
+    #[test]
+    fn a_red_flag_ends_when_the_safety_car_leads_the_restart() {
+        let msgs: Vec<RaceControl> = serde_json::from_str(
+            r#"[{"category":"SessionStatus","message":"SESSION STARTED","date":"2026-08-23T13:00:00","flag":null,"scope":null},
+                {"category":"Other","message":"RED FLAG - RACE SUSPENDED","date":"2026-08-23T13:05:28","flag":null,"scope":null},
+                {"category":"Other","message":"RACE WILL RESUME AT 15:33","date":"2026-08-23T13:22:29","flag":null,"scope":null},
+                {"category":"Other","message":"SAFETY CAR LIGHTS ON","date":"2026-08-23T13:28:11","flag":null,"scope":null}]"#,
+        )
+        .unwrap();
+        assert_eq!(track_flag(&msgs), Some("yellow"), "SC restart: yellow, not red");
+        // Announcement alone changes nothing.
+        assert_eq!(track_flag(&msgs[..3]), Some("red"), "a scheduled resume is still a stoppage");
+        // Green flag ends the SC period.
+        let mut green = msgs.clone();
+        green.push(serde_json::from_str(
+            r#"{"category":"Flag","flag":"GREEN","scope":"Track","message":"GREEN FLAG","date":"2026-08-23T13:31:00"}"#,
+        ).unwrap());
+        assert_eq!(track_flag(&green), None, "green flag: racing");
     }
 
     #[test]
