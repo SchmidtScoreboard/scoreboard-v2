@@ -2539,8 +2539,12 @@ fn map_status(t: &StatusType) -> Option<GameStatus> {
         | "STATUS_OVERTIME" | "STATUS_EXTRA_TIME" | "STATUS_SHOOTOUT" => GameStatus::Active,
         "STATUS_HALFTIME" | "STATUS_END_PERIOD" | "STATUS_DELAYED" | "STATUS_SUSPENDED"
         | "STATUS_HALFTIME_ET" | "STATUS_END_OF_EXTRATIME" => GameStatus::Intermission,
+        // SESSION_COMPLETE is ESPN's transitional post-chequered racing
+        // status (state still "in"!) before the official STATUS_FINAL —
+        // observed live at the 2026 Dutch GP, where the catch-all turned a
+        // just-finished race into a PREGAME frame.
         "STATUS_FINAL" | "STATUS_PLAY_COMPLETE" | "STATUS_FULL_TIME" | "STATUS_FINAL_PEN"
-        | "STATUS_FINAL_AET" => GameStatus::Final,
+        | "STATUS_FINAL_AET" | "STATUS_SESSION_COMPLETE" => GameStatus::Final,
         "STATUS_POSTPONED" | "STATUS_CANCELED" | "STATUS_ABANDONED" => return None,
         _ => GameStatus::Pregame,
     };
@@ -2722,6 +2726,15 @@ mod leader_tests {
         assert!(!f1_session_wants_gaps(&comp("Qual", "STATUS_IN_PROGRESS")), "quali gaps mislead");
         assert!(!f1_session_wants_gaps(&comp("SS", "STATUS_IN_PROGRESS")), "sprint quali too");
         assert!(!f1_session_wants_gaps(&comp("FP1", "STATUS_IN_PROGRESS")));
+    }
+
+    /// ESPN's post-chequered racing status, observed live: SESSION_COMPLETE
+    /// with state still "in". Unmapped it fell to the Pregame catch-all and
+    /// a finished race rendered as a matchup with a start time.
+    #[test]
+    fn a_completed_session_is_final_not_pregame() {
+        let t: StatusType = serde_json::from_str(r#"{"name":"STATUS_SESSION_COMPLETE"}"#).unwrap();
+        assert!(matches!(map_status(&t), Some(GameStatus::Final)));
     }
 
     /// ESPN carries only gap-to-leader, so race rows derive the interval to
