@@ -637,6 +637,21 @@ struct CoreStat {
     display_value: String,
 }
 
+/// Rewrite gap-to-leader values as intervals to the car ahead, in place.
+/// "+d.ddd" strings only; anything else ("+2L", "DNF") is left alone and
+/// skipped by the subtraction. Hundredths — thousandths read as noise at
+/// four pixels per digit.
+fn derive_intervals(rows: &mut [LeaderRow]) {
+    let mut prev = 0.0_f64; // the leader's gap to itself
+    for row in rows.iter_mut() {
+        let Some(g) = row.value.strip_prefix('+').and_then(|v| v.parse::<f64>().ok()) else {
+            continue;
+        };
+        row.value = format!("+{:.2}", (g - prev).max(0.0));
+        prev = g;
+    }
+}
+
 /// The gap the timing tower shows. Field names verified live during the 2026
 /// Dutch GP: qualifying carries `gapToLeader`; the race is expected to carry
 /// the same or `behindTime`/`behindLaps` (ESPN's older racing vocabulary), so
@@ -649,6 +664,11 @@ fn extract_gap(stats: &CoreStatistics) -> Option<String> {
             for st in &cat.stats {
                 if st.name == wanted && !st.display_value.is_empty() && st.display_value != "0" && st.display_value != "0.000" {
                     let v = st.display_value.replace(" Laps", "L").replace(" Lap", "L");
+                    // Hundredths: "+1.804" -> "+1.80". Non-numeric strings
+                    // ("+2L") pass through.
+                    if let Some(n) = v.strip_prefix('+').and_then(|x| x.parse::<f64>().ok()) {
+                        return Some(format!("+{n:.2}"));
+                    }
                     return Some(v);
                 }
             }
@@ -889,7 +909,16 @@ fn parse_f1(
                 })
                 .collect();
             drivers.sort_by_key(|(o, _)| *o);
-            let rows = drivers.into_iter().take(crate::render::LEADERBOARD_MAX_ROWS).map(|(_, r)| r).collect();
+            let mut rows: Vec<LeaderRow> =
+                drivers.into_iter().take(crate::render::LEADERBOARD_MAX_ROWS).map(|(_, r)| r).collect();
+            // Race sessions show the INTERVAL to the car ahead, like the
+            // broadcast tower — ESPN only carries gap-to-leader, but adjacent
+            // gaps subtract cleanly (ESPN stamps the whole field in one
+            // batch). Lapped cars keep their string and drop out of the
+            // arithmetic. Quali sessions never carry gaps here by design.
+            if matches!(session, "race" | "sprint") {
+                derive_intervals(&mut rows);
+            }
             let name = fit_words(&format!("{base}{suffix}"), 13);
             Some(Game {
                 id: format!("{}-{}", ev.id, session),
@@ -2645,7 +2674,7 @@ mod leader_tests {
             ]}]}}"#,
         )
         .unwrap();
-        assert_eq!(extract_gap(&trailing).as_deref(), Some("+0.287"));
+        assert_eq!(extract_gap(&trailing).as_deref(), Some("+0.29"), "hundredths on the panel");
 
         let leader: CoreStatistics = serde_json::from_str(
             r#"{"splits":{"categories":[{"stats":[
@@ -2691,6 +2720,21 @@ mod leader_tests {
         assert!(!f1_session_wants_gaps(&comp("FP1", "STATUS_IN_PROGRESS")));
     }
 
+    /// ESPN carries only gap-to-leader, so race rows derive the interval to
+    /// the car ahead by subtracting adjacent gaps. Lapped cars keep their
+    /// string and drop out of the arithmetic.
+    #[test]
+    fn espn_race_rows_derive_intervals_from_adjacent_gaps() {
+        let row = |value: &str| LeaderRow { value: value.into(), ..Default::default() };
+        let mut rows = vec![row(""), row("+1.804"), row("+4.799"), row("+2L"), row("+30.100")];
+        derive_intervals(&mut rows);
+        assert_eq!(rows[0].value, "", "leader stays blank");
+        assert_eq!(rows[1].value, "+1.80", "P2's interval IS its gap");
+        assert_eq!(rows[2].value, "+3.00", "P3: 4.799 - 1.804, hundredths");
+        assert_eq!(rows[3].value, "+2L", "lapped string untouched");
+        assert_eq!(rows[4].value, "+25.30", "the car behind a lapped one subtracts the last numeric gap");
+    }
+
     /// parse_f1 joins fetched gaps onto rows by (competition, competitor) id;
     /// drivers the fetch missed keep the blank value they always had.
     #[test]
@@ -2708,12 +2752,12 @@ mod leader_tests {
         )
         .unwrap();
         let mut gaps = HashMap::new();
-        gaps.insert(("401839097".to_string(), "5829".to_string()), "+0.287".to_string());
+        gaps.insert(("401839097".to_string(), "5829".to_string()), "+0.29".to_string());
         let games = parse_f1(ev, &gaps);
         assert_eq!(games.len(), 1);
         let rows = &games[0].leaderboard.as_ref().unwrap().rows;
         assert_eq!(rows[0].value, "", "leader blank");
-        assert_eq!(rows[1].value, "+0.287", "fetched gap lands on the right driver");
+        assert_eq!(rows[1].value, "+0.29", "fetched gap lands on the right driver");
         assert_eq!(rows[2].value, "", "a missed fetch degrades to blank, not an error");
     }
 

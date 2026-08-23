@@ -392,7 +392,8 @@ fn format_gap(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::Number(n) => {
             let f = n.as_f64().unwrap_or(0.0);
-            if f <= 0.0 { String::new() } else { format!("+{f:.3}") }
+            // Hundredths — thousandths read as noise at four pixels a digit.
+            if f <= 0.0 { String::new() } else { format!("+{f:.2}") }
         }
         serde_json::Value::String(s) => {
             s.to_uppercase().replace(" LAPS", "L").replace(" LAP", "L")
@@ -540,7 +541,7 @@ mod tests {
         assert_eq!(rows[0].name, "NOR");
         assert_eq!(rows[0].value, "", "the leader's zero gap draws blank, not +0.000");
         assert_eq!(rows[1].name, "RUS");
-        assert_eq!(rows[1].value, "+0.102", "final segment, not first");
+        assert_eq!(rows[1].value, "+0.10", "final segment, not first, in hundredths");
         assert_eq!(rows[2].value, "DNF", "status labels beat numbers");
         assert_eq!(
             rows[0].color,
@@ -578,7 +579,7 @@ mod tests {
         assert_eq!(rows[0].value, "", "leader gap blank");
         assert_eq!(rows[0].tire, Some('S'), "latest stint's compound");
         assert_eq!(rows[1].name, "RUS");
-        assert_eq!(rows[1].value, "+1.360", "the INTERVAL to the car ahead, not the 50s gap to the leader");
+        assert_eq!(rows[1].value, "+1.36", "the INTERVAL to the car ahead, in hundredths");
         assert_eq!(rows[1].tire, Some('H'));
         assert_eq!(rows[2].value, "+1L", "lapped cars tighten for 64px");
     }
