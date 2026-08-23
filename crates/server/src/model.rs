@@ -109,6 +109,11 @@ pub struct LeaderRow {
 #[derive(Clone, Debug, Serialize)]
 pub struct Leaderboard {
     pub name: String,
+    /// Track status for a motorsport session: "red" or "yellow" recolors the
+    /// title-row flags; None (the overwhelming default, and everything golf)
+    /// draws the checkered pair. Serialized for the /game debug view.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flag: Option<String>,
     pub rows: Vec<LeaderRow>,
 }
 

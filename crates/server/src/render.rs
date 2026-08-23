@@ -1210,8 +1210,24 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
         // title ("BRITISH GP Q") otherwise collides and reads as garbage.
         let (flag_w, gap) = (8, 2);
         if tx >= 1 + flag_w + gap && tx + title_w <= 55 - gap {
-            checkered_flag(&mut c, 1);
-            checkered_flag(&mut c, 55);
+            // Track status recolors the pair: SOLID red or yellow, because
+            // that is what those flags look like — checks are the chequered
+            // flag's identity, not a canvas. None (green or unknown) keeps
+            // the checkered chrome.
+            match lb.flag.as_deref() {
+                Some("red") => {
+                    fill(&mut c, 1, 1, flag_w as u32, 6, Rgb888::new(255, 0, 0));
+                    fill(&mut c, 55, 1, flag_w as u32, 6, Rgb888::new(255, 0, 0));
+                }
+                Some("yellow") => {
+                    fill(&mut c, 1, 1, flag_w as u32, 6, YELLOW);
+                    fill(&mut c, 55, 1, flag_w as u32, 6, YELLOW);
+                }
+                _ => {
+                    checkered_flag(&mut c, 1);
+                    checkered_flag(&mut c, 55);
+                }
+            }
         }
     } else {
         // Golf's round, right-aligned on the title row — the one thing the
@@ -1899,6 +1915,7 @@ mod kern_tests {
             start_time: "2026-08-08T11:00Z".into(),
             end_time: None,
             leaderboard: Some(crate::model::Leaderboard {
+                flag: None,
                 name: name.into(),
                 rows: vec![crate::model::LeaderRow {
                     name: "SCHEFFLER".into(),
@@ -2066,6 +2083,7 @@ mod kern_tests {
             clock: String::new(),
             start_time: String::new(), end_time: None,
             leaderboard: Some(Leaderboard {
+                flag: None,
                 name: "MONACO GP".into(),
                 rows: vec![
                     LeaderRow { name: "VERSTAPPEN".into(), value: "L42".into(), ..Default::default() },
@@ -2349,6 +2367,7 @@ mod kern_tests {
             });
             g.situation = None;
             g.leaderboard = Some(crate::model::Leaderboard {
+                flag: None,
                 name: "THE OPEN".into(),
                 rows: vec![crate::model::LeaderRow {
                     name: "SCHEFFLER".into(),
@@ -2789,6 +2808,7 @@ mod kern_tests {
         g.situation = None;
         g.home = TeamSide::empty("");
         let lb = |name: &str| Some(Leaderboard {
+            flag: None,
             name: name.into(),
             rows: vec![LeaderRow { name: "VER".into(), value: "+1".into(), ..Default::default() }],
         });
@@ -2823,7 +2843,7 @@ mod kern_tests {
         });
         g.situation = None;
         g.home = TeamSide::empty("");
-        g.leaderboard = Some(Leaderboard { name: "GP".into(), rows: vec![row("1"), row("20")] });
+        g.leaderboard = Some(Leaderboard { flag: None, name: "GP".into(), rows: vec![row("1"), row("20")] });
         let (_, px) = render_game(&g, None, NameStyle::Name);
 
         // Leftmost lit pixel past the rank column, per row band (baselines 12, 18).
@@ -2851,6 +2871,7 @@ mod kern_tests {
         g.situation = None;
         g.home = TeamSide::empty("");
         let rows = |n: usize| Some(Leaderboard {
+            flag: None,
             name: "OPEN".into(),
             rows: (0..n).map(|i| LeaderRow { name: format!("PLAYER{i}"), value: format!("-{i}"), ..Default::default() }).collect(),
         });
@@ -3667,6 +3688,54 @@ mod wx_tests {
 
 #[cfg(test)]
 mod wx_dump {
+    /// A red or yellow track status turns the title-row flags SOLID in that
+    /// color; no status keeps the checkered pair.
+    #[test]
+    fn track_status_recolors_the_f1_title_flags() {
+        let f1_game = |flag: Option<&str>| crate::model::Game {
+            id: "e-race".into(),
+            sport_id: "f1".into(),
+            away: crate::model::TeamSide::empty("F1"),
+            home: crate::model::TeamSide::empty(""),
+            status: crate::model::GameStatus::Active,
+            ordinal: String::new(),
+            clock: String::new(),
+            start_time: "2026-08-23T13:00Z".into(),
+            end_time: None,
+            leaderboard: Some(crate::model::Leaderboard {
+                flag: flag.map(String::from),
+                name: "DUTCH GP".into(),
+                rows: vec![crate::model::LeaderRow {
+                    rank: "1".into(),
+                    name: "NOR".into(),
+                    value: String::new(),
+                    ..Default::default()
+                }],
+            }),
+            champ: None,
+            series: None,
+            session: Some("race".into()),
+            situation: None,
+            pregame: None,
+        };
+        let px_at = |px: &[u8], x: usize, y: usize| {
+            let i = (y * 64 + x) * 2;
+            u16::from_le_bytes([px[i], px[i + 1]])
+        };
+        let rg = |v: u16| ((v >> 11) & 0x1F, (v >> 5) & 0x3F);
+        let (_, red) = render_frame(&f1_game(Some("red")), None, None, scoreboard_protocol::NameStyle::Name);
+        let (r, g) = rg(px_at(&red, 2, 2));
+        assert!(r > 20 && g < 8, "red flag: red-only corner, got r={r} g={g}");
+        let (_, yel) = render_frame(&f1_game(Some("yellow")), None, None, scoreboard_protocol::NameStyle::Name);
+        let (r, g) = rg(px_at(&yel, 2, 2));
+        assert!(r > 20 && g > 40, "yellow flag: red+green corner, got r={r} g={g}");
+        assert_ne!(px_at(&yel, 4, 2), 0, "solid flags have no dark checks");
+        let (_, chk) = render_frame(&f1_game(None), None, None, scoreboard_protocol::NameStyle::Name);
+        let (r, g) = rg(px_at(&chk, 2, 2));
+        assert!(r > 20 && g > 40, "checkered corner check is white");
+        assert_eq!(px_at(&chk, 4, 2), 0, "and the alternate check is dark");
+    }
+
     /// Panel-centering let any title past ~8 characters evict the round
     /// marker — "CPKC WOMENS" showed no R3 while "BMW" did. Sharing titles
     /// left-align now, which buys the marker back for names up to ~10
@@ -3684,6 +3753,7 @@ mod wx_dump {
             start_time: "2026-08-22T11:00Z".into(),
             end_time: None,
             leaderboard: Some(crate::model::Leaderboard {
+                flag: None,
                 // 9 chars, 44px: what the name map emits for this event —
                 // wide enough that panel-centering used to evict the round.
                 name: "CPKC OPEN".into(),

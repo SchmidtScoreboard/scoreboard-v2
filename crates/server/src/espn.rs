@@ -781,7 +781,7 @@ fn parse_golf(sport_id: &str, ev: LeaderEvent) -> Option<Game> {
         start_time: tee_off.unwrap_or(comp.date),
         // Tournaments run for days — surface when this one wraps up.
         end_time: (!ev.end_date.is_empty()).then(|| ev.end_date.clone()),
-        leaderboard: Some(Leaderboard { name, rows }),
+        leaderboard: Some(Leaderboard { name, flag: None, rows }),
         champ,
         series: None,
         session: None,
@@ -905,7 +905,7 @@ fn parse_f1(
                 // so only the race session carries it.
                 end_time: (session == "race" && !ev.end_date.is_empty())
                     .then(|| ev.end_date.clone()),
-                leaderboard: Some(Leaderboard { name, rows }),
+                leaderboard: Some(Leaderboard { name, flag: None, rows }),
                 champ: None,
                 series: None,
                 session: Some(session.into()),
@@ -1616,7 +1616,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             away: TeamSide::empty("PGA"), home: TeamSide::empty(""),
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
             // Ten deep so the board's scrolling leaderboard shows in demo mode.
-            leaderboard: Some(Leaderboard { name: "MASTERS".into(), rows: vec![
+            leaderboard: Some(Leaderboard { flag: None, name: "MASTERS".into(), rows: vec![
                 LeaderRow { name: "SCHEFFLER".into(), value: "-8".into(), ..Default::default() },
                 LeaderRow { name: "MCILROY".into(), value: "-6".into(), ..Default::default() },
                 LeaderRow { name: "MORIKAWA".into(), value: "-5".into(), ..Default::default() },
@@ -1638,7 +1638,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             id: "demo-golf-2".into(), sport_id: "lpga".into(),
             away: TeamSide::empty("LPGA"), home: TeamSide::empty(""),
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
-            leaderboard: Some(Leaderboard { name: "US OPEN".into(), rows: vec![
+            leaderboard: Some(Leaderboard { flag: None, name: "US OPEN".into(), rows: vec![
                 LeaderRow { name: "KORDA".into(), value: "-7".into(), ..Default::default() },
                 LeaderRow { name: "THITIKUL".into(), value: "-5".into(), ..Default::default() },
                 LeaderRow { name: "VU".into(), value: "-4".into(), ..Default::default() },
@@ -1656,7 +1656,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
             // Full broadcast treatment: team colors + tire compounds (live
             // ESPN rows carry no tire data, so the demo is where dots show).
-            leaderboard: Some(Leaderboard { name: "MONACO GP".into(), rows: vec![
+            leaderboard: Some(Leaderboard { flag: None, name: "MONACO GP".into(), rows: vec![
                 f1_row(1, "VER", "LAP 42", 'M'),
                 f1_row(2, "NOR", "+2.1", 'M'),
                 f1_row(3, "LEC", "+5.8", 'S'),
@@ -1692,7 +1692,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             id: "demo-f1-quali".into(), sport_id: "f1".into(),
             away: TeamSide::empty("F1"), home: TeamSide::empty(""),
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
-            leaderboard: Some(Leaderboard { name: "BRITISH GP Q".into(), rows: vec![
+            leaderboard: Some(Leaderboard { flag: None, name: "BRITISH GP Q".into(), rows: vec![
                 LeaderRow { rank: "1".into(), name: "NOR".into(), value: "1:24.8".into(), color: f1_team_color("NOR"), tire: None, thru: None },
                 LeaderRow { rank: "2".into(), name: "VER".into(), value: "+0.093".into(), color: f1_team_color("VER"), tire: None, thru: None },
                 LeaderRow { rank: "3".into(), name: "HAM".into(), value: "+0.210".into(), color: f1_team_color("HAM"), tire: None, thru: None },

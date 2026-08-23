@@ -36,6 +36,9 @@ pub struct OpenF1 {
 pub struct SessionRows {
     pub session: &'static str,
     pub rows: Vec<LeaderRow>,
+    /// Current track status: "red" / "yellow" recolor the frame's title-row
+    /// flags. None = green-or-nothing, which draws the checkered pair.
+    pub flag: Option<&'static str>,
     pub fetched: Instant,
 }
 
@@ -170,8 +173,19 @@ impl OpenF1 {
         if rows.is_empty() {
             return None;
         }
-        tracing::info!("openf1: {} rows for {} (session {key})", rows.len(), kind);
-        Some(SessionRows { session: kind, rows, fetched: Instant::now() })
+        // Track status only matters while the session runs — a finished
+        // session's chequered flag is just the checkered glyphs.
+        let flag = if ended {
+            None
+        } else {
+            let msgs: Vec<RaceControl> = self
+                .get_json(&format!("https://api.openf1.org/v1/race_control?session_key={key}"))
+                .await
+                .unwrap_or_default();
+            track_flag(&msgs)
+        };
+        tracing::info!("openf1: {} rows for {} (session {key}, flag {flag:?})", rows.len(), kind);
+        Some(SessionRows { session: kind, rows, flag, fetched: Instant::now() })
     }
 }
 
@@ -232,6 +246,102 @@ struct SessionResult {
     dns: bool,
     #[serde(default)]
     dsq: bool,
+}
+
+#[derive(Deserialize, Clone)]
+struct RaceControl {
+    #[serde(default)]
+    category: String,
+    #[serde(default)]
+    flag: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    date: String,
+}
+
+/// The track status a session is under, from the race-control stream.
+///
+/// Learned from the REAL stream during the 2026 Dutch GP (red-flagged five
+/// minutes in): a red flag arrives as category "Other" with the message
+/// "RED FLAG - RACE SUSPENDED" and `flag: None`, alongside SessionStatus
+/// "SESSION ABORTED" — and a "TRACK CLEAR" flag message follows minutes
+/// later while the race is STILL suspended (marshals clearing debris is not
+/// a restart). So:
+///
+/// - RED holds until a SESSION-level resume (SessionStatus RESUMED/STARTED
+///   or a green-flag message), never a mere track-clear.
+/// - YELLOW = safety car / VSC deployed and not yet ended, or a TRACK-scope
+///   yellow not yet cleared. Sector yellows are local waving, not session
+///   state, and are deliberately ignored.
+fn track_flag(msgs: &[RaceControl]) -> Option<&'static str> {
+    let mut last_red = "";
+    let mut last_session_green = "";
+    let mut last_sc_on = "";
+    let mut last_sc_off = "";
+    let mut last_track_yellow = "";
+    let mut last_track_clear = "";
+    for m in msgs {
+        let d = m.date.as_str();
+        let up = m.message.to_uppercase();
+        let is_flag = m.category == "Flag";
+        let track = m.scope.as_deref() == Some("Track");
+        if (is_flag && m.flag.as_deref() == Some("RED"))
+            || up.contains("RED FLAG")
+            || (m.category == "SessionStatus" && (up.contains("ABORT") || up.contains("SUSPEND")))
+        {
+            if d > last_red {
+                last_red = d;
+            }
+        }
+        if (m.category == "SessionStatus"
+            && (up.contains("RESUM") || up.contains("START") || up.contains("GREEN")))
+            || up.contains("GREEN LIGHT")
+            || up.contains("GREEN FLAG")
+        {
+            if d > last_session_green {
+                last_session_green = d;
+            }
+        }
+        if m.category == "SafetyCar" {
+            if up.contains("IN THIS LAP") || up.contains("ENDING") {
+                if d > last_sc_off {
+                    last_sc_off = d;
+                }
+            } else if up.contains("DEPLOYED") {
+                if d > last_sc_on {
+                    last_sc_on = d;
+                }
+            }
+        }
+        if is_flag && track {
+            match m.flag.as_deref() {
+                Some("YELLOW") | Some("DOUBLE YELLOW") => {
+                    if d > last_track_yellow {
+                        last_track_yellow = d;
+                    }
+                }
+                Some("CLEAR") | Some("GREEN") => {
+                    if d > last_track_clear {
+                        last_track_clear = d;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if !last_red.is_empty() && last_red > last_session_green {
+        return Some("red");
+    }
+    if !last_sc_on.is_empty() && last_sc_on > last_sc_off {
+        return Some("yellow");
+    }
+    if !last_track_yellow.is_empty() && last_track_yellow > last_track_clear {
+        return Some("yellow");
+    }
+    None
 }
 
 /// OpenF1 session_name → the session suffix ESPN game ids use.
@@ -452,6 +562,51 @@ mod tests {
         assert_eq!(session_kind("Sprint"), Some("sprint"));
         assert_eq!(session_kind("Sprint Qualifying"), Some("sprint-quali"));
         assert_eq!(session_kind("Practice 1"), None, "practice never renders");
+    }
+
+    /// The exact sequence the 2026 Dutch GP produced live while this was
+    /// being written: session start, red flag five minutes in (spelled as an
+    /// "Other" message + "SESSION ABORTED", flag field None), then a TRACK
+    /// CLEAR that must NOT lift the red, because the race is still suspended.
+    #[test]
+    fn a_red_flag_survives_a_track_clear() {
+        let msgs: Vec<RaceControl> = serde_json::from_str(
+            r#"[{"category":"SessionStatus","message":"SESSION STARTED","date":"2026-08-23T13:00:00","flag":null,"scope":null},
+                {"category":"SessionStatus","message":"SESSION ABORTED","date":"2026-08-23T13:05:27","flag":null,"scope":null},
+                {"category":"Other","message":"RED FLAG - RACE SUSPENDED","date":"2026-08-23T13:05:28","flag":null,"scope":null},
+                {"category":"Flag","flag":"CLEAR","scope":"Track","message":"TRACK CLEAR","date":"2026-08-23T13:08:00"},
+                {"category":"Flag","flag":"DOUBLE YELLOW","scope":"Sector","message":"DOUBLE YELLOW IN TRACK SECTOR 18","date":"2026-08-23T13:08:01"}]"#,
+        )
+        .unwrap();
+        assert_eq!(track_flag(&msgs), Some("red"), "track-clear is marshals, not a restart");
+
+        // The restart lifts it.
+        let mut resumed = msgs.clone();
+        resumed.push(serde_json::from_str(
+            r#"{"category":"SessionStatus","message":"SESSION RESUMED","date":"2026-08-23T13:40:00","flag":null,"scope":null}"#,
+        ).unwrap());
+        assert_eq!(track_flag(&resumed), None, "a resume clears the red");
+    }
+
+    #[test]
+    fn safety_car_and_track_yellows_read_as_yellow_sector_yellows_do_not() {
+        let sc: Vec<RaceControl> = serde_json::from_str(
+            r#"[{"category":"SessionStatus","message":"SESSION STARTED","date":"T1","flag":null,"scope":null},
+                {"category":"SafetyCar","message":"SAFETY CAR DEPLOYED","date":"T2","flag":null,"scope":null}]"#,
+        )
+        .unwrap();
+        assert_eq!(track_flag(&sc), Some("yellow"));
+        let mut ended = sc.clone();
+        ended.push(serde_json::from_str(
+            r#"{"category":"SafetyCar","message":"SAFETY CAR IN THIS LAP","date":"T3","flag":null,"scope":null}"#,
+        ).unwrap());
+        assert_eq!(track_flag(&ended), None, "SC coming in ends the yellow");
+
+        let sector: Vec<RaceControl> = serde_json::from_str(
+            r#"[{"category":"Flag","flag":"DOUBLE YELLOW","scope":"Sector","message":"DOUBLE YELLOW IN TRACK SECTOR 4","date":"T1"}]"#,
+        )
+        .unwrap();
+        assert_eq!(track_flag(&sector), None, "a sector yellow is local waving, not session state");
     }
 
     /// Runs only by hand (`cargo test -p server openf1_live -- --ignored`),

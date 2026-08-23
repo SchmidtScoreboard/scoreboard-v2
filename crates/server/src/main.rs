@@ -1509,6 +1509,7 @@ fn sample_game_for(sport_id: &str, extras: bool, live: bool) -> model::Game {
             // their spoiler setting with a basketball frame.
             let (title, rows) = sample_leaderboard(sport_id);
             g.leaderboard = Some(model::Leaderboard {
+                flag: None,
                 name: title.into(),
                 rows: rows
                     .into_iter()
@@ -1909,6 +1910,16 @@ async fn get_game(
         tracing::info!("game {id} board={} -> UNKNOWN GAME", q.get("board").map(String::as_str).unwrap_or("-"));
         return (axum::http::StatusCode::NOT_FOUND, format!("no game '{id}'")).into_response();
     };
+    // The debug window shows the game as the BOARD sees it: preferences
+    // applied and, for a league with an alternate feed, that feed's rows.
+    let of1 = s.openf1_rows.lock().unwrap();
+    let active_openf1 =
+        cfg.as_ref().is_some_and(|c| openf1_rows_for(c, &game, of1.as_ref()).is_some());
+    let game = cfg
+        .as_ref()
+        .map(|c| board_view_with(c, &game, of1.as_ref()).into_owned())
+        .unwrap_or(game);
+    drop(of1);
     // `spoiler_for` already honors the one-off reveal list, so a revealed
     // game passes through unredacted like everywhere else.
     let spoiler = cfg.as_ref().and_then(|c| spoiler_for(c, &game));
@@ -1917,6 +1928,22 @@ async fn get_game(
         None => (game, false),
     };
     let mut v = serde_json::to_value(&game).expect("game serializes");
+    if game.sport_id == "f1" {
+        // Which feed the user ASKED for, and which one actually produced the
+        // rows above — they differ when the alternate is selected but its
+        // data is stale or for another session.
+        let configured = cfg
+            .as_ref()
+            .and_then(|c| c.sports.iter().find(|sp| sp.sport_id == "f1"))
+            .and_then(|sp| sp.data_source.clone())
+            .unwrap_or_else(|| "espn".into());
+        let obj = v.as_object_mut().expect("game serializes to an object");
+        obj.insert("data_source".into(), configured.into());
+        obj.insert(
+            "data_source_active".into(),
+            (if active_openf1 { "openf1" } else { "espn" }).into(),
+        );
+    }
     if spoiled {
         // Flag the redaction in the payload itself, like GameSummary::spoiled.
         v.as_object_mut()
@@ -1974,6 +2001,31 @@ pub(crate) fn board_view<'a>(cfg: &BoardConfig, g: &'a Game) -> std::borrow::Cow
     board_view_with(cfg, g, None)
 }
 
+/// The OpenF1 rows that would replace this game's, when the board opted in
+/// AND the stored rows are for this session AND fresh. One gate, used by the
+/// swap and by the /game debug keys, so the two can never disagree.
+fn openf1_rows_for<'r>(
+    cfg: &BoardConfig,
+    g: &Game,
+    openf1: Option<&'r openf1::SessionRows>,
+) -> Option<&'r openf1::SessionRows> {
+    let selected = g.sport_id == "f1"
+        && cfg
+            .sports
+            .iter()
+            .find(|s| s.sport_id == g.sport_id)
+            .and_then(|s| s.data_source.as_deref())
+            == Some("openf1");
+    if !selected {
+        return None;
+    }
+    openf1
+        .filter(|r| r.fetched.elapsed() < Duration::from_secs(600))
+        // Matched on the game's SESSION, not an id suffix —
+        // "-sprint-quali" ends with "-quali" and would collide.
+        .filter(|r| g.session.as_deref() == Some(r.session))
+}
+
 /// `board_view` plus the OpenF1 row swap: a board whose f1 league selected
 /// the alternate source gets that feed's timing rows on the SAME game — ids,
 /// title, and status stay ESPN's, so flipping the switch is a controlled
@@ -1997,17 +2049,7 @@ pub(crate) fn board_view_with<'a>(
     let drop_extras = !show_extras && game_has_extras(g);
     let drop_thru = !show_thru
         && g.leaderboard.as_ref().is_some_and(|lb| lb.rows.iter().any(|r| r.thru.is_some()));
-    let openf1_swap = if g.sport_id == "f1"
-        && league.and_then(|s| s.data_source.as_deref()) == Some("openf1")
-    {
-        openf1
-            .filter(|r| r.fetched.elapsed() < Duration::from_secs(600))
-            // Matched on the game's SESSION, not an id suffix —
-            // "-sprint-quali" ends with "-quali" and would collide.
-            .filter(|r| g.session.as_deref() == Some(r.session))
-    } else {
-        None
-    };
+    let openf1_swap = openf1_rows_for(cfg, g, openf1);
     if !drop_round && !drop_extras && !drop_thru && openf1_swap.is_none() {
         return std::borrow::Cow::Borrowed(g);
     }
@@ -2015,6 +2057,9 @@ pub(crate) fn board_view_with<'a>(
     if let Some(swap) = openf1_swap {
         if let Some(lb) = hidden.leaderboard.as_mut() {
             lb.rows = swap.rows.clone();
+            // Track status rides the same swap: red/yellow recolor the
+            // title-row flags, and only for boards on this source.
+            lb.flag = swap.flag.map(String::from);
         }
     }
     if drop_round {
@@ -4878,7 +4923,7 @@ fn preview() {
             id: "g".into(), sport_id: "pga".into(),
             away: model::TeamSide::empty("PGA"), home: model::TeamSide::empty(""),
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
-            leaderboard: Some(model::Leaderboard { name: "MASTERS".into(), rows: vec![
+            leaderboard: Some(model::Leaderboard { flag: None, name: "MASTERS".into(), rows: vec![
                 model::LeaderRow { name: "SCHEFFLER".into(), value: "-8".into(), ..Default::default() },
                 model::LeaderRow { name: "MCILROY".into(), value: "-6".into(), ..Default::default() },
                 model::LeaderRow { name: "MORIKAWA".into(), value: "-5".into(), ..Default::default() },
@@ -4895,7 +4940,7 @@ fn preview() {
             id: "f".into(), sport_id: "f1".into(),
             away: model::TeamSide::empty("F1"), home: model::TeamSide::empty(""),
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
-            leaderboard: Some(model::Leaderboard { name: "MONACO GP".into(), rows: vec![
+            leaderboard: Some(model::Leaderboard { flag: None, name: "MONACO GP".into(), rows: vec![
                 model::LeaderRow { rank: "1".into(), name: "VER".into(), value: "LAP 42".into(), color: Some(model::hex_to_rgb("3671C6")), tire: Some('M'), thru: None },
                 model::LeaderRow { rank: "2".into(), name: "NOR".into(), value: "+2.1".into(), color: Some(model::hex_to_rgb("FF8000")), tire: Some('M'), thru: None },
                 model::LeaderRow { rank: "3".into(), name: "LEC".into(), value: "+5.8".into(), color: Some(model::hex_to_rgb("E8002D")), tire: Some('S'), thru: None },
@@ -6418,6 +6463,7 @@ mod tests {
             start_time: "2026-08-08T11:00Z".into(),
             end_time: None,
             leaderboard: Some(crate::model::Leaderboard {
+                flag: None,
                 name: "WYNDHAM".into(),
                 rows: vec![crate::model::LeaderRow {
                     name: "HOSSLER".into(),
@@ -6473,6 +6519,7 @@ mod tests {
             start_time: "2026-08-22T14:00Z".into(),
             end_time: None,
             leaderboard: Some(crate::model::Leaderboard {
+                flag: None,
                 name: "DUTCH GP Q".into(),
                 rows: vec![crate::model::LeaderRow {
                     rank: "1".into(),
@@ -6489,6 +6536,7 @@ mod tests {
         };
         let rows = |session: &'static str, age: Duration| openf1::SessionRows {
             session,
+            flag: None,
             rows: vec![crate::model::LeaderRow {
                 rank: "1".into(),
                 name: "NOR".into(),
@@ -6513,9 +6561,16 @@ mod tests {
         assert!(matches!(v, std::borrow::Cow::Borrowed(_)), "default costs nothing");
         assert_eq!(name_of(&v), "PIA");
 
-        // Opted in + matching session + fresh: swapped.
-        let v = board_view_with(&cfg_with(Some("openf1")), &f1, Some(&fresh));
+        // Opted in + matching session + fresh: swapped, flag included.
+        let mut flagged = rows("quali", Duration::from_secs(0));
+        flagged.flag = Some("red");
+        let v = board_view_with(&cfg_with(Some("openf1")), &f1, Some(&flagged));
         assert_eq!(name_of(&v), "NOR", "the alternate feed's rows");
+        assert_eq!(
+            v.leaderboard.as_ref().unwrap().flag.as_deref(),
+            Some("red"),
+            "track status rides the swap"
+        );
 
         // Wrong session: sprint-quali rows must NOT land on the quali game.
         let sprint = rows("sprint-quali", Duration::from_secs(0));
@@ -6555,6 +6610,7 @@ mod tests {
             start_time: "2026-08-22T11:00Z".into(),
             end_time: None,
             leaderboard: Some(crate::model::Leaderboard {
+                flag: None,
                 name: "BMW".into(),
                 rows: vec![
                     crate::model::LeaderRow {
@@ -7023,6 +7079,7 @@ mod tests {
         let mut g = live_game("401811960");
         g.sport_id = "pga".into();
         g.leaderboard = Some(crate::model::Leaderboard {
+            flag: None,
             name: "ROCKET".into(),
             rows: Vec::new(),
         });
