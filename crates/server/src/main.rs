@@ -4186,11 +4186,22 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
                 let view = board_view_with(&cfg, g, of1.as_ref());
                 let mut s = to_summary_for(&view, spoiler, tz);
                 s.scrolls = game_scroll_capable(&cfg, g);
-                // The pushed card frame renders the SAME view the summary
-                // described — it used to render the raw game, so the app's
-                // card image ignored every per-league display preference and
-                // the data-source swap while the panel honored them.
-                let (fid, px) = render::render_frame(&view, spoiler, tz, name_style_for(&cfg, &g.sport_id));
+                // The pushed card frame IS the board's frame — same view,
+                // same renderer, same content hash, so a now-showing game has
+                // ONE frame in the cache and the card cannot diverge from the
+                // panel. Both apps crop a deep leaderboard's tall strip to
+                // its top 32 rows, which is exactly the panel's resting
+                // window. (render_board_frame delegates to the static layout
+                // for everything that isn't a deep leaderboard, so for team
+                // sports these were already identical pixels.)
+                let rows_cap = cfg
+                    .sports
+                    .iter()
+                    .find(|sp| sp.sport_id == g.sport_id)
+                    .and_then(|sp| sp.leaderboard_rows)
+                    .map(|r| r as usize)
+                    .unwrap_or(render::LEADERBOARD_DEFAULT_ROWS);
+                let (fid, px, _) = render::render_board_frame(&view, rows_cap, spoiler, tz, name_style_for(&cfg, &g.sport_id));
                 drop(of1);
                 state.cache_frame(fid.clone(), px);
                 s.frame_id = fid;
