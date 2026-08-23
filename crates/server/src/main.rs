@@ -1866,7 +1866,16 @@ async fn get_render(
                 .as_ref()
                 .map(|c| name_style_for(c, &g.sport_id))
                 .unwrap_or_else(|| default_name_style(&g.sport_id));
-            render::render_frame(g, spoiler, tz, style).1
+            // The card image must be the frame the BOARD draws: preferences
+            // and the data-source swap applied, not the raw feed game. The
+            // app's tiles diverging from the panel is how "the preview does
+            // not match my scoreboard" gets reported — because it didn't.
+            let of1 = s.openf1_rows.lock().unwrap();
+            let view = cfg
+                .as_ref()
+                .map(|c| board_view_with(c, g, of1.as_ref()))
+                .unwrap_or(std::borrow::Cow::Borrowed(g));
+            render::render_frame(&view, spoiler, tz, style).1
         })
     });
     tracing::info!(
@@ -4139,10 +4148,15 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
             .map(|g| {
                 let spoiler = spoiler_for(&cfg, g);
                 let of1 = state.openf1_rows.lock().unwrap();
-                let mut s = to_summary_for(&board_view_with(&cfg, g, of1.as_ref()), spoiler, tz);
-                drop(of1);
+                let view = board_view_with(&cfg, g, of1.as_ref());
+                let mut s = to_summary_for(&view, spoiler, tz);
                 s.scrolls = game_scroll_capable(&cfg, g);
-                let (fid, px) = render::render_frame(g, spoiler, tz, name_style_for(&cfg, &g.sport_id));
+                // The pushed card frame renders the SAME view the summary
+                // described — it used to render the raw game, so the app's
+                // card image ignored every per-league display preference and
+                // the data-source swap while the panel honored them.
+                let (fid, px) = render::render_frame(&view, spoiler, tz, name_style_for(&cfg, &g.sport_id));
+                drop(of1);
                 state.cache_frame(fid.clone(), px);
                 s.frame_id = fid;
                 s
@@ -4210,8 +4224,12 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
             s.status = "upcoming".into();
             // Real cached frame, like the shown entries: a pregame frame is the
             // matchup + start time, so there's no score to leak — and the card
-            // shows the same art the board will when the puck drops.
-            let (fid, px) = render::render_frame(g, spoiler, tz, name_style_for(&cfg, &g.sport_id));
+            // shows the same art the board will when the puck drops. Rendered
+            // from the VIEW for the same reason as the shown loop.
+            let of1 = state.openf1_rows.lock().unwrap();
+            let view = board_view_with(&cfg, g, of1.as_ref());
+            let (fid, px) = render::render_frame(&view, spoiler, tz, name_style_for(&cfg, &g.sport_id));
+            drop(of1);
             state.cache_frame(fid.clone(), px);
             s.frame_id = fid;
             s

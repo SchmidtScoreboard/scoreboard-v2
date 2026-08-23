@@ -355,10 +355,18 @@ fn track_flag(msgs: &[RaceControl]) -> Option<&'static str> {
     if !last_red.is_empty() && last_red > red_over {
         return Some("red");
     }
-    if !last_sc_on.is_empty() && last_sc_on > last_sc_off {
+    // A session-level green ends the SC period and track yellows too: the
+    // Dutch GP's SC phase closed with nothing but "SESSION STARTED" (the
+    // rolling restart) — no IN-THIS-LAP, no lights-off, no green flag. The
+    // same rule retires the pre-race "SAFETY CAR LIGHTS ON" that precedes
+    // the formation lap, which otherwise painted the start yellow.
+    if !last_sc_on.is_empty() && last_sc_on > last_sc_off && last_sc_on > last_session_green {
         return Some("yellow");
     }
-    if !last_track_yellow.is_empty() && last_track_yellow > last_track_clear {
+    if !last_track_yellow.is_empty()
+        && last_track_yellow > last_track_clear
+        && last_track_yellow > last_session_green
+    {
         return Some("yellow");
     }
     None
@@ -623,6 +631,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(track_flag(&msgs), Some("yellow"), "SC restart: yellow, not red");
+        // ...and the SC phase ended with NOTHING but a SESSION STARTED (the
+        // rolling restart, verbatim from the stream at 13:33:00).
+        let mut restarted = msgs.clone();
+        restarted.push(serde_json::from_str(
+            r#"{"category":"SessionStatus","message":"SESSION STARTED","date":"2026-08-23T13:33:00","flag":null,"scope":null}"#,
+        ).unwrap());
+        assert_eq!(track_flag(&restarted), None, "a session start ends the SC yellow");
+        // The pre-race shape: SC lights on BEFORE the start must not paint
+        // the start yellow (12:55 lights-on, 13:03 session start, verbatim).
+        let prerace: Vec<RaceControl> = serde_json::from_str(
+            r#"[{"category":"Other","message":"SAFETY CAR LIGHTS ON","date":"2026-08-23T12:55:02","flag":null,"scope":null},
+                {"category":"SessionStatus","message":"SESSION STARTED","date":"2026-08-23T13:03:28","flag":null,"scope":null}]"#,
+        )
+        .unwrap();
+        assert_eq!(track_flag(&prerace), None, "the formation-lap SC is not a race yellow");
         // Announcement alone changes nothing.
         assert_eq!(track_flag(&msgs[..3]), Some("red"), "a scheduled resume is still a stoppage");
         // Green flag ends the SC period.
