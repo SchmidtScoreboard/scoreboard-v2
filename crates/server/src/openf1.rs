@@ -266,7 +266,11 @@ struct Stint {
 #[derive(Deserialize)]
 struct SessionResult {
     driver_number: u32,
-    position: u32,
+    /// NULL for retired cars that were not classified — the 2026 Dutch GP's
+    /// official result carried five of them, and a strict u32 here failed
+    /// the WHOLE array's parse, locking the fallback to live timing forever.
+    #[serde(default)]
+    position: Option<u32>,
     /// Per-segment for quali ([Q1, Q2, Q3]); scalar for races. The LAST
     /// segment a driver reached carries their final gap.
     #[serde(default)]
@@ -450,7 +454,9 @@ fn driver_row(
 
 fn rows_from_results(results: &[SessionResult], drivers: &[Driver]) -> Vec<LeaderRow> {
     let mut sorted: Vec<&SessionResult> = results.iter().collect();
-    sorted.sort_by_key(|r| r.position);
+    // Unclassified retirements (position null) sort to the bottom, where the
+    // broadcast puts them; the depth cap usually truncates them anyway.
+    sorted.sort_by_key(|r| r.position.unwrap_or(u32::MAX));
     sorted
         .iter()
         .take(crate::render::LEADERBOARD_MAX_ROWS)
@@ -470,7 +476,8 @@ fn rows_from_results(results: &[SessionResult], drivers: &[Driver]) -> Vec<Leade
                     v => format_gap(v),
                 }
             };
-            LeaderRow { rank: r.position.to_string(), name, value, color, tire: None, thru: None }
+            let rank = r.position.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
+            LeaderRow { rank, name, value, color, tire: None, thru: None }
         })
         .collect()
 }
@@ -576,6 +583,27 @@ mod tests {
             Some(crate::model::hex_to_rgb("F47600")),
             "the FEED's team colour, not the hardcoded map"
         );
+    }
+
+    /// The 2026 Dutch GP's OFFICIAL classification, verbatim: unclassified
+    /// retirements carry position NULL — a strict integer failed the whole
+    /// array and locked the results path out permanently.
+    #[test]
+    fn null_positions_in_the_official_classification_parse_and_sink() {
+        let results: Vec<SessionResult> = serde_json::from_str(
+            r#"[{"position":null,"driver_number":77,"dnf":true,"dns":false,"dsq":false,"gap_to_leader":null},
+                {"position":1,"driver_number":1,"dnf":false,"dns":false,"dsq":false,"gap_to_leader":0},
+                {"position":2,"driver_number":12,"dnf":false,"dns":false,"dsq":false,"gap_to_leader":11.536},
+                {"position":17,"driver_number":23,"dnf":true,"dns":false,"dsq":false,"gap_to_leader":null}]"#,
+        )
+        .unwrap();
+        let rows = rows_from_results(&results, &[]);
+        assert_eq!(rows[0].rank, "1");
+        assert_eq!(rows[1].value, "+11.54", "gap to the winner, hundredths");
+        assert_eq!(rows[2].rank, "17");
+        assert_eq!(rows[2].value, "DNF", "a CLASSIFIED retirement keeps its position");
+        assert_eq!(rows[3].rank, "-", "an unclassified one sinks with no number");
+        assert_eq!(rows[3].value, "DNF");
     }
 
     /// Live rows: latest record per driver wins, tires ride along, lapped
