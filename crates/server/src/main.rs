@@ -3953,6 +3953,7 @@ pub async fn weather_loop(state: AppState) {
 pub fn tick_once(state: &AppState) {
     beat(state, "tick");
     refresh_pairing_codes(state);
+    sweep_stale_pins(state);
     // Re-anchor every connected board's clock. The board runs its own clock
     // between these; this only corrects drift and carries DST over.
     let connected: Vec<String> = state.devices.lock().unwrap().keys().cloned().collect();
@@ -4043,6 +4044,40 @@ async fn tick_loop(state: AppState) {
     loop {
         interval.tick().await;
         tick_once(&state);
+    }
+}
+
+/// Clear pins whose game is no longer showable.
+///
+/// A pin means "this game alone, while it's still live" — `chosen_games`'
+/// own words — and the BOARD already honors that scope by falling back to
+/// the rotation when the game goes stale. But the CONFIG kept the id
+/// forever, and the app dims every other card while `focused_game_id` is
+/// set: pin a race, let it finish, and an hour later the whole dashboard is
+/// grey with nothing visibly pinned. The pin expires WITH the game now.
+///
+/// An EMPTY slate keeps pins: that is a feed hiccup, not a game ending, and
+/// a pin must not be lost to a bad poll.
+fn sweep_stale_pins(state: &AppState) {
+    let board_ids: Vec<String> = state.configs.lock().unwrap().keys().cloned().collect();
+    for bid in board_ids {
+        let cfg = state.config_for(&bid);
+        let Some(fid) = cfg.focused_game_id.clone() else { continue };
+        let verdict = with_slate(state, Some(&cfg), |games| {
+            if games.is_empty() {
+                return None; // feed hiccup: no verdict
+            }
+            Some(games.iter().any(|g| g.id == fid && board_shows(state, g)))
+        });
+        if verdict == Some(false) {
+            tracing::info!("pin on {fid} expired with its game (board {bid})");
+            let mut cfg = cfg;
+            cfg.focused_game_id = None;
+            state.configs.lock().unwrap().insert(bid.clone(), cfg.clone());
+            state.persist_config(&bid, &cfg);
+            // The board re-renders its rotation and every app un-dims.
+            push_board_state(state, &bid);
+        }
     }
 }
 
@@ -6610,6 +6645,58 @@ mod tests {
         let offered = data_sources_for("f1", true);
         assert_eq!(offered[0].id, "espn", "the FIRST entry is the default");
         assert_eq!(offered[1].id, "openf1");
+    }
+
+    /// A pin expires WITH its game: pinned race finishes and ages out, the
+    /// pin clears, the config persists, and the app stops dimming a
+    /// dashboard with nothing visibly pinned on it. An empty slate (feed
+    /// hiccup) must never cost anyone their pin.
+    #[test]
+    fn a_pin_expires_with_its_game() {
+        let state = AppState::new_ephemeral();
+        let live = Game {
+            id: "600057441-race".into(),
+            sport_id: "f1".into(),
+            away: crate::model::TeamSide::empty("F1"),
+            home: crate::model::TeamSide::empty(""),
+            status: GameStatus::Active,
+            ordinal: String::new(),
+            clock: String::new(),
+            start_time: "2026-08-23T13:00Z".into(),
+            end_time: None,
+            leaderboard: None,
+            champ: None,
+            series: None,
+            session: Some("race".into()),
+            situation: None,
+            pregame: None,
+        };
+        *state.games.lock().unwrap() = vec![live.clone()];
+        let mut cfg = BoardConfig::default();
+        cfg.focused_game_id = Some(live.id.clone());
+        state.configs.lock().unwrap().insert("b1".into(), cfg);
+
+        // Live: the pin holds.
+        sweep_stale_pins(&state);
+        assert_eq!(
+            state.config_for("b1").focused_game_id.as_deref(),
+            Some("600057441-race"),
+            "a live pinned game keeps its pin"
+        );
+
+        // Feed hiccup: empty slate must not clear it.
+        *state.games.lock().unwrap() = Vec::new();
+        sweep_stale_pins(&state);
+        assert!(state.config_for("b1").focused_game_id.is_some(), "no verdict from an empty slate");
+
+        // Final, past its linger (no watched finish recorded): not showable.
+        let done = Game { status: GameStatus::Final, ..live };
+        *state.games.lock().unwrap() = vec![done];
+        sweep_stale_pins(&state);
+        assert!(
+            state.config_for("b1").focused_game_id.is_none(),
+            "the pin expires with the game"
+        );
     }
 
     /// The holes-played column follows the same switch shape as the round:
