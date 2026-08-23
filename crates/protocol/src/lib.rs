@@ -245,6 +245,13 @@ pub struct OffModeInput {
     pub max_len: u32,
 }
 
+/// One feed a league can be served from — see `SportDescriptor::data_sources`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct DataSourceOption {
+    pub id: String,
+    pub label: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SportDescriptor {
     pub id: String,
@@ -275,6 +282,19 @@ pub struct SportDescriptor {
     /// and sorts last instead of first.
     #[serde(default)]
     pub category_rank: u32,
+    /// The DATA SOURCES a server can feed this league from, when there is
+    /// more than one. Empty (the default, and the case for every league on a
+    /// stock server) means no choice exists and no picker appears anywhere.
+    ///
+    /// Descriptor-shaped for the same reason as `category`: ids and labels
+    /// are STRINGS the server declares, so a server with an extra feed (an
+    /// OpenF1 key, say) can offer it without any app knowing the name in
+    /// advance. The FIRST entry is the default. A server only lists sources
+    /// it can actually serve — credentials for a personal-use feed live in
+    /// the server's environment and are never on the wire, so a server
+    /// without them simply never offers the option.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data_sources: Vec<DataSourceOption>,
     /// What this league's box-score extras are CALLED, or empty when it draws
     /// none. Doubles as the gate and the label: an empty string means the app
     /// shows no toggle, and a non-empty one is the toggle's title.
@@ -514,6 +534,11 @@ pub fn default_name_style(sport_id: &str) -> NameStyle {
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct SportConfig {
     pub sport_id: String,
+    /// Which of the league's `data_sources` feeds this board's frames.
+    /// `None` = the FIRST declared source (the default). Ignored when the
+    /// catalog offers no choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_source: Option<String>,
     pub favorite_team_ids: Vec<String>,
     /// LEGACY, and frozen. The single "big games" option this league used to
     /// carry, kept load-bearing for two audiences: an OLDER SERVER binary (a
@@ -1196,6 +1221,7 @@ pub enum Command {
     /// default (shown).
     SetLeagueShowRound { sport_id: String, show: Option<bool> },
     SetLeagueShowThru { sport_id: String, show: Option<bool> },
+    SetLeagueDataSource { sport_id: String, source: Option<String> },
     /// Box-score extras for a league (baseball H/E, NHL shots, soccer
     /// shootout/aggregate). `None` reverts to the default, which is shown.
     SetLeagueShowExtras { sport_id: String, show: Option<bool> },

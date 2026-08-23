@@ -42,6 +42,11 @@ pub struct UiTeam {
     pub alt_color: Option<String>,
 }
 #[derive(uniffi::Record, Clone)]
+pub struct UiDataSourceOption {
+    pub id: String,
+    pub label: String,
+}
+#[derive(uniffi::Record, Clone)]
 pub struct UiChampOption {
     pub id: String,
     pub label: String,
@@ -112,6 +117,11 @@ pub struct UiSport {
     pub category: String,
     /// Section sort rank, 1-based. Zero means unranked and sorts last.
     pub category_rank: u32,
+    /// Alternate feeds this league can be served from. Empty (the normal
+    /// case) = no choice, no picker. The FIRST entry is the default. The
+    /// apps show this DEBUG-ONLY today — the only alternate is behind a
+    /// personal-use key on the server.
+    pub data_sources: Vec<UiDataSourceOption>,
     /// What this league's box-score extras are called ("Hits and errors"), or
     /// empty when it draws none — in which case the app offers no switch. A
     /// STRING, never an enum, for the same reason as `category`. Empty from a
@@ -152,6 +162,8 @@ pub struct UiSportConfig {
     pub show_round: Option<bool>,
     /// Golf's holes-played column ("thru"). None = the default, which is ON.
     pub show_thru: Option<bool>,
+    /// Which declared data source feeds this league; None = the default.
+    pub data_source: Option<String>,
     /// Box-score extras (baseball H/E, NHL shots, soccer shootout/aggregate).
     /// None = the default, ON.
     pub show_extras: Option<bool>,
@@ -760,6 +772,10 @@ impl ScoreboardClient {
         let _ = self.tx.send(Out::Command(board_id, Command::SetLeagueShowThru { sport_id, show }));
     }
 
+    pub fn set_league_data_source(&self, board_id: String, sport_id: String, source: Option<String>) {
+        let _ = self.tx.send(Out::Command(board_id, Command::SetLeagueDataSource { sport_id, source }));
+    }
+
     /// The box-score extras beside the score — baseball's hits and errors, NHL
     /// shots on goal, a soccer shootout or aggregate. None reverts to the
     /// default, which is shown.
@@ -999,6 +1015,11 @@ fn to_ui_sports(cat: Catalog) -> Vec<UiSport> {
                 .map(|c| UiChampOption { id: c.id, label: c.label })
                 .collect(),
             category: s.category,
+            data_sources: s
+                .data_sources
+                .into_iter()
+                .map(|d| UiDataSourceOption { id: d.id, label: d.label })
+                .collect(),
             category_rank: s.category_rank,
             extras_label: s.extras_label.clone(),
         })
@@ -1122,6 +1143,7 @@ fn to_ui_configs(sports: Vec<PSportConfig>) -> Vec<UiSportConfig> {
             leaderboard_rows: s.leaderboard_rows,
             show_round: s.show_round,
             show_thru: s.show_thru,
+            data_source: s.data_source.clone(),
             show_extras: s.show_extras,
             name_style: s.name_style.map(UiNameStyle::from),
             spoiler: s.spoiler,

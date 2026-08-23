@@ -384,6 +384,7 @@ impl SportsDataSource for EspnSource {
             teams.sort_by(|a, b| a.name.cmp(&b.name));
             tracing::info!("espn teams {}: {}", lg.league, teams.len());
             sports.push(SportDescriptor {
+                data_sources: Vec::new(),
                 id: lg.sport_id.into(),
                 // Left empty, like the lists below: `with_binary_owned` stamps
                 // the name and family from LEAGUE_IDENTITY at startup, so none

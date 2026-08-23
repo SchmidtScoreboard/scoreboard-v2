@@ -857,6 +857,15 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) -> O
                     cfg.sports.push(SportConfig { sport_id, show_thru: show, ..Default::default() });
                 }
             }
+            // Which feed drives this league's frames. Same upsert shape; None
+            // returns to the catalog's first (default) source.
+            Command::SetLeagueDataSource { sport_id, source } => {
+                if let Some(s) = cfg.sports.iter_mut().find(|s| s.sport_id == sport_id) {
+                    s.data_source = source;
+                } else if source.is_some() {
+                    cfg.sports.push(SportConfig { sport_id, data_source: source, ..Default::default() });
+                }
+            }
             // The box-score extras beside the score. Same upsert shape, and the
             // same default: absent means shown, so a league nobody has touched
             // draws what it always drew.
@@ -1354,6 +1363,7 @@ mod tests {
                 leaderboard_rows: None,
                 show_round: None,
                 show_thru: None,
+                data_source: None,
                 show_extras: None,
                 spoiler: true,
                 spoiler_team_ids: vec!["nhl-tor".into()],

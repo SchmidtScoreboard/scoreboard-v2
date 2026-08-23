@@ -699,6 +699,8 @@ public protocol ScoreboardClientProtocol: AnyObject {
      */
     func setGameSpoiler(boardId: String, gameId: String, hidden: Bool)
 
+    func setLeagueDataSource(boardId: String, sportId: String, source: String?)
+
     /**
      * Seconds each game holds the panel before the rotation advances.
      * Per-league "time per event" override; None reverts to the board default.
@@ -1149,6 +1151,14 @@ open class ScoreboardClient:
                                                                     FfiConverterString.lower(boardId),
                                                                     FfiConverterString.lower(gameId),
                                                                     FfiConverterBool.lower(hidden), $0)
+    }
+    }
+
+    open func setLeagueDataSource(boardId: String, sportId: String, source: String?) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_set_league_data_source(self.uniffiClonePointer(),
+                                                                          FfiConverterString.lower(boardId),
+                                                                          FfiConverterString.lower(sportId),
+                                                                          FfiConverterOptionString.lower(source), $0)
     }
     }
 
@@ -2045,6 +2055,67 @@ public func FfiConverterTypeUiChampOption_lift(_ buf: RustBuffer) throws -> UiCh
 #endif
 public func FfiConverterTypeUiChampOption_lower(_ value: UiChampOption) -> RustBuffer {
     return FfiConverterTypeUiChampOption.lower(value)
+}
+
+public struct UiDataSourceOption {
+    public var id: String
+    public var label: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, label: String) {
+        self.id = id
+        self.label = label
+    }
+}
+
+extension UiDataSourceOption: Equatable, Hashable {
+    public static func == (lhs: UiDataSourceOption, rhs: UiDataSourceOption) -> Bool {
+        if lhs.id != rhs.id {
+            return false
+        }
+        if lhs.label != rhs.label {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(label)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiDataSourceOption: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiDataSourceOption {
+        return
+            try UiDataSourceOption(
+                id: FfiConverterString.read(from: &buf),
+                label: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UiDataSourceOption, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiDataSourceOption_lift(_ buf: RustBuffer) throws -> UiDataSourceOption {
+    return try FfiConverterTypeUiDataSourceOption.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiDataSourceOption_lower(_ value: UiDataSourceOption) -> RustBuffer {
+    return FfiConverterTypeUiDataSourceOption.lower(value)
 }
 
 public struct UiDepthOption {
@@ -3409,6 +3480,13 @@ public struct UiSport {
      */
     public var categoryRank: UInt32
     /**
+     * Alternate feeds this league can be served from. Empty (the normal
+     * case) = no choice, no picker. The FIRST entry is the default. The
+     * apps show this DEBUG-ONLY today — the only alternate is behind a
+     * personal-use key on the server.
+     */
+    public var dataSources: [UiDataSourceOption]
+    /**
      * What this league's box-score extras are called ("Hits and errors"), or
      * empty when it draws none — in which case the app offers no switch. A
      * STRING, never an enum, for the same reason as `category`. Empty from a
@@ -3435,6 +3513,12 @@ public struct UiSport {
                     * Section sort rank, 1-based. Zero means unranked and sorts last.
                     */ categoryRank: UInt32,
                 /**
+                    * Alternate feeds this league can be served from. Empty (the normal
+                    * case) = no choice, no picker. The FIRST entry is the default. The
+                    * apps show this DEBUG-ONLY today — the only alternate is behind a
+                    * personal-use key on the server.
+                    */ dataSources: [UiDataSourceOption],
+                /**
                     * What this league's box-score extras are called ("Hits and errors"), or
                     * empty when it draws none — in which case the app offers no switch. A
                     * STRING, never an enum, for the same reason as `category`. Empty from a
@@ -3449,6 +3533,7 @@ public struct UiSport {
         self.championshipRounds = championshipRounds
         self.category = category
         self.categoryRank = categoryRank
+        self.dataSources = dataSources
         self.extrasLabel = extrasLabel
     }
 }
@@ -3476,6 +3561,9 @@ extension UiSport: Equatable, Hashable {
         if lhs.categoryRank != rhs.categoryRank {
             return false
         }
+        if lhs.dataSources != rhs.dataSources {
+            return false
+        }
         if lhs.extrasLabel != rhs.extrasLabel {
             return false
         }
@@ -3490,6 +3578,7 @@ extension UiSport: Equatable, Hashable {
         hasher.combine(championshipRounds)
         hasher.combine(category)
         hasher.combine(categoryRank)
+        hasher.combine(dataSources)
         hasher.combine(extrasLabel)
     }
 }
@@ -3508,6 +3597,7 @@ public struct FfiConverterTypeUiSport: FfiConverterRustBuffer {
                 championshipRounds: FfiConverterSequenceTypeUiChampOption.read(from: &buf),
                 category: FfiConverterString.read(from: &buf),
                 categoryRank: FfiConverterUInt32.read(from: &buf),
+                dataSources: FfiConverterSequenceTypeUiDataSourceOption.read(from: &buf),
                 extrasLabel: FfiConverterString.read(from: &buf)
             )
     }
@@ -3520,6 +3610,7 @@ public struct FfiConverterTypeUiSport: FfiConverterRustBuffer {
         FfiConverterSequenceTypeUiChampOption.write(value.championshipRounds, into: &buf)
         FfiConverterString.write(value.category, into: &buf)
         FfiConverterUInt32.write(value.categoryRank, into: &buf)
+        FfiConverterSequenceTypeUiDataSourceOption.write(value.dataSources, into: &buf)
         FfiConverterString.write(value.extrasLabel, into: &buf)
     }
 }
@@ -3563,6 +3654,10 @@ public struct UiSportConfig {
      */
     public var showThru: Bool?
     /**
+     * Which declared data source feeds this league; None = the default.
+     */
+    public var dataSource: String?
+    /**
      * Box-score extras (baseball H/E, NHL shots, soccer shootout/aggregate).
      * None = the default, ON.
      */
@@ -3602,6 +3697,9 @@ public struct UiSportConfig {
                     * Golf's holes-played column ("thru"). None = the default, which is ON.
                     */ showThru: Bool?,
                 /**
+                    * Which declared data source feeds this league; None = the default.
+                    */ dataSource: String?,
+                /**
                     * Box-score extras (baseball H/E, NHL shots, soccer shootout/aggregate).
                     * None = the default, ON.
                     */ showExtras: Bool?,
@@ -3624,6 +3722,7 @@ public struct UiSportConfig {
         self.leaderboardRows = leaderboardRows
         self.showRound = showRound
         self.showThru = showThru
+        self.dataSource = dataSource
         self.showExtras = showExtras
         self.nameStyle = nameStyle
         self.spoiler = spoiler
@@ -3654,6 +3753,9 @@ extension UiSportConfig: Equatable, Hashable {
         if lhs.showThru != rhs.showThru {
             return false
         }
+        if lhs.dataSource != rhs.dataSource {
+            return false
+        }
         if lhs.showExtras != rhs.showExtras {
             return false
         }
@@ -3677,6 +3779,7 @@ extension UiSportConfig: Equatable, Hashable {
         hasher.combine(leaderboardRows)
         hasher.combine(showRound)
         hasher.combine(showThru)
+        hasher.combine(dataSource)
         hasher.combine(showExtras)
         hasher.combine(nameStyle)
         hasher.combine(spoiler)
@@ -3698,6 +3801,7 @@ public struct FfiConverterTypeUiSportConfig: FfiConverterRustBuffer {
                 leaderboardRows: FfiConverterOptionUInt32.read(from: &buf),
                 showRound: FfiConverterOptionBool.read(from: &buf),
                 showThru: FfiConverterOptionBool.read(from: &buf),
+                dataSource: FfiConverterOptionString.read(from: &buf),
                 showExtras: FfiConverterOptionBool.read(from: &buf),
                 nameStyle: FfiConverterOptionTypeUiNameStyle.read(from: &buf),
                 spoiler: FfiConverterBool.read(from: &buf),
@@ -3713,6 +3817,7 @@ public struct FfiConverterTypeUiSportConfig: FfiConverterRustBuffer {
         FfiConverterOptionUInt32.write(value.leaderboardRows, into: &buf)
         FfiConverterOptionBool.write(value.showRound, into: &buf)
         FfiConverterOptionBool.write(value.showThru, into: &buf)
+        FfiConverterOptionString.write(value.dataSource, into: &buf)
         FfiConverterOptionBool.write(value.showExtras, into: &buf)
         FfiConverterOptionTypeUiNameStyle.write(value.nameStyle, into: &buf)
         FfiConverterBool.write(value.spoiler, into: &buf)
@@ -4910,6 +5015,31 @@ private struct FfiConverterSequenceTypeUiChampOption: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             try seq.append(FfiConverterTypeUiChampOption.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeUiDataSourceOption: FfiConverterRustBuffer {
+    typealias SwiftType = [UiDataSourceOption]
+
+    static func write(_ value: [UiDataSourceOption], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeUiDataSourceOption.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UiDataSourceOption] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UiDataSourceOption]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeUiDataSourceOption.read(from: &buf))
         }
         return seq
     }
@@ -6183,6 +6313,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_game_spoiler() != 7018 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_scoreboardclient_set_league_data_source() != 1965 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_league_dwell() != 25672 {

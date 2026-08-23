@@ -189,6 +189,9 @@ class Session(context: Context) : ClientListener {
     fun setLeagueShowExtras(boardId: String, sportId: String, show: Boolean?) =
         client.setLeagueShowExtras(boardId, sportId, show)
 
+    fun setLeagueDataSource(boardId: String, sportId: String, source: String?) =
+        client.setLeagueDataSource(boardId, sportId, source)
+
     fun setLeagueShowThru(boardId: String, sportId: String, show: Boolean?) =
         client.setLeagueShowThru(boardId, sportId, show)
 

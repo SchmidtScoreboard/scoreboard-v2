@@ -1021,6 +1021,8 @@ internal open class UniffiVTableCallbackInterfaceClientListener(
 
 
 
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -1098,6 +1100,8 @@ internal interface UniffiLib : Library {
     fun uniffi_app_core_fn_method_scoreboardclient_set_fw_channel(`ptr`: Pointer,`boardId`: RustBuffer.ByValue,`channel`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_app_core_fn_method_scoreboardclient_set_game_spoiler(`ptr`: Pointer,`boardId`: RustBuffer.ByValue,`gameId`: RustBuffer.ByValue,`hidden`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    fun uniffi_app_core_fn_method_scoreboardclient_set_league_data_source(`ptr`: Pointer,`boardId`: RustBuffer.ByValue,`sportId`: RustBuffer.ByValue,`source`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_app_core_fn_method_scoreboardclient_set_league_dwell(`ptr`: Pointer,`boardId`: RustBuffer.ByValue,`sportId`: RustBuffer.ByValue,`secs`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1487,6 +1491,8 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_app_core_checksum_method_scoreboardclient_set_game_spoiler(
     ): Short
+    fun uniffi_app_core_checksum_method_scoreboardclient_set_league_data_source(
+    ): Short
     fun uniffi_app_core_checksum_method_scoreboardclient_set_league_dwell(
     ): Short
     fun uniffi_app_core_checksum_method_scoreboardclient_set_league_name_style(
@@ -1790,6 +1796,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_method_scoreboardclient_set_game_spoiler() != 7018.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_method_scoreboardclient_set_league_data_source() != 1965.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_method_scoreboardclient_set_league_dwell() != 25672.toShort()) {
@@ -2474,6 +2483,8 @@ public interface ScoreboardClientInterface {
      */
     fun `setGameSpoiler`(`boardId`: kotlin.String, `gameId`: kotlin.String, `hidden`: kotlin.Boolean)
     
+    fun `setLeagueDataSource`(`boardId`: kotlin.String, `sportId`: kotlin.String, `source`: kotlin.String?)
+    
     /**
      * Seconds each game holds the panel before the rotation advances.
      * Per-league "time per event" override; None reverts to the board default.
@@ -3075,6 +3086,17 @@ open class ScoreboardClient: Disposable, AutoCloseable, ScoreboardClientInterfac
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_app_core_fn_method_scoreboardclient_set_game_spoiler(
         it, FfiConverterString.lower(`boardId`),FfiConverterString.lower(`gameId`),FfiConverterBoolean.lower(`hidden`),_status)
+}
+    }
+    
+    
+
+    override fun `setLeagueDataSource`(`boardId`: kotlin.String, `sportId`: kotlin.String, `source`: kotlin.String?)
+        = 
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_method_scoreboardclient_set_league_data_source(
+        it, FfiConverterString.lower(`boardId`),FfiConverterString.lower(`sportId`),FfiConverterOptionalString.lower(`source`),_status)
 }
     }
     
@@ -3754,6 +3776,38 @@ public object FfiConverterTypeUiChampOption: FfiConverterRustBuffer<UiChampOptio
     )
 
     override fun write(value: UiChampOption, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterString.write(value.`label`, buf)
+    }
+}
+
+
+
+data class UiDataSourceOption (
+    var `id`: kotlin.String, 
+    var `label`: kotlin.String
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeUiDataSourceOption: FfiConverterRustBuffer<UiDataSourceOption> {
+    override fun read(buf: ByteBuffer): UiDataSourceOption {
+        return UiDataSourceOption(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: UiDataSourceOption) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`label`)
+    )
+
+    override fun write(value: UiDataSourceOption, buf: ByteBuffer) {
             FfiConverterString.write(value.`id`, buf)
             FfiConverterString.write(value.`label`, buf)
     }
@@ -4496,6 +4550,13 @@ data class UiSport (
      */
     var `categoryRank`: kotlin.UInt, 
     /**
+     * Alternate feeds this league can be served from. Empty (the normal
+     * case) = no choice, no picker. The FIRST entry is the default. The
+     * apps show this DEBUG-ONLY today — the only alternate is behind a
+     * personal-use key on the server.
+     */
+    var `dataSources`: List<UiDataSourceOption>, 
+    /**
      * What this league's box-score extras are called ("Hits and errors"), or
      * empty when it draws none — in which case the app offers no switch. A
      * STRING, never an enum, for the same reason as `category`. Empty from a
@@ -4521,6 +4582,7 @@ public object FfiConverterTypeUiSport: FfiConverterRustBuffer<UiSport> {
             FfiConverterSequenceTypeUiChampOption.read(buf),
             FfiConverterString.read(buf),
             FfiConverterUInt.read(buf),
+            FfiConverterSequenceTypeUiDataSourceOption.read(buf),
             FfiConverterString.read(buf),
         )
     }
@@ -4533,6 +4595,7 @@ public object FfiConverterTypeUiSport: FfiConverterRustBuffer<UiSport> {
             FfiConverterSequenceTypeUiChampOption.allocationSize(value.`championshipRounds`) +
             FfiConverterString.allocationSize(value.`category`) +
             FfiConverterUInt.allocationSize(value.`categoryRank`) +
+            FfiConverterSequenceTypeUiDataSourceOption.allocationSize(value.`dataSources`) +
             FfiConverterString.allocationSize(value.`extrasLabel`)
     )
 
@@ -4544,6 +4607,7 @@ public object FfiConverterTypeUiSport: FfiConverterRustBuffer<UiSport> {
             FfiConverterSequenceTypeUiChampOption.write(value.`championshipRounds`, buf)
             FfiConverterString.write(value.`category`, buf)
             FfiConverterUInt.write(value.`categoryRank`, buf)
+            FfiConverterSequenceTypeUiDataSourceOption.write(value.`dataSources`, buf)
             FfiConverterString.write(value.`extrasLabel`, buf)
     }
 }
@@ -4574,6 +4638,10 @@ data class UiSportConfig (
      * Golf's holes-played column ("thru"). None = the default, which is ON.
      */
     var `showThru`: kotlin.Boolean?, 
+    /**
+     * Which declared data source feeds this league; None = the default.
+     */
+    var `dataSource`: kotlin.String?, 
     /**
      * Box-score extras (baseball H/E, NHL shots, soccer shootout/aggregate).
      * None = the default, ON.
@@ -4611,6 +4679,7 @@ public object FfiConverterTypeUiSportConfig: FfiConverterRustBuffer<UiSportConfi
             FfiConverterOptionalUInt.read(buf),
             FfiConverterOptionalBoolean.read(buf),
             FfiConverterOptionalBoolean.read(buf),
+            FfiConverterOptionalString.read(buf),
             FfiConverterOptionalBoolean.read(buf),
             FfiConverterOptionalTypeUiNameStyle.read(buf),
             FfiConverterBoolean.read(buf),
@@ -4626,6 +4695,7 @@ public object FfiConverterTypeUiSportConfig: FfiConverterRustBuffer<UiSportConfi
             FfiConverterOptionalUInt.allocationSize(value.`leaderboardRows`) +
             FfiConverterOptionalBoolean.allocationSize(value.`showRound`) +
             FfiConverterOptionalBoolean.allocationSize(value.`showThru`) +
+            FfiConverterOptionalString.allocationSize(value.`dataSource`) +
             FfiConverterOptionalBoolean.allocationSize(value.`showExtras`) +
             FfiConverterOptionalTypeUiNameStyle.allocationSize(value.`nameStyle`) +
             FfiConverterBoolean.allocationSize(value.`spoiler`) +
@@ -4640,6 +4710,7 @@ public object FfiConverterTypeUiSportConfig: FfiConverterRustBuffer<UiSportConfi
             FfiConverterOptionalUInt.write(value.`leaderboardRows`, buf)
             FfiConverterOptionalBoolean.write(value.`showRound`, buf)
             FfiConverterOptionalBoolean.write(value.`showThru`, buf)
+            FfiConverterOptionalString.write(value.`dataSource`, buf)
             FfiConverterOptionalBoolean.write(value.`showExtras`, buf)
             FfiConverterOptionalTypeUiNameStyle.write(value.`nameStyle`, buf)
             FfiConverterBoolean.write(value.`spoiler`, buf)
@@ -5597,6 +5668,34 @@ public object FfiConverterSequenceTypeUiChampOption: FfiConverterRustBuffer<List
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeUiChampOption.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeUiDataSourceOption: FfiConverterRustBuffer<List<UiDataSourceOption>> {
+    override fun read(buf: ByteBuffer): List<UiDataSourceOption> {
+        val len = buf.getInt()
+        return List<UiDataSourceOption>(len) {
+            FfiConverterTypeUiDataSourceOption.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<UiDataSourceOption>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeUiDataSourceOption.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<UiDataSourceOption>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeUiDataSourceOption.write(it, buf)
         }
     }
 }

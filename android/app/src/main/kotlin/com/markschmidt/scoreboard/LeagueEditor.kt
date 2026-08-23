@@ -404,6 +404,35 @@ fun LeagueEditorScreen(
                 }
             }
 
+            // Data source — DEBUG ONLY: the only alternate feed today rides a
+            // personal-use key on the server, so the switch is an evaluation
+            // tool, not a product surface. The server only DECLARES sources
+            // it can serve, so a release build (or a server without the key)
+            // never shows this even if the gate were wrong.
+            if (BuildConfig.DEBUG && sport.dataSources.size > 1) {
+                item { EditorHeader("Data source") }
+                val currentSource = sc?.dataSource ?: sport.dataSources.first().id
+                for (opt in sport.dataSources) {
+                    item(key = "source-${opt.id}") {
+                        ListItem(
+                            headlineContent = { Text(opt.label) },
+                            leadingContent = {
+                                RadioButton(
+                                    selected = opt.id == currentSource,
+                                    onClick = null,
+                                )
+                            },
+                            modifier = Modifier.clickable {
+                                // The default (first) source stores as null, so an
+                                // untouched board carries no setting at all.
+                                val store = if (opt.id == sport.dataSources.first().id) null else opt.id
+                                session.setLeagueDataSource(boardId, sportId, store)
+                            },
+                        )
+                    }
+                }
+            }
+
             // Teams
             if (sport.teams.isNotEmpty()) {
                 item { EditorHeader("Teams") }

@@ -7,6 +7,7 @@ mod bdf;
 mod espn;
 mod model;
 mod offmode;
+mod openf1;
 mod weather;
 mod render;
 mod serve;
@@ -135,6 +136,12 @@ pub struct AppState {
     /// Live pairing codes: code -> (board_id, when the board registered it).
     /// The stamp expires the code (`PAIR_CODE_TTL`) — see `register_pairing_code`.
     pub pending: Arc<Mutex<HashMap<String, (String, Instant)>>>,
+    /// OpenF1 alternate feed — Some only when the environment carries the
+    /// personal-use credentials. See `crates/server/src/openf1.rs`.
+    pub openf1: Arc<Option<openf1::OpenF1>>,
+    /// The latest OpenF1 session rows, swapped into f1 frames by `board_view`
+    /// for boards that opted in. None until the first successful fetch.
+    pub openf1_rows: Arc<Mutex<Option<openf1::SessionRows>>>,
     pub allow: Arc<Mutex<HashMap<String, HashSet<String>>>>, // board_id -> controller ids
     db: Option<Arc<Mutex<Connection>>>,
     /// Pairing-attempt budget per controller pubkey. One shared bucket meant a
@@ -404,6 +411,8 @@ impl AppState {
             devices: Arc::new(Mutex::new(HashMap::new())),
             controllers: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
+            openf1: Arc::new(openf1::OpenF1::from_env()),
+            openf1_rows: Arc::new(Mutex::new(None)),
             allow: Arc::new(Mutex::new(allow)),
             db: db.map(|c| Arc::new(Mutex::new(c))),
             pair_limiters: Arc::new(Mutex::new(HashMap::new())),
@@ -1962,6 +1971,19 @@ pub(crate) fn redact_game(g: &Game, mode: SpoilerMode) -> Game {
 /// toggle. Borrowed unless a setting actually changes something, so the common
 /// case allocates nothing.
 pub(crate) fn board_view<'a>(cfg: &BoardConfig, g: &'a Game) -> std::borrow::Cow<'a, Game> {
+    board_view_with(cfg, g, None)
+}
+
+/// `board_view` plus the OpenF1 row swap: a board whose f1 league selected
+/// the alternate source gets that feed's timing rows on the SAME game — ids,
+/// title, and status stay ESPN's, so flipping the switch is a controlled
+/// comparison. Rows older than ten minutes are ignored: a dead feed must
+/// degrade to ESPN, never freeze a stale tower on the panel.
+pub(crate) fn board_view_with<'a>(
+    cfg: &BoardConfig,
+    g: &'a Game,
+    openf1: Option<&openf1::SessionRows>,
+) -> std::borrow::Cow<'a, Game> {
     let league = cfg.sports.iter().find(|s| s.sport_id == g.sport_id);
     // Default ON: a leaderboard looks the same on Thursday as on Sunday, so the
     // round earns its corner until someone turns it off.
@@ -1975,10 +1997,26 @@ pub(crate) fn board_view<'a>(cfg: &BoardConfig, g: &'a Game) -> std::borrow::Cow
     let drop_extras = !show_extras && game_has_extras(g);
     let drop_thru = !show_thru
         && g.leaderboard.as_ref().is_some_and(|lb| lb.rows.iter().any(|r| r.thru.is_some()));
-    if !drop_round && !drop_extras && !drop_thru {
+    let openf1_swap = if g.sport_id == "f1"
+        && league.and_then(|s| s.data_source.as_deref()) == Some("openf1")
+    {
+        openf1
+            .filter(|r| r.fetched.elapsed() < Duration::from_secs(600))
+            // Matched on the game's SESSION, not an id suffix —
+            // "-sprint-quali" ends with "-quali" and would collide.
+            .filter(|r| g.session.as_deref() == Some(r.session))
+    } else {
+        None
+    };
+    if !drop_round && !drop_extras && !drop_thru && openf1_swap.is_none() {
         return std::borrow::Cow::Borrowed(g);
     }
     let mut hidden = g.clone();
+    if let Some(swap) = openf1_swap {
+        if let Some(lb) = hidden.leaderboard.as_mut() {
+            lb.rows = swap.rows.clone();
+        }
+    }
     if drop_round {
         hidden.ordinal.clear();
     }
@@ -2887,7 +2925,8 @@ fn manifest_inner(state: &AppState, board_id: &str) -> Manifest {
                     .map(|r| r as usize)
                     .unwrap_or(render::LEADERBOARD_DEFAULT_ROWS);
                 let style = name_style_for(&cfg, &g.sport_id);
-                let view = board_view(&cfg, g);
+                let of1 = state.openf1_rows.lock().unwrap();
+                let view = board_view_with(&cfg, g, of1.as_ref());
                 let (id, px, scrolls) = render::render_board_frame(&view, rows_cap, spoiler_for(&cfg, g), tz, style);
                 state.cache_frame(id.clone(), px);
                 rotation.push(RotationEntry { frame_id: id, dwell_ms, scroll: scrolls });
@@ -4054,7 +4093,9 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
             .iter()
             .map(|g| {
                 let spoiler = spoiler_for(&cfg, g);
-                let mut s = to_summary_for(&board_view(&cfg, g), spoiler, tz);
+                let of1 = state.openf1_rows.lock().unwrap();
+                let mut s = to_summary_for(&board_view_with(&cfg, g, of1.as_ref()), spoiler, tz);
+                drop(of1);
                 s.scrolls = game_scroll_capable(&cfg, g);
                 let (fid, px) = render::render_frame(g, spoiler, tz, name_style_for(&cfg, &g.sport_id));
                 state.cache_frame(fid.clone(), px);
@@ -4065,7 +4106,9 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
         // Bumped games ride along flagged, without pre-rendered frames (the app
         // falls back to HTTP rendering for those cards).
         out.extend(bumped.iter().map(|g| {
-            let mut s = to_summary_for(&board_view(&cfg, g), spoiler_for(&cfg, g), tz);
+            let of1 = state.openf1_rows.lock().unwrap();
+            let mut s = to_summary_for(&board_view_with(&cfg, g, of1.as_ref()), spoiler_for(&cfg, g), tz);
+            drop(of1);
             s.scrolls = game_scroll_capable(&cfg, g);
             s.bumped = true;
             s
@@ -4111,7 +4154,9 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
         });
         out.extend(upcoming.iter().take(UPCOMING_CAP).map(|g| {
             let spoiler = spoiler_for(&cfg, g);
-            let mut s = to_summary_for(&board_view(&cfg, g), spoiler, tz);
+            let of1 = state.openf1_rows.lock().unwrap();
+            let mut s = to_summary_for(&board_view_with(&cfg, g, of1.as_ref()), spoiler, tz);
+            drop(of1);
             s.scrolls = game_scroll_capable(&cfg, g);
             s.queued = true;
             // The app's "Live and Upcoming" section keys off this status to tell
@@ -4149,6 +4194,26 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
         config: cfg,
         firmware_version,
         firmware_update,
+    }
+}
+
+/// Fetch OpenF1 rows on the poll tick — gated on credentials AND on some
+/// board actually having selected the source, because the key is a paid
+/// personal one and the default costs it nothing. Failures leave the last
+/// rows in place; `board_view` ignores rows older than ten minutes, so a
+/// dead feed degrades to ESPN rather than freezing.
+async fn maybe_fetch_openf1(state: &AppState) {
+    let Some(client) = state.openf1.as_ref() else { return };
+    let wanted = state.configs.lock().unwrap().values().any(|cfg| {
+        cfg.sports
+            .iter()
+            .any(|s| s.sport_id == "f1" && s.data_source.as_deref() == Some("openf1"))
+    });
+    if !wanted {
+        return;
+    }
+    if let Some(rows) = client.fetch_latest().await {
+        *state.openf1_rows.lock().unwrap() = Some(rows);
     }
 }
 
@@ -4216,6 +4281,7 @@ async fn poll_loop(state: AppState, source: Arc<dyn SportsDataSource>) {
         let fetched_at = Instant::now();
         last_fetch = Some(fetched_at);
         let mut games = source.fetch().await;
+        maybe_fetch_openf1(&state).await;
         // Ingestion filter: far-future scheduled games (a GP two weeks out,
         // week-one CFB) never enter state — no render work, no browse clutter.
         // The demo source flows through here too; its slate stays within the
@@ -4531,6 +4597,7 @@ pub(crate) fn leaderboard_sports() -> Vec<SportDescriptor> {
     let sport = |id: &str| {
         let (name, category, rank) = espn::league_identity(id).unwrap_or((id, "", 0));
         SportDescriptor {
+                data_sources: Vec::new(),
             id: id.into(),
             name: name.into(),
             teams: vec![],
@@ -4589,8 +4656,31 @@ fn with_binary_owned(mut c: Catalog) -> Catalog {
             s.category_rank = rank;
             s.extras_label = extras_label_for(&s.id).into();
         }
+        // Stamped here, not in the fetcher, for the cached-catalog reason
+        // above — and recomputed per boot, because the offer depends on this
+        // process's ENVIRONMENT: a server without the OpenF1 key must not
+        // keep advertising a source it can no longer serve.
+        s.data_sources = data_sources_for(&s.id, openf1::OpenF1::from_env().is_some());
     }
     c
+}
+
+/// The feeds this server can offer a league. Only f1 has an alternate, and
+/// only when the process carries OpenF1 credentials — the key is personal-use
+/// and lives in the environment, so a server without it never offers the
+/// choice and no app ever shows the switch. FIRST entry is the default.
+fn data_sources_for(
+    sport_id: &str,
+    openf1_available: bool,
+) -> Vec<scoreboard_protocol::DataSourceOption> {
+    if sport_id == "f1" && openf1_available {
+        vec![
+            scoreboard_protocol::DataSourceOption { id: "espn".into(), label: "ESPN".into() },
+            scoreboard_protocol::DataSourceOption { id: "openf1".into(), label: "OpenF1".into() },
+        ]
+    } else {
+        Vec::new()
+    }
 }
 
 /// What a league's box-score extras are called, or "" when it draws none.
@@ -4628,6 +4718,7 @@ fn load_cached_catalog() -> Option<Catalog> {
 
 fn mock_catalog() -> Catalog {
     let sport = |id: &str, name: &str, teams: Vec<Team>| SportDescriptor {
+                data_sources: Vec::new(),
         id: id.into(),
         name: name.into(),
         teams,
@@ -5602,6 +5693,7 @@ mod tests {
                         leaderboard_rows: None,
                         show_round: None,
                 show_thru: None,
+                data_source: None,
                         show_extras: None,
                         spoiler: false,
                         spoiler_team_ids: vec![],
@@ -5616,6 +5708,7 @@ mod tests {
                         leaderboard_rows: None,
                         show_round: None,
                 show_thru: None,
+                data_source: None,
                         show_extras: None,
                         spoiler: false,
                         spoiler_team_ids: vec![],
@@ -5630,6 +5723,7 @@ mod tests {
                         leaderboard_rows: None,
                         show_round: None,
                 show_thru: None,
+                data_source: None,
                         show_extras: None,
                         spoiler: false,
                         spoiler_team_ids: vec![],
@@ -5683,6 +5777,7 @@ mod tests {
                 leaderboard_rows: None,
                 show_round: None,
                 show_thru: None,
+                data_source: None,
                 show_extras: None,
                 spoiler: false,
                 spoiler_team_ids: vec![],
@@ -5772,6 +5867,7 @@ mod tests {
                 leaderboard_rows: None,
                 show_round: None,
                 show_thru: None,
+                data_source: None,
                 show_extras: None,
                 spoiler: false,
                 spoiler_team_ids: vec![],
@@ -6359,6 +6455,88 @@ mod tests {
         // the common case doesn't clone.
         let f1 = Game { sport_id: "f1".into(), ordinal: String::new(), ..golf.clone() };
         assert!(matches!(board_view(&cfg, &f1), std::borrow::Cow::Borrowed(_)), "no needless clone");
+    }
+
+    /// The OpenF1 swap: rows replace ESPN's only when the board OPTED IN,
+    /// only on the matching session, and only while fresh — and the offer
+    /// itself exists only when the server carries the personal-use key.
+    #[test]
+    fn the_openf1_swap_is_opt_in_session_matched_and_fresh() {
+        let f1 = Game {
+            id: "600057441-quali".into(),
+            sport_id: "f1".into(),
+            away: crate::model::TeamSide::empty("F1"),
+            home: crate::model::TeamSide::empty(""),
+            status: GameStatus::Active,
+            ordinal: String::new(),
+            clock: String::new(),
+            start_time: "2026-08-22T14:00Z".into(),
+            end_time: None,
+            leaderboard: Some(crate::model::Leaderboard {
+                name: "DUTCH GP Q".into(),
+                rows: vec![crate::model::LeaderRow {
+                    rank: "1".into(),
+                    name: "PIA".into(),
+                    value: String::new(),
+                    ..Default::default()
+                }],
+            }),
+            champ: None,
+            series: None,
+            session: Some("quali".into()),
+            situation: None,
+            pregame: None,
+        };
+        let rows = |session: &'static str, age: Duration| openf1::SessionRows {
+            session,
+            rows: vec![crate::model::LeaderRow {
+                rank: "1".into(),
+                name: "NOR".into(),
+                value: String::new(),
+                ..Default::default()
+            }],
+            fetched: Instant::now() - age,
+        };
+        let cfg_with = |source: Option<&str>| BoardConfig {
+            sports: vec![SportConfig {
+                sport_id: "f1".into(),
+                data_source: source.map(String::from),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let name_of = |v: &Game| v.leaderboard.as_ref().unwrap().rows[0].name.clone();
+
+        // Default (no selection): ESPN rows, no clone.
+        let fresh = rows("quali", Duration::from_secs(0));
+        let v = board_view_with(&cfg_with(None), &f1, Some(&fresh));
+        assert!(matches!(v, std::borrow::Cow::Borrowed(_)), "default costs nothing");
+        assert_eq!(name_of(&v), "PIA");
+
+        // Opted in + matching session + fresh: swapped.
+        let v = board_view_with(&cfg_with(Some("openf1")), &f1, Some(&fresh));
+        assert_eq!(name_of(&v), "NOR", "the alternate feed's rows");
+
+        // Wrong session: sprint-quali rows must NOT land on the quali game.
+        let sprint = rows("sprint-quali", Duration::from_secs(0));
+        let v = board_view_with(&cfg_with(Some("openf1")), &f1, Some(&sprint));
+        assert_eq!(name_of(&v), "PIA", "session mismatch keeps ESPN rows");
+
+        // Stale: a dead feed degrades to ESPN rather than freezing.
+        let stale = rows("quali", Duration::from_secs(700));
+        let v = board_view_with(&cfg_with(Some("openf1")), &f1, Some(&stale));
+        assert_eq!(name_of(&v), "PIA", "stale rows are ignored");
+    }
+
+    /// The catalog offers the alternate source ONLY for f1 and ONLY when the
+    /// server carries credentials — no key, no switch, anywhere.
+    #[test]
+    fn data_sources_are_offered_only_with_credentials() {
+        assert!(data_sources_for("f1", false).is_empty(), "no key, no offer");
+        assert!(data_sources_for("nhl", true).is_empty(), "only f1 has an alternate");
+        let offered = data_sources_for("f1", true);
+        assert_eq!(offered[0].id, "espn", "the FIRST entry is the default");
+        assert_eq!(offered[1].id, "openf1");
     }
 
     /// The holes-played column follows the same switch shape as the round:
@@ -7807,6 +7985,7 @@ mod tests {
             leaderboard_rows: None,
             show_round: None,
                 show_thru: None,
+                data_source: None,
             show_extras: None,
             spoiler: false,
             spoiler_team_ids: vec![],
@@ -8039,6 +8218,7 @@ mod tests {
             leaderboard_rows: None,
             show_round: None,
                 show_thru: None,
+                data_source: None,
             show_extras: None,
             spoiler: false,
             spoiler_team_ids: vec![],

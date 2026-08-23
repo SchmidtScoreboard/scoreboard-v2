@@ -523,6 +523,11 @@ void uniffi_app_core_fn_method_scoreboardclient_set_fw_channel(void*_Nonnull ptr
 void uniffi_app_core_fn_method_scoreboardclient_set_game_spoiler(void*_Nonnull ptr, RustBuffer board_id, RustBuffer game_id, int8_t hidden, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_DATA_SOURCE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_DATA_SOURCE
+void uniffi_app_core_fn_method_scoreboardclient_set_league_data_source(void*_Nonnull ptr, RustBuffer board_id, RustBuffer sport_id, RustBuffer source, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_DWELL
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_DWELL
 void uniffi_app_core_fn_method_scoreboardclient_set_league_dwell(void*_Nonnull ptr, RustBuffer board_id, RustBuffer sport_id, RustBuffer secs, RustCallStatus *_Nonnull out_status
@@ -1568,6 +1573,12 @@ uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_fw_channel(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_GAME_SPOILER
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_GAME_SPOILER
 uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_game_spoiler(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_DATA_SOURCE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_LEAGUE_DATA_SOURCE
+uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_league_data_source(void
     
 );
 #endif

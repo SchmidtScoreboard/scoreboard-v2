@@ -147,6 +147,7 @@ struct BoardInfo {
     var leagueRows: [String: UInt32] = [:]      // sportId -> leaderboard depth (golf/F1)
     var leagueShowRound: [String: Bool] = [:]   // sportId -> golf round indicator (absent = shown)
     var leagueShowThru: [String: Bool] = [:]    // sportId -> golf holes-played column (absent = shown)
+    var leagueDataSource: [String: String] = [:] // sportId -> alternate feed id (absent = default)
     var leagueShowExtras: [String: Bool] = [:] // sportId -> box-score extras (absent = shown)
     var leagueNameStyle: [String: UiNameStyle] = [:] // sportId -> name-style override (absent = league default)
     var strictSpoilers = false                   // spoiled games: strict vs normal display
@@ -1171,6 +1172,7 @@ final class BoardViewModel: ObservableObject {
         var rows: [String: UInt32] = [:]
         var showRound: [String: Bool] = [:]
         var showThru: [String: Bool] = [:]
+        var dataSource: [String: String] = [:]
         var showExtras: [String: Bool] = [:]
         var nameStyle: [String: UiNameStyle] = [:]
         var lspoil: [String: Bool] = [:]
@@ -1182,6 +1184,7 @@ final class BoardViewModel: ObservableObject {
             if let r = s.leaderboardRows { rows[s.sportId] = r }
             if let sr = s.showRound { showRound[s.sportId] = sr }
             if let st = s.showThru { showThru[s.sportId] = st }
+            if let ds = s.dataSource { dataSource[s.sportId] = ds }
             if let se = s.showExtras { showExtras[s.sportId] = se }
             if let n = s.nameStyle { nameStyle[s.sportId] = n }
             if s.spoiler { lspoil[s.sportId] = true }
@@ -1209,6 +1212,7 @@ final class BoardViewModel: ObservableObject {
             $0.leagueRows = rows
             $0.leagueShowRound = showRound
             $0.leagueShowThru = showThru
+            $0.leagueDataSource = dataSource
             $0.leagueShowExtras = showExtras
             $0.leagueNameStyle = nameStyle
             $0.strictSpoilers = c.strictSpoilers
@@ -1382,6 +1386,21 @@ final class BoardViewModel: ObservableObject {
             else { $0.leagueShowThru.removeValue(forKey: sportId) }
         }
         client?.setLeagueShowThru(boardId: id, sportId: sportId, show: stored)
+    }
+
+    /// Which declared data source feeds a league. The default (the catalog's
+    /// FIRST entry) stores as nil, so an untouched board carries no setting.
+    func leagueDataSource(_ sport: UiSport) -> String {
+        current.leagueDataSource[sport.id] ?? sport.dataSources.first?.id ?? ""
+    }
+    func setLeagueDataSource(_ sport: UiSport, _ source: String) {
+        guard let id = selectedBoardId else { return }
+        let stored: String? = source == sport.dataSources.first?.id ? nil : source
+        mutate(id) {
+            if let stored { $0.leagueDataSource[sport.id] = stored }
+            else { $0.leagueDataSource.removeValue(forKey: sport.id) }
+        }
+        client?.setLeagueDataSource(boardId: id, sportId: sport.id, source: stored)
     }
 
     /// The box-score extras beside the score — baseball's hits and errors, NHL
@@ -4193,6 +4212,28 @@ struct LeagueEditorView: View {
                     Text("Holes played")
                 }
             }
+            // Data source — DEBUG ONLY: the one alternate feed today rides a
+            // personal-use key on the server, so this is an evaluation tool,
+            // not a product surface. The server only declares sources it can
+            // serve, so a release build (or a keyless server) never offers it.
+            #if DEBUG
+            if sport.dataSources.count > 1 {
+                Section {
+                    Picker("Data source", selection: Binding(
+                        get: { model.leagueDataSource(sport) },
+                        set: { model.setLeagueDataSource(sport, $0) }
+                    )) {
+                        ForEach(sport.dataSources, id: \.id) { d in
+                            Text(d.label).tag(d.id)
+                        }
+                    }
+                } header: {
+                    Text("Data source")
+                } footer: {
+                    Text("Evaluation switch — the alternate feed uses a personal-use key on the server.")
+                }
+            }
+            #endif
             // Only for leagues that actually draw extras. The server says which,
             // and names them — an empty label means there is nothing to switch
             // off, so no row appears at all.

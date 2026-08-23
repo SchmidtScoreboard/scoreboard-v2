@@ -222,6 +222,7 @@ mod tests {
             championship_rounds: Vec::new(),
             category: cat.into(),
             category_rank: rank,
+            data_sources: Vec::new(),
             extras_label: String::new(),
         }
     }
