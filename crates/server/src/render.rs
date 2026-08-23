@@ -762,10 +762,13 @@ pub fn render_game(g: &Game, tz: Option<chrono_tz::Tz>, style: NameStyle) -> (Fr
                 let sx = (FRAME_WIDTH as i32 - text_width(&s, lay.status_big)) / 2;
                 draw_text(&mut c, &s, sx, by, lay.status_big, color);
             } else {
-                // Scheduled with a national broadcast: start time over the
-                // channel, the two-line block centered in the strip. The 1px
-                // gap lets the pair fit even the NHL layout's 12px strip.
-                let (h1, h2, gap) = (cap_h(lay.status_big), cap_h(false), 1);
+                // Two status lines (start time over channel, FINAL over
+                // hits-and-errors), the block centered in the strip. A 2px
+                // gap so the lines read as two things — EXCEPT the NHL
+                // layout, whose 12px strip the pair fills exactly at 1px:
+                // one more pixel clips the bottom glyph row off the panel.
+                let (h1, h2) = (cap_h(lay.status_big), cap_h(false));
+                let gap = if lay.status_big { 1 } else { 2 };
                 let top = strip_top + (strip_h - (h1 + gap + h2)) / 2;
                 let by1 = centered_baseline(top, h1, lay.status_big);
                 draw_text(&mut c, &s, (FRAME_WIDTH as i32 - text_width(&s, lay.status_big)) / 2, by1, lay.status_big, color);
