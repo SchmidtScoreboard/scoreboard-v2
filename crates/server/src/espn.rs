@@ -916,7 +916,11 @@ fn parse_f1(
             // gaps subtract cleanly (ESPN stamps the whole field in one
             // batch). Lapped cars keep their string and drop out of the
             // arithmetic. Quali sessions never carry gaps here by design.
-            if matches!(session, "race" | "sprint") {
+            // LIVE races only: a finished classification reads as gaps to
+            // the winner, which is what ESPN already carries.
+            if matches!(session, "race" | "sprint")
+                && matches!(status, GameStatus::Active | GameStatus::Intermission)
+            {
                 derive_intervals(&mut rows);
             }
             let name = fit_words(&format!("{base}{suffix}"), 13);

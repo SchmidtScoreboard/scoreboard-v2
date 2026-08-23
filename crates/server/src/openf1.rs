@@ -151,15 +151,31 @@ impl OpenF1 {
             .map(|end| end < chrono::Utc::now())
             .unwrap_or(false);
 
-        let rows = if ended || kind == "quali" || kind == "sprint-quali" {
-            let results: Vec<SessionResult> = self
+        // Prefer the official classification for ended sessions and quali —
+        // but session_result 404s until OpenF1 PUBLISHES it, which can lag
+        // the chequered flag by a while (and `ended` flips at the PLANNED
+        // end time, which a red flag blows straight through). So each path
+        // falls back to the other: live timing keeps flowing after the
+        // flag, and a session that ended long ago has results by now.
+        let results_first = ended || kind == "quali" || kind == "sprint-quali";
+        let from_results = |results: Vec<SessionResult>, drivers: &[Driver]| {
+            let r = rows_from_results(&results, drivers);
+            (!r.is_empty()).then_some(r)
+        };
+        let mut rows = None;
+        if results_first {
+            if let Some(results) = self
                 .get_json(&format!("https://api.openf1.org/v1/session_result?session_key={key}"))
-                .await?;
-            rows_from_results(&results, &drivers)
-        } else {
+                .await
+            {
+                rows = from_results(results, &drivers);
+            }
+        }
+        if rows.is_none() {
             let positions: Vec<Position> = self
                 .get_json(&format!("https://api.openf1.org/v1/position?session_key={key}"))
-                .await?;
+                .await
+                .unwrap_or_default();
             let intervals: Vec<Interval> = self
                 .get_json(&format!("https://api.openf1.org/v1/intervals?session_key={key}"))
                 .await
@@ -168,8 +184,20 @@ impl OpenF1 {
                 .get_json(&format!("https://api.openf1.org/v1/stints?session_key={key}"))
                 .await
                 .unwrap_or_default();
-            rows_from_live(&positions, &intervals, &stints, &drivers)
-        };
+            let live = rows_from_live(&positions, &intervals, &stints, &drivers);
+            if !live.is_empty() {
+                rows = Some(live);
+            }
+        }
+        if rows.is_none() && !results_first {
+            if let Some(results) = self
+                .get_json(&format!("https://api.openf1.org/v1/session_result?session_key={key}"))
+                .await
+            {
+                rows = from_results(results, &drivers);
+            }
+        }
+        let rows = rows.unwrap_or_default();
         if rows.is_empty() {
             return None;
         }
@@ -670,6 +698,21 @@ mod tests {
             r#"{"category":"SafetyCar","message":"SAFETY CAR IN THIS LAP","date":"T3","flag":null,"scope":null}"#,
         ).unwrap());
         assert_eq!(track_flag(&ended), None, "SC coming in ends the yellow");
+
+        // The VSC, verbatim from the stream (14:44:35): category SafetyCar,
+        // message just "VSC DEPLOYED" — caught by the category, not the text.
+        let vsc: Vec<RaceControl> = serde_json::from_str(
+            r#"[{"category":"SessionStatus","message":"SESSION STARTED","date":"T1","flag":null,"scope":null},
+                {"category":"SafetyCar","message":"VSC DEPLOYED","date":"T2","flag":null,"scope":null}]"#,
+        )
+        .unwrap();
+        assert_eq!(track_flag(&vsc), Some("yellow"), "a VSC is a yellow");
+        // ...and its end, verbatim (14:48:41): "VSC ENDING", then TRACK CLEAR.
+        let mut vsc_over = vsc.clone();
+        vsc_over.push(serde_json::from_str(
+            r#"{"category":"SafetyCar","message":"VSC ENDING","date":"T3","flag":null,"scope":null}"#,
+        ).unwrap());
+        assert_eq!(track_flag(&vsc_over), None, "VSC ENDING clears the yellow");
 
         let sector: Vec<RaceControl> = serde_json::from_str(
             r#"[{"category":"Flag","flag":"DOUBLE YELLOW","scope":"Sector","message":"DOUBLE YELLOW IN TRACK SECTOR 4","date":"T1"}]"#,
