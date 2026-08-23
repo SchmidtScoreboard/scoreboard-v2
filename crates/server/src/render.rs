@@ -762,18 +762,35 @@ pub fn render_game(g: &Game, tz: Option<chrono_tz::Tz>, style: NameStyle) -> (Fr
                 let sx = (FRAME_WIDTH as i32 - text_width(&s, lay.status_big)) / 2;
                 draw_text(&mut c, &s, sx, by, lay.status_big, color);
             } else {
-                // Two status lines (start time over channel, FINAL over
-                // hits-and-errors), the block centered in the strip. A 2px
-                // gap so the lines read as two things — EXCEPT the NHL
-                // layout, whose 12px strip the pair fills exactly at 1px:
-                // one more pixel clips the bottom glyph row off the panel.
-                let (h1, h2) = (cap_h(lay.status_big), cap_h(false));
-                let gap = if lay.status_big { 1 } else { 2 };
-                let top = strip_top + (strip_h - (h1 + gap + h2)) / 2;
-                let by1 = centered_baseline(top, h1, lay.status_big);
-                draw_text(&mut c, &s, (FRAME_WIDTH as i32 - text_width(&s, lay.status_big)) / 2, by1, lay.status_big, color);
-                let by2 = centered_baseline(top + h1 + gap, h2, false);
-                draw_text(&mut c, broadcast, (FRAME_WIDTH as i32 - text_width(broadcast, false)) / 2, by2, false, GREY);
+                if lay.status_big {
+                    // The NHL layout's 12px strip can't stack two lines with
+                    // any air between them, so it doesn't: ONE line, time at
+                    // the left, channel tucked right in grey — label and
+                    // metadata, like a leaderboard row's name and value.
+                    // Both share the TIME's baseline (two centerings drifted
+                    // a pixel apart; text on a line shares a baseline) and
+                    // the same big font — measured, big time + big channel
+                    // fit for every national channel except ESPN2 against a
+                    // double-digit hour, and THAT combination drops the
+                    // channel to the small font on the same baseline.
+                    let by = centered_baseline(strip_top, strip_h, true);
+                    draw_text(&mut c, &s, 2, by, true, color);
+                    let big_fits = text_width(&s, true) + text_width(broadcast, true) + 8
+                        <= FRAME_WIDTH as i32;
+                    let bw = text_width(broadcast, big_fits);
+                    draw_text(&mut c, broadcast, FRAME_WIDTH as i32 - 2 - bw, by, big_fits, GREY);
+                } else {
+                    // Two status lines (start time over channel, FINAL over
+                    // hits-and-errors), the block centered in the strip with
+                    // a 2px gap so the lines read as two things.
+                    let (h1, h2) = (cap_h(false), cap_h(false));
+                    let gap = 2;
+                    let top = strip_top + (strip_h - (h1 + gap + h2)) / 2;
+                    let by1 = centered_baseline(top, h1, false);
+                    draw_text(&mut c, &s, (FRAME_WIDTH as i32 - text_width(&s, false)) / 2, by1, false, color);
+                    let by2 = centered_baseline(top + h1 + gap, h2, false);
+                    draw_text(&mut c, broadcast, (FRAME_WIDTH as i32 - text_width(broadcast, false)) / 2, by2, false, GREY);
+                }
             }
         }
     }
@@ -3691,6 +3708,46 @@ mod wx_tests {
 
 #[cfg(test)]
 mod wx_dump {
+    /// The NHL pregame status is ONE line — big time at the left, channel
+    /// right in the same big font on the SAME baseline. Measured geometry:
+    /// "6:05 PM" spans x=2..33, "TNT" x=49..62, so the air probe sits at
+    /// 35..47 and the shared-baseline check compares exact lit-row sets.
+    #[test]
+    fn nhl_pregame_status_is_one_shared_baseline_line() {
+        use crate::model::*;
+        let side = |abbrev: &str, p: &str| TeamSide {
+            abbrev: abbrev.into(), name: abbrev.into(), location: abbrev.into(), score: 0,
+            primary: hex_to_rgb(p), secondary: hex_to_rgb("FFFFFF"),
+            hits: None, errors: None, shots: None, shootout: None, aggregate: None,
+        };
+        let mut g = Game {
+            id: "x".into(), sport_id: "nhl".into(),
+            away: side("STL", "002F87"), home: side("CHI", "CF0A2C"),
+            status: GameStatus::Pregame,
+            ordinal: String::new(), clock: String::new(),
+            start_time: "2026-08-24T23:05Z".into(), end_time: None,
+            leaderboard: None, champ: None, series: None, session: None,
+            situation: None, pregame: None,
+        };
+        g.pregame = Some(Pregame {
+            away_record: String::new(), home_record: String::new(), broadcast: "TNT".into(),
+        });
+        let (_, px) = render_frame(&g, None, None, scoreboard_protocol::NameStyle::Name);
+        let lit = |x: usize, y: usize| {
+            let i = (y * 64 + x) * 2;
+            px[i] != 0 || px[i + 1] != 0
+        };
+        let strip = 20..32;
+        let col_lit = |x: usize| strip.clone().any(|y| lit(x, y));
+        assert!((2..12).any(col_lit), "time ink at the left");
+        assert!((49..63).any(col_lit), "channel ink at the right");
+        assert!(!(35..47).any(col_lit), "one line, air between the halves");
+        let rows = |xs: std::ops::Range<usize>| -> Vec<usize> {
+            strip.clone().filter(|&y| xs.clone().any(|x| lit(x, y))).collect()
+        };
+        assert_eq!(rows(2..34), rows(48..63), "both halves occupy identical rows");
+    }
+
     /// A red or yellow track status turns the title-row flags SOLID in that
     /// color; no status keeps the checkered pair.
     #[test]
