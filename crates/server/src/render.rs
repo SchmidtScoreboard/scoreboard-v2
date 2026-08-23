@@ -767,12 +767,14 @@ pub fn render_game(g: &Game, tz: Option<chrono_tz::Tz>, style: NameStyle) -> (Fr
                     // any air between them, so it doesn't: ONE line, time at
                     // the left, channel tucked right in grey — label and
                     // metadata, like a leaderboard row's name and value.
-                    // Both share the TIME's baseline (two centerings drifted
-                    // a pixel apart; text on a line shares a baseline) and
-                    // the same big font — measured, big time + big channel
-                    // fit for every national channel except ESPN2 against a
-                    // double-digit hour, and THAT combination drops the
-                    // channel to the small font on the same baseline.
+                    // Both halves share a CENTERLINE — same big font, so
+                    // they occupy the same rows outright. (Measured, big
+                    // time + big channel fit for every national channel
+                    // except ESPN2 against a double-digit hour; that one
+                    // combination drops the channel to the small font, whose
+                    // 5px caps cannot center exactly in a 6px band — the
+                    // half-pixel rounds DOWN, the direction that did not
+                    // read as drift in review.)
                     let by = centered_baseline(strip_top, strip_h, true);
                     draw_text(&mut c, &s, 2, by, true, color);
                     let big_fits = text_width(&s, true) + text_width(broadcast, true) + 8
@@ -3709,7 +3711,8 @@ mod wx_tests {
 #[cfg(test)]
 mod wx_dump {
     /// The NHL pregame status is ONE line — big time at the left, channel
-    /// right in the same big font on the SAME baseline. Measured geometry:
+    /// right in the same big font on a shared CENTERLINE (same font, so the
+    /// halves occupy identical rows outright). Measured geometry:
     /// "6:05 PM" spans x=2..33, "TNT" x=49..62, so the air probe sits at
     /// 35..47 and the shared-baseline check compares exact lit-row sets.
     #[test]
@@ -3745,7 +3748,7 @@ mod wx_dump {
         let rows = |xs: std::ops::Range<usize>| -> Vec<usize> {
             strip.clone().filter(|&y| xs.clone().any(|x| lit(x, y))).collect()
         };
-        assert_eq!(rows(2..34), rows(48..63), "both halves occupy identical rows");
+        assert_eq!(rows(2..34), rows(48..63), "shared centerline: identical rows");
     }
 
     /// A red or yellow track status turns the title-row flags SOLID in that
