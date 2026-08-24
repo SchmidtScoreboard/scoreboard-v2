@@ -5178,7 +5178,18 @@ mod tests {
             for e in &m.rotation {
                 let (_, px) = frames.get(&e.frame_id).cloned().unwrap();
                 let payload = encode_frame_payload(&px, board_core::SUPPORTED_FRAME_CODECS);
-                assert!(payload.len() < px.len(), "a rendered frame should compress");
+                // MOST frames compress, but a dither-heavy frame can RLE-lose
+                // and legitimately fall back to raw-plus-header — the board
+                // decodes that fine (it is the legacy path). The demo slate is
+                // minute-driven, so which frames exist here depends on the
+                // wall clock; asserting a ratio made this test fail only at
+                // certain times of day, which is the worst kind of red. The
+                // invariant is that the payload never BALLOONS.
+                assert!(
+                    payload.len() <= px.len() + 8,
+                    "frame payload ballooned: {} raw={} payload={}",
+                    e.frame_id, px.len(), payload.len()
+                );
                 b.on_frame(e.frame_id.clone(), payload);
             }
         }

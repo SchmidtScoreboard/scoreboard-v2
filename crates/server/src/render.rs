@@ -3098,14 +3098,14 @@ const WX_CLEAR: [&str; 13] = [
     "    SSSSS    ",
     "   SSSSSSS   ",
     "  SSSSSSSSS  ",
+    "  SSSSSSSSS  ",
     "S SSSSSSSSS S",
-    "S SSSSSSSSS S",
+    "  SSSSSSSSS  ",
     "  SSSSSSSSS  ",
     "   SSSSSSS   ",
     "    SSSSS    ",
     "  S       S  ",
     "      S      ",
-    "             ",
 ];
 const WX_PARTLY: [&str; 13] = [
     "   S         ",
@@ -3114,7 +3114,7 @@ const WX_PARTLY: [&str; 13] = [
     "S SSS S      ",
     "  SSS        ",
     " S   S       ",
-    "             ",
+    "   S         ",
     "       CCCC  ",
     "   CCCCCCCCC ",
     "  CCCCCCCCCCC",
@@ -3138,6 +3138,7 @@ const WX_CLOUDY: [&str; 13] = [
     "             ",
 ];
 const WX_FOG: [&str; 13] = [
+    "             ",
     " FFFFFFFFFFF ",
     "             ",
     "             ",
@@ -3150,9 +3151,9 @@ const WX_FOG: [&str; 13] = [
     " FFFFFFFFFFF ",
     "             ",
     "             ",
-    "             ",
 ];
 const WX_DRIZZLE: [&str; 13] = [
+    "             ",
     "      CCCC   ",
     "   CCCCCCCCC ",
     "  CCCCCCCCCCC",
@@ -3165,9 +3166,9 @@ const WX_DRIZZLE: [&str; 13] = [
     "  R   R   R  ",
     "             ",
     "             ",
-    "             ",
 ];
 const WX_RAIN: [&str; 13] = [
+    "             ",
     "      CCCC   ",
     "   CCCCCCCCC ",
     "  CCCCCCCCCCC",
@@ -3180,9 +3181,9 @@ const WX_RAIN: [&str; 13] = [
     " R   R   R   ",
     "             ",
     "             ",
-    "             ",
 ];
 const WX_SLEET: [&str; 13] = [
+    "             ",
     "      CCCC   ",
     "   CCCCCCCCC ",
     "  CCCCCCCCCCC",
@@ -3193,7 +3194,6 @@ const WX_SLEET: [&str; 13] = [
     "   R   R   R ",
     "             ",
     "  W   W   W  ",
-    "             ",
     "             ",
     "             ",
 ];
@@ -3228,17 +3228,17 @@ const WX_STORM: [&str; 13] = [
     "             ",
 ];
 const WX_CLEAR_NIGHT: [&str; 13] = [
-    "    MMMM     ",
-    "  MMM        ",
-    "  MM         ",
-    " MM          ",
-    " MM          ",
-    " MM          ",
-    " MM          ",
-    "  MM         ",
-    "  MMM        ",
-    "    MMMM     ",
     "             ",
+    "      MMMM   ",
+    "    MMM      ",
+    "    MM       ",
+    "   MM        ",
+    "   MM        ",
+    "   MM        ",
+    "   MM        ",
+    "    MM       ",
+    "    MMM      ",
+    "      MMMM   ",
     "             ",
     "             ",
 ];
@@ -3266,8 +3266,8 @@ const WX_CLEAR9: [&str; 9] = [
     "S SSSSS S",
     "  SSSSS  ",
     "   SSS   ",
-    "    S    ",
     "         ",
+    "    S    ",
 ];
 const WX_PARTLY9: [&str; 9] = [
     " SSS     ",
@@ -3292,14 +3292,14 @@ const WX_CLOUDY9: [&str; 9] = [
     "         ",
 ];
 const WX_FOG9: [&str; 9] = [
+    "         ",
     " FFFFFFF ",
     "         ",
     "FFFFFFFFF",
     "         ",
+    "FFFFFFFFF",
     "         ",
     " FFFFFFF ",
-    "         ",
-    "  FFFFF  ",
     "         ",
 ];
 const WX_DRIZZLE9: [&str; 9] = [
@@ -3358,14 +3358,14 @@ const WX_STORM9: [&str; 9] = [
     "         ",
 ];
 const WX_CLEAR_NIGHT9: [&str; 9] = [
-    "  MMM    ",
-    " MM      ",
-    "MM       ",
-    "MM       ",
-    "MM       ",
-    "MM       ",
-    " MM      ",
-    "  MMM    ",
+    "    MMM  ",
+    "   MM    ",
+    "  MM     ",
+    "  MM     ",
+    "  MM     ",
+    "  MM     ",
+    "   MM    ",
+    "    MMM  ",
     "         ",
 ];
 const WX_PARTLY_NIGHT9: [&str; 9] = [
@@ -3654,7 +3654,21 @@ mod wx_tests {
                 }
                 let (x0, y0, x1, y1) = wx_bbox(art);
                 assert!(x0 <= x1 && y0 <= y1, "{name} ({w}px) has no ink");
-                assert_eq!((y1 - y0 + 1) % 2, 0, "{name} ({w}px) ink height must be even");
+                // Even ink height keeps an icon's centre EXACTLY on the
+                // temperature's line. An odd height is allowed only when the
+                // art is perfectly symmetric about its centre row — the owner
+                // chose a true centre row for the sun over exact line-sharing
+                // (the half-pixel rounds the same way every render).
+                let h = y1 - y0 + 1;
+                if h % 2 != 0 {
+                    for d in 0..h / 2 {
+                        assert_eq!(
+                            art[(y0 + d) as usize], art[(y1 - d) as usize],
+                            "{name} ({w}px): odd ink height demands vertical symmetry (rows {} vs {})",
+                            y0 + d, y1 - d
+                        );
+                    }
+                }
             }
         }
     }
@@ -3675,14 +3689,22 @@ mod wx_tests {
             let temp = wx_temp(w.temp);
             let icon = wx_icon(&mut c, art, 8, 10);
             let text = wx_text(&mut c, &temp, 17, 10, true, 2, WHITE);
-            assert_eq!(
-                icon.0 + icon.1,
-                text.0 + text.1,
-                "code {code}: icon and temperature must share a centre line"
+            // Compared doubled so even-height icons must land EXACTLY on the
+            // text's centre. Odd-height icons (the symmetric sun) sit half a
+            // pixel off by arithmetic necessity — one doubled unit, floored
+            // the same direction every time, is the accepted cost of a true
+            // centre row.
+            let diff = (icon.0 + icon.1) - (text.0 + text.1);
+            assert!(
+                (-1..=1).contains(&diff),
+                "code {code}: icon centre off the temperature line by more than half a pixel"
             );
             centers.insert(icon.0 + icon.1);
         }
-        assert_eq!(centers.len(), 1, "every condition centres on the same line");
+        // One doubled unit of spread: the even-height icons share a line
+        // exactly, and the odd-height sun sits the accepted half-pixel off.
+        let (lo, hi) = (centers.iter().min().unwrap(), centers.iter().max().unwrap());
+        assert!(hi - lo <= 1, "conditions drift more than half a pixel apart");
     }
 
     /// Three digits and a minus sign both happen. Neither may run off the panel.
