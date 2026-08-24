@@ -3094,7 +3094,7 @@ mod kern_tests {
 
 const WX_CLEAR: [&str; 13] = [
     "      S      ",
-    "  S       S  ",
+    " S         S ",
     "    SSSSS    ",
     "   SSSSSSS   ",
     "  SSSSSSSSS  ",
@@ -3104,7 +3104,7 @@ const WX_CLEAR: [&str; 13] = [
     "  SSSSSSSSS  ",
     "   SSSSSSS   ",
     "    SSSSS    ",
-    "  S       S  ",
+    " S         S ",
     "      S      ",
 ];
 const WX_PARTLY: [&str; 13] = [
