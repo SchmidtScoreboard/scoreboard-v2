@@ -663,9 +663,10 @@ fn render_spoiled(g: &Game, mode: SpoilerMode, style: NameStyle) -> (FrameId, Ve
         let title_w = text_width(&lb.name, false);
         let tx = 32 - title_w / 2;
         draw_text(&mut c, &lb.name, tx, 5, false, title_color);
-        if f1 && tx >= 11 && tx + title_w <= 53 {
+        let rx = FRAME_WIDTH as i32 - 1 - FLAG_W;
+        if f1 && tx >= 1 + FLAG_W + 2 && tx + title_w <= rx - 2 {
             checkered_flag(&mut c, 1);
-            checkered_flag(&mut c, 55);
+            checkered_flag(&mut c, rx);
         }
         let by = centered_baseline(8, FRAME_HEIGHT as i32 - 8, true);
         draw_text(&mut c, &text, 32 - text_width(&text, true) / 2, by, true, color);
@@ -1230,24 +1231,25 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
     if f1 {
         // Flags only when the title clears them by 2px on both sides — a long
         // title ("BRITISH GP Q") otherwise collides and reads as garbage.
-        let (flag_w, gap) = (8, 2);
-        if tx >= 1 + flag_w + gap && tx + title_w <= 55 - gap {
+        let (flag_w, gap) = (FLAG_W, 2);
+        let rx = FRAME_WIDTH as i32 - 1 - flag_w;
+        if tx >= 1 + flag_w + gap && tx + title_w <= rx - gap {
             // Track status recolors the pair: SOLID red or yellow, because
             // that is what those flags look like — checks are the chequered
             // flag's identity, not a canvas. None (green or unknown) keeps
             // the checkered chrome.
             match lb.flag.as_deref() {
                 Some("red") => {
-                    fill(&mut c, 1, 1, flag_w as u32, 6, Rgb888::new(255, 0, 0));
-                    fill(&mut c, 55, 1, flag_w as u32, 6, Rgb888::new(255, 0, 0));
+                    fill(&mut c, 1, 1, flag_w as u32, FLAG_H as u32, Rgb888::new(255, 0, 0));
+                    fill(&mut c, rx, 1, flag_w as u32, FLAG_H as u32, Rgb888::new(255, 0, 0));
                 }
                 Some("yellow") => {
-                    fill(&mut c, 1, 1, flag_w as u32, 6, YELLOW);
-                    fill(&mut c, 55, 1, flag_w as u32, 6, YELLOW);
+                    fill(&mut c, 1, 1, flag_w as u32, FLAG_H as u32, YELLOW);
+                    fill(&mut c, rx, 1, flag_w as u32, FLAG_H as u32, YELLOW);
                 }
                 _ => {
                     checkered_flag(&mut c, 1);
-                    checkered_flag(&mut c, 55);
+                    checkered_flag(&mut c, rx);
                 }
             }
         }
@@ -1348,11 +1350,17 @@ fn tire_color(compound: char) -> Rgb888 {
 /// An 8x6 checkered flag (2x2 checks) for the F1 title row corners. Starts at
 /// row 1, preserving the layout's 1px top gap; the bottom row dips just below
 /// the title's baseline into empty space.
+/// 7x5 with 1px checks, chosen from a rendered spread: the ODD dimensions
+/// put a lit check in all four corners, so the glyph reads as a bounded
+/// flag and the left/right pair mirror each other exactly. 1px under the
+/// title's cap height leaves a hair of air under the text line.
+const FLAG_W: i32 = 7;
+const FLAG_H: i32 = 5;
 fn checkered_flag(c: &mut Canvas, x0: i32) {
-    for cy in 0..3i32 {
-        for cx in 0..4i32 {
+    for cy in 0..FLAG_H {
+        for cx in 0..FLAG_W {
             if (cx + cy) % 2 == 0 {
-                fill(c, x0 + cx * 2, 1 + cy * 2, 2, 2, WHITE);
+                fill(c, x0 + cx, 1 + cy, 1, 1, WHITE);
             }
         }
     }
@@ -3792,11 +3800,11 @@ mod wx_dump {
         let (_, yel) = render_frame(&f1_game(Some("yellow")), None, None, scoreboard_protocol::NameStyle::Name);
         let (r, g) = rg(px_at(&yel, 2, 2));
         assert!(r > 20 && g > 40, "yellow flag: red+green corner, got r={r} g={g}");
-        assert_ne!(px_at(&yel, 4, 2), 0, "solid flags have no dark checks");
+        assert_ne!(px_at(&yel, 3, 2), 0, "solid flags have no dark checks");
         let (_, chk) = render_frame(&f1_game(None), None, None, scoreboard_protocol::NameStyle::Name);
         let (r, g) = rg(px_at(&chk, 2, 2));
         assert!(r > 20 && g > 40, "checkered corner check is white");
-        assert_eq!(px_at(&chk, 4, 2), 0, "and the alternate check is dark");
+        assert_eq!(px_at(&chk, 3, 2), 0, "and the alternate check is dark");
     }
 
     /// Panel-centering let any title past ~8 characters evict the round
