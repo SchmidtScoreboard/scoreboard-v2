@@ -3468,6 +3468,32 @@ fn wx_icon(c: &mut Canvas, art: &[&str], cx: i32, cy: i32) -> (i32, i32) {
     (oy + y0, oy + y1)
 }
 
+/// Draw text centred on `cx` BY ITS INK, the way `wx_icon` centres art.
+///
+/// `text_width` measures the ADVANCE box, whose final cell keeps its full
+/// width however narrow the last glyph's ink is — so `cx - text_width / 2`
+/// centres a box with a blank column on its right edge, and the string lands
+/// a pixel left. Under a 9px icon centred on the same `cx`, that pixel is
+/// visible: the forecast's temperatures sat left of the icons above them.
+///
+/// Same `wx_center_off` and the same floor as the icon path, so an icon and
+/// the text beneath it agree by construction rather than by coincidence.
+fn wx_text_centered(
+    c: &mut Canvas,
+    s: &str,
+    cx: i32,
+    cy: i32,
+    big: bool,
+    scale: i32,
+    color: Rgb888,
+) -> (i32, i32) {
+    let x = match ink_span(s, big, scale) {
+        Some((lo, hi)) => wx_center_off(lo, hi - 1, cx),
+        None => cx,
+    };
+    wx_text(c, s, x, cy, big, scale, color)
+}
+
 fn wx_icon_w(art: &[&str]) -> i32 {
     let (x0, _, x1, _) = wx_bbox(art);
     x1 - x0 + 1
@@ -3573,7 +3599,7 @@ pub fn render_weather_detailed(w: &crate::weather::Weather) -> (FrameId, Vec<u8>
     wx_text(&mut c, &hi, 61 - text_width(&hi, false), t_span.0 + 2, false, 1, WX_HOT);
     wx_text(&mut c, &lo, 61 - text_width(&lo, false), t_span.1 - 2, false, 1, WX_COLD);
     let cond = crate::weather::condition_for(w.code);
-    wx_text(&mut c, cond, (FRAME_WIDTH as i32 - text_width(cond, false)) / 2, 24, false, 1, WX_DIM);
+    wx_text_centered(&mut c, cond, FRAME_WIDTH as i32 / 2, 24, false, 1, WX_DIM);
     let px = c.to_rgb565();
     (frame_id(&px), px)
 }
@@ -3585,12 +3611,12 @@ pub fn render_weather_forecast(w: &crate::weather::Weather) -> (FrameId, Vec<u8>
         let cx = i as i32 * 22 + 10;
         let tint = if i == 0 { WHITE } else { WX_DIM };
         let label = day.label.as_str();
-        wx_text(&mut c, label, cx - text_width(label, false) / 2, 3, false, 1, tint);
+        wx_text_centered(&mut c, label, cx, 3, false, 1, tint);
         // Daily codes have no day/night sense — a forecast is for the daytime.
         wx_icon(&mut c, wx_art(crate::weather::icon_for(day.code, true), true), cx, 12);
         let (hi, lo) = (day.hi.to_string(), day.lo.to_string());
-        wx_text(&mut c, &hi, cx - text_width(&hi, false) / 2, 22, false, 1, WX_HOT);
-        wx_text(&mut c, &lo, cx - text_width(&lo, false) / 2, 28, false, 1, WX_COLD);
+        wx_text_centered(&mut c, &hi, cx, 22, false, 1, WX_HOT);
+        wx_text_centered(&mut c, &lo, cx, 28, false, 1, WX_COLD);
         if i > 0 {
             fill(&mut c, cx - 11, 1, 1, 30, Rgb888::new(30, 30, 30));
         }
@@ -3670,6 +3696,49 @@ mod wx_tests {
                     }
                 }
             }
+        }
+    }
+
+    /// The forecast's three columns each stack a label, an icon, and two
+    /// temperatures — all centred on the SAME column axis, so they must agree
+    /// with each other. They did not: text centred on its advance box, whose
+    /// trailing cell is blank for a narrow last glyph, so every temperature
+    /// sat a pixel left of the icon above it.
+    #[test]
+    fn forecast_columns_centre_their_ink_on_one_axis() {
+        let (_, px) = render_weather_forecast(&crate::weather::Weather::sample());
+        let at = |x: usize, y: usize| {
+            let i = (y * FRAME_WIDTH + x) * 2;
+            u16::from_le_bytes([px[i], px[i + 1]])
+        };
+        // Ink centre of a colour band within a column, doubled to keep the
+        // half-pixel honest.
+        let centre = |rows: std::ops::Range<usize>, cols: std::ops::Range<usize>, want: u16| {
+            let xs: Vec<usize> = cols
+                .filter(|&x| rows.clone().any(|y| at(x, y) == want))
+                .collect();
+            assert!(!xs.is_empty(), "no ink found");
+            xs[0] + xs[xs.len() - 1]
+        };
+        let to565 = |c: Rgb888| {
+            ((c.r() as u16 >> 3) << 11) | ((c.g() as u16 >> 2) << 5) | (c.b() as u16 >> 3)
+        };
+        for (col, span) in [(0usize, 0..21usize), (1, 22..43), (2, 44..64)] {
+            let hi = centre(16..26, span.clone(), to565(WX_HOT));
+            let lo = centre(22..32, span.clone(), to565(WX_COLD));
+            // The icon: any lit pixel that is not one of the text colours.
+            let icon_xs: Vec<usize> = span
+                .clone()
+                .filter(|&x| {
+                    (6..20).any(|y| {
+                        let v = at(x, y);
+                        v != 0 && v != to565(WX_HOT) && v != to565(WX_COLD)
+                    })
+                })
+                .collect();
+            let icon = icon_xs[0] + icon_xs[icon_xs.len() - 1];
+            assert_eq!(hi, icon, "column {col}: high must share the icon's axis");
+            assert_eq!(lo, icon, "column {col}: low must share the icon's axis");
         }
     }
 
