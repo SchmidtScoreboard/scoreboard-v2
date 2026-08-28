@@ -609,6 +609,12 @@ pub fn render_frame(g: &Game, spoiler: Option<SpoilerMode>, tz: Option<chrono_tz
 /// nothing when the centered title would collide with it.
 ///
 /// Returns whether it drew, so the spoiled frame can fall back to its own text.
+/// Left inset of a shared title row, matching `render_leaderboard_rows`' name
+/// column. The predicate that left-aligns a title derives its own limit from
+/// this, so a title never shifts left for a round marker that then refuses to
+/// draw.
+const TITLE_MARGIN: i32 = 1;
+
 fn draw_round_marker(c: &mut Canvas, round: &str, title_x: i32, title_w: i32, color: Rgb888) -> bool {
     if round.is_empty() {
         return false;
@@ -1225,8 +1231,12 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
     // keep both. Wider names still center and keep the row to themselves —
     // the name is the identity; the round is chrome.
     let round_w = text_width(&g.ordinal, false);
-    let shares_row = !f1 && !g.ordinal.is_empty() && title_w <= 61 - round_w;
-    let tx = if shares_row { 0 } else { 32 - title_w / 2 };
+    // The title starts where the leaderboard NAMES start. Flush against the
+    // panel edge — which is where left-aligning first put it — reads as a
+    // slip beside rows that begin one column in.
+    let shares_row =
+        !f1 && !g.ordinal.is_empty() && TITLE_MARGIN + title_w <= 61 - round_w;
+    let tx = if shares_row { TITLE_MARGIN } else { 32 - title_w / 2 };
     draw_text(&mut c, &lb.name, tx, 5, false, title_color);
     if f1 {
         // Flags only when the title clears them by 2px on both sides — a long
@@ -3896,6 +3906,54 @@ mod wx_dump {
         let (r, g) = rg(px_at(&chk, 2, 2));
         assert!(r > 20 && g > 40, "checkered corner check is white");
         assert_eq!(px_at(&chk, 3, 2), 0, "and the alternate check is dark");
+    }
+
+    /// A shared title row starts where the NAMES start. Left-aligning the
+    /// title to reclaim the round marker put it flush against the panel edge,
+    /// one column left of every row beneath it — visible as a ragged left
+    /// margin the moment a short title (an "FM") sat above a leaderboard.
+    #[test]
+    fn a_shared_golf_title_starts_where_the_names_do() {
+        let g = crate::model::Game {
+            id: "g".into(),
+            sport_id: "lpga".into(),
+            away: crate::model::TeamSide::empty("LPGA"),
+            home: crate::model::TeamSide::empty(""),
+            status: crate::model::GameStatus::Active,
+            ordinal: "R2".into(),
+            clock: String::new(),
+            start_time: "2026-08-24T11:00Z".into(),
+            end_time: None,
+            leaderboard: Some(crate::model::Leaderboard {
+                flag: None,
+                name: "FM".into(),
+                rows: vec![crate::model::LeaderRow {
+                    name: "KIM".into(),
+                    value: "-8".into(),
+                    ..Default::default()
+                }],
+            }),
+            champ: None,
+            series: None,
+            session: None,
+            situation: None,
+            pregame: None,
+        };
+        let (_, px) = render_frame(&g, None, None, scoreboard_protocol::NameStyle::Name);
+        let lit = |x: usize, y: usize| {
+            let i = (y * FRAME_WIDTH + x) * 2;
+            px[i] != 0 || px[i + 1] != 0
+        };
+        let first_ink = |rows: std::ops::Range<usize>| {
+            (0..FRAME_WIDTH).find(|&x| rows.clone().any(|y| lit(x, y))).expect("ink")
+        };
+        let title_left = first_ink(0..8);
+        let name_left = first_ink(11..18);
+        assert_eq!(
+            title_left, name_left,
+            "the title and the first leader name must share a left margin"
+        );
+        assert_eq!(title_left, TITLE_MARGIN as usize, "and it is the declared inset");
     }
 
     /// Panel-centering let any title past ~8 characters evict the round
