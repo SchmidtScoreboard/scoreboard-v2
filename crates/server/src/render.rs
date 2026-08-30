@@ -3103,19 +3103,19 @@ mod kern_tests {
 // enforces it.
 
 const WX_CLEAR: [&str; 13] = [
-    "      S      ",
-    " S         S ",
-    "    SSSSS    ",
-    "   SSSSSSS   ",
-    "  SSSSSSSSS  ",
-    "  SSSSSSSSS  ",
-    "S SSSSSSSSS S",
-    "  SSSSSSSSS  ",
-    "  SSSSSSSSS  ",
-    "   SSSSSSS   ",
-    "    SSSSS    ",
-    " S         S ",
-    "      S      ",
+    "    S  S     ",
+    " S        S  ",
+    "    SSSS     ",
+    "   SSSSSS    ",
+    "S SSSSSSSS S ",
+    "  SSSSSSSS   ",
+    "  SSSSSSSS   ",
+    "S SSSSSSSS S ",
+    "   SSSSSS    ",
+    "    SSSS     ",
+    " S        S  ",
+    "    S  S     ",
+    "             ",
 ];
 const WX_PARTLY: [&str; 13] = [
     "   S         ",
@@ -3269,15 +3269,15 @@ const WX_PARTLY_NIGHT: [&str; 13] = [
 ];
 
 const WX_CLEAR9: [&str; 9] = [
-    "    S    ",
+    "  S  S   ",
     "         ",
-    "   SSS   ",
-    "  SSSSS  ",
-    "S SSSSS S",
-    "  SSSSS  ",
-    "   SSS   ",
+    "S  SS  S ",
+    "  SSSS   ",
+    "  SSSS   ",
+    "S  SS  S ",
     "         ",
-    "    S    ",
+    "  S  S   ",
+    "         ",
 ];
 const WX_PARTLY9: [&str; 9] = [
     " SSS     ",
@@ -3691,10 +3691,14 @@ mod wx_tests {
                 let (x0, y0, x1, y1) = wx_bbox(art);
                 assert!(x0 <= x1 && y0 <= y1, "{name} ({w}px) has no ink");
                 // Even ink height keeps an icon's centre EXACTLY on the
-                // temperature's line. An odd height is allowed only when the
-                // art is perfectly symmetric about its centre row — the owner
-                // chose a true centre row for the sun over exact line-sharing
-                // (the half-pixel rounds the same way every render).
+                // temperature's line. Even the sun: its rays are PAIRS
+                // straddling each edge's centre rather than single dots on a
+                // centre row, precisely so that no icon needs an odd height.
+                // The one holdout is the 9px fog — four bars on alternating
+                // rows is an odd stack, and the owner kept the even rhythm
+                // over the exact centre. Odd is allowed only with perfect
+                // vertical symmetry, which is what makes the half-pixel a
+                // constant rather than a wobble.
                 let h = y1 - y0 + 1;
                 if h % 2 != 0 {
                     for d in 0..h / 2 {
@@ -3747,8 +3751,17 @@ mod wx_tests {
                 })
                 .collect();
             let icon = icon_xs[0] + icon_xs[icon_xs.len() - 1];
-            assert_eq!(hi, icon, "column {col}: high must share the icon's axis");
-            assert_eq!(lo, icon, "column {col}: low must share the icon's axis");
+            // Doubled units. An odd-width icon shares the axis exactly; an
+            // even-width one (the split-ray sun) sits half a pixel off the
+            // odd-width digits by parity — one doubled unit, never more.
+            assert!(
+                (hi as i64 - icon as i64).abs() <= 1,
+                "column {col}: high drifts past half a pixel off the icon's axis"
+            );
+            assert!(
+                (lo as i64 - icon as i64).abs() <= 1,
+                "column {col}: low drifts past half a pixel off the icon's axis"
+            );
         }
     }
 
@@ -3768,22 +3781,14 @@ mod wx_tests {
             let temp = wx_temp(w.temp);
             let icon = wx_icon(&mut c, art, 8, 10);
             let text = wx_text(&mut c, &temp, 17, 10, true, 2, WHITE);
-            // Compared doubled so even-height icons must land EXACTLY on the
-            // text's centre. Odd-height icons (the symmetric sun) sit half a
-            // pixel off by arithmetic necessity — one doubled unit, floored
-            // the same direction every time, is the accepted cost of a true
-            // centre row.
-            let diff = (icon.0 + icon.1) - (text.0 + text.1);
-            assert!(
-                (-1..=1).contains(&diff),
-                "code {code}: icon centre off the temperature line by more than half a pixel"
+            assert_eq!(
+                icon.0 + icon.1,
+                text.0 + text.1,
+                "code {code}: icon and temperature must share a centre line"
             );
             centers.insert(icon.0 + icon.1);
         }
-        // One doubled unit of spread: the even-height icons share a line
-        // exactly, and the odd-height sun sits the accepted half-pixel off.
-        let (lo, hi) = (centers.iter().min().unwrap(), centers.iter().max().unwrap());
-        assert!(hi - lo <= 1, "conditions drift more than half a pixel apart");
+        assert_eq!(centers.len(), 1, "every condition centres on the same line");
     }
 
     /// Three digits and a minus sign both happen. Neither may run off the panel.
