@@ -828,23 +828,19 @@ pub fn render_game(g: &Game, tz: Option<chrono_tz::Tz>, style: NameStyle) -> (Fr
             } else {
                 if lay.status_big {
                     // The NHL layout's 12px strip can't stack two lines with
-                    // any air between them, so it doesn't: ONE line, time at
-                    // the left, channel tucked right in grey — label and
-                    // metadata, like a leaderboard row's name and value.
-                    // Both halves share a CENTERLINE — same big font, so
-                    // they occupy the same rows outright. (Measured, big
-                    // time + big channel fit for every national channel
-                    // except ESPN2 against a double-digit hour; that one
-                    // combination drops the channel to the small font, whose
-                    // 5px caps cannot center exactly in a 6px band — the
-                    // half-pixel rounds DOWN, the direction that did not
-                    // read as drift in review.)
-                    let by = centered_baseline(strip_top, strip_h, true);
-                    draw_text(&mut c, &s, 2, by, true, color);
-                    let big_fits = text_width(&s, true) + text_width(broadcast, true) + 8
-                        <= FRAME_WIDTH as i32;
-                    let bw = text_width(broadcast, big_fits);
-                    draw_text(&mut c, broadcast, FRAME_WIDTH as i32 - 2 - bw, by, big_fits, GREY);
+                    // any air between them, so it doesn't: ONE line, time
+                    // against the left edge, channel against the right in
+                    // grey — label and metadata, like a leaderboard row's
+                    // name and value. Both in the SMALL font on one shared
+                    // centerline: in the big font a long channel (ESPN2
+                    // against a double-digit hour) had to drop to small
+                    // alone, and a big time beside a small channel read as
+                    // two different things. Small, every channel fits beside
+                    // every time, so the two always match.
+                    let by = centered_baseline(strip_top, strip_h, false);
+                    draw_text(&mut c, &s, 2, by, false, color);
+                    let bw = text_width(broadcast, false);
+                    draw_text(&mut c, broadcast, FRAME_WIDTH as i32 - 2 - bw, by, false, GREY);
                 } else {
                     // Two status lines (start time over channel, FINAL over
                     // hits-and-errors), the block centered in the strip with
@@ -4423,6 +4419,27 @@ mod wx_dump {
             strip.clone().filter(|&y| xs.clone().any(|x| lit(x, y))).collect()
         };
         assert_eq!(rows(2..34), rows(48..63), "shared centerline: identical rows");
+        assert_eq!(rows(2..34).len(), 5, "the small font: 5px caps");
+
+        // The longest channel beside a double-digit hour: still the small
+        // font on both halves, still clear of each other — no half drops a
+        // size on its own.
+        g.start_time = "2026-08-25T03:05Z".into(); // a double-digit hour locally
+        g.pregame.as_mut().unwrap().broadcast = "ESPN2".into();
+        let (_, px) = render_frame(&g, None, None, scoreboard_protocol::NameStyle::Name);
+        let lit = |x: usize, y: usize| {
+            let i = (y * 64 + x) * 2;
+            px[i] != 0 || px[i + 1] != 0
+        };
+        let col_lit = |x: usize| strip.clone().any(|y| lit(x, y));
+        let rows = |xs: std::ops::Range<usize>| -> Vec<usize> {
+            strip.clone().filter(|&y| xs.clone().any(|x| lit(x, y))).collect()
+        };
+        let lit_cols: Vec<usize> = (0..64).filter(|&x| col_lit(x)).collect();
+        let gap = lit_cols.windows(2).map(|w| w[1] - w[0]).max().unwrap();
+        assert!(gap >= 4, "air between the time and the channel ({lit_cols:?})");
+        assert_eq!(rows(0..20), rows(44..64), "same size, same rows");
+        assert_eq!(rows(0..20).len(), 5);
     }
 
     /// A red or yellow track status turns the title-row flags SOLID in that
@@ -4794,8 +4811,8 @@ mod matchplay_tests {
         let intl = ["MATSUYAMA", "IM", "KIM", "SCOTT", "CONNERS", "TAYLOR", "LEE", "FOX", "HISATSUNE", "KIM", "BEZUIDENHOUT", "ECHAVARRIA"];
         let live = |i: usize, m: &str, thru: u32| MatchState::Live { leader: Some(i), margin: m.into(), thru };
         let sun = [
-            MatchState::Final { winner: Some(0), result: "3&2".into() },
-            MatchState::Final { winner: Some(1), result: "2&1".into() },
+            MatchState::Final { winner: Some(0), result: "3+2".into() },
+            MatchState::Final { winner: Some(1), result: "2+1".into() },
             MatchState::Final { winner: None, result: "HALVED".into() },
             live(0, "2UP", 15),
             live(1, "1UP", 14),

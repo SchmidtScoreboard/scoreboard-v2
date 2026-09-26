@@ -1047,9 +1047,12 @@ impl MpCompetitor {
     }
 }
 
-/// "1 Up" -> "1UP", "3 & 2" -> "3&2", "AS" stays: golf's notation, packed.
+/// "1 Up" -> "1UP", "3 & 2" -> "3+2", "AS" stays: golf's notation, packed
+/// for the panel. The numbers stay golf's (3 up with 2 to play); the "&"
+/// becomes "+" because the 4x6 ampersand is a squiggle that reads as an 8
+/// ("6&4" looked like "684").
 fn match_notation(s: &str) -> String {
-    s.to_uppercase().split_whitespace().collect::<Vec<_>>().join("")
+    s.to_uppercase().split_whitespace().collect::<Vec<_>>().join("").replace('&', "+")
 }
 
 /// The panel colour for a cup team. The feed carries none (both `color`
@@ -4292,6 +4295,16 @@ mod champ_tests {
         assert_eq!(mp.matches[3].state, MatchState::Scheduled { tee: Some("2026-09-26T12:56Z".into()) });
         assert_eq!(g.status, GameStatus::Active);
         assert_eq!(g.start_time, "2026-09-26T12:56Z", "the next tee time");
+    }
+
+    /// A finished match's result keeps golf's numbers with a readable
+    /// separator: ESPN's "6 & 4" is "6+4" on the panel.
+    #[test]
+    fn match_results_use_a_plus_not_an_ampersand() {
+        assert_eq!(match_notation("6 & 4"), "6+4");
+        assert_eq!(match_notation("2 & 1"), "2+1");
+        assert_eq!(match_notation("1 Up"), "1UP");
+        assert_eq!(match_notation("AS"), "AS");
     }
 
     /// The debug TUI's parse path is the server's parse path: parse_feed

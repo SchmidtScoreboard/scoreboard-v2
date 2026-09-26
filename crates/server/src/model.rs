@@ -196,7 +196,7 @@ pub enum MatchState {
     /// golf's own notation ("1UP", "AS"); `thru` is holes completed.
     Live { leader: Option<usize>, margin: String, thru: u32 },
     /// Over. `winner` indexes `teams` (None = halved); `result` is how golf
-    /// writes it ("3&2", "1UP", "HALVED").
+    /// writes it, packed for the panel ("3+2", "1UP", "HALVED").
     Final { winner: Option<usize>, result: String },
 }
 
