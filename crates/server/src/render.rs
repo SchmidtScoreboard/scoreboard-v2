@@ -1480,19 +1480,23 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
     (frame_id(&px), px)
 }
 
-/// The faint line between matches in a match-play tower.
-const MATCH_DIVIDER: Rgb888 = Rgb888::new(48, 48, 48);
+/// The light background every other match wears in a match-play tower, so
+/// a match's rows read as one block without a divider line. The first match
+/// is on black, keeping the band clear of the pinned title rows.
+// Deliberately faint: the switch between matches should be felt more than
+// seen. Lighter bands (64, 80) competed with the text and washed out the
+// grey of a beaten pair.
+const MATCH_BAND: Rgb888 = Rgb888::new(24, 24, 24);
 
 /// One row of a match-play tower: a player, and — on the first row of a
 /// side — the match's value or holes played.
 struct MpRow {
     name: String,
     ink: Rgb888,
-    thru: Option<u32>,
     value: String,
     value_ink: Rgb888,
-    /// First row of a match after the first: a divider goes above it.
-    new_match: bool,
+    /// Which match this row belongs to (0-based): odd matches wear the band.
+    match_idx: usize,
 }
 
 /// A tee time in the board's zone, clock only ("7:56"): the rows are all
@@ -1509,26 +1513,26 @@ fn tee_label(iso: &str, tz: Option<chrono_tz::Tz>) -> Option<String> {
 /// The tower's rows, a row per PLAYER so every name is whole — a
 /// leaderboard of the players on the course. Whole matches only, up to
 /// `max_rows`. The match's value rides on the leading side's first row
-/// (white "AS" on the first side when level); holes played go on the OTHER
-/// side's first row, which has the width to spare. A finished match puts the
-/// result on the winner's row and greys the losers; one not yet started
-/// shows its tee time.
+/// (white "AS" on the first side when level), and holes played sit on the
+/// row directly beneath it, right-aligned in grey — a row that never carries
+/// a value of its own. A finished match puts the result on the winner's row
+/// and greys the losers; one not yet started shows its tee time.
 fn matchplay_rows(mp: &crate::model::MatchPlay, max_rows: usize, tz: Option<chrono_tz::Tz>) -> Vec<MpRow> {
     use crate::model::MatchState;
-    let mut out = Vec::new();
-    for m in &mp.matches {
+    let mut out: Vec<MpRow> = Vec::new();
+    for (k, m) in mp.matches.iter().enumerate() {
         let n = m.players[0].len() + m.players[1].len();
         if out.len() + n > max_rows {
             break;
         }
-        let first = out.len();
+        let mut pending_thru: Option<u32> = None;
         for i in 0..2 {
             let team = mp.teams[i].color;
             let (value, value_ink, thru, ink) = match &m.state {
-                MatchState::Live { leader: Some(l), margin, .. } if *l == i => (margin.clone(), team, None, team),
-                MatchState::Live { leader: Some(_), thru, .. } => (String::new(), team, Some(*thru), team),
-                MatchState::Live { leader: None, .. } if i == 0 => ("AS".into(), WHITE, None, team),
-                MatchState::Live { thru, .. } => (String::new(), WHITE, Some(*thru), team),
+                MatchState::Live { leader: Some(l), margin, thru } if *l == i => (margin.clone(), team, Some(*thru), team),
+                MatchState::Live { leader: Some(_), .. } => (String::new(), team, None, team),
+                MatchState::Live { leader: None, thru, .. } if i == 0 => ("AS".into(), WHITE, Some(*thru), team),
+                MatchState::Live { .. } => (String::new(), WHITE, None, team),
                 MatchState::Final { winner: Some(w), result } if *w == i => (result.clone(), team, None, team),
                 MatchState::Final { winner: Some(_), .. } => (String::new(), GREY, None, GREY),
                 MatchState::Final { winner: None, .. } if i == 0 => ("HALF".into(), WHITE, None, team),
@@ -1543,11 +1547,33 @@ fn matchplay_rows(mp: &crate::model::MatchPlay, max_rows: usize, tz: Option<chro
                 out.push(MpRow {
                     name: player.clone(),
                     ink,
-                    thru: if lead { thru } else { None },
                     value: if lead { value.clone() } else { String::new() },
                     value_ink,
-                    new_match: first > 0 && out.len() == first,
+                    match_idx: k,
                 });
+                // Holes played go on the next row down, under the value.
+                // Like golf's thru: only while it is news (0 is the first
+                // hole still being played).
+                // In singles that next row is the OTHER side's, so the
+                // hand-off is by row, not by side.
+                if let Some(t) = pending_thru.take() {
+                    let r = out.last_mut().unwrap();
+                    r.value = t.to_string();
+                    r.value_ink = GREY;
+                } else if lead {
+                    pending_thru = thru.filter(|t| (1..=17).contains(t));
+                }
+            }
+        }
+        // A singles match led by its SECOND side has its value on the
+        // match's last row, with nothing below it inside the match: the
+        // number goes on the row above instead (the other side's, which is
+        // empty), so it stays in its own match's value column.
+        if let Some(t) = pending_thru {
+            let above = out.len() - 2;
+            if out[above].value.is_empty() {
+                out[above].value = t.to_string();
+                out[above].value_ink = GREY;
             }
         }
     }
@@ -1605,19 +1631,16 @@ fn render_matchplay(mp: &crate::model::MatchPlay, max_rows: usize, tz: Option<ch
 
     // The holes-played column anchors off the widest value on the frame,
     // like golf's thru column, so it does not zigzag row to row.
-    let value_col = rows.iter().map(|r| tabular_width(&r.value, false)).max().unwrap_or(0);
+    // Bands first, text over them. A band covers its rows' 6px slots: the
+    // blank row above each line of text plus the text itself.
+    for (i, r) in rows.iter().enumerate() {
+        if r.match_idx % 2 == 1 {
+            fill(&mut c, 0, 12 + i as i32 * 6 - 5, FRAME_WIDTH as u32, 6, MATCH_BAND);
+        }
+    }
     let mut by = 12;
     for r in &rows {
-        if r.new_match {
-            fill(&mut c, 0, by - 5, FRAME_WIDTH as u32, 1, MATCH_DIVIDER);
-        }
-        let mut name_max = 63 - tabular_width(&r.value, false) - 2;
-        if let Some(t) = r.thru {
-            let thru_right = 63 - value_col - 3;
-            let ts = t.to_string();
-            draw_text_right(&mut c, &ts, thru_right, by, false, GREY);
-            name_max = thru_right - text_width(&ts, false) - 2;
-        }
+        let name_max = 63 - tabular_width(&r.value, false) - 2;
         draw_text_clip(&mut c, &r.name, 1, by, name_max, false, r.ink);
         draw_text_right_tabular(&mut c, &r.value, 63, by, false, r.value_ink);
         by += 6;
@@ -4601,6 +4624,47 @@ mod matchplay_tests {
         let (_, flat, scrolls) = render_board_frame(&g, 4, None, None, NameStyle::Name);
         assert!(!scrolls);
         assert_eq!(flat.len(), FRAME_WIDTH * FRAME_HEIGHT * 2);
+    }
+
+    /// Matches alternate black and a faint band — the first on black, clear
+    /// of the pinned title — and holes played sit on the row BELOW the
+    /// match's value, right-aligned.
+    #[test]
+    fn matches_alternate_bands_and_holes_sit_beside_the_value() {
+        let g = game(&fixture());
+        let (_, frame, _) = render_board_frame(&g, LEADERBOARD_DEFAULT_ROWS, None, None, NameStyle::Name);
+        // Column 0 is always background (names start at x = 1).
+        let bg = |y: i32| px(&frame, 0, y);
+        let band = c565(MATCH_BAND);
+        for k in 0..4 {
+            // A pair-vs-pair match is 4 rows = 24px, rows from y = 7.
+            let (top, bottom) = (7 + k * 24, 7 + k * 24 + 23);
+            let want = if k % 2 == 1 { band } else { 0 };
+            assert!((top..=bottom).all(|y| bg(y) == want), "match {k} background");
+        }
+        assert!((0..7).all(|y| bg(y) == 0), "the title rows stay black");
+        // Match 1 (Thomas/Koivun 1UP through 2): "1UP" on the first row
+        // (baseline 12), the holes-played number grey at the right edge of
+        // the row below (baseline 18), and nothing grey on the value row.
+        let grey = c565(GREY);
+        assert!((56..64).any(|x| (14..=18).any(|y| px(&frame, x, y) == grey)), "thru under the margin");
+        assert!(!(0..64).any(|x| (8..=12).any(|y| px(&frame, x, y) == grey)), "the value row carries only the margin");
+    }
+
+    /// Holes played follow the match value in every shape: under it for a
+    /// pair or a singles match led by its first side, and above it for a
+    /// singles match led by its second side (no row below inside the match).
+    #[test]
+    fn holes_played_follow_the_value_in_singles_too() {
+        let mut g = game(&fixture());
+        let mp = mp_mut(&mut g);
+        mp.matches = vec![
+            Match { players: [vec!["THOMAS".into()], vec!["SCOTT".into()]], state: MatchState::Live { leader: Some(0), margin: "2UP".into(), thru: 15 } },
+            Match { players: [vec!["CANTLAY".into()], vec!["CONNERS".into()]], state: MatchState::Live { leader: Some(1), margin: "1UP".into(), thru: 14 } },
+        ];
+        let rows = matchplay_rows(mp_of(&g), LEADERBOARD_MAX_ROWS, None);
+        let values: Vec<&str> = rows.iter().map(|r| r.value.as_str()).collect();
+        assert_eq!(values, ["2UP", "15", "14", "1UP"]);
     }
 
     /// Half points read as a decimal: "7.5", never the 4x6 "½".
