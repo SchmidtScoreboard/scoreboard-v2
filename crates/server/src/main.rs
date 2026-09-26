@@ -2319,28 +2319,52 @@ pub(crate) fn game_scroll_capable(cfg: &BoardConfig, g: &Game) -> bool {
     g.leaderboard.as_ref().is_some_and(|lb| render::leaderboard_row_count(lb) > 4)
 }
 
-/// How long one rotation entry holds this board's panel, in ms: the
-/// league's speed override or the board's, snapped to a preset (so a legacy
-/// 7s or 30s behaves as the preset its label says), and doubled for a
-/// scrolling screen — the glide needs the time to be readable.
-pub(crate) fn entry_dwell_ms(cfg: &BoardConfig, sport_id: &str, scrolls: bool) -> u32 {
+/// How long one rotation entry holds this board's panel, in ms, for a frame
+/// `frame_rows` tall: the league's speed override or the board's, snapped to
+/// a preset (so a legacy 7s or 30s behaves as the preset its label says),
+/// scaled by the frame's height when it scrolls (`screen_dwell_ms`: 64 rows
+/// twice as long, 128 four times). Pass 32 for a screen that does not scroll.
+pub(crate) fn entry_dwell_ms(cfg: &BoardConfig, sport_id: &str, frame_rows: usize) -> u32 {
     let secs = cfg
         .sports
         .iter()
         .find(|s| s.sport_id == sport_id)
         .and_then(|s| s.dwell_secs)
         .unwrap_or(cfg.dwell_secs);
-    let ms = scoreboard_protocol::snap_dwell_secs(secs) * 1000;
-    if scrolls { ms * scoreboard_protocol::SCROLL_DWELL_FACTOR } else { ms }
+    scoreboard_protocol::screen_dwell_ms(secs, frame_rows)
+}
+
+/// A league's leaderboard depth on this board (golf/F1 rows; 4 = static).
+pub(crate) fn league_rows_cap(cfg: &BoardConfig, sport_id: &str) -> usize {
+    cfg.sports
+        .iter()
+        .find(|sp| sp.sport_id == sport_id)
+        .and_then(|sp| sp.leaderboard_rows)
+        .map(|r| r as usize)
+        .unwrap_or(render::LEADERBOARD_DEFAULT_ROWS)
 }
 
 /// Mark a board-scoped summary with how this board scrolls the game: the
 /// flag the app's scroll toggle keys off, plus the dwell and pinned rows the
-/// app's card needs to glide exactly as the panel does.
-pub(crate) fn mark_scroll(s: &mut GameSummary, cfg: &BoardConfig, g: &Game) {
+/// app's card needs to glide exactly as the panel does. The dwell depends on
+/// the frame's height, so `frame_rows` is the board frame's height when the
+/// caller already rendered it; None renders it here (only for a game that can
+/// scroll — a handful of leaderboards, never the team-sport slate). A game
+/// whose scrolling is turned off (depth 4) renders panel-sized and gets no
+/// glide, though its toggle still shows.
+pub(crate) fn mark_scroll(s: &mut GameSummary, cfg: &BoardConfig, g: &Game, frame_rows: Option<usize>) {
     s.scrolls = game_scroll_capable(cfg, g);
-    if s.scrolls {
-        s.scroll_dwell_ms = entry_dwell_ms(cfg, &g.sport_id, true);
+    if !s.scrolls {
+        return;
+    }
+    let rows = frame_rows.unwrap_or_else(|| {
+        let (_, px, _) = render::render_board_frame(
+            g, league_rows_cap(cfg, &g.sport_id), None, board_tz(cfg), name_style_for(cfg, &g.sport_id),
+        );
+        px.len() / (scoreboard_protocol::FRAME_WIDTH * 2)
+    });
+    if rows > scoreboard_protocol::FRAME_HEIGHT {
+        s.scroll_dwell_ms = entry_dwell_ms(cfg, &g.sport_id, rows);
         s.pin_rows = render::LEADERBOARD_PIN_ROWS;
     }
 }
@@ -3097,10 +3121,11 @@ fn manifest_inner(state: &AppState, board_id: &str) -> Manifest {
                 let of1 = state.openf1_rows.lock().unwrap();
                 let view = board_view_with(&cfg, g, of1.as_ref());
                 let (id, px, scrolls) = render::render_board_frame(&view, rows_cap, spoiler_for(&cfg, g), tz, style);
+                // The league's speed (else the board's), scaled by the
+                // frame's height when it scrolls: the scroll pass syncs to it.
+                let rows = if scrolls { px.len() / (scoreboard_protocol::FRAME_WIDTH * 2) } else { scoreboard_protocol::FRAME_HEIGHT };
+                let dwell_ms = entry_dwell_ms(&cfg, &g.sport_id, rows);
                 state.cache_frame(id.clone(), px);
-                // The league's speed (else the board's), doubled when the
-                // frame scrolls: the scroll pass syncs to it.
-                let dwell_ms = entry_dwell_ms(&cfg, &g.sport_id, scrolls);
                 // Every scrolling frame is a leaderboard, and a leaderboard's
                 // title rows hold still while the field glides under them.
                 let pin_rows = if scrolls { render::LEADERBOARD_PIN_ROWS } else { 0 };
@@ -4307,7 +4332,6 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
                 let of1 = state.openf1_rows.lock().unwrap();
                 let view = board_view_with(&cfg, g, of1.as_ref());
                 let mut s = to_summary_for(&view, spoiler, tz);
-                mark_scroll(&mut s, &cfg, g);
                 // The pushed card frame IS the board's frame — same view,
                 // same renderer, same content hash, so a now-showing game has
                 // ONE frame in the cache and the card cannot diverge from the
@@ -4316,15 +4340,12 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
                 // window. (render_board_frame delegates to the static layout
                 // for everything that isn't a deep leaderboard, so for team
                 // sports these were already identical pixels.)
-                let rows_cap = cfg
-                    .sports
-                    .iter()
-                    .find(|sp| sp.sport_id == g.sport_id)
-                    .and_then(|sp| sp.leaderboard_rows)
-                    .map(|r| r as usize)
-                    .unwrap_or(render::LEADERBOARD_DEFAULT_ROWS);
+                let rows_cap = league_rows_cap(&cfg, &g.sport_id);
                 let (fid, px, _) = render::render_board_frame(&view, rows_cap, spoiler, tz, name_style_for(&cfg, &g.sport_id));
                 drop(of1);
+                // The frame just rendered IS the panel's, so its height sets
+                // the card's glide exactly as it sets the rotation's dwell.
+                mark_scroll(&mut s, &cfg, g, Some(px.len() / (scoreboard_protocol::FRAME_WIDTH * 2)));
                 state.cache_frame(fid.clone(), px);
                 s.frame_id = fid;
                 s
@@ -4336,7 +4357,7 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
             let of1 = state.openf1_rows.lock().unwrap();
             let mut s = to_summary_for(&board_view_with(&cfg, g, of1.as_ref()), spoiler_for(&cfg, g), tz);
             drop(of1);
-            mark_scroll(&mut s, &cfg, g);
+            mark_scroll(&mut s, &cfg, g, None);
             s.bumped = true;
             s
         }));
@@ -4384,7 +4405,7 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
             let of1 = state.openf1_rows.lock().unwrap();
             let mut s = to_summary_for(&board_view_with(&cfg, g, of1.as_ref()), spoiler, tz);
             drop(of1);
-            mark_scroll(&mut s, &cfg, g);
+            mark_scroll(&mut s, &cfg, g, None);
             s.queued = true;
             // The app's "Live and Upcoming" section keys off this status to tell
             // "on the board right now" from "claimed, hasn't started". The raw
@@ -5245,9 +5266,10 @@ mod tests {
         assert!(!cfg.power && cfg.wake_at.is_none(), "indefinite off: asleep, no timer");
     }
 
-    /// Deep leaderboards get a scrolling manifest entry held for TWICE the
-    /// board's speed (the board fits one full pass into it, and a glide needs
-    /// the time to be readable); team games stay static at the speed itself.
+    /// Deep leaderboards get a scrolling manifest entry held for the board's
+    /// speed scaled by the frame's height (64 rows twice as long, 128 four
+    /// times: the board fits one full pass into it); team games stay static
+    /// at the speed itself.
     #[test]
     fn manifest_scrolls_deep_leaderboards() {
         let state = AppState::new_ephemeral();
@@ -5260,7 +5282,8 @@ mod tests {
         for e in &scrolled {
             let px = state.frames.lock().unwrap().get(&e.frame_id).map(|(_, p)| p.clone()).unwrap();
             assert!(px.len() > FRAME_BYTES, "scroll entries carry tall frames");
-            assert_eq!(e.dwell_ms, dwell * 2, "a scrolling screen holds for twice the speed");
+            let rows = (px.len() / (scoreboard_protocol::FRAME_WIDTH * 2)) as u32;
+            assert_eq!(e.dwell_ms, dwell * rows / 32, "a scrolling screen holds in proportion to its height");
         }
         for e in m.rotation.iter().filter(|e| !e.scroll) {
             let px = state.frames.lock().unwrap().get(&e.frame_id).map(|(_, p)| p.clone()).unwrap();
@@ -5428,14 +5451,26 @@ mod tests {
         let games = state.games.lock().unwrap().clone();
         let deep = games.iter().find(|g| game_scroll_capable(&cfg, g)).expect("a deep demo leaderboard");
         let mut s = to_summary(deep, None);
-        mark_scroll(&mut s, &cfg, deep);
+        mark_scroll(&mut s, &cfg, deep, None);
         assert!(s.scrolls);
-        assert_eq!(s.scroll_dwell_ms, entry_dwell_ms(&cfg, &deep.sport_id, true));
-        assert_eq!(s.scroll_dwell_ms, scoreboard_protocol::snap_dwell_secs(cfg.dwell_secs) * 2000);
+        // The dwell is the one the rotation uses: the speed scaled by the
+        // board frame's height.
+        let (_, px, _) = render::render_board_frame(deep, league_rows_cap(&cfg, &deep.sport_id), None, None, name_style_for(&cfg, &deep.sport_id));
+        let rows = px.len() / (scoreboard_protocol::FRAME_WIDTH * 2);
+        assert!(rows > 32);
+        assert_eq!(s.scroll_dwell_ms, scoreboard_protocol::screen_dwell_ms(cfg.dwell_secs, rows));
         assert_eq!(s.pin_rows, render::LEADERBOARD_PIN_ROWS);
+        // Scrolling turned off (depth 4): the toggle still shows, no glide.
+        let mut off = cfg.clone();
+        off.sports.retain(|sp| sp.sport_id != deep.sport_id);
+        off.sports.push(SportConfig { sport_id: deep.sport_id.clone(), leaderboard_rows: Some(4), ..Default::default() });
+        let mut o = to_summary(deep, None);
+        mark_scroll(&mut o, &off, deep, None);
+        assert!(o.scrolls, "the toggle offers to turn it back on");
+        assert_eq!((o.scroll_dwell_ms, o.pin_rows), (0, 0), "a static frame does not glide");
         let team = games.iter().find(|g| g.leaderboard.is_none()).unwrap();
         let mut t = to_summary(team, None);
-        mark_scroll(&mut t, &cfg, team);
+        mark_scroll(&mut t, &cfg, team, None);
         assert!(!t.scrolls);
         assert_eq!((t.scroll_dwell_ms, t.pin_rows), (0, 0), "nothing to glide");
         // The wire omits both for a static game.
@@ -5527,14 +5562,17 @@ mod tests {
         assert_eq!(m.rotation.len(), chosen.len());
         // The board default, as a static screen holds it; a scrolling one
         // holds it twice as long.
-        let base = scoreboard_protocol::snap_dwell_secs(cfg.dwell_secs) * 1000;
-        let default_for = |e: &RotationEntry| if e.scroll { base * 2 } else { base };
+        let rows_of = |e: &RotationEntry| {
+            let frames = state.frames.lock().unwrap();
+            frames.get(&e.frame_id).map(|(_, p)| p.len() / (scoreboard_protocol::FRAME_WIDTH * 2)).unwrap()
+        };
+        let default_for = |e: &RotationEntry| scoreboard_protocol::screen_dwell_ms(cfg.dwell_secs, rows_of(e));
         let mut saw_f1 = false;
         for (entry, g) in m.rotation.iter().zip(&chosen) {
             if g.sport_id == "f1" {
-                // 30s is not a preset: it snaps to Slow (20s), doubled for
-                // the scroll.
-                assert_eq!(entry.dwell_ms, 40_000, "override applies to F1, snapped and doubled");
+                // 30s is not a preset: it snaps to Slow (20s), scaled by the
+                // tall frame's height for the scroll.
+                assert_eq!(entry.dwell_ms, 20_000 * rows_of(entry) as u32 / 32, "override applies to F1, snapped and scaled");
                 assert!(entry.scroll, "demo F1 is deep enough to scroll");
                 saw_f1 = true;
             } else {

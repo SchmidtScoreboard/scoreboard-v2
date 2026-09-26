@@ -1663,7 +1663,7 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_app_core_checksum_func_dwell_label() != 29753.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_app_core_checksum_func_dwell_options() != 20460.toShort()) {
+    if (lib.uniffi_app_core_checksum_func_dwell_options() != 3072.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_dwell_selected() != 52470.toShort()) {
@@ -6498,8 +6498,9 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
 
         /**
          * The speed choices, fastest first: Fast (10s), Standard (15s), Slow (20s).
-         * A scrolling screen holds for twice its speed; the labels don't say so,
-         * because the choice is about pace, not arithmetic.
+         * A scrolling screen holds longer in proportion to its height (64 rows twice
+         * its speed, 128 four times — the server's `screen_dwell_ms`); the labels
+         * don't say so, because the choice is about pace, not arithmetic.
          */ fun `dwellOptions`(): List<UiDwellOption> {
             return FfiConverterSequenceTypeUiDwellOption.lift(
     uniffiRustCall() { _status ->

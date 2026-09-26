@@ -5735,8 +5735,9 @@ public func dwellLabel(secs: UInt32) -> String {
 
 /**
  * The speed choices, fastest first: Fast (10s), Standard (15s), Slow (20s).
- * A scrolling screen holds for twice its speed; the labels don't say so,
- * because the choice is about pace, not arithmetic.
+ * A scrolling screen holds longer in proportion to its height (64 rows twice
+ * its speed, 128 four times — the server's `screen_dwell_ms`); the labels
+ * don't say so, because the choice is about pace, not arithmetic.
  */
 public func dwellOptions() -> [UiDwellOption] {
     return try! FfiConverterSequenceTypeUiDwellOption.lift(try! rustCall {
@@ -6384,7 +6385,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_func_dwell_label() != 29753 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_func_dwell_options() != 20460 {
+    if uniffi_app_core_checksum_func_dwell_options() != 3072 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_dwell_selected() != 52470 {

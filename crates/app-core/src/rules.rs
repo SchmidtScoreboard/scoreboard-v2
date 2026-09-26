@@ -469,8 +469,9 @@ pub struct UiDepthOption {
 // server times the board by the same snap, so label and panel agree.
 
 /// The speed choices, fastest first: Fast (10s), Standard (15s), Slow (20s).
-/// A scrolling screen holds for twice its speed; the labels don't say so,
-/// because the choice is about pace, not arithmetic.
+/// A scrolling screen holds longer in proportion to its height (64 rows twice
+/// its speed, 128 four times — the server's `screen_dwell_ms`); the labels
+/// don't say so, because the choice is about pace, not arithmetic.
 #[uniffi::export]
 pub fn dwell_options() -> Vec<UiDwellOption> {
     use scoreboard_protocol::{DWELL_FAST_SECS, DWELL_SLOW_SECS, DWELL_STANDARD_SECS};

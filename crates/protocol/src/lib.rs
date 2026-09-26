@@ -361,8 +361,8 @@ pub struct GameSummary {
     #[serde(default)]
     pub scrolls: bool,
     /// For a game whose board rendering scrolls: the dwell of its scroll pass
-    /// on this board (ms; the speed's dwell times [`SCROLL_DWELL_FACTOR`]),
-    /// so the app's card can glide exactly as the panel does. 0 otherwise.
+    /// on this board (ms; [`screen_dwell_ms`] of its frame), so the app's card
+    /// can glide exactly as the panel does. 0 otherwise.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub scroll_dwell_ms: u32,
     /// Rows at the top of that scrolling frame that stay put (the
@@ -839,9 +839,18 @@ pub const DWELL_STANDARD_SECS: u32 = 15;
 pub const DWELL_SLOW_SECS: u32 = 20;
 pub const DWELL_PRESETS_SECS: [u32; 3] = [DWELL_FAST_SECS, DWELL_STANDARD_SECS, DWELL_SLOW_SECS];
 
-/// A scrolling screen (a deep leaderboard) holds the panel this many times as
-/// long as its speed's dwell: the scroll pass needs the time to be readable.
-pub const SCROLL_DWELL_FACTOR: u32 = 2;
+/// How long a screen holds the panel (ms) at speed `secs` for a frame
+/// `frame_rows` tall: the speed's dwell for a panel-sized screen, scaled by
+/// the frame's height for a scrolling one — 64 rows twice as long, 128 four
+/// times. The scroll pass fits into the dwell, so a fixed multiple made a
+/// frame one row taller than the panel crawl that row for the whole pass,
+/// while the deepest tower rushed; scaling by height keeps the glide paced
+/// to what there is to read.
+pub fn screen_dwell_ms(secs: u32, frame_rows: usize) -> u32 {
+    let base = snap_dwell_secs(secs) as u64 * 1000;
+    let rows = frame_rows.max(FRAME_HEIGHT) as u64;
+    (base * rows / FRAME_HEIGHT as u64) as u32
+}
 
 /// The preset nearest `secs`; an exact midpoint (12.5s never happens in
 /// whole seconds, but 0 or a huge value might) goes to the slower preset.
@@ -1920,6 +1929,20 @@ mod dwell_tests {
             assert_eq!(snap_dwell_secs(secs), want, "{secs}s");
         }
         assert_eq!(default_dwell_secs(), DWELL_STANDARD_SECS, "new boards are Standard");
+    }
+
+    /// The dwell scales with the frame's height: a panel-sized screen holds
+    /// for its speed, 64 rows twice that, 128 four times, and a frame one
+    /// row taller than the panel barely longer than a static screen.
+    #[test]
+    fn scrolling_dwell_scales_with_the_frame() {
+        assert_eq!(screen_dwell_ms(15, 32), 15_000);
+        assert_eq!(screen_dwell_ms(15, 64), 30_000);
+        assert_eq!(screen_dwell_ms(15, 128), 60_000);
+        assert_eq!(screen_dwell_ms(15, 38), 17_812, "one extra row, barely longer");
+        assert_eq!(screen_dwell_ms(10, 107), 33_437);
+        assert_eq!(screen_dwell_ms(7, 64), 20_000, "the speed snaps first (7s is Fast)");
+        assert_eq!(screen_dwell_ms(15, 0), 15_000, "never shorter than the speed");
     }
 
     /// The five phases, and at rest at both ends of the dwell.

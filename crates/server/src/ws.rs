@@ -409,7 +409,7 @@ async fn controller_loop(
                             .map(|g| {
                                 let spoiler = crate::spoiler_for(&cfg, g);
                                 let mut s = crate::to_summary_for(g, spoiler, tz);
-                                crate::mark_scroll(&mut s, &cfg, g);
+                                crate::mark_scroll(&mut s, &cfg, g, None);
                                 s.queued = prefs
                                     .as_ref()
                                     .is_some_and(|p| crate::game_queued(&state, &cfg, p, g));
