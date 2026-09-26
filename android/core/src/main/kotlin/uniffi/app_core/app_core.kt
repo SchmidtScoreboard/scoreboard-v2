@@ -1023,6 +1023,8 @@ internal open class UniffiVTableCallbackInterfaceClientListener(
 
 
 
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -1199,6 +1201,8 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_off_mode_value(`mode`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_panel_shows_nothing(`nowShowing`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
     fun uniffi_app_core_fn_func_parse_networks(`raw`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_pickable_modes(`offModes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1398,6 +1402,8 @@ internal interface UniffiLib : Library {
     fun uniffi_app_core_checksum_func_normalized_pin(
     ): Short
     fun uniffi_app_core_checksum_func_off_mode_value(
+    ): Short
+    fun uniffi_app_core_checksum_func_panel_shows_nothing(
     ): Short
     fun uniffi_app_core_checksum_func_parse_networks(
     ): Short
@@ -1612,7 +1618,7 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_app_core_checksum_func_displayed_now_showing() != 48767.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_app_core_checksum_func_effective_mode() != 28114.toShort()) {
+    if (lib.uniffi_app_core_checksum_func_effective_mode() != 65057.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_fallback_off_modes() != 1849.toShort()) {
@@ -1658,6 +1664,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_off_mode_value() != 49163.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_panel_shows_nothing() != 2688.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_parse_networks() != 61308.toShort()) {
@@ -6305,7 +6314,8 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
 
         /**
          * The ring follows the GLASS: what the panel is actually showing, as a
-         * picker id. Quiet hours force Off (the window darkens the panel whatever
+         * picker id. `now_showing_empty` is [`panel_shows_nothing`], not the list's
+         * length. Quiet hours force Off (the window darkens the panel whatever
          * the mode says); scores mode with nothing on is showing the idle screen,
          * with the blank descriptor reading as Off.
          */ fun `effectiveMode`(`mode`: kotlin.String, `quietActive`: kotlin.Boolean, `nowShowingEmpty`: kotlin.Boolean, `offMode`: kotlin.String): kotlin.String {
@@ -6542,6 +6552,23 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_app_core_fn_func_off_mode_value(
         FfiConverterTypeUiOffMode.lower(`mode`),FfiConverterString.lower(`key`),FfiConverterMapStringString.lower(`params`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Is the panel showing NO game? Counts only entries that are actually in
+         * the board's rotation: an "upcoming" entry is claimed-but-unstarted (it
+         * rides along in "Live and Upcoming" for the reader, flagged `queued`) and a
+         * bumped one was pushed off by the cap — neither is on the glass. Passing
+         * the raw list length instead put the ring on Scores while the panel sat
+         * on the idle weather screen waiting for tonight's games.
+         */ fun `panelShowsNothing`(`nowShowing`: List<UiGame>): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_panel_shows_nothing(
+        FfiConverterSequenceTypeUiGame.lower(`nowShowing`),_status)
 }
     )
     }

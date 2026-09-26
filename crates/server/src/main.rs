@@ -7,6 +7,7 @@ mod bdf;
 mod espn;
 mod model;
 mod offmode;
+mod laps;
 mod openf1;
 mod weather;
 mod render;
@@ -86,6 +87,32 @@ const PAIR_GLOBAL_REFILL_PER_SEC: f64 = 5.0;
 /// long before this; without an expiry every code a board ever displayed stayed
 /// live forever, so the guessable space grew with every setup session.
 const PAIR_CODE_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// Reserved pairing code for App Store / Play Store review. Typed into the
+/// normal pairing screen it pairs the controller to a server-side VIRTUAL demo
+/// board — no device ever connects; the board exists only as a config that
+/// `config_for` forces onto the demo slate. Documented in the stores' review
+/// notes, nowhere user-facing. `register_pairing_code` refuses to index this
+/// code for a real board, so a TRNG collision can't shadow the demo.
+pub const DEMO_PAIR_CODE: &str = "776677";
+
+/// Marker prefix for virtual demo board ids. Unforgeable from the device side:
+/// a board id IS its Ed25519 pubkey and must sign the auth challenge, and
+/// `demo-…` is not valid pubkey hex. (Demo GAME ids are also `demo-*` —
+/// different namespace, the two never share a map.)
+pub const DEMO_BOARD_PREFIX: &str = "demo-";
+
+pub fn is_demo_board(board_id: &str) -> bool {
+    board_id.starts_with(DEMO_BOARD_PREFIX)
+}
+
+/// Per-CONTROLLER demo board id, so two reviewers never share config. The
+/// pubkey is 64 hex by the time any caller has it (it signed the challenge),
+/// but slice defensively anyway.
+pub fn demo_board_id(controller_pubkey: &str) -> String {
+    let tag = controller_pubkey.get(..12).unwrap_or(controller_pubkey);
+    format!("{DEMO_BOARD_PREFIX}{tag}")
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -452,12 +479,22 @@ impl AppState {
     }
 
     pub fn config_for(&self, board_id: &str) -> BoardConfig {
-        self.configs
+        let mut cfg = self
+            .configs
             .lock()
             .unwrap()
             .get(board_id)
             .cloned()
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // A virtual demo board is demo_data by IDENTITY, not by toggle: a
+        // reviewer flipping the app's demo switch must never strand it on the
+        // (possibly empty) real slate. Forced here — the one choke point every
+        // reader funnels through — so `with_slate` stays the only reader of
+        // the flag itself.
+        if is_demo_board(board_id) {
+            cfg.demo_data = true;
+        }
+        cfg
     }
 
     /// Is this controller authorized to view/command this board?
@@ -579,6 +616,15 @@ impl AppState {
     /// per board, so keeping a CONNECTED board's live costs no extra guessable
     /// space — and it dies ten minutes after the board goes away.
     pub fn register_pairing_code(&self, code: String, board_id: &str) {
+        // A board whose TRNG happens to mint the reserved demo code (1-in-10⁶
+        // per boot) must not be indexed under it: the Pair intercept would win
+        // anyway and hand its owner the DEMO board instead of their own,
+        // silently. Refused here, the collision is logged and the board is
+        // simply unpairable until its next boot re-mints.
+        if code == DEMO_PAIR_CODE {
+            tracing::warn!("board '{board_id}' minted the reserved demo pairing code; not registering it");
+            return;
+        }
         let now = Instant::now();
         let mut pending = self.pending.lock().unwrap();
         pending.retain(|_, (bid, minted)| {
@@ -835,7 +881,7 @@ async fn main() {
                 println!("sending a test alert to {}...", m.recipient());
                 match m
                     .send(
-                        "Scoreboard: test alert",
+                        "OpenScoreboard: test alert",
                         "This is a test from `server --test-alert`.\n\n\
                          If you are reading it, alerting is wired up: you will get one \
                          email when a problem is confirmed, one when it clears, and a \
@@ -1509,7 +1555,12 @@ fn sample_game_for(sport_id: &str, extras: bool, live: bool) -> model::Game {
             // their spoiler setting with a basketball frame.
             let (title, rows) = sample_leaderboard(sport_id);
             g.leaderboard = Some(model::Leaderboard {
+                // The F1 preview wears the lap bar: mid-race, so the
+                // filled and unfilled halves both show.
+                laps: (sport_id == "f1").then_some(model::LapProgress { completed: 42, total: 78 }),
                 flag: None,
+                stage: None,
+                quali: None,
                 name: title.into(),
                 rows: rows
                     .into_iter()
@@ -2069,6 +2120,19 @@ pub(crate) fn board_view_with<'a>(
             // Track status rides the same swap: red/yellow recolor the
             // title-row flags, and only for boards on this source.
             lb.flag = swap.flag.map(String::from);
+            // So do the qualifying segment and its elimination zones — this
+            // feed knows the segment exactly (race control says when each
+            // starts), where ESPN's reading trails by minutes.
+            lb.stage = swap.stage;
+            lb.quali = swap.quali;
+            // The lap bar too. ESPN's status is the authority on the race
+            // being over: the live laps feed stops one short at the flag
+            // (the lap in progress is never "completed") until OpenF1
+            // publishes the classification, which can lag.
+            lb.laps = swap.laps.map(|l| match g.status {
+                GameStatus::Final => model::LapProgress { completed: l.total, total: l.total },
+                _ => l,
+            });
         }
     }
     if drop_round {
@@ -4282,7 +4346,9 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
         }));
         out
     };
-    let online = state.devices.lock().unwrap().contains_key(board_id);
+    // A demo board has no device to connect, and "offline" would read as
+    // broken to the reviewer it exists for — the server IS the board here.
+    let online = is_demo_board(board_id) || state.devices.lock().unwrap().contains_key(board_id);
     // What the connected device reported (dropped on disconnect, so offline
     // boards read None) and the version the app may offer as an update —
     // `offer_for` picks the newest dist among the board's channel's allowed
@@ -4987,7 +5053,7 @@ fn preview() {
             id: "g".into(), sport_id: "pga".into(),
             away: model::TeamSide::empty("PGA"), home: model::TeamSide::empty(""),
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
-            leaderboard: Some(model::Leaderboard { flag: None, name: "MASTERS".into(), rows: vec![
+            leaderboard: Some(model::Leaderboard { laps: None, flag: None, stage: None, quali: None, name: "MASTERS".into(), rows: vec![
                 model::LeaderRow { name: "SCHEFFLER".into(), value: "-8".into(), ..Default::default() },
                 model::LeaderRow { name: "MCILROY".into(), value: "-6".into(), ..Default::default() },
                 model::LeaderRow { name: "MORIKAWA".into(), value: "-5".into(), ..Default::default() },
@@ -5004,7 +5070,7 @@ fn preview() {
             id: "f".into(), sport_id: "f1".into(),
             away: model::TeamSide::empty("F1"), home: model::TeamSide::empty(""),
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
-            leaderboard: Some(model::Leaderboard { flag: None, name: "MONACO GP".into(), rows: vec![
+            leaderboard: Some(model::Leaderboard { laps: Some(model::LapProgress { completed: 42, total: 78 }), flag: None, stage: None, quali: None, name: "MONACO GP".into(), rows: vec![
                 model::LeaderRow { rank: "1".into(), name: "VER".into(), value: "LAP 42".into(), color: Some(model::hex_to_rgb("3671C6")), tire: Some('M'), thru: None },
                 model::LeaderRow { rank: "2".into(), name: "NOR".into(), value: "+2.1".into(), color: Some(model::hex_to_rgb("FF8000")), tire: Some('M'), thru: None },
                 model::LeaderRow { rank: "3".into(), name: "LEC".into(), value: "+5.8".into(), color: Some(model::hex_to_rgb("E8002D")), tire: Some('S'), thru: None },
@@ -6537,8 +6603,10 @@ mod tests {
             clock: String::new(),
             start_time: "2026-08-08T11:00Z".into(),
             end_time: None,
-            leaderboard: Some(crate::model::Leaderboard {
+            leaderboard: Some(crate::model::Leaderboard { laps: None,
                 flag: None,
+                stage: None,
+                quali: None,
                 name: "WYNDHAM".into(),
                 rows: vec![crate::model::LeaderRow {
                     name: "HOSSLER".into(),
@@ -6593,8 +6661,10 @@ mod tests {
             clock: String::new(),
             start_time: "2026-08-22T14:00Z".into(),
             end_time: None,
-            leaderboard: Some(crate::model::Leaderboard {
+            leaderboard: Some(crate::model::Leaderboard { laps: None,
                 flag: None,
+                stage: None,
+                quali: None,
                 name: "DUTCH GP Q".into(),
                 rows: vec![crate::model::LeaderRow {
                     rank: "1".into(),
@@ -6611,7 +6681,10 @@ mod tests {
         };
         let rows = |session: &'static str, age: Duration| openf1::SessionRows {
             session,
+            stage: None,
+            quali: None,
             flag: None,
+            laps: None,
             rows: vec![crate::model::LeaderRow {
                 rank: "1".into(),
                 name: "NOR".into(),
@@ -6736,8 +6809,10 @@ mod tests {
             clock: String::new(),
             start_time: "2026-08-22T11:00Z".into(),
             end_time: None,
-            leaderboard: Some(crate::model::Leaderboard {
+            leaderboard: Some(crate::model::Leaderboard { laps: None,
                 flag: None,
+                stage: None,
+                quali: None,
                 name: "BMW".into(),
                 rows: vec![
                     crate::model::LeaderRow {
@@ -7205,8 +7280,10 @@ mod tests {
     fn leaderboard_summaries_carry_the_espn_link() {
         let mut g = live_game("401811960");
         g.sport_id = "pga".into();
-        g.leaderboard = Some(crate::model::Leaderboard {
+        g.leaderboard = Some(crate::model::Leaderboard { laps: None,
             flag: None,
+            stage: None,
+            quali: None,
             name: "ROCKET".into(),
             rows: Vec::new(),
         });
@@ -8310,6 +8387,24 @@ mod tests {
         s.register_pairing_code("444444".into(), "board-y");
         assert_eq!(try_pair(&s, "333333", "ctrl-1").unwrap(), "board-x");
         assert_eq!(try_pair(&s, "444444", "ctrl-1").unwrap(), "board-y");
+    }
+
+    /// The reserved demo code never enters `pending` (a TRNG collision must
+    /// not shadow the virtual board), and the demo identity forces demo data
+    /// on a virgin config — the toggle can't strand a reviewer on the real
+    /// slate.
+    #[test]
+    fn reserved_demo_code_never_registers() {
+        let s = AppState::new_ephemeral();
+        s.register_pairing_code(DEMO_PAIR_CODE.into(), "board-x");
+        assert!(!s.pending.lock().unwrap().contains_key(DEMO_PAIR_CODE), "reserved code refused");
+        assert!(try_pair(&s, DEMO_PAIR_CODE, "ctrl-1").is_err(), "nothing to consume via try_pair");
+
+        assert!(is_demo_board("demo-abcdef012345"));
+        assert!(!is_demo_board(&"ab".repeat(32)), "a real pubkey id is not demo");
+        assert_eq!(demo_board_id(&"ab".repeat(32)), "demo-abababababab");
+        assert!(s.config_for("demo-abcdef012345").demo_data, "demo forced by identity, no stored config needed");
+        assert!(!s.config_for(&"ab".repeat(32)).demo_data, "real boards keep the stored default");
     }
 
     /// Unpairing revokes exactly one controller's grant, durably.

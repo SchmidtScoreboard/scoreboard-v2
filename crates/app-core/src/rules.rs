@@ -811,8 +811,20 @@ fn urlencode(s: &str) -> String {
     out
 }
 
+/// Is the panel showing NO game? Counts only entries that are actually in
+/// the board's rotation: an "upcoming" entry is claimed-but-unstarted (it
+/// rides along in "Live and Upcoming" for the reader, flagged `queued`) and a
+/// bumped one was pushed off by the cap — neither is on the glass. Passing
+/// the raw list length instead put the ring on Scores while the panel sat
+/// on the idle weather screen waiting for tonight's games.
+#[uniffi::export]
+pub fn panel_shows_nothing(now_showing: Vec<UiGame>) -> bool {
+    !now_showing.iter().any(|g| !g.queued && !g.bumped)
+}
+
 /// The ring follows the GLASS: what the panel is actually showing, as a
-/// picker id. Quiet hours force Off (the window darkens the panel whatever
+/// picker id. `now_showing_empty` is [`panel_shows_nothing`], not the list's
+/// length. Quiet hours force Off (the window darkens the panel whatever
 /// the mode says); scores mode with nothing on is showing the idle screen,
 /// with the blank descriptor reading as Off.
 #[uniffi::export]
@@ -1096,6 +1108,17 @@ mod tests {
         assert_eq!(effective_mode("scores".into(), false, true, "blank".into()), "off");
         assert_eq!(effective_mode("scores".into(), false, false, "weather".into()), "scores");
         assert_eq!(effective_mode("clock".into(), false, true, "weather".into()), "clock");
+    }
+
+    /// Upcoming and bumped entries ride along in "Live and Upcoming" but are
+    /// not on the panel — two queued games and nothing live is an idle board.
+    #[test]
+    fn upcoming_games_do_not_light_the_scores_ring() {
+        let mut queued = game("later", "upcoming", false);
+        queued.queued = true;
+        assert!(panel_shows_nothing(vec![]));
+        assert!(panel_shows_nothing(vec![queued.clone(), game("cut", "live", true)]));
+        assert!(!panel_shows_nothing(vec![queued, game("on", "live", false)]));
     }
 
     #[test]

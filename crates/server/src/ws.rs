@@ -290,6 +290,29 @@ async fn controller_loop(
                         ));
                         continue;
                     }
+                    // The reserved review code pairs a VIRTUAL board: same
+                    // grant + persistence as a real pairing (so Subscribe,
+                    // Unpair and restarts all behave identically), but there
+                    // is no device — no SetupDone to send, no pending code to
+                    // consume, and no push_board (a manifest nobody receives).
+                    // After the rate limiter deliberately: the reserved code
+                    // buys a guesser nothing extra.
+                    if code == crate::DEMO_PAIR_CODE {
+                        let board_id = crate::demo_board_id(&pubkey);
+                        state
+                            .allow
+                            .lock()
+                            .unwrap()
+                            .entry(board_id.clone())
+                            .or_default()
+                            .insert(pubkey.clone());
+                        state.persist_pairing(&board_id, &pubkey);
+                        tracing::info!("controller '{pubkey}' paired with virtual demo board '{board_id}'");
+                        let _ = out.send(Message::Text(
+                            serde_json::to_string(&ServerMsg::Paired { board_id }).unwrap(),
+                        ));
+                        continue;
+                    }
                     let reply = match try_pair(&state, &code, &pubkey) {
                         Ok(board_id) => {
                             tracing::info!("controller '{pubkey}' paired with '{board_id}'");
@@ -1281,6 +1304,126 @@ mod tests {
         }).await;
         let ack2 = recv_until(&mut other, |m| matches!(m, ServerMsg::CommandAck { .. })).await;
         assert!(matches!(ack2, Some(ServerMsg::CommandAck { ok: false, .. })));
+    }
+
+    /// The reserved review code pairs a VIRTUAL board: per-controller id,
+    /// online with demo games from the very first Subscribe, never a firmware
+    /// offer (even with a hosted dist newer than anything real), and Unpair
+    /// revokes it like any real grant. No device is involved at any point.
+    #[tokio::test]
+    async fn demo_pair_end_to_end() {
+        let (url, state) =
+            spawn_server_with(state_with_firmware(&[(FwChannel::Stable, "2099.1.1")])).await;
+
+        let (mut ctrl, ctrl_pk) = auth(&url, Role::Controller, &[2u8; 32]).await;
+        send(&mut ctrl, &ClientMsg::Pair { code: crate::DEMO_PAIR_CODE.into() }).await;
+        let board_id = match recv_until(&mut ctrl, |m| matches!(m, ServerMsg::Paired { .. })).await {
+            Some(ServerMsg::Paired { board_id }) => board_id,
+            other => panic!("the reserved code pairs, got {other:?}"),
+        };
+        assert!(crate::is_demo_board(&board_id), "reserved code mints a demo id, got '{board_id}'");
+        assert_eq!(board_id, crate::demo_board_id(&ctrl_pk), "demo id is derived from the controller");
+
+        send(&mut ctrl, &ClientMsg::Subscribe { board_ids: vec![board_id.clone()] }).await;
+        match recv_until(&mut ctrl, |m| matches!(m, ServerMsg::BoardState { .. })).await {
+            Some(ServerMsg::BoardState {
+                online,
+                config,
+                now_showing,
+                firmware_version,
+                firmware_update,
+                ..
+            }) => {
+                assert!(online, "the server IS the demo board; offline would read as broken");
+                assert!(config.demo_data, "demo data forced on by identity");
+                assert!(!now_showing.is_empty(), "the boot-seeded demo slate fills now-showing");
+                assert!(
+                    now_showing.iter().all(|g| g.id.starts_with("demo-")),
+                    "a demo board serves ONLY demo games: {:?}",
+                    now_showing.iter().map(|g| g.id.clone()).collect::<Vec<_>>()
+                );
+                assert_eq!(firmware_version, None, "nothing ever reports a version");
+                assert_eq!(firmware_update, None, "a virtual board is never offered firmware");
+            }
+            other => panic!("expected the initial BoardState, got {other:?}"),
+        }
+
+        // Unpair revokes the grant exactly like a real board's.
+        send(&mut ctrl, &ClientMsg::Unpair { board_id: board_id.clone() }).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!state.is_allowed(&board_id, &ctrl_pk), "unpair revoked the demo grant");
+        send(&mut ctrl, &ClientMsg::Command {
+            req_id: 1,
+            board_id: board_id.clone(),
+            cmd: Command::SetBrightness { level: 50 },
+        }).await;
+        let ack = recv_until(&mut ctrl, |m| matches!(m, ServerMsg::CommandAck { .. })).await;
+        assert!(matches!(ack, Some(ServerMsg::CommandAck { ok: false, .. })));
+    }
+
+    /// A real board whose TRNG mints the reserved code is refused indexing:
+    /// the code stays out of `pending`, and a controller typing it gets the
+    /// demo board — never someone else's hardware.
+    #[tokio::test]
+    async fn reserved_code_cannot_be_shadowed_by_a_device() {
+        let (url, state) = spawn_server().await;
+
+        let (mut dev, dev_board) = auth(&url, Role::Device, &[1u8; 32]).await;
+        send(&mut dev, &ClientMsg::EnterSetup { code: crate::DEMO_PAIR_CODE.into() }).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !state.pending.lock().unwrap().contains_key(crate::DEMO_PAIR_CODE),
+            "the reserved code is never indexed for a real board"
+        );
+
+        let (mut ctrl, _) = auth(&url, Role::Controller, &[2u8; 32]).await;
+        send(&mut ctrl, &ClientMsg::Pair { code: crate::DEMO_PAIR_CODE.into() }).await;
+        match recv_until(&mut ctrl, |m| matches!(m, ServerMsg::Paired { .. })).await {
+            Some(ServerMsg::Paired { board_id }) => {
+                assert!(crate::is_demo_board(&board_id));
+                assert_ne!(board_id, dev_board, "the collision must not hand out the real board");
+            }
+            other => panic!("expected Paired, got {other:?}"),
+        }
+        assert!(
+            state.allow.lock().unwrap().get(&dev_board).is_none_or(|s| s.is_empty()),
+            "the real board stays unpaired"
+        );
+    }
+
+    /// Each reviewer gets their OWN demo board: distinct ids, no cross-grant,
+    /// and config changes don't bleed between them.
+    #[tokio::test]
+    async fn two_controllers_get_distinct_demo_boards() {
+        let (url, state) = spawn_server().await;
+
+        let (mut a, pk_a) = auth(&url, Role::Controller, &[2u8; 32]).await;
+        send(&mut a, &ClientMsg::Pair { code: crate::DEMO_PAIR_CODE.into() }).await;
+        let id_a = match recv_until(&mut a, |m| matches!(m, ServerMsg::Paired { .. })).await {
+            Some(ServerMsg::Paired { board_id }) => board_id,
+            other => panic!("expected Paired, got {other:?}"),
+        };
+        let (mut b, pk_b) = auth(&url, Role::Controller, &[3u8; 32]).await;
+        send(&mut b, &ClientMsg::Pair { code: crate::DEMO_PAIR_CODE.into() }).await;
+        let id_b = match recv_until(&mut b, |m| matches!(m, ServerMsg::Paired { .. })).await {
+            Some(ServerMsg::Paired { board_id }) => board_id,
+            other => panic!("expected Paired, got {other:?}"),
+        };
+
+        assert_ne!(id_a, id_b, "two reviewers never share a demo board");
+        assert!(state.is_allowed(&id_a, &pk_a) && !state.is_allowed(&id_a, &pk_b));
+        assert!(state.is_allowed(&id_b, &pk_b) && !state.is_allowed(&id_b, &pk_a));
+
+        // Config isolation: A's brightness change never reaches B's board.
+        send(&mut a, &ClientMsg::Command {
+            req_id: 1,
+            board_id: id_a.clone(),
+            cmd: Command::SetBrightness { level: 42 },
+        }).await;
+        let ack = recv_until(&mut a, |m| matches!(m, ServerMsg::CommandAck { .. })).await;
+        assert!(matches!(ack, Some(ServerMsg::CommandAck { ok: true, .. })));
+        assert_eq!(state.config_for(&id_a).brightness, 42);
+        assert_ne!(state.config_for(&id_b).brightness, 42, "B's config untouched");
     }
 
     /// "Remove this scoreboard" over the wire: the grant a controller hands

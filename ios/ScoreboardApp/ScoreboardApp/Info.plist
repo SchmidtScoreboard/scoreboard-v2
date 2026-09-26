@@ -4,6 +4,8 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>OpenScoreboard</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -17,40 +19,27 @@
 	<key>CFBundleShortVersionString</key>
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
-	<!-- Only exercised by "Save Image" in the share sheet. Add-only access:
-	     the app never reads the library. Without this key the save action is
-	     missing from the sheet (or crashes the moment it is tapped). -->
-	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>Saves shared scoreboard images to your photo library.</string>
-	<!-- Scoreboard servers speak plain ws/http (the board has no TLS stack), and
-	     users can point a board at any host — LAN IPs, Railway TCP proxies, etc.
-	     ATS would silently block every /render image fetch to a non-local name. -->
-	<!-- The blanket plaintext exemption is gone: the board speaks TLS as of
-	     firmware 2026.7.21 and the app now talks wss:// + https:// to Railway's
-	     edge, so nothing in a shipping build loads over cleartext. What remains
-	     is local networking, which ATS treats separately — that keeps the
-	     Simulator's ws://127.0.0.1 and a LAN dev server working without
-	     re-opening arbitrary plaintext to the whole internet. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>Scoreboard uses Bluetooth to send a new board its Wi-Fi credentials during setup.</string>
+	<string>OpenScoreboard uses Bluetooth to send a new board its Wi-Fi credentials during setup.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Saves shared scoreboard images to your photo library.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
+	<key>UIRequiresFullScreen</key>
+	<true/>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
 	</array>
-	<!-- Portrait-only by design (a one-hand controller), and the target
-	     includes iPad: a partial orientation set without this flag is the
-	     "All interface orientations must be supported" build warning. -->
-	<key>UIRequiresFullScreen</key>
-	<true/>
 </dict>
 </plist>

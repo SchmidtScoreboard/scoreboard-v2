@@ -670,7 +670,7 @@ final class BoardViewModel: ObservableObject {
         ScoreboardApp.effectiveMode(
             mode: current.mode,
             quietActive: current.quietActive,
-            nowShowingEmpty: nowShowing.isEmpty,
+            nowShowingEmpty: ScoreboardApp.panelShowsNothing(nowShowing: nowShowing),
             offMode: current.offMode
         )
     }
@@ -2500,8 +2500,26 @@ struct DashboardView: View {
                 modePickerTiles
             }
             .contentMargins(.horizontal, 20, for: .scrollContent)
-            .onAppear {
-                proxy.scrollTo(model.effectiveMode, anchor: .center)
+            // On entry AND whenever the selection moves. On entry alone it
+            // aimed at a placeholder: the row appears before the board's
+            // state arrives, when `current` is still the default record
+            // (idle screen Clock, nothing showing), so the rail settled on
+            // Clock and the ring then moved to Weather off-screen with no
+            // second scroll. A mode change later (the timer returning the
+            // board to scores) deserves the same reveal. The TILE LIST is in
+            // the key too: the server's screen list can land after the mode
+            // settles on Weather, and a scroll to a tile that does not exist
+            // yet is dropped — Android hit exactly this on a cold start.
+            .onChange(of: [model.effectiveMode] + model.pickableModes.map(\.id), initial: true) { _, key in
+                let mode = key[0]
+                // Never for the FIRST tile: `scrollTo` ignores the content
+                // margin when it clamps, so centring a tile already at the
+                // leading edge slid the rail 20pt and cut Scores off at the
+                // card's edge. The first tile is on-screen at rest anyway.
+                // (Android's picker has the same guard.)
+                if model.pickableModes.first?.id != mode {
+                    proxy.scrollTo(mode, anchor: .center)
+                }
             }
         }
     }
@@ -4584,7 +4602,7 @@ extension BluetoothProvisioner: CBCentralManagerDelegate {
         switch central.state {
         case .poweredOn: beginScan()
         case .poweredOff: status = .bluetoothOff
-        case .unauthorized: status = .failed("Bluetooth permission is off for Scoreboard")
+        case .unauthorized: status = .failed("Bluetooth permission is off for OpenScoreboard")
         default: status = .failed("Bluetooth is unavailable")
         }
     }

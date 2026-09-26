@@ -15,7 +15,9 @@
         android:maxSdkVersion="30" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
     <application
-        android:label="Scoreboard"
+        android:label="OpenScoreboard"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:name=".ScoreboardApplication"
         android:theme="@android:style/Theme.Material.NoActionBar">
         <!-- Scoped to the cache dir the share export writes; the receiving

@@ -8,7 +8,7 @@ set -euo pipefail
 cd "$(dirname "$0")/ScoreboardApp"
 
 PROJ=ScoreboardApp.xcodeproj
-BUNDLE=com.schmidt.scoreboard
+BUNDLE=com.markschmidt.scoreone
 FALLBACK_SIM=7A2B776B-D436-4EFB-AB0F-8E2770F303DB # iPhone 17 Pro
 
 # Build the Rust core if its xcframework is missing (fresh checkout).

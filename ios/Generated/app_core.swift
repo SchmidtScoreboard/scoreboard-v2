@@ -5580,7 +5580,8 @@ public func displayedNowShowing(games: [UiGame], focusedGameId: String?) -> [UiG
 
 /**
  * The ring follows the GLASS: what the panel is actually showing, as a
- * picker id. Quiet hours force Off (the window darkens the panel whatever
+ * picker id. `now_showing_empty` is [`panel_shows_nothing`], not the list's
+ * length. Quiet hours force Off (the window darkens the panel whatever
  * the mode says); scores mode with nothing on is showing the idle screen,
  * with the blank descriptor reading as Off.
  */
@@ -5821,6 +5822,22 @@ public func offModeValue(mode: UiOffMode, key: String, params: [String: String])
             FfiConverterTypeUiOffMode.lower(mode),
             FfiConverterString.lower(key),
             FfiConverterDictionaryStringString.lower(params), $0
+        )
+    })
+}
+
+/**
+ * Is the panel showing NO game? Counts only entries that are actually in
+ * the board's rotation: an "upcoming" entry is claimed-but-unstarted (it
+ * rides along in "Live and Upcoming" for the reader, flagged `queued`) and a
+ * bumped one was pushed off by the cap — neither is on the glass. Passing
+ * the raw list length instead put the ring on Scores while the panel sat
+ * on the idle weather screen waiting for tonight's games.
+ */
+public func panelShowsNothing(nowShowing: [UiGame]) -> Bool {
+    return try! FfiConverterBool.lift(try! rustCall {
+        uniffi_app_core_fn_func_panel_shows_nothing(
+            FfiConverterSequenceTypeUiGame.lower(nowShowing), $0
         )
     })
 }
@@ -6129,7 +6146,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_func_displayed_now_showing() != 48767 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_func_effective_mode() != 28114 {
+    if uniffi_app_core_checksum_func_effective_mode() != 65057 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_fallback_off_modes() != 1849 {
@@ -6175,6 +6192,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_off_mode_value() != 49163 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_panel_shows_nothing() != 2688 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_parse_networks() != 61308 {

@@ -12,6 +12,8 @@
 		5C0FFEE5C0FFEE5C0FFEE515 /* app_core.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C0FFEE5C0FFEE5C0FFEE514 /* app_core.swift */; };
 		5C0FFEE5C0FFEE5C0FFEE518 /* AppCore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5C0FFEE5C0FFEE5C0FFEE517 /* AppCore.xcframework */; };
 		5C0FFEE5C0FFEE5C0FFEE521 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5C0FFEE5C0FFEE5C0FFEE520 /* Assets.xcassets */; };
+		5C0FFEE5C0FFEE5C0FFEE523 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 5C0FFEE5C0FFEE5C0FFEE522 /* PrivacyInfo.xcprivacy */; };
+		ED8AE7863054FD7A0010ADBE /* ScoreboardIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = ED8AE7853054FD7A0010ADBE /* ScoreboardIcon.icon */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -22,6 +24,8 @@
 		5C0FFEE5C0FFEE5C0FFEE516 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		5C0FFEE5C0FFEE5C0FFEE517 /* AppCore.xcframework */ = {isa = PBXFileReference; expectedSignature = "AppleDeveloperProgram:C2UW47HS8X:Mark Schmidt"; lastKnownFileType = wrapper.xcframework; name = AppCore.xcframework; path = ../AppCore.xcframework; sourceTree = SOURCE_ROOT; };
 		5C0FFEE5C0FFEE5C0FFEE520 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		5C0FFEE5C0FFEE5C0FFEE522 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		ED8AE7853054FD7A0010ADBE /* ScoreboardIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = ScoreboardIcon.icon; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -41,6 +45,7 @@
 			children = (
 				5C0FFEE5C0FFEE5C0FFEE504 /* ScoreboardApp */,
 				5C0FFEE5C0FFEE5C0FFEE519 /* Frameworks */,
+				ED8AE7853054FD7A0010ADBE /* ScoreboardIcon.icon */,
 				5C0FFEE5C0FFEE5C0FFEE503 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -61,6 +66,7 @@
 				5C0FFEE5C0FFEE5C0FFEE514 /* app_core.swift */,
 				5C0FFEE5C0FFEE5C0FFEE520 /* Assets.xcassets */,
 				5C0FFEE5C0FFEE5C0FFEE516 /* Info.plist */,
+				5C0FFEE5C0FFEE5C0FFEE522 /* PrivacyInfo.xcprivacy */,
 			);
 			path = ScoreboardApp;
 			sourceTree = "<group>";
@@ -132,6 +138,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				5C0FFEE5C0FFEE5C0FFEE521 /* Assets.xcassets in Resources */,
+				5C0FFEE5C0FFEE5C0FFEE523 /* PrivacyInfo.xcprivacy in Resources */,
+				ED8AE7863054FD7A0010ADBE /* ScoreboardIcon.icon in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -256,11 +264,12 @@
 		5C0FFEE5C0FFEE5C0FFEE50E /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = ScoreboardIcon;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = NO;
 				CODE_SIGNING_ALLOWED = YES;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APPINTENTS_METADATA_EXTRACTION = NO;
 				ENABLE_PREVIEWS = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
@@ -268,8 +277,6 @@
 				);
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ScoreboardApp/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Score One";
-				ENABLE_APPINTENTS_METADATA_EXTRACTION = NO;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -287,11 +294,12 @@
 		5C0FFEE5C0FFEE5C0FFEE50F /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = ScoreboardIcon;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = NO;
 				CODE_SIGNING_ALLOWED = YES;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APPINTENTS_METADATA_EXTRACTION = NO;
 				ENABLE_PREVIEWS = YES;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
@@ -299,8 +307,6 @@
 				);
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = ScoreboardApp/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Score One";
-				ENABLE_APPINTENTS_METADATA_EXTRACTION = NO;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

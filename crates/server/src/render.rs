@@ -200,13 +200,19 @@ fn kern(prev: char, cur: char, big: bool, base: i32) -> i32 {
     let (Some(pg), Some(cg)) = (font.glyph(prev), font.glyph(cur)) else {
         return 0;
     };
+    // A period or comma is a dot on the baseline, and the row rule below
+    // would tuck the next glyph clean over it: "+0.44" drew the dot inside
+    // the 4's empty bottom-left corner and read "+044" on the F1 tower. A
+    // low mark keeps every row of the next glyph clear of it instead.
+    let low_mark = matches!(prev, '.' | ',');
     let mut min_gap: Option<i32> = None;
     for rrel in -8..=2 {
         let Some((cl, _)) = glyph_ink_row(cg, rrel) else {
             continue;
         };
         // prev's rightmost ink within one row of this one (catches diagonals)
-        let pr = [rrel - 1, rrel, rrel + 1]
+        let rows: Vec<i32> = if low_mark { (-8..=2).collect() } else { vec![rrel - 1, rrel, rrel + 1] };
+        let pr = rows
             .into_iter()
             .filter_map(|r| glyph_ink_row(pg, r).map(|(_, right)| right))
             .max();
@@ -313,6 +319,57 @@ fn draw_text_right(c: &mut Canvas, s: &str, right: i32, by: i32, big: bool, colo
     draw_text(c, s, right - text_width(s, big), by, big, color);
 }
 
+/// The cell a tabular string gives `ch`, as `(glyph draw offset, advance)`.
+///
+/// A digit keeps the font's own advance. A period, comma or colon is one
+/// column of ink parked in the middle of a 4px cell, which put TWO blank
+/// columns on each side of the dot in "+7.16" and read as a gap in the
+/// number. Narrow punctuation gets a cell of its ink plus one blank column,
+/// with the ink at the cell's left edge — the digit before it already ends
+/// in a blank column, so the dot sits one column clear on both sides.
+fn tabular_cell(ch: char, big: bool) -> (i32, i32) {
+    if matches!(ch, '.' | ',' | ':') {
+        let font = if big { crate::bdf::font_5x8() } else { crate::bdf::font_4x6() };
+        if let Some(g) = font.glyph(ch) {
+            let (lo, hi) = (-8..=2)
+                .filter_map(|r| glyph_ink_row(g, r))
+                .fold((i32::MAX, i32::MIN), |(lo, hi), (l, r)| (lo.min(l), hi.max(r)));
+            if lo <= hi {
+                return (-lo, hi - lo + 2);
+            }
+        }
+    }
+    (0, advance(ch, big))
+}
+
+/// Draw text in fixed cells with NO optical kerning — tabular figures. The
+/// leaderboard's timing column uses this and nothing else does: kerned,
+/// "+7.16" tucked its dot under the 7's top bar, and the row above kerned
+/// "+1.23" by a different amount, so the decimal points wandered from row
+/// to row (MAR-115). With every glyph in its own cell and the column
+/// right-aligned, the dots stack.
+fn draw_text_tabular(c: &mut Canvas, s: &str, x: i32, by: i32, big: bool, color: Rgb888) {
+    let font = if big { crate::bdf::font_5x8() } else { crate::bdf::font_4x6() };
+    let mut cx = x;
+    for ch in s.chars() {
+        let (off, adv) = tabular_cell(ch, big);
+        if let Some(g) = font.glyph(ch) {
+            draw_glyph(c, g, cx + off, by, color);
+        }
+        cx += adv;
+    }
+}
+
+/// Width of `s` as `draw_text_tabular` draws it: a plain sum of its cells.
+pub(crate) fn tabular_width(s: &str, big: bool) -> i32 {
+    s.chars().map(|ch| tabular_cell(ch, big).1).sum()
+}
+
+/// Tabular text right-aligned so its right edge sits at `right`.
+fn draw_text_right_tabular(c: &mut Canvas, s: &str, right: i32, by: i32, big: bool, color: Rgb888) {
+    draw_text_tabular(c, s, right - tabular_width(s, big), by, big, color);
+}
+
 /// Like `draw_text` but stops before `max_right`, so a long name doesn't run into
 /// a right-aligned value (used by the leaderboard rows).
 fn draw_text_clip(c: &mut Canvas, s: &str, x: i32, by: i32, max_right: i32, big: bool, color: Rgb888) {
@@ -374,7 +431,7 @@ fn draw_sprite(c: &mut Canvas, sprite: (&[u8], i32), x0: i32, y0: i32, color: Rg
 /// per-char advances, no optical kerning. Baseball's ordinal-position quirk
 /// (shift left in extra innings) was computed with THIS measure, so it is here.
 fn naive_width_4x6(s: &str) -> i32 {
-    s.chars().map(|ch| advance(ch, false)).sum()
+    tabular_width(s, false)
 }
 
 struct Layout {
@@ -517,7 +574,7 @@ pub fn team_name_metrics(sport: &str, display: &str) -> (i32, i32) {
 pub fn leaderboard_name_metrics(name: &str, value: &str, has_rank: bool) -> (i32, i32) {
     let width = text_width(name, false);
     let value_right = 63;
-    let name_max_right = value_right - text_width(value, false) - 2;
+    let name_max_right = value_right - tabular_width(value, false) - 2;
     let name_x = if has_rank { text_width("20", false) + 3 } else { 1 };
     (width, name_max_right - name_x)
 }
@@ -671,8 +728,8 @@ fn render_spoiled(g: &Game, mode: SpoilerMode, style: NameStyle) -> (FrameId, Ve
         draw_text(&mut c, &lb.name, tx, 5, false, title_color);
         let rx = FRAME_WIDTH as i32 - 1 - FLAG_W;
         if f1 && tx >= 1 + FLAG_W + 2 && tx + title_w <= rx - 2 {
-            checkered_flag(&mut c, 1);
-            checkered_flag(&mut c, rx);
+            checkered_flag(&mut c, 1, 1);
+            checkered_flag(&mut c, rx, 1);
         }
         let by = centered_baseline(8, FRAME_HEIGHT as i32 - 8, true);
         draw_text(&mut c, &text, 32 - text_width(&text, true) / 2, by, true, color);
@@ -1214,9 +1271,20 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
     // bottom): 4 rows land exactly on the 32px panel; more rows grow the frame
     // by 6px each and the board scrolls the window.
     let rows = lb.rows.len().min(max_rows);
-    let height = if rows > 4 { 12 + (rows as i32 - 1) * 6 + 2 } else { FRAME_HEIGHT as i32 };
-    let mut c = Canvas::with_height(height as usize);
     let f1 = g.sport_id == "f1";
+    // A race with a known distance wears a LAP BAR under the title: one
+    // pixel per lap, filled as the leader completes them, wrapping onto a
+    // second row past 64 laps (Monaco). The bar takes a blank row on each
+    // side, and the panel only has that row if the title moves up to the
+    // top edge: title 5 + gap + bar + gap + four rows of 5 on their 6px
+    // pitch = 31 of 32. A two-row bar needs the 32nd as well, so the rows
+    // move down one and the last row's descender row is the panel edge.
+    let laps = if f1 { lb.laps.filter(|l| l.total > 0) } else { None };
+    let bar_rows = laps.map_or(0, |l| (l.total as i32 + FRAME_WIDTH as i32 - 1) / FRAME_WIDTH as i32).min(2);
+    let title_by = if bar_rows > 0 { 4 } else { 5 };
+    let first_by = 12 + (bar_rows - 1).max(0);
+    let height = if rows > 4 { first_by + (rows as i32 - 1) * 6 + 2 } else { FRAME_HEIGHT as i32 };
+    let mut c = Canvas::with_height(height as usize);
     let accent = if f1 {
         Rgb888::new(225, 6, 0) // F1 red
     } else {
@@ -1224,7 +1292,16 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
     };
     // F1 wears race-day chrome: white event title between checkered flags.
     let title_color = if f1 { WHITE } else { accent };
-    let title_w = text_width(&lb.name, false);
+    // A live qualifying title names its segment: "SPANISH GP Q" -> "SPANISH
+    // GP Q2". The digit rides on the session letter the parser put there,
+    // and only when the whole thing still fits the panel.
+    let title = match lb.stage {
+        Some(st) if lb.name.ends_with('Q') && text_width(&format!("{}{st}", lb.name), false) <= 62 => {
+            format!("{}{st}", lb.name)
+        }
+        _ => lb.name.clone(),
+    };
+    let title_w = text_width(&title, false);
     // Golf titles that can share the row with the round LEFT-ALIGN instead of
     // centering: centering wasted the left margin and let any name past ~8
     // characters evict the round. Left-aligned, names up to ~10 characters
@@ -1237,12 +1314,13 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
     let shares_row =
         !f1 && !g.ordinal.is_empty() && TITLE_MARGIN + title_w <= 61 - round_w;
     let tx = if shares_row { TITLE_MARGIN } else { 32 - title_w / 2 };
-    draw_text(&mut c, &lb.name, tx, 5, false, title_color);
+    draw_text(&mut c, &title, tx, title_by, false, title_color);
     if f1 {
         // Flags only when the title clears them by 2px on both sides — a long
         // title ("BRITISH GP Q") otherwise collides and reads as garbage.
         let (flag_w, gap) = (FLAG_W, 2);
         let rx = FRAME_WIDTH as i32 - 1 - flag_w;
+        let fy = title_by - 4;
         if tx >= 1 + flag_w + gap && tx + title_w <= rx - gap {
             // Track status recolors the pair: SOLID red or yellow, because
             // that is what those flags look like — checks are the chequered
@@ -1250,17 +1328,26 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
             // the checkered chrome.
             match lb.flag.as_deref() {
                 Some("red") => {
-                    fill(&mut c, 1, 1, flag_w as u32, FLAG_H as u32, Rgb888::new(255, 0, 0));
-                    fill(&mut c, rx, 1, flag_w as u32, FLAG_H as u32, Rgb888::new(255, 0, 0));
+                    fill(&mut c, 1, fy, flag_w as u32, FLAG_H as u32, Rgb888::new(255, 0, 0));
+                    fill(&mut c, rx, fy, flag_w as u32, FLAG_H as u32, Rgb888::new(255, 0, 0));
                 }
                 Some("yellow") => {
-                    fill(&mut c, 1, 1, flag_w as u32, FLAG_H as u32, YELLOW);
-                    fill(&mut c, rx, 1, flag_w as u32, FLAG_H as u32, YELLOW);
+                    fill(&mut c, 1, fy, flag_w as u32, FLAG_H as u32, YELLOW);
+                    fill(&mut c, rx, fy, flag_w as u32, FLAG_H as u32, YELLOW);
                 }
                 _ => {
-                    checkered_flag(&mut c, 1);
-                    checkered_flag(&mut c, rx);
+                    checkered_flag(&mut c, 1, fy);
+                    checkered_flag(&mut c, rx, fy);
                 }
+            }
+        }
+        if let Some(l) = laps {
+            // Row 6, then row 7 for laps past 64. Unfilled laps are a dim
+            // track so the bar reads as a bar before the first lap is done.
+            let done = l.completed.min(l.total);
+            for lap in 0..l.total.min(2 * FRAME_WIDTH as u32) {
+                let (x, y) = ((lap % FRAME_WIDTH as u32) as i32, 6 + (lap / FRAME_WIDTH as u32) as i32);
+                fill(&mut c, x, y, 1, 1, if lap < done { WHITE } else { LAP_TRACK });
             }
         }
     } else {
@@ -1279,7 +1366,7 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
         // Match the original golf.rs density: 4x6 rows on a 6px pitch, so the title
         // + 4 rows = 5 rows fit the 32px panel (the original fit 5, not 4). The whole
         // block sits one pixel down from the top so the gap is even (1px) top + bottom.
-        let mut by = 12;
+        let mut by = first_by;
         // The thru column is a COLUMN: anchored off the widest score on the
         // screen, not each row's own. Per-row anchoring made the digits
         // zigzag whenever -11 sat above -9.
@@ -1287,16 +1374,38 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
             .rows
             .iter()
             .take(max_rows.max(5))
-            .map(|r| text_width(&r.value, false))
+            .map(|r| tabular_width(&r.value, false))
             .max()
             .unwrap_or(0);
-        for row in lb.rows.iter().take(max_rows.max(5)) {
+        let shown = lb.rows.len().min(max_rows.max(5));
+        for (i, row) in lb.rows.iter().take(shown).enumerate() {
+            // Qualifying's elimination zones, by rank. A driver already
+            // knocked out in an earlier segment is a closed book and goes
+            // grey — rank, code, and the time that put them out. One in the
+            // running segment's drop zone keeps the team colours (they are
+            // still racing) and wears the rank in red; a red line under the
+            // last safe row is the broadcast tower's cut line.
+            let rank_n: Option<u32> = row.rank.parse().ok();
+            let out = matches!((lb.quali, rank_n), (Some(z), Some(r)) if r > z.field);
+            let danger = matches!((lb.quali, rank_n), (Some(z), Some(r)) if r > z.safe && r <= z.field);
+            let cut_below = matches!((lb.quali, rank_n), (Some(z), Some(r)) if r == z.safe && z.safe < z.field)
+                && i + 1 < shown;
             // Leaderboard rows draw the team/driver color as ink on the BLACK
             // panel — a dark team color (deep blue, maroon) would be unreadable,
             // so force it to white when it doesn't clear black by enough. The
             // team-row path already runs colors through ensure_contrast; this
             // brings the F1/golf tower to parity.
-            let ink = row.color.map(|c| ensure_contrast(Rgb888::BLACK, c)).unwrap_or(WHITE);
+            let ink = if out {
+                GREY
+            } else {
+                row.color.map(|c| ensure_contrast(Rgb888::BLACK, c)).unwrap_or(WHITE)
+            };
+            let rank_ink = if danger { accent } else { ink };
+            if cut_below {
+                // The one blank pixel row between this row's glyphs and the
+                // next's: rows sit on a 6px pitch with 5px glyphs.
+                fill(&mut c, 0, by + 1, FRAME_WIDTH as u32, 1, accent);
+            }
             // Tire compound: a 1px strip on the far right edge, full row pitch
             // so consecutive rows read as one continuous color column.
             let value_right = if let Some(t) = row.tire {
@@ -1309,7 +1418,9 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
             // score keeps the emphasis. Only a golfer still on the course
             // carries one, so on a finished round the column is not there at
             // all and the name gets the width back.
-            let value_w = text_width(&row.value, false);
+            // The timing column is tabular (fixed advances, no kerning) so its
+            // decimal points share a column down the tower.
+            let value_w = tabular_width(&row.value, false);
             let name_max_right = if let Some(thru) = &row.thru {
                 let thru_right = value_right - widest_value - 3;
                 draw_text_right(&mut c, thru, thru_right, by, false, GREY);
@@ -1325,7 +1436,7 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
                 // timings line up.
                 let col_w = text_width("20", false);
                 let rx = (col_w - text_width(&row.rank, false)) / 2;
-                draw_text(&mut c, &row.rank, rx, by, false, ink);
+                draw_text(&mut c, &row.rank, rx, by, false, rank_ink);
                 col_w + 3
             };
             // A golfer last-name / driver code that runs into the value gets
@@ -1336,8 +1447,18 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
             draw_text_clip(&mut c, &row.name, name_x, by, name_max_right, false, ink);
             // The timing wears the team color too (contrast-guarded like the
             // name); golf (no row color) keeps its green accent values.
-            let value_ink = row.color.map(|c| ensure_contrast(Rgb888::BLACK, c)).unwrap_or(accent);
-            draw_text_right(&mut c, &row.value, value_right, by, false, value_ink);
+            // Golf (no row colour) keeps its green accent values. An F1 row
+            // without a team colour draws its timing white, not red: on the
+            // tower red now means the drop zone, and a red "1:35.91" beside
+            // a white code read as a warning about nothing.
+            let value_ink = if out {
+                GREY
+            } else {
+                row.color
+                    .map(|c| ensure_contrast(Rgb888::BLACK, c))
+                    .unwrap_or(if f1 { WHITE } else { accent })
+            };
+            draw_text_right_tabular(&mut c, &row.value, value_right, by, false, value_ink);
             by += 6;
         }
     }
@@ -1366,11 +1487,14 @@ fn tire_color(compound: char) -> Rgb888 {
 /// title's cap height leaves a hair of air under the text line.
 const FLAG_W: i32 = 7;
 const FLAG_H: i32 = 5;
-fn checkered_flag(c: &mut Canvas, x0: i32) {
+/// The unfilled part of the lap bar: dim enough to read as a track under
+/// the white laps, bright enough to survive RGB565 and a real panel.
+const LAP_TRACK: Rgb888 = Rgb888::new(64, 64, 64);
+fn checkered_flag(c: &mut Canvas, x0: i32, y0: i32) {
     for cy in 0..FLAG_H {
         for cx in 0..FLAG_W {
             if (cx + cy) % 2 == 0 {
-                fill(c, x0 + cx, 1 + cy, 1, 1, WHITE);
+                fill(c, x0 + cx, y0 + cy, 1, 1, WHITE);
             }
         }
     }
@@ -1954,8 +2078,10 @@ mod kern_tests {
             clock: String::new(),
             start_time: "2026-08-08T11:00Z".into(),
             end_time: None,
-            leaderboard: Some(crate::model::Leaderboard {
+            leaderboard: Some(crate::model::Leaderboard { laps: None,
                 flag: None,
+                stage: None,
+                quali: None,
                 name: name.into(),
                 rows: vec![crate::model::LeaderRow {
                     name: "SCHEFFLER".into(),
@@ -2122,8 +2248,10 @@ mod kern_tests {
             ordinal: String::new(),
             clock: String::new(),
             start_time: String::new(), end_time: None,
-            leaderboard: Some(Leaderboard {
+            leaderboard: Some(Leaderboard { laps: None,
                 flag: None,
+                stage: None,
+                quali: None,
                 name: "MONACO GP".into(),
                 rows: vec![
                     LeaderRow { name: "VERSTAPPEN".into(), value: "L42".into(), ..Default::default() },
@@ -2160,6 +2288,176 @@ mod kern_tests {
         // Kerning never ADDS space: a string is never wider than its naive cell sum.
         let naive: i32 = "GRAVY".chars().map(|c| advance(c, big)).sum();
         assert!(text_width("GRAVY", big) <= naive);
+    }
+
+    /// "+0.44": the 4's bottom-left is empty, so row-wise kerning slid it
+    /// over the dot and the panel read "+044". The dot's ink (column 1) must
+    /// keep a clear column before the 4's stroke.
+    #[test]
+    fn a_period_never_tucks_under_the_next_digit() {
+        assert!(kerned_advance('.', '4', false) >= 3, "dot at col 1, gap at col 2, digit from col 3");
+        assert!(kerned_advance('.', '7', false) >= 3);
+        // A digit before the dot still kerns as before: nothing tucks under a 4.
+        assert_eq!(kerned_advance('4', '.', false), advance('4', false) - kern('4', '.', false, advance('4', false)));
+    }
+
+    /// MAR-115: the timing column is TABULAR. Kerned, "+7.16" tucked its dot
+    /// under the 7's overhang (the 7's ink on the dot's rows is one column,
+    /// so the kerner saw a hole) and "+1.23" kerned by a different amount,
+    /// so the decimal points wandered from row to row. Fixed advances and a
+    /// shared right edge put every dot in the same column.
+    #[test]
+    fn leaderboard_timing_decimals_share_a_column() {
+        use crate::model::{Game, GameStatus, Leaderboard, LeaderRow, TeamSide};
+        // The kerner WOULD tuck the dot under a 7; the tabular measure ignores it.
+        assert!(text_width("7.", false) < tabular_width("7.", false));
+        let values = ["+1.23", "+7.16", "+3.57"];
+        let mut rows = vec![LeaderRow { rank: "1".into(), name: "LEC".into(), ..Default::default() }];
+        for (i, v) in values.iter().enumerate() {
+            rows.push(LeaderRow { rank: (i + 2).to_string(), name: "ANT".into(), value: v.to_string(), ..Default::default() });
+        }
+        let g = Game {
+            id: "t".into(),
+            sport_id: "f1".into(),
+            home: TeamSide::empty(""),
+            away: TeamSide::empty("F1"),
+            status: GameStatus::Active,
+            ordinal: String::new(),
+            clock: String::new(),
+            start_time: String::new(), end_time: None,
+            leaderboard: Some(Leaderboard { laps: None, flag: None, stage: None, quali: None, name: "SPANISH GP".into(), rows }),
+            champ: None,
+            series: None,
+            session: Some("race".into()),
+            situation: None,
+            pregame: None,
+        };
+        let (_, px) = render_leaderboard(&g, None);
+        // Rows sit on baselines 12, 18, 24, 30; the dot is the lone pixel on
+        // the baseline row between the digit cells either side of it.
+        // "+d.dd" right-aligned at 63 in cells of 4, 4, 2, 4, 4: '+' 45,
+        // digit 49, the dot's ink at 53, the next digit from 55.
+        assert_eq!(tabular_width("+7.16", false), 18);
+        let dot_cols: Vec<Vec<i32>> = (0..values.len())
+            .map(|i| {
+                let by = 18 + 6 * i as i32;
+                (52..55).filter(|&x| px565(&px, x, by) != 0).collect()
+            })
+            .collect();
+        for (v, cols) in values.iter().zip(&dot_cols) {
+            assert_eq!(cols, &vec![53], "{v}: the dot must be the only ink between the digit cells");
+        }
+        // ONE blank column on each side of the dot, not two: "+1.23"'s 1 has
+        // its base bar out to column 51, then blank 52, dot 53, blank 54.
+        assert_ne!(px565(&px, 51, 18), 0, "the 1's base bar reaches the column before the gap");
+    }
+
+    fn race_with_laps(laps: Option<crate::model::LapProgress>) -> Game {
+        use crate::model::{Leaderboard, LeaderRow, TeamSide};
+        let row = |rank: &str, name: &str, value: &str| LeaderRow {
+            rank: rank.into(), name: name.into(), value: value.into(), ..Default::default()
+        };
+        Game {
+            id: "t".into(),
+            sport_id: "f1".into(),
+            home: TeamSide::empty(""),
+            away: TeamSide::empty("F1"),
+            status: GameStatus::Active,
+            ordinal: String::new(),
+            clock: String::new(),
+            start_time: String::new(), end_time: None,
+            leaderboard: Some(Leaderboard {
+                laps,
+                flag: None,
+                stage: None,
+                quali: None,
+                name: "SPANISH GP".into(),
+                rows: vec![row("1", "LEC", ""), row("2", "ANT", "+1.23"), row("3", "VER", "+7.16"), row("4", "RUS", "+3.57")],
+            }),
+            champ: None,
+            series: None,
+            session: Some("race".into()),
+            situation: None,
+            pregame: None,
+        }
+    }
+
+    /// MAR-116: the lap bar sits one blank row under the title and one
+    /// above the first driver row, and the title moves to the panel's top
+    /// edge to pay for it. The rows themselves do not move.
+    #[test]
+    fn lap_bar_moves_the_title_up_and_keeps_a_gap_each_side() {
+        use crate::model::LapProgress;
+        let row_lit = |px: &[u8], y: i32| (0..FRAME_WIDTH as i32).filter(|&x| px565(px, x, y) != 0).count();
+        // Without a bar: today's layout, 1px margin top and bottom.
+        let (_, px) = render_leaderboard(&race_with_laps(None), None);
+        assert_eq!(row_lit(&px, 0), 0, "no bar: blank top row");
+        assert!(row_lit(&px, 1) > 0, "no bar: title ink from row 1");
+        assert_eq!(row_lit(&px, 31), 0, "no bar: blank bottom row");
+
+        let (_, px) = render_leaderboard(&race_with_laps(Some(LapProgress { completed: 23, total: 57 })), None);
+        assert!(row_lit(&px, 0) > 0, "title ink starts on row 0");
+        assert_eq!(row_lit(&px, 5), 0, "blank row between title and bar");
+        let bar: Vec<u16> = (0..FRAME_WIDTH as i32).map(|x| px565(&px, x, 6)).collect();
+        assert_eq!(bar.iter().filter(|&&p| p == c565(WHITE)).count(), 23, "23 laps done");
+        assert_eq!(bar.iter().filter(|&&p| p == c565(LAP_TRACK)).count(), 57 - 23, "34 to go");
+        assert_eq!(bar.iter().filter(|&&p| p == 0).count(), 64 - 57, "nothing past the distance");
+        assert_eq!(row_lit(&px, 7), 0, "blank row between bar and rows");
+        assert!(row_lit(&px, 8) > 0, "first driver row where it always was");
+        assert_eq!(row_lit(&px, 31), 0, "bottom margin kept");
+    }
+
+    /// Writes the lap-bar frames as LED-style PNGs for eyeballing:
+    ///   MOCKUP_OUT=/tmp/f1 cargo test -p server dump_lap_bar_frames -- --ignored
+    #[test]
+    #[ignore = "writes preview PNGs; run with --ignored and MOCKUP_OUT"]
+    fn dump_lap_bar_frames() {
+        use crate::model::LapProgress;
+        let out = std::path::PathBuf::from(std::env::var("MOCKUP_OUT").expect("MOCKUP_OUT"));
+        std::fs::create_dir_all(&out).unwrap();
+        for (name, laps) in [
+            ("lap-bar-none", None),
+            ("lap-bar-23-of-57", Some(LapProgress { completed: 23, total: 57 })),
+            ("lap-bar-70-of-78", Some(LapProgress { completed: 70, total: 78 })),
+        ] {
+            let (_, px) = render_leaderboard(&race_with_laps(laps), None);
+            let mut img = image::RgbImage::new(FRAME_WIDTH as u32 * 8, FRAME_HEIGHT as u32 * 8);
+            for y in 0..FRAME_HEIGHT as i32 {
+                for x in 0..FRAME_WIDTH as i32 {
+                    let v = px565(&px, x, y);
+                    let (r, g, b) = (((v >> 11) as u8) << 3, (((v >> 5) & 0x3F) as u8) << 2, ((v & 0x1F) as u8) << 3);
+                    if v == 0 { continue; }
+                    for dy in 0..6u32 { for dx in 0..6u32 {
+                        img.put_pixel(x as u32 * 8 + 1 + dx, y as u32 * 8 + 1 + dy, image::Rgb([r, g, b]));
+                    }}
+                }
+            }
+            img.save(out.join(format!("{name}.png"))).unwrap();
+        }
+    }
+
+    /// Past 64 laps the bar wraps onto row 7 and the rows move down one,
+    /// spending the bottom margin: 32 rows exactly.
+    #[test]
+    fn two_row_lap_bar_spends_the_bottom_margin() {
+        use crate::model::LapProgress;
+        let row_lit = |px: &[u8], y: i32| (0..FRAME_WIDTH as i32).filter(|&x| px565(px, x, y) != 0).count();
+        let (_, px) = render_leaderboard(&race_with_laps(Some(LapProgress { completed: 70, total: 78 })), None);
+        assert_eq!(row_lit(&px, 6), 64, "first bar row full");
+        assert_eq!(row_lit(&px, 7), 78 - 64, "second bar row carries the rest");
+        assert_eq!((0..64).filter(|&x| px565(&px, x, 6) == c565(WHITE)).count(), 64);
+        assert_eq!((0..64).filter(|&x| px565(&px, x, 7) == c565(WHITE)).count(), 6, "70 done = 64 + 6");
+        assert_eq!(row_lit(&px, 8), 0, "blank row under the bar");
+        assert!(row_lit(&px, 9) > 0, "rows start one lower");
+        assert!(row_lit(&px, 31) > 0, "last row's baseline is the panel edge");
+        // A deep tower keeps the same pitch below the bar.
+        let mut g = race_with_laps(Some(LapProgress { completed: 70, total: 78 }));
+        let lb = g.leaderboard.as_mut().unwrap();
+        for i in 5..=8 {
+            lb.rows.push(crate::model::LeaderRow { rank: i.to_string(), name: "XXX".into(), ..Default::default() });
+        }
+        let (_, tall) = render_leaderboard_rows(&g, 8, None);
+        assert_eq!(tall.len(), (13 + 7 * 6 + 2) * FRAME_WIDTH * 2, "8 rows from baseline 13, plus the descender row");
     }
 
     // ---- situational layouts (ported from the original football/baseball/hockey.rs) ----
@@ -2406,8 +2704,10 @@ mod kern_tests {
                 down_string: String::new(), ball_position: String::new(), home_possession: None,
             });
             g.situation = None;
-            g.leaderboard = Some(crate::model::Leaderboard {
+            g.leaderboard = Some(crate::model::Leaderboard { laps: None,
                 flag: None,
+                stage: None,
+                quali: None,
                 name: "THE OPEN".into(),
                 rows: vec![crate::model::LeaderRow {
                     name: "SCHEFFLER".into(),
@@ -2847,8 +3147,10 @@ mod kern_tests {
         });
         g.situation = None;
         g.home = TeamSide::empty("");
-        let lb = |name: &str| Some(Leaderboard {
+        let lb = |name: &str| Some(Leaderboard { laps: None,
             flag: None,
+            stage: None,
+            quali: None,
             name: name.into(),
             rows: vec![LeaderRow { name: "VER".into(), value: "+1".into(), ..Default::default() }],
         });
@@ -2862,6 +3164,57 @@ mod kern_tests {
         g.leaderboard = lb("BRITISH GP Q");
         let (_, px) = render_game(&g, None, NameStyle::Name);
         assert!(!corner_lit(&px), "long title takes the corners instead");
+    }
+
+    /// A live qualifying tower: the segment digit joins the title, the rank
+    /// of a driver in the drop zone goes red under a red cut line, and a
+    /// driver already eliminated goes grey top to bottom.
+    #[test]
+    fn quali_zones_paint_the_cut_line_red_ranks_and_grey_outs() {
+        use crate::model::{Leaderboard, LeaderRow, QualiZones};
+        let row = |rank: &str, value: &str| LeaderRow {
+            rank: rank.into(),
+            name: "VER".into(),
+            value: value.into(),
+            color: Some(Rgb888::new(0x36, 0x71, 0xC6)),
+            tire: None,
+            thru: None,
+        };
+        let mut g = sit_game("f1", "", "", Situation::Football {
+            down_string: String::new(), ball_position: String::new(), home_possession: None,
+        });
+        g.situation = None;
+        g.home = TeamSide::empty("");
+        // A fixture-sized field: ranks 1..4, cut after 2, out from 4.
+        g.leaderboard = Some(Leaderboard { laps: None,
+            flag: None,
+            name: "SPANISH GP Q".into(),
+            stage: Some(2),
+            quali: Some(QualiZones { safe: 2, field: 3 }),
+            rows: vec![row("1", ""), row("2", "+0.16"), row("3", "+0.29"), row("4", "1:35.31")],
+        });
+        let (_, px) = render_game(&g, None, NameStyle::Name);
+        let red = c565(Rgb888::new(225, 6, 0));
+        let grey = c565(GREY);
+        let team = c565(ensure_contrast(Rgb888::BLACK, Rgb888::new(0x36, 0x71, 0xC6)));
+        // Row baselines 12, 18, 24, 30; the cut line sits at 19, under P2.
+        assert!((0..64).all(|x| px565(&px, x, 19) == red), "cut line under the last safe row");
+        assert!(!(0..64).any(|x| px565(&px, x, 13) == red), "no line under P1");
+        let band_has = |y0: i32, y1: i32, x0: i32, x1: i32, c: u16| {
+            (y0..=y1).any(|y| (x0..x1).any(|x| px565(&px, x, y) == c))
+        };
+        assert!(band_has(20, 24, 0, 9, red), "P3's rank is red: in the drop zone");
+        assert!(band_has(20, 24, 12, 30, team), "P3's code keeps the team colour");
+        assert!(band_has(26, 30, 0, 9, grey) && band_has(26, 30, 12, 64, grey), "P4 is out: grey rank, code, time");
+        assert!(!band_has(26, 30, 0, 64, team), "no team colour left on the out row");
+        assert!(!band_has(7, 12, 0, 9, red), "P1's rank is not red");
+
+        // The title gained the digit: "SPANISH GP Q2" is wider than "SPANISH GP Q".
+        let lit = |px: &[u8]| (0..64).filter(|&x| (1..=5).any(|y| px565(px, x, y) != 0)).count();
+        let with = lit(&px);
+        g.leaderboard.as_mut().unwrap().stage = None;
+        let (_, px) = render_game(&g, None, NameStyle::Name);
+        assert!(lit(&px) < with, "without a stage the title is narrower");
     }
 
     /// Timing-tower alignment: ranks sit centered in a fixed two-digit column,
@@ -2883,7 +3236,7 @@ mod kern_tests {
         });
         g.situation = None;
         g.home = TeamSide::empty("");
-        g.leaderboard = Some(Leaderboard { flag: None, name: "GP".into(), rows: vec![row("1"), row("20")] });
+        g.leaderboard = Some(Leaderboard { laps: None, flag: None, stage: None, quali: None, name: "GP".into(), rows: vec![row("1"), row("20")] });
         let (_, px) = render_game(&g, None, NameStyle::Name);
 
         // Leftmost lit pixel past the rank column, per row band (baselines 12, 18).
@@ -2910,8 +3263,10 @@ mod kern_tests {
         });
         g.situation = None;
         g.home = TeamSide::empty("");
-        let rows = |n: usize| Some(Leaderboard {
+        let rows = |n: usize| Some(Leaderboard { laps: None,
             flag: None,
+            stage: None,
+            quali: None,
             name: "OPEN".into(),
             rows: (0..n).map(|i| LeaderRow { name: format!("PLAYER{i}"), value: format!("-{i}"), ..Default::default() }).collect(),
         });
@@ -3879,8 +4234,10 @@ mod wx_dump {
             clock: String::new(),
             start_time: "2026-08-23T13:00Z".into(),
             end_time: None,
-            leaderboard: Some(crate::model::Leaderboard {
+            leaderboard: Some(crate::model::Leaderboard { laps: None,
                 flag: flag.map(String::from),
+                stage: None,
+                quali: None,
                 name: "DUTCH GP".into(),
                 rows: vec![crate::model::LeaderRow {
                     rank: "1".into(),
@@ -3929,8 +4286,10 @@ mod wx_dump {
             clock: String::new(),
             start_time: "2026-08-24T11:00Z".into(),
             end_time: None,
-            leaderboard: Some(crate::model::Leaderboard {
+            leaderboard: Some(crate::model::Leaderboard { laps: None,
                 flag: None,
+                stage: None,
+                quali: None,
                 name: "FM".into(),
                 rows: vec![crate::model::LeaderRow {
                     name: "KIM".into(),
@@ -3977,8 +4336,10 @@ mod wx_dump {
             clock: String::new(),
             start_time: "2026-08-22T11:00Z".into(),
             end_time: None,
-            leaderboard: Some(crate::model::Leaderboard {
+            leaderboard: Some(crate::model::Leaderboard { laps: None,
                 flag: None,
+                stage: None,
+                quali: None,
                 // 9 chars, 44px: what the name map emits for this event —
                 // wide enough that panel-centering used to evict the round.
                 name: "CPKC OPEN".into(),
@@ -4037,6 +4398,7 @@ mod wx_dump {
         }
     }
 }
+
 
 
 

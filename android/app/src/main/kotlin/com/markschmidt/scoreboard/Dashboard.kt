@@ -153,7 +153,10 @@ private fun GamesSection(
                     GameCard(
                         session, state, boardId, game, refresh,
                         pinNeedsShowing = false,
-                        modifier = Modifier.width(300.dp),
+                        // 240 not 300: at 300 one card filled the phone's
+                        // width and the carousel read as a single card;
+                        // this matches the iOS dashboard's proportions.
+                        modifier = Modifier.width(240.dp),
                     )
                 }
             }
@@ -256,15 +259,22 @@ private fun ModePicker(session: Session, state: Session.AppState, boardId: Strin
     val board = state.boards[boardId] ?: return
     val modes = remember(state.offModes) { pickableModes(state.offModes) }
     if (modes.isEmpty()) return
-    val nothingShowing = board.nowShowing.isEmpty()
+    // Upcoming/bumped entries are not on the panel — the core decides.
+    val nothingShowing = panelShowsNothing(board.nowShowing)
     val selected = remember(cfg.mode, board.quietActive, nothingShowing, cfg.offMode) {
         effectiveMode(cfg.mode, board.quietActive, nothingShowing, cfg.offMode)
     }
     // Opens scrolled to the SELECTED tile — a rail whose selection sits
-    // off-screen reads as "nothing is selected" (MAR-110). Once, on entry;
-    // after that the user owns the scroll position.
+    // off-screen reads as "nothing is selected" (MAR-110). On entry and
+    // whenever the selection moves (state arriving after first composition,
+    // or the timer returning the board to scores); between moves the user
+    // owns the scroll position. Keyed on the TILES too: on a cold start the
+    // cached board state lands before the server's screen list, so the rail
+    // first composes as Scores/Off alone, the scroll to Weather finds no
+    // such tile, and when Clock/Weather arrive the selection is unchanged —
+    // nothing re-scrolled, and the ring sat off-screen.
     val listState = rememberLazyListState()
-    LaunchedEffect(Unit) {
+    LaunchedEffect(selected, modes) {
         val i = modes.indexOfFirst { it.id == selected }
         if (i > 0) listState.scrollToItem(i)
     }

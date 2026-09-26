@@ -1,4 +1,4 @@
-# Scoreboard
+# OpenScoreboard
 
 A physical 64×32 RGB LED scoreboard. **Smart server, dumb client**: the Rust
 server (`crates/server`) polls ESPN, renders every frame, and serves them over

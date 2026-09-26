@@ -1,4 +1,4 @@
-# Scoreboard for Android
+# OpenScoreboard for Android
 
 Kotlin/Compose over the **same Rust core the iOS app ships**
 (`crates/app-core`, via uniffi). The parity contract lives in the repo root's

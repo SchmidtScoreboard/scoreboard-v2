@@ -114,7 +114,58 @@ pub struct Leaderboard {
     /// draws the checkered pair. Serialized for the /game debug view.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flag: Option<String>,
+    /// Qualifying segment in progress (1..=3): the renderer appends it to
+    /// the session letter in the title ("SPANISH GP Q" -> "SPANISH GP Q2").
+    /// None outside a live qualifying session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<u8>,
+    /// Elimination zones of the running qualifying segment; None for races,
+    /// golf, and finished sessions (a classification has no danger zone).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quali: Option<QualiZones>,
+    /// Race progress for the lap bar under the title: laps the leader has
+    /// completed out of the scheduled distance. None outside race and
+    /// sprint sessions, before the start, and on a circuit whose distance
+    /// `laps.rs` does not know — no bar is better than a wrong one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub laps: Option<LapProgress>,
     pub rows: Vec<LeaderRow>,
+}
+
+/// Laps the leader has completed out of the race's scheduled total.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct LapProgress {
+    pub completed: u32,
+    pub total: u32,
+}
+
+/// Where the axe falls in a qualifying segment, by RANK. Ranks past `safe`
+/// are in the elimination zone of the segment being run; ranks past `field`
+/// were already eliminated in an earlier segment and are only along for the
+/// classification. Q3 has `safe == field == 10`: nobody left to drop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct QualiZones {
+    pub safe: u32,
+    pub field: u32,
+}
+
+impl QualiZones {
+    /// The zones for segment `stage` (1..=3) of an `n`-car field. The rules
+    /// drop half the surplus over ten in each of Q1 and Q2 (22 cars: 6 and 6,
+    /// leaving 16 then 10; 20 cars: 5 and 5). Fewer than ten cars is not a
+    /// qualifying format this understands.
+    pub fn for_field(n: usize, stage: u8) -> Option<Self> {
+        if n < 10 {
+            return None;
+        }
+        let n = n as u32;
+        let cut1 = n - (n - 10) / 2;
+        Some(match stage {
+            1 => QualiZones { safe: cut1, field: n },
+            2 => QualiZones { safe: 10, field: cut1 },
+            _ => QualiZones { safe: 10, field: 10 },
+        })
+    }
 }
 
 /// Championship/postseason context for a game, classified from ESPN's season
@@ -249,5 +300,22 @@ pub fn ensure_contrast(primary: Rgb888, secondary: Rgb888) -> Rgb888 {
         Rgb888::WHITE
     } else {
         Rgb888::BLACK
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 22 cars (2026): six out in Q1, six in Q2, ten in Q3. 20 cars: five
+    /// and five. Q3 has nobody left to drop.
+    #[test]
+    fn quali_zones_follow_the_field_size() {
+        assert_eq!(QualiZones::for_field(22, 1), Some(QualiZones { safe: 16, field: 22 }));
+        assert_eq!(QualiZones::for_field(22, 2), Some(QualiZones { safe: 10, field: 16 }));
+        assert_eq!(QualiZones::for_field(22, 3), Some(QualiZones { safe: 10, field: 10 }));
+        assert_eq!(QualiZones::for_field(20, 1), Some(QualiZones { safe: 15, field: 20 }));
+        assert_eq!(QualiZones::for_field(20, 2), Some(QualiZones { safe: 10, field: 15 }));
+        assert_eq!(QualiZones::for_field(3, 1), None, "not a qualifying format");
     }
 }

@@ -36,9 +36,18 @@ pub struct OpenF1 {
 pub struct SessionRows {
     pub session: &'static str,
     pub rows: Vec<LeaderRow>,
+    /// Live qualifying: the segment being run (1..=3), read exactly from
+    /// race control's session-status stream. None otherwise.
+    pub stage: Option<u8>,
+    /// Live qualifying: the segment's elimination zones. None otherwise.
+    pub quali: Option<crate::model::QualiZones>,
     /// Current track status: "red" / "yellow" recolor the frame's title-row
     /// flags. None = green-or-nothing, which draws the checkered pair.
     pub flag: Option<&'static str>,
+    /// Race and sprint: the leader's completed laps out of the circuit's
+    /// scheduled distance, for the lap bar. None when the distance is not
+    /// known or the session is not a race.
+    pub laps: Option<crate::model::LapProgress>,
     pub fetched: Instant,
 }
 
@@ -157,36 +166,78 @@ impl OpenF1 {
         // end time, which a red flag blows straight through). So each path
         // falls back to the other: live timing keeps flowing after the
         // flag, and a session that ended long ago has results by now.
-        let results_first = ended || kind == "quali" || kind == "sprint-quali";
+        let is_quali = kind == "quali" || kind == "sprint-quali";
+        let results_first = ended || is_quali;
         let from_results = |results: Vec<SessionResult>, drivers: &[Driver]| {
             let r = rows_from_results(&results, drivers);
             (!r.is_empty()).then_some(r)
         };
         let mut rows = None;
+        // Laps the leader has completed, from the live laps feed. A race the
+        // official classification covers is over: every lap is done.
+        let mut laps_done: Option<u32> = None;
         if results_first {
             if let Some(results) = self
                 .get_json(&format!("https://api.openf1.org/v1/session_result?session_key={key}"))
                 .await
             {
                 rows = from_results(results, &drivers);
+                laps_done = rows.as_ref().map(|_| u32::MAX);
             }
         }
+        // Race control serves two readers: the track flag below, and a live
+        // qualifying's segment boundaries. Fetched once, up front.
+        let msgs: Vec<RaceControl> = if ended && !is_quali {
+            Vec::new()
+        } else {
+            self.get_json(&format!("https://api.openf1.org/v1/race_control?session_key={key}"))
+                .await
+                .unwrap_or_default()
+        };
+        let (mut stage, mut zones) = (None, None);
         if rows.is_none() {
             let positions: Vec<Position> = self
                 .get_json(&format!("https://api.openf1.org/v1/position?session_key={key}"))
-                .await
-                .unwrap_or_default();
-            let intervals: Vec<Interval> = self
-                .get_json(&format!("https://api.openf1.org/v1/intervals?session_key={key}"))
                 .await
                 .unwrap_or_default();
             let stints: Vec<Stint> = self
                 .get_json(&format!("https://api.openf1.org/v1/stints?session_key={key}"))
                 .await
                 .unwrap_or_default();
-            let live = rows_from_live(&positions, &intervals, &stints, &drivers);
-            if !live.is_empty() {
-                rows = Some(live);
+            if is_quali {
+                // Intervals are race-only; a live qualifying's numbers come
+                // from the laps themselves, segmented by race control.
+                let laps: Vec<Lap> = self
+                    .get_json(&format!("https://api.openf1.org/v1/laps?session_key={key}"))
+                    .await
+                    .unwrap_or_default();
+                let (live, st, z) = quali_rows_live(&positions, &laps, &msgs, &stints, &drivers);
+                if !live.is_empty() {
+                    rows = Some(live);
+                    stage = Some(st);
+                    zones = z;
+                }
+            } else {
+                let intervals: Vec<Interval> = self
+                    .get_json(&format!("https://api.openf1.org/v1/intervals?session_key={key}"))
+                    .await
+                    .unwrap_or_default();
+                let live = rows_from_live(&positions, &intervals, &stints, &drivers);
+                if !live.is_empty() {
+                    rows = Some(live);
+                }
+                // The leader's laps alone (one small request): the lap being
+                // run already has a record, so completed = the highest
+                // number less one.
+                if let Some(leader) = leader_number(&positions) {
+                    let laps: Vec<Lap> = self
+                        .get_json(&format!(
+                            "https://api.openf1.org/v1/laps?session_key={key}&driver_number={leader}"
+                        ))
+                        .await
+                        .unwrap_or_default();
+                    laps_done = Some(laps_completed(&laps));
+                }
             }
         }
         if rows.is_none() && !results_first {
@@ -195,6 +246,7 @@ impl OpenF1 {
                 .await
             {
                 rows = from_results(results, &drivers);
+                laps_done = rows.as_ref().map(|_| u32::MAX);
             }
         }
         let rows = rows.unwrap_or_default();
@@ -203,17 +255,18 @@ impl OpenF1 {
         }
         // Track status only matters while the session runs — a finished
         // session's chequered flag is just the checkered glyphs.
-        let flag = if ended {
-            None
-        } else {
-            let msgs: Vec<RaceControl> = self
-                .get_json(&format!("https://api.openf1.org/v1/race_control?session_key={key}"))
-                .await
-                .unwrap_or_default();
-            track_flag(&msgs)
+        let flag = if ended { None } else { track_flag(&msgs) };
+        let laps = match kind {
+            "race" | "sprint" => crate::laps::total_laps(&session.circuit_short_name, kind == "sprint")
+                .map(|total| crate::model::LapProgress { completed: laps_done.unwrap_or(0).min(total), total }),
+            _ => None,
         };
-        tracing::info!("openf1: {} rows for {} (session {key}, flag {flag:?})", rows.len(), kind);
-        Some(SessionRows { session: kind, rows, flag, fetched: Instant::now() })
+        tracing::info!(
+            "openf1: {} rows for {} (session {key}, flag {flag:?}, stage {stage:?}, laps {laps:?})",
+            rows.len(),
+            kind
+        );
+        Some(SessionRows { session: kind, rows, stage, quali: zones, flag, laps, fetched: Instant::now() })
     }
 }
 
@@ -226,6 +279,9 @@ struct Session {
     session_name: String,
     #[serde(default)]
     date_end: Option<String>,
+    /// "Madring", "Monte Carlo": keys the scheduled lap count.
+    #[serde(default)]
+    circuit_short_name: String,
 }
 #[derive(Deserialize)]
 struct Driver {
@@ -254,6 +310,20 @@ struct Interval {
     interval: serde_json::Value,
     #[serde(default)]
     date: String,
+}
+#[derive(Deserialize)]
+struct Lap {
+    driver_number: u32,
+    #[serde(default)]
+    lap_number: u32,
+    /// Seconds; null for a lap still being run.
+    #[serde(default)]
+    lap_duration: Option<f64>,
+    #[serde(default)]
+    date_start: Option<String>,
+    /// The lap that leaves the pits — never a flying lap.
+    #[serde(default)]
+    is_pit_out_lap: bool,
 }
 #[derive(Deserialize)]
 struct Stint {
@@ -482,6 +552,26 @@ fn rows_from_results(results: &[SessionResult], drivers: &[Driver]) -> Vec<Leade
         .collect()
 }
 
+/// Who leads: the driver whose LATEST position record says 1.
+fn leader_number(positions: &[Position]) -> Option<u32> {
+    use std::collections::HashMap;
+    let mut pos: HashMap<u32, (&str, u32)> = HashMap::new();
+    for p in positions {
+        let e = pos.entry(p.driver_number).or_insert((p.date.as_str(), p.position));
+        if p.date.as_str() >= e.0 {
+            *e = (p.date.as_str(), p.position);
+        }
+    }
+    pos.iter().find(|(_, (_, p))| *p == 1).map(|(n, _)| *n)
+}
+
+/// Laps a driver has completed, from their lap records: the feed opens a
+/// record when a lap STARTS (the quali capture's out-laps carried sector
+/// times and no duration), so the highest lap number is the one being run.
+fn laps_completed(laps: &[Lap]) -> u32 {
+    laps.iter().map(|l| l.lap_number).max().map_or(0, |m| m.saturating_sub(1))
+}
+
 fn rows_from_live(
     positions: &[Position],
     intervals: &[Interval],
@@ -534,6 +624,172 @@ fn rows_from_live(
             }
         })
         .collect()
+}
+
+/// When each qualifying segment began, from race control's session-status
+/// stream. A segment is a SESSION STARTED that follows a SESSION FINISHED
+/// (or is the first): a restart after a red flag also arrives as STARTED,
+/// and must not count as Q2. Dates are RFC3339 in one fixed format, so the
+/// strings sort as times.
+fn segment_starts(msgs: &[RaceControl]) -> Vec<String> {
+    let mut status: Vec<&RaceControl> = msgs.iter().filter(|m| m.category == "SessionStatus").collect();
+    status.sort_by(|a, b| a.date.cmp(&b.date));
+    let mut starts = Vec::new();
+    let mut finished = true;
+    for m in status {
+        let up = m.message.to_uppercase();
+        if up.contains("FINISH") {
+            finished = true;
+        } else if up.contains("START") && finished {
+            starts.push(m.date.clone());
+            finished = false;
+        }
+    }
+    starts
+}
+
+/// Lap times race control has deleted (track limits), as (car, milliseconds):
+/// "CAR 41 (LIN) TIME 1:35.149 DELETED - TRACK LIMITS AT TURN 17 LAP 3".
+/// The laps feed keeps the lap as driven, so this is the only way to know
+/// it no longer counts. A "LAP DELETED" without a time was never a
+/// flying lap and needs nothing.
+fn deleted_laps(msgs: &[RaceControl]) -> std::collections::HashSet<(u32, i64)> {
+    msgs.iter()
+        .filter(|m| m.message.contains("DELETED"))
+        .filter_map(|m| {
+            let car: u32 = m.message.strip_prefix("CAR ")?.split(' ').next()?.parse().ok()?;
+            let (_, rest) = m.message.split_once("TIME ")?;
+            let ms = parse_lap_time(rest.split(' ').next()?)?;
+            Some((car, ms))
+        })
+        .collect()
+}
+
+/// "1:35.149" -> 95149 (milliseconds). Integer so lap durations from the
+/// laps feed (a float) can be matched exactly after rounding.
+fn parse_lap_time(t: &str) -> Option<i64> {
+    let (m, s) = t.split_once(':')?;
+    let m: i64 = m.parse().ok()?;
+    let s: f64 = s.parse().ok()?;
+    Some(m * 60_000 + (s * 1000.0).round() as i64)
+}
+
+/// 95.312 -> "1:35.31": a lap time in hundredths, like every other timing
+/// on the panel.
+fn format_lap(secs: f64) -> String {
+    let m = (secs / 60.0).floor();
+    format!("{}:{:05.2}", m as u32, secs - m * 60.0)
+}
+
+/// A live qualifying tower: order from the position feed (the timing
+/// screen), numbers from the laps. Each driver's best lap in the running
+/// segment sets the column — the leader's as a lap time, the rest as the
+/// gap to it — and a driver yet to set one this segment draws blank rather
+/// than last segment's number (see the ESPN path for why that misleads).
+/// Drivers already eliminated show the best lap of the last segment they
+/// ran, which the renderer greys; the position feed keeps them at the
+/// bottom. Deleted laps are removed before any of this.
+///
+/// Returns the rows, the segment (1..=3), and its elimination zones.
+fn quali_rows_live(
+    positions: &[Position],
+    laps: &[Lap],
+    msgs: &[RaceControl],
+    stints: &[Stint],
+    drivers: &[Driver],
+) -> (Vec<LeaderRow>, u8, Option<crate::model::QualiZones>) {
+    use std::collections::HashMap;
+    let starts = segment_starts(msgs);
+    let stage = starts.len().clamp(1, 3) as u8;
+    let segment_of = |date: &str| -> usize {
+        starts.iter().filter(|s| s.as_str() <= date).count().saturating_sub(1).min(2)
+    };
+    let deleted = deleted_laps(msgs);
+    // Only FLYING laps count. The feed times every lap, including the
+    // out-lap (flagged) and the in-lap (not flagged — but the driver's next
+    // lap is a pit-out, which is how it is recognised): a driver whose only
+    // Q2 laps were out and in showed "+20.63" here, where the timing screen
+    // had no time for them at all. What survives is then held to 107% of
+    // the segment's fastest lap — the FIA's own qualifying threshold — so a
+    // cool-down lap with no pit stop after it cannot pose as a best either.
+    let pit_out: std::collections::HashSet<(u32, u32)> =
+        laps.iter().filter(|l| l.is_pit_out_lap).map(|l| (l.driver_number, l.lap_number)).collect();
+    let mut best: HashMap<u32, [Option<f64>; 3]> = HashMap::new();
+    let mut fastest: [Option<f64>; 3] = [None; 3];
+    for lap in laps {
+        let (Some(d), Some(ds)) = (lap.lap_duration, lap.date_start.as_deref()) else { continue };
+        if d <= 0.0
+            || lap.is_pit_out_lap
+            || pit_out.contains(&(lap.driver_number, lap.lap_number + 1))
+            || deleted.contains(&(lap.driver_number, (d * 1000.0).round() as i64))
+        {
+            continue;
+        }
+        let seg = segment_of(ds);
+        let slot = &mut best.entry(lap.driver_number).or_default()[seg];
+        if slot.is_none_or(|b| d < b) {
+            *slot = Some(d);
+        }
+        if fastest[seg].is_none_or(|f| d < f) {
+            fastest[seg] = Some(d);
+        }
+    }
+    for b in best.values_mut() {
+        for (seg, slot) in b.iter_mut().enumerate() {
+            if let (Some(d), Some(f)) = (*slot, fastest[seg]) {
+                if d > f * 1.07 {
+                    *slot = None;
+                }
+            }
+        }
+    }
+
+    let mut pos: HashMap<u32, (&str, u32)> = HashMap::new();
+    for p in positions {
+        let e = pos.entry(p.driver_number).or_insert((p.date.as_str(), p.position));
+        if p.date.as_str() >= e.0 {
+            *e = (p.date.as_str(), p.position);
+        }
+    }
+    let mut tire: HashMap<u32, (u32, Option<&str>)> = HashMap::new();
+    for s in stints {
+        let e = tire.entry(s.driver_number).or_insert((s.lap_start, s.compound.as_deref()));
+        if s.lap_start >= e.0 {
+            *e = (s.lap_start, s.compound.as_deref());
+        }
+    }
+    let mut order: Vec<(u32, u32)> = pos.iter().map(|(n, (_, p))| (*p, *n)).collect();
+    order.sort();
+    let zones = crate::model::QualiZones::for_field(order.len(), stage);
+    let cur = (stage - 1) as usize;
+    let leader_best = order.first().and_then(|(_, n)| best.get(n).and_then(|b| b[cur]));
+    let rows = order
+        .into_iter()
+        .take(crate::render::LEADERBOARD_MAX_ROWS)
+        .map(|(p, n)| {
+            let (name, color) = driver_row(n, drivers);
+            let b = best.get(&n);
+            let out = zones.is_some_and(|z| p > z.field);
+            let value = if out {
+                b.and_then(|b| b.iter().rev().flatten().next().copied()).map(format_lap).unwrap_or_default()
+            } else {
+                match (b.and_then(|b| b[cur]), leader_best) {
+                    (Some(mine), _) if p == 1 => format_lap(mine),
+                    (Some(mine), Some(lead)) if mine >= lead => format!("+{:.2}", mine - lead),
+                    _ => String::new(),
+                }
+            };
+            LeaderRow {
+                rank: p.to_string(),
+                name,
+                value,
+                color,
+                tire: tire.get(&n).and_then(|(_, c)| tire_code(c.unwrap_or(""))),
+                thru: None,
+            }
+        })
+        .collect();
+    (rows, stage, zones)
 }
 
 /// OpenF1 compounds → the single-letter code the render's tire strip colors.
@@ -638,6 +894,176 @@ mod tests {
         assert_eq!(rows[1].value, "+1.36", "the INTERVAL to the car ahead, in hundredths");
         assert_eq!(rows[1].tire, Some('H'));
         assert_eq!(rows[2].value, "+1L", "lapped cars tighten for 64px");
+    }
+
+    /// Q2 of the 2026 Spanish GP, shapes verbatim: segments come from the
+    /// session-status stream (a red-flag restart is NOT a new segment), the
+    /// leader shows a lap time and the rest the gap to it, a driver without
+    /// a lap this segment draws blank, and a deleted time is not a best lap.
+    #[test]
+    fn live_quali_rows_come_from_laps_segmented_by_race_control() {
+        let msgs: Vec<RaceControl> = serde_json::from_str(
+            r#"[{"category":"SessionStatus","message":"SESSION STARTED","date":"2026-09-12T14:00:00+00:00","flag":null,"scope":null},
+                {"category":"SessionStatus","message":"SESSION ABORTED","date":"2026-09-12T14:06:00+00:00","flag":null,"scope":null},
+                {"category":"SessionStatus","message":"SESSION STARTED","date":"2026-09-12T14:12:00+00:00","flag":null,"scope":null},
+                {"category":"SessionStatus","message":"SESSION FINISHED","date":"2026-09-12T14:18:00+00:00","flag":null,"scope":null},
+                {"category":"Other","message":"CAR 63 (RUS) TIME 1:33.000 DELETED - TRACK LIMITS AT TURN 6 LAP 9 16:16:33","date":"2026-09-12T14:30:00+00:00","flag":null,"scope":null},
+                {"category":"SessionStatus","message":"SESSION STARTED","date":"2026-09-12T14:25:00+00:00","flag":null,"scope":null}]"#,
+        )
+        .unwrap();
+        assert_eq!(segment_starts(&msgs).len(), 2, "the restart at 14:12 is still Q1");
+        let laps: Vec<Lap> = serde_json::from_str(
+            r#"[{"driver_number":1,"lap_number":1,"lap_duration":95.5,"date_start":"2026-09-12T14:03:00+00:00"},
+                {"driver_number":1,"lap_number":2,"lap_duration":94.812,"date_start":"2026-09-12T14:28:00+00:00"},
+                {"driver_number":1,"lap_number":3,"lap_duration":null,"date_start":"2026-09-12T14:30:00+00:00"},
+                {"driver_number":63,"lap_number":1,"lap_duration":95.9,"date_start":"2026-09-12T14:04:00+00:00"},
+                {"driver_number":63,"lap_number":2,"lap_duration":95.1,"date_start":"2026-09-12T14:29:00+00:00"},
+                {"driver_number":63,"lap_number":3,"lap_duration":93.0,"date_start":"2026-09-12T14:31:00+00:00"},
+                {"driver_number":12,"lap_number":1,"lap_duration":96.2,"date_start":"2026-09-12T14:05:00+00:00"},
+                {"driver_number":12,"lap_number":7,"lap_duration":469.8,"date_start":"2026-09-12T14:25:34+00:00","is_pit_out_lap":true},
+                {"driver_number":12,"lap_number":8,"lap_duration":113.19,"date_start":"2026-09-12T14:27:45+00:00"},
+                {"driver_number":12,"lap_number":9,"lap_duration":492.4,"date_start":"2026-09-12T14:35:53+00:00","is_pit_out_lap":true},
+                {"driver_number":12,"lap_number":10,"lap_duration":110.0,"date_start":"2026-09-12T14:37:52+00:00"}]"#,
+        )
+        .unwrap();
+        let positions: Vec<Position> = serde_json::from_str(
+            r#"[{"driver_number":1,"position":1,"date":"2026-09-12T14:28:30+00:00"},
+                {"driver_number":63,"position":2,"date":"2026-09-12T14:29:30+00:00"},
+                {"driver_number":12,"position":3,"date":"2026-09-12T14:25:00+00:00"}]"#,
+        )
+        .unwrap();
+        let (rows, stage, zones) = quali_rows_live(&positions, &laps, &msgs, &[], &drivers());
+        assert_eq!(stage, 2);
+        assert!(zones.is_none(), "three cars is no qualifying format");
+        assert_eq!(rows[0].name, "NOR");
+        assert_eq!(rows[0].value, "1:34.81", "the leader's best lap THIS segment");
+        assert_eq!(rows[1].name, "RUS");
+        assert_eq!(rows[1].value, "+0.29", "gap to that lap; the deleted 1:33.0 does not count");
+        assert_eq!(
+            rows[2].value, "",
+            "out-lap, in-lap (the pit-out follows it) and a cool-down lap outside 107% are not times: blank"
+        );
+
+        assert_eq!(deleted_laps(&msgs).into_iter().next(), Some((63, 93_000)));
+        assert_eq!(format_lap(95.312), "1:35.31");
+        assert_eq!(format_lap(60.0), "1:00.00");
+    }
+
+    /// With a full field the zones follow the segment, and an eliminated
+    /// driver's column holds the lap of the last segment they ran.
+    #[test]
+    fn live_quali_marks_the_eliminated_with_their_last_lap() {
+        let mut positions = Vec::new();
+        let mut laps = Vec::new();
+        for n in 1..=20u32 {
+            positions.push(Position { driver_number: n, position: n, date: "2026-09-12T14:30:00+00:00".into() });
+            let lap = |k: u32, d: f64, at: &str| Lap {
+                driver_number: n,
+                lap_number: k,
+                lap_duration: Some(d),
+                date_start: Some(at.into()),
+                is_pit_out_lap: false,
+            };
+            laps.push(lap(1, 90.0 + n as f64 * 0.1, "2026-09-12T14:05:00+00:00"));
+            if n <= 15 {
+                laps.push(lap(2, 89.0 + n as f64 * 0.1, "2026-09-12T14:30:00+00:00"));
+            }
+        }
+        let msgs: Vec<RaceControl> = serde_json::from_str(
+            r#"[{"category":"SessionStatus","message":"SESSION STARTED","date":"2026-09-12T14:00:00+00:00","flag":null,"scope":null},
+                {"category":"SessionStatus","message":"SESSION FINISHED","date":"2026-09-12T14:18:00+00:00","flag":null,"scope":null},
+                {"category":"SessionStatus","message":"SESSION STARTED","date":"2026-09-12T14:25:00+00:00","flag":null,"scope":null}]"#,
+        )
+        .unwrap();
+        let (rows, stage, zones) = quali_rows_live(&positions, &laps, &msgs, &[], &[]);
+        assert_eq!(stage, 2);
+        assert_eq!(zones, Some(crate::model::QualiZones { safe: 10, field: 15 }));
+        assert_eq!(rows[0].value, "1:29.10");
+        assert_eq!(rows[14].value, "+1.40", "P15 is still in the field: a Q2 gap");
+        assert_eq!(rows[15].value, "1:31.60", "P16 went out in Q1: that lap, for the renderer to grey");
+    }
+
+    /// Render a CAPTURED OpenF1 snapshot (drivers/position/laps/race_control/
+    /// stints JSON as `design/f1-logs/live-openf1/<ts>/` or the one-shot
+    /// `design/f1-logs/openf1-<name>-<ts>.json` files hold them) to a PNG at
+    /// the board's full row depth:
+    ///
+    ///   OPENF1_FIXTURE_DIR=... OPENF1_FIXTURE_TS=20260912T143721Z \
+    ///   F1_FIXTURE_OUT=/tmp/f1 cargo test -p server render_openf1_fixture -- --ignored
+    ///
+    /// With OPENF1_FIXTURE_TS set, files are read as `<dir>/openf1-<name>-<ts>.json`;
+    /// without it, as `<dir>/<name>.json`.
+    #[test]
+    #[ignore]
+    fn render_openf1_fixture() {
+        let dir = std::env::var("OPENF1_FIXTURE_DIR").expect("OPENF1_FIXTURE_DIR");
+        let ts = std::env::var("OPENF1_FIXTURE_TS").ok();
+        let out = std::env::var("F1_FIXTURE_OUT").unwrap_or_else(|_| dir.clone());
+        let load = |name: &str| -> String {
+            let path = match &ts {
+                Some(ts) => format!("{dir}/openf1-{name}-{ts}.json"),
+                None => format!("{dir}/{name}.json"),
+            };
+            std::fs::read_to_string(&path).unwrap_or_else(|_| "[]".into())
+        };
+        let drivers: Vec<Driver> = serde_json::from_str(&load("drivers")).unwrap_or_default();
+        let positions: Vec<Position> = serde_json::from_str(&load("position")).unwrap_or_default();
+        let laps: Vec<Lap> = serde_json::from_str(&load("laps")).unwrap_or_default();
+        let msgs: Vec<RaceControl> = serde_json::from_str(&load("race_control")).unwrap_or_default();
+        let stints: Vec<Stint> = serde_json::from_str(&load("stints")).unwrap_or_default();
+        let (rows, stage, zones) = quali_rows_live(&positions, &laps, &msgs, &stints, &drivers);
+        let g = crate::model::Game {
+            id: "openf1-quali".into(),
+            sport_id: "f1".into(),
+            away: crate::model::TeamSide::empty("F1"),
+            home: crate::model::TeamSide::empty(""),
+            status: crate::model::GameStatus::Active,
+            ordinal: String::new(),
+            clock: String::new(),
+            start_time: String::new(),
+            end_time: None,
+            leaderboard: Some(crate::model::Leaderboard { laps: None,
+                name: "SPANISH GP Q".into(),
+                flag: track_flag(&msgs).map(String::from),
+                stage: Some(stage),
+                quali: zones,
+                rows,
+            }),
+            champ: None,
+            series: None,
+            session: Some("quali".into()),
+            situation: None,
+            pregame: None,
+        };
+        let (_, px, _) = crate::render::render_board_frame(
+            &g, crate::render::LEADERBOARD_MAX_ROWS, None, None, scoreboard_protocol::NameStyle::Name,
+        );
+        std::fs::create_dir_all(&out).unwrap();
+        let path = format!("{out}/openf1-quali-{}.png", ts.as_deref().unwrap_or("snapshot"));
+        std::fs::write(&path, crate::render_png(&px)).unwrap();
+        eprintln!("wrote {path} (stage {stage}, zones {zones:?})");
+    }
+
+    /// MAR-116: the leader is whoever's LATEST position record says 1, and
+    /// their completed laps are one less than the lap record being run.
+    #[test]
+    fn lap_progress_from_the_leaders_laps() {
+        let positions: Vec<Position> = serde_json::from_str(
+            r#"[{"driver_number":16,"position":2,"date":"2026-09-13T13:01:00+00:00"},
+                {"driver_number":12,"position":1,"date":"2026-09-13T13:01:00+00:00"},
+                {"driver_number":16,"position":1,"date":"2026-09-13T13:20:00+00:00"},
+                {"driver_number":12,"position":2,"date":"2026-09-13T13:20:00+00:00"}]"#,
+        )
+        .unwrap();
+        assert_eq!(leader_number(&positions), Some(16), "LEC took the lead at 13:20");
+        let laps: Vec<Lap> = serde_json::from_str(
+            r#"[{"driver_number":16,"lap_number":21,"lap_duration":95.1,"date_start":"2026-09-13T13:38:00+00:00"},
+                {"driver_number":16,"lap_number":22,"lap_duration":95.3,"date_start":"2026-09-13T13:39:35+00:00"},
+                {"driver_number":16,"lap_number":23,"lap_duration":null,"date_start":"2026-09-13T13:41:10+00:00"}]"#,
+        )
+        .unwrap();
+        assert_eq!(laps_completed(&laps), 22, "lap 23 is being run");
+        assert_eq!(laps_completed(&[]), 0);
     }
 
     #[test]

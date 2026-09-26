@@ -771,6 +771,11 @@ RustBuffer uniffi_app_core_fn_func_normalized_pin(RustBuffer raw, RustCallStatus
 RustBuffer uniffi_app_core_fn_func_off_mode_value(RustBuffer mode, RustBuffer key, RustBuffer params, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_PANEL_SHOWS_NOTHING
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_PANEL_SHOWS_NOTHING
+int8_t uniffi_app_core_fn_func_panel_shows_nothing(RustBuffer now_showing, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_PARSE_NETWORKS
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_PARSE_NETWORKS
 RustBuffer uniffi_app_core_fn_func_parse_networks(RustBuffer raw, RustCallStatus *_Nonnull out_status
@@ -1297,6 +1302,12 @@ uint16_t uniffi_app_core_checksum_func_normalized_pin(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_OFF_MODE_VALUE
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_OFF_MODE_VALUE
 uint16_t uniffi_app_core_checksum_func_off_mode_value(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_PANEL_SHOWS_NOTHING
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_PANEL_SHOWS_NOTHING
+uint16_t uniffi_app_core_checksum_func_panel_shows_nothing(void
     
 );
 #endif

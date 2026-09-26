@@ -113,7 +113,7 @@ pub struct EspnSource {
     /// (competitor id → gap). A finished race's gaps never change, and
     /// without this every poll would re-fan-out 20 requests for the rest of
     /// the weekend the event stays on ESPN's scoreboard.
-    f1_gap_cache: tokio::sync::Mutex<std::collections::HashMap<String, std::collections::HashMap<String, String>>>,
+    f1_gap_cache: tokio::sync::Mutex<std::collections::HashMap<String, std::collections::HashMap<String, F1Timing>>>,
 }
 
 impl EspnSource {
@@ -275,8 +275,8 @@ pub(crate) fn parse_feed(feed: &str, raw: &str) -> Result<Vec<Game>, String> {
             let r: LeaderboardResponse = serde_json::from_str(raw).map_err(|e| e.to_string())?;
             // The debug/TUI path shows the scoreboard feed as-is; the
             // per-driver gap fan-out belongs to the live poll only.
-            let no_gaps = std::collections::HashMap::new();
-            Ok(r.events.into_iter().flat_map(|ev| parse_f1(ev, &no_gaps)).collect())
+            let no_timing = std::collections::HashMap::new();
+            Ok(r.events.into_iter().flat_map(|ev| parse_f1(ev, &no_timing)).collect())
         }
         _ => {
             let sport_id = FEEDS
@@ -519,39 +519,44 @@ impl EspnSource {
         };
         let mut out = Vec::new();
         for ev in events {
-            let gaps = self.f1_gaps_for_event(&ev).await;
-            out.extend(parse_f1(ev, &gaps));
+            let timing = self.f1_timing_for_event(&ev).await;
+            out.extend(parse_f1(ev, &timing));
         }
         out
     }
 
-    /// Live gaps for an event's RACE sessions (grand prix and sprint), keyed
-    /// (competition id, competitor id) → "+0.287".
+    /// Live timing for an event's sessions, keyed (competition id,
+    /// competitor id).
     ///
     /// The scoreboard inlines an empty `statistics` for every session, but
     /// the same data exists per-competitor in ESPN's core API — one request
     /// per driver, which is why this is bounded to the rows the board can
-    /// draw and to sessions where a gap means something. QUALIFYING IS
-    /// DELIBERATELY EXCLUDED: ESPN resets gaps per Q1/Q2/Q3 segment while
-    /// positions span the whole hour, so its own site shows P8 nearer than
-    /// P2 mid-session — rendered on the panel that reads as our bug.
+    /// draw and to sessions where the numbers mean something.
+    ///
+    /// Qualifying is the interesting case. ESPN resets `gapToLeader` per
+    /// Q1/Q2/Q3 segment while the scoreboard `order` spans the whole hour
+    /// (and lags by a minute), so joined naively its own site shows P8
+    /// nearer than P2 mid-session. The SAME resource also carries the
+    /// timing-screen `position`, which is what the gaps are relative to,
+    /// and the per-segment lap times ESPN fills in as drivers drop out —
+    /// together they are enough to draw a coherent tower (see `parse_f1`).
     ///
     /// Failures degrade to the blank value column this render always had.
-    async fn f1_gaps_for_event(
+    async fn f1_timing_for_event(
         &self,
         ev: &LeaderEvent,
-    ) -> std::collections::HashMap<(String, String), String> {
+    ) -> std::collections::HashMap<(String, String), F1Timing> {
         let mut out = std::collections::HashMap::new();
         for comp in &ev.competitions {
-            if !f1_session_wants_gaps(comp) {
+            if !f1_session_wants_timing(comp) {
                 continue;
             }
             let done = matches!(map_status(&comp.status.type_), Some(GameStatus::Final));
-            // A finished race's gaps are frozen — serve the cache, fetch once.
+            // A finished session's numbers are frozen — serve the cache, fetch once.
             if done {
                 if let Some(cached) = self.f1_gap_cache.lock().await.get(&comp.id) {
-                    for (cid, gap) in cached {
-                        out.insert((comp.id.clone(), cid.clone()), gap.clone());
+                    for (cid, t) in cached {
+                        out.insert((comp.id.clone(), cid.clone()), t.clone());
                     }
                     continue;
                 }
@@ -574,22 +579,22 @@ impl EspnSource {
                 let client = self.client.clone();
                 async move {
                     let stats: CoreStatistics = client.get(&url).send().await.ok()?.json().await.ok()?;
-                    Some((cid, extract_gap(&stats)?))
+                    Some((cid, f1_timing(&stats)))
                 }
             }))
             .await;
 
-            let mut session: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-            for (cid, gap) in fetched.into_iter().flatten() {
-                session.insert(cid, gap);
+            let mut session: std::collections::HashMap<String, F1Timing> = std::collections::HashMap::new();
+            for (cid, t) in fetched.into_iter().flatten() {
+                session.insert(cid, t);
             }
             if !session.is_empty() {
-                tracing::info!("f1 gaps: {} rows for session {}", session.len(), comp.id);
-                for (cid, gap) in &session {
-                    out.insert((comp.id.clone(), cid.clone()), gap.clone());
+                tracing::info!("f1 timing: {} rows for session {}", session.len(), comp.id);
+                for (cid, t) in &session {
+                    out.insert((comp.id.clone(), cid.clone()), t.clone());
                 }
                 // Cache live results too: if the one poll that sees Final
-                // hits a network blip, the race still keeps its last gaps.
+                // hits a network blip, the session still keeps its last numbers.
                 self.f1_gap_cache.lock().await.insert(comp.id.clone(), session);
             }
         }
@@ -597,20 +602,39 @@ impl EspnSource {
     }
 }
 
-/// Which sessions earn the per-driver gap fan-out: RACES (grand prix and
-/// sprint), live or finished. Qualifying never — see `f1_gaps_for_event` —
-/// and pregame never (there is nothing to fetch yet).
-fn f1_session_wants_gaps(comp: &LeaderComp) -> bool {
-    let is_race = matches!(
+/// Which sessions earn the per-driver timing fan-out: every session the
+/// board can show (races, sprints, qualifying, sprint qualifying), live or
+/// finished. Practice never, and pregame never (there is nothing to fetch
+/// yet).
+fn f1_session_wants_timing(comp: &LeaderComp) -> bool {
+    let shown = matches!(
         comp.type_.as_ref().map(|t| t.abbreviation.as_str()),
-        Some("Race") | Some("SR")
+        Some("Race") | Some("SR") | Some("Qual") | Some("SS")
     );
-    is_race
+    shown
         && !comp.id.is_empty()
         && matches!(
             map_status(&comp.status.type_),
             Some(GameStatus::Active | GameStatus::Intermission | GameStatus::Final)
         )
+}
+
+/// One driver's slice of the core statistics resource, as the render needs it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct F1Timing {
+    /// "+0.29" — gap to the leader of the CURRENT segment (quali) or the
+    /// race; None for the leader and for a driver ESPN has nothing on.
+    pub gap: Option<String>,
+    /// The timing-screen position. Observed live (2026 Spanish GP quali) to
+    /// lead the scoreboard `order` by about a minute and to be the ordering
+    /// `gap` is relative to.
+    pub position: Option<i64>,
+    /// Per-segment qualifying lap times ("1:35.312"), indexed Q1..Q3. ESPN
+    /// fills a driver's time for the segment they were eliminated in, and
+    /// only after the segment ends — so "any Q1 time in the field" reads as
+    /// "Q1 is over". Empty for a segment the driver never ran or that is
+    /// still running.
+    pub qual_time: [Option<String>; 3],
 }
 
 /// The core API statistics resource: categories of name/displayValue stats.
@@ -652,6 +676,26 @@ fn derive_intervals(rows: &mut [LeaderRow]) {
     }
 }
 
+/// Everything the tower needs from one driver's statistics resource.
+fn f1_timing(stats: &CoreStatistics) -> F1Timing {
+    let mut t = F1Timing { gap: extract_gap(stats), ..Default::default() };
+    let stat = |name: &str| -> Option<String> {
+        let categories = &stats.splits.as_ref()?.categories;
+        categories
+            .iter()
+            .flat_map(|c| c.stats.iter())
+            .find(|s| s.name == name)
+            .map(|s| s.display_value.clone())
+            .filter(|v| !v.is_empty())
+    };
+    t.position = stat("position").and_then(|v| v.parse().ok()).filter(|p| *p > 0);
+    for (i, name) in ["qual1TimeMS", "qual2TimeMS", "qual3TimeMS"].into_iter().enumerate() {
+        // A segment not run (or not over) reads "0.000".
+        t.qual_time[i] = stat(name).filter(|v| v != "0.000" && v != "0");
+    }
+    t
+}
+
 /// The gap the timing tower shows. Field names verified live during the 2026
 /// Dutch GP: qualifying carries `gapToLeader`; the race is expected to carry
 /// the same or `behindTime`/`behindLaps` (ESPN's older racing vocabulary), so
@@ -675,6 +719,17 @@ fn extract_gap(stats: &CoreStatistics) -> Option<String> {
         }
     }
     None
+}
+
+/// A qualifying lap time as the panel draws it: "1:35.312" -> "1:35.31",
+/// hundredths like every other timing on the board. Anything that is not
+/// m:ss.fff passes through untouched.
+pub(crate) fn fit_lap_time(t: &str) -> String {
+    let Some((m, sec)) = t.split_once(':') else { return t.to_string() };
+    match (m.parse::<u32>(), sec.parse::<f64>()) {
+        (Ok(m), Ok(s)) => format!("{m}:{s:05.2}"),
+        _ => t.to_string(),
+    }
 }
 
 /// A leaderboard "event" (especially an F1 race weekend) can carry several
@@ -801,7 +856,7 @@ fn parse_golf(sport_id: &str, ev: LeaderEvent) -> Option<Game> {
         start_time: tee_off.unwrap_or(comp.date),
         // Tournaments run for days — surface when this one wraps up.
         end_time: (!ev.end_date.is_empty()).then(|| ev.end_date.clone()),
-        leaderboard: Some(Leaderboard { name, flag: None, rows }),
+        leaderboard: Some(Leaderboard { laps: None, name, flag: None, stage: None, quali: None, rows }),
         champ,
         series: None,
         session: None,
@@ -859,9 +914,10 @@ fn first_tee_time(comp: &LeaderComp) -> Option<String> {
 /// own schedule, status, and standings. Practice sessions are never shown.
 fn parse_f1(
     ev: LeaderEvent,
-    gaps: &std::collections::HashMap<(String, String), String>,
+    timing: &std::collections::HashMap<(String, String), F1Timing>,
 ) -> Vec<Game> {
     let base = clean_f1_name(&ev.short_name);
+    let circuit = ev.circuit.map(|c| c.full_name).unwrap_or_default();
     ev.competitions
         .into_iter()
         .filter_map(|comp| {
@@ -874,20 +930,38 @@ fn parse_f1(
                 _ => return None, // practice / unknown
             };
             let status = map_status(&comp.status.type_)?;
-            let mut drivers: Vec<(i64, LeaderRow)> = comp
+            let live = matches!(status, GameStatus::Active | GameStatus::Intermission);
+            let is_quali = matches!(session, "quali" | "sprint-quali");
+            // The lap bar: ESPN's status `period` is the leader's lap count
+            // (it climbs through a session and reads the full distance at
+            // Final), and the total is a per-circuit constant the feed does
+            // not carry. Race and sprint only, once the lights have gone
+            // out; a circuit the table does not know draws no bar.
+            let laps = match session {
+                "race" | "sprint" if !matches!(status, GameStatus::Pregame) => {
+                    crate::laps::total_laps(&circuit, session == "sprint").map(|total| {
+                        let completed = u32::try_from(comp.status.period).unwrap_or(0).min(total);
+                        crate::model::LapProgress { completed, total }
+                    })
+                }
+                _ => None,
+            };
+            // (sort key, row, the driver's timing)
+            let mut drivers: Vec<(i64, LeaderRow, F1Timing)> = comp
                 .competitors
                 .into_iter()
                 .enumerate()
                 .filter_map(|(i, c)| {
                     let code = f1_code(&c.athlete.as_ref()?.display_name);
                     let order = if c.order > 0 { c.order } else { i as i64 + 1 };
+                    let t = timing.get(&(comp.id.clone(), c.id.clone())).cloned().unwrap_or_default();
                     // The scoreboard's inline statistics have been empty for
                     // every session all weekend; the per-driver core fetch is
                     // where gaps actually live. Inline stays as fallback in
                     // case ESPN ever starts populating it.
-                    let value = gaps
-                        .get(&(comp.id.clone(), c.id.clone()))
-                        .cloned()
+                    let value = t
+                        .gap
+                        .clone()
                         .or_else(|| {
                             c.statistics
                                 .first()
@@ -905,22 +979,40 @@ fn parse_f1(
                         value,
                         tire: None,
                         thru: None,
-                    }))
+                    }, t))
                 })
                 .collect();
-            drivers.sort_by_key(|(o, _)| *o);
+            // A LIVE qualifying tower orders by the timing screen, which the
+            // gaps are relative to and which the scoreboard order trails by
+            // a minute. Only when ESPN gave every driver one — a half-keyed
+            // sort would interleave two orderings.
+            let by_position = is_quali && live && !drivers.is_empty()
+                && drivers.iter().all(|(_, _, t)| t.position.is_some());
+            if by_position {
+                for (key, row, t) in drivers.iter_mut() {
+                    *key = t.position.unwrap_or(*key);
+                    row.rank = key.to_string();
+                }
+            }
+            drivers.sort_by_key(|(o, _, _)| *o);
+            let field_size = drivers.len();
+            let (mut stage, mut zones) = (None, None);
+            if is_quali {
+                // No timing (fan-out failed, or the debug path) means no
+                // stage either: "Q1" would be a guess dressed as a fact.
+                stage = by_position.then(|| quali_stage(drivers.iter().map(|(_, _, t)| t)));
+                zones = stage.and_then(|st| crate::model::QualiZones::for_field(field_size, st));
+                quali_values(&mut drivers, zones, live);
+            }
             let mut rows: Vec<LeaderRow> =
-                drivers.into_iter().take(crate::render::LEADERBOARD_MAX_ROWS).map(|(_, r)| r).collect();
+                drivers.into_iter().take(crate::render::LEADERBOARD_MAX_ROWS).map(|(_, r, _)| r).collect();
             // Race sessions show the INTERVAL to the car ahead, like the
             // broadcast tower — ESPN only carries gap-to-leader, but adjacent
             // gaps subtract cleanly (ESPN stamps the whole field in one
             // batch). Lapped cars keep their string and drop out of the
-            // arithmetic. Quali sessions never carry gaps here by design.
-            // LIVE races only: a finished classification reads as gaps to
-            // the winner, which is what ESPN already carries.
-            if matches!(session, "race" | "sprint")
-                && matches!(status, GameStatus::Active | GameStatus::Intermission)
-            {
+            // arithmetic. LIVE races only: a finished classification reads
+            // as gaps to the winner, which is what ESPN already carries.
+            if matches!(session, "race" | "sprint") && live {
                 derive_intervals(&mut rows);
             }
             let name = fit_words(&format!("{base}{suffix}"), 13);
@@ -938,7 +1030,7 @@ fn parse_f1(
                 // so only the race session carries it.
                 end_time: (session == "race" && !ev.end_date.is_empty())
                     .then(|| ev.end_date.clone()),
-                leaderboard: Some(Leaderboard { name, flag: None, rows }),
+                leaderboard: Some(Leaderboard { laps, name, flag: None, stage, quali: zones, rows }),
                 champ: None,
                 series: None,
                 session: Some(session.into()),
@@ -947,6 +1039,67 @@ fn parse_f1(
             })
         })
         .collect()
+}
+
+/// Which qualifying segment is running, from what ESPN has published: a
+/// driver's lap time for a segment appears once that segment is OVER (the
+/// eliminated carry theirs; observed live, 2026 Spanish GP), so any Q1 time
+/// in the field means Q2, any Q2 time means Q3. ESPN publishes those with
+/// some lag, so this can trail the real segment change by minutes — late
+/// beats early: an early flip would paint the wrong six drivers red while
+/// their segment still runs.
+fn quali_stage<'a>(timing: impl Iterator<Item = &'a F1Timing>) -> u8 {
+    let mut stage = 1;
+    for t in timing {
+        if t.qual_time[1].is_some() {
+            stage = 3;
+        } else if t.qual_time[0].is_some() {
+            stage = stage.max(2);
+        }
+    }
+    stage
+}
+
+/// The value column of a qualifying tower, in place. Rows are in rank order.
+///
+/// LIVE, in the running segment's field: ESPN's gap to the segment leader —
+/// but a driver yet to set a time this segment still carries LAST segment's
+/// gap, which ESPN sorts to the bottom of the field, so a gap smaller than
+/// the one above it is stale and draws blank. Already eliminated: the lap
+/// time that put them out, once ESPN has published it, else the segment gap
+/// they finished on — either way a closed book, and the renderer greys it.
+/// FINISHED: everyone's lap time from the last segment they ran, which is
+/// the one column that reads coherently across Q1/Q2/Q3 (the per-segment
+/// gaps are each relative to a different leader).
+fn quali_values(
+    drivers: &mut [(i64, LeaderRow, F1Timing)],
+    zones: Option<crate::model::QualiZones>,
+    live: bool,
+) {
+    let last_time = |t: &F1Timing| t.qual_time.iter().rev().flatten().next().map(|v| fit_lap_time(v));
+    if !live || zones.is_none() {
+        for (_, row, t) in drivers.iter_mut() {
+            row.value = if live { row.value.clone() } else { last_time(t).unwrap_or_default() };
+        }
+        return;
+    }
+    let z = zones.unwrap();
+    let mut prev = 0.0_f64;
+    for (rank, row, t) in drivers.iter_mut() {
+        let rank = *rank as u32;
+        if rank > z.field {
+            row.value = last_time(t).unwrap_or_else(|| row.value.clone());
+            continue;
+        }
+        if rank == 1 {
+            row.value.clear();
+            continue;
+        }
+        match row.value.strip_prefix('+').and_then(|v| v.parse::<f64>().ok()) {
+            Some(g) if g >= prev => prev = g,
+            _ => row.value.clear(),
+        }
+    }
 }
 
 fn golfer_last_name(full: &str) -> String {
@@ -997,9 +1150,28 @@ fn f1_team_color(code: &str) -> Option<embedded_graphics::pixelcolor::Rgb888> {
 fn f1_code(display_name: &str) -> String {
     f1_last_name(display_name)
         .chars()
+        .map(fold_diacritic)
         .filter(|c| c.is_ascii_alphabetic())
         .take(3)
         .collect()
+}
+
+/// Accented Latin capitals to their base letter, so Hülkenberg codes as HUL
+/// and Pérez as PER (the FIA codes) rather than HLK / PRZ — which is what
+/// dropping the non-ASCII letter produced, and what left both drivers'
+/// rows white on the panel because the color table never matched.
+fn fold_diacritic(c: char) -> char {
+    match c {
+        'À' | 'Á' | 'Â' | 'Ã' | 'Ä' | 'Å' => 'A',
+        'Ç' => 'C',
+        'È' | 'É' | 'Ê' | 'Ë' => 'E',
+        'Ì' | 'Í' | 'Î' | 'Ï' => 'I',
+        'Ñ' => 'N',
+        'Ò' | 'Ó' | 'Ô' | 'Õ' | 'Ö' | 'Ø' => 'O',
+        'Ù' | 'Ú' | 'Û' | 'Ü' => 'U',
+        'Ý' => 'Y',
+        _ => c,
+    }
 }
 
 /// Shorten a tournament `shortName` to fit the panel (ported from `golf.py`).
@@ -1184,6 +1356,14 @@ struct LeaderEvent {
     end_date: String,
     #[serde(default)]
     competitions: Vec<LeaderComp>,
+    /// F1 only: the venue, whose name keys the scheduled lap count.
+    #[serde(default)]
+    circuit: Option<LeaderCircuit>,
+}
+#[derive(Deserialize)]
+struct LeaderCircuit {
+    #[serde(default, rename = "fullName")]
+    full_name: String,
 }
 #[derive(Deserialize)]
 struct LeaderComp {
@@ -1649,7 +1829,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             away: TeamSide::empty("PGA"), home: TeamSide::empty(""),
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
             // Ten deep so the board's scrolling leaderboard shows in demo mode.
-            leaderboard: Some(Leaderboard { flag: None, name: "MASTERS".into(), rows: vec![
+            leaderboard: Some(Leaderboard { laps: None, flag: None, stage: None, quali: None, name: "MASTERS".into(), rows: vec![
                 LeaderRow { name: "SCHEFFLER".into(), value: "-8".into(), ..Default::default() },
                 LeaderRow { name: "MCILROY".into(), value: "-6".into(), ..Default::default() },
                 LeaderRow { name: "MORIKAWA".into(), value: "-5".into(), ..Default::default() },
@@ -1671,7 +1851,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             id: "demo-golf-2".into(), sport_id: "lpga".into(),
             away: TeamSide::empty("LPGA"), home: TeamSide::empty(""),
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
-            leaderboard: Some(Leaderboard { flag: None, name: "US OPEN".into(), rows: vec![
+            leaderboard: Some(Leaderboard { laps: None, flag: None, stage: None, quali: None, name: "US OPEN".into(), rows: vec![
                 LeaderRow { name: "KORDA".into(), value: "-7".into(), ..Default::default() },
                 LeaderRow { name: "THITIKUL".into(), value: "-5".into(), ..Default::default() },
                 LeaderRow { name: "VU".into(), value: "-4".into(), ..Default::default() },
@@ -1689,7 +1869,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
             // Full broadcast treatment: team colors + tire compounds (live
             // ESPN rows carry no tire data, so the demo is where dots show).
-            leaderboard: Some(Leaderboard { flag: None, name: "MONACO GP".into(), rows: vec![
+            leaderboard: Some(Leaderboard { laps: None, flag: None, stage: None, quali: None, name: "MONACO GP".into(), rows: vec![
                 f1_row(1, "VER", "LAP 42", 'M'),
                 f1_row(2, "NOR", "+2.1", 'M'),
                 f1_row(3, "LEC", "+5.8", 'S'),
@@ -1725,7 +1905,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             id: "demo-f1-quali".into(), sport_id: "f1".into(),
             away: TeamSide::empty("F1"), home: TeamSide::empty(""),
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
-            leaderboard: Some(Leaderboard { flag: None, name: "BRITISH GP Q".into(), rows: vec![
+            leaderboard: Some(Leaderboard { laps: None, flag: None, stage: None, quali: None, name: "BRITISH GP Q".into(), rows: vec![
                 LeaderRow { rank: "1".into(), name: "NOR".into(), value: "1:24.8".into(), color: f1_team_color("NOR"), tire: None, thru: None },
                 LeaderRow { rank: "2".into(), name: "VER".into(), value: "+0.093".into(), color: f1_team_color("VER"), tire: None, thru: None },
                 LeaderRow { rank: "3".into(), name: "HAM".into(), value: "+0.210".into(), color: f1_team_color("HAM"), tire: None, thru: None },
@@ -2711,7 +2891,7 @@ mod leader_tests {
     /// per Q1/Q2/Q3 segment while positions span the hour, so the numbers
     /// contradict the order they sit next to.
     #[test]
-    fn f1_gap_fanout_is_races_only() {
+    fn f1_timing_fanout_covers_every_shown_session() {
         let comp = |abbr: &str, status: &str| -> LeaderComp {
             serde_json::from_str(&format!(
                 r#"{{"id":"401839097","type":{{"abbreviation":"{abbr}"}},
@@ -2719,13 +2899,180 @@ mod leader_tests {
             ))
             .unwrap()
         };
-        assert!(f1_session_wants_gaps(&comp("Race", "STATUS_IN_PROGRESS")));
-        assert!(f1_session_wants_gaps(&comp("Race", "STATUS_FINAL")));
-        assert!(f1_session_wants_gaps(&comp("SR", "STATUS_IN_PROGRESS")), "a sprint is a race");
-        assert!(!f1_session_wants_gaps(&comp("Race", "STATUS_SCHEDULED")), "nothing to fetch pregame");
-        assert!(!f1_session_wants_gaps(&comp("Qual", "STATUS_IN_PROGRESS")), "quali gaps mislead");
-        assert!(!f1_session_wants_gaps(&comp("SS", "STATUS_IN_PROGRESS")), "sprint quali too");
-        assert!(!f1_session_wants_gaps(&comp("FP1", "STATUS_IN_PROGRESS")));
+        assert!(f1_session_wants_timing(&comp("Race", "STATUS_IN_PROGRESS")));
+        assert!(f1_session_wants_timing(&comp("Race", "STATUS_FINAL")));
+        assert!(f1_session_wants_timing(&comp("SR", "STATUS_IN_PROGRESS")), "a sprint is a race");
+        assert!(!f1_session_wants_timing(&comp("Race", "STATUS_SCHEDULED")), "nothing to fetch pregame");
+        assert!(f1_session_wants_timing(&comp("Qual", "STATUS_IN_PROGRESS")), "quali: position + segment times");
+        assert!(f1_session_wants_timing(&comp("SS", "STATUS_IN_PROGRESS")), "sprint quali too");
+        assert!(!f1_session_wants_timing(&comp("FP1", "STATUS_IN_PROGRESS")), "practice never renders");
+    }
+
+    /// The segment reads from what ESPN has PUBLISHED: a driver's Q1 time
+    /// appears once they are out of Q1, so any Q1 time means Q2 is on.
+    #[test]
+    fn quali_stage_reads_from_published_segment_times() {
+        let t = |q1: Option<&str>, q2: Option<&str>| F1Timing {
+            qual_time: [q1.map(String::from), q2.map(String::from), None],
+            ..Default::default()
+        };
+        assert_eq!(quali_stage([t(None, None), t(None, None)].iter()), 1);
+        assert_eq!(quali_stage([t(None, None), t(Some("1:35.312"), None)].iter()), 2);
+        assert_eq!(quali_stage([t(Some("1:35.312"), None), t(None, Some("1:34.001"))].iter()), 3);
+        assert_eq!(quali_stage(std::iter::empty()), 1, "nothing published yet: Q1");
+    }
+
+    /// Q2 of the 2026 Spanish GP, verbatim shapes: the field's gaps are to
+    /// the Q2 leader, a driver without a Q2 lap still carries a SMALLER Q1
+    /// gap (blanked), and the Q1-eliminated carry the lap time that put
+    /// them out (kept — the renderer greys it).
+    #[test]
+    fn live_quali_values_blank_stale_gaps_and_keep_out_times() {
+        let mk = |rank: i64, gap: Option<&str>, q1: Option<&str>| {
+            (
+                rank,
+                LeaderRow { rank: rank.to_string(), value: gap.unwrap_or("").into(), ..Default::default() },
+                F1Timing {
+                    gap: gap.map(String::from),
+                    position: Some(rank),
+                    qual_time: [q1.map(String::from), None, None],
+                },
+            )
+        };
+        let mut drivers = vec![
+            mk(1, None, None),
+            mk(2, Some("+0.16"), None),
+            mk(3, Some("+2.98"), None),
+            mk(4, Some("+0.75"), None), // Q1 gap: no Q2 lap yet
+            mk(5, Some("+3.10"), None), // back on Q2 gaps (leader-relative)
+            mk(6, Some("+2.10"), Some("1:35.312")), // out in Q1
+            mk(7, Some("+2.18"), None), // out in Q1, time not published yet
+        ];
+        // A five-car "field" so the cut lands inside the fixture: safe 3, field 5.
+        let zones = Some(crate::model::QualiZones { safe: 3, field: 5 });
+        quali_values(&mut drivers, zones, true);
+        let v: Vec<&str> = drivers.iter().map(|(_, r, _)| r.value.as_str()).collect();
+        assert_eq!(v, ["", "+0.16", "+2.98", "", "+3.10", "1:35.31", "+2.18"]);
+
+        // Finished: lap times from the last segment each driver ran.
+        let mut done = vec![mk(1, None, Some("1:34.100")), mk(2, Some("+0.30"), None)];
+        quali_values(&mut done, None, false);
+        assert_eq!(done[0].1.value, "1:34.10");
+        assert_eq!(done[1].1.value, "", "nothing published: blank, not a stale gap");
+    }
+
+    /// A live quali orders by the timing screen (which the gaps are relative
+    /// to), carries the segment and its zones, and falls back to the
+    /// scoreboard order when the fan-out gave nothing.
+    #[test]
+    fn live_quali_orders_by_timing_position_and_carries_the_segment() {
+        let ev = || -> LeaderEvent {
+            serde_json::from_str(
+                r#"{"id":"600057443","shortName":"Spanish GP","competitions":[{
+                    "id":"401839106",
+                    "type":{"abbreviation":"Qual"},
+                    "status":{"type":{"name":"STATUS_IN_PROGRESS"}},
+                    "competitors":[
+                        {"id":"4665","order":1,"athlete":{"displayName":"Max Verstappen"}},
+                        {"id":"5503","order":2,"athlete":{"displayName":"George Russell"}},
+                        {"id":"868","order":3,"athlete":{"displayName":"Lewis Hamilton"}}
+                    ]}]}"#,
+            )
+            .unwrap()
+        };
+        let mut timing = HashMap::new();
+        let t = |gap: Option<&str>, pos: i64, q1: Option<&str>| F1Timing {
+            gap: gap.map(String::from),
+            position: Some(pos),
+            qual_time: [q1.map(String::from), None, None],
+        };
+        timing.insert(("401839106".into(), "4665".into()), t(None, 1, None));
+        timing.insert(("401839106".into(), "5503".into()), t(Some("+0.29"), 3, None));
+        timing.insert(("401839106".into(), "868".into()), t(Some("+0.15"), 2, Some("1:35.000")));
+        let g = parse_f1(ev(), &timing).remove(0);
+        let lb = g.leaderboard.unwrap();
+        let names: Vec<&str> = lb.rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["VER", "HAM", "RUS"], "timing position, not scoreboard order");
+        assert_eq!(lb.rows[1].rank, "2", "rank follows the timing position");
+        assert_eq!(lb.stage, Some(2), "a published Q1 time means Q2");
+        assert_eq!(lb.name, "SPANISH GP Q", "the digit is the renderer's to add");
+        assert!(lb.quali.is_none(), "three cars is no qualifying format");
+
+        let g = parse_f1(ev(), &HashMap::new()).remove(0);
+        let lb = g.leaderboard.unwrap();
+        let names: Vec<&str> = lb.rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["VER", "RUS", "HAM"], "no timing: scoreboard order");
+        assert_eq!(lb.stage, None, "no timing: no segment claimed");
+    }
+
+    /// The statistics resource, 2026 Spanish GP Q2 verbatim for a driver
+    /// out in Q1: position, gap, and the Q1 time all come through.
+    #[test]
+    fn f1_timing_reads_position_and_segment_times() {
+        let stats: CoreStatistics = serde_json::from_str(
+            r#"{"splits":{"categories":[
+                {"name":"general","stats":[
+                    {"name":"place","displayValue":"17"},
+                    {"name":"qual1TimeMS","displayValue":"1:35.312"},
+                    {"name":"qual2TimeMS","displayValue":"0.000"},
+                    {"name":"qual3TimeMS","displayValue":"0.000"}]},
+                {"name":"gapToLeader","stats":[
+                    {"name":"position","displayValue":"17"},
+                    {"name":"gapToLeader","displayValue":"+2.101"}]}]}}"#,
+        )
+        .unwrap();
+        let t = f1_timing(&stats);
+        assert_eq!(t.gap.as_deref(), Some("+2.10"));
+        assert_eq!(t.position, Some(17));
+        assert_eq!(t.qual_time, [Some("1:35.312".to_string()), None, None]);
+        assert_eq!(fit_lap_time("1:35.312"), "1:35.31");
+        assert_eq!(fit_lap_time("DNF"), "DNF", "non-times pass through");
+    }
+
+    /// Accented surnames code as the FIA does: HUL and PER, not HLK / PRZ.
+    #[test]
+    fn driver_codes_fold_diacritics() {
+        assert_eq!(f1_code("Nico Hülkenberg"), "HUL");
+        assert_eq!(f1_code("Sergio Pérez"), "PER");
+        assert_eq!(f1_code("Max Verstappen"), "VER");
+        assert!(f1_team_color("HUL").is_some(), "and therefore get their team colour");
+    }
+
+    /// Render a CAPTURED ESPN snapshot (the scoreboard plus one statistics
+    /// file per driver, as `design/f1-logs/live/<ts>/` holds them) to PNGs,
+    /// one per session, at the board's full row depth — the way to see what
+    /// a live session looked like without a server or a session in progress:
+    ///
+    ///   F1_FIXTURE_DIR=design/f1-logs/live/20260912T144011Z \
+    ///   F1_FIXTURE_OUT=/tmp/f1 cargo test -p server render_f1_fixture -- --ignored
+    #[test]
+    #[ignore]
+    fn render_f1_fixture() {
+        let dir = std::env::var("F1_FIXTURE_DIR").expect("F1_FIXTURE_DIR");
+        let out = std::env::var("F1_FIXTURE_OUT").unwrap_or_else(|_| dir.clone());
+        std::fs::create_dir_all(&out).unwrap();
+        let raw = std::fs::read_to_string(format!("{dir}/scoreboard.json")).unwrap();
+        let r: LeaderboardResponse = serde_json::from_str(&raw).unwrap();
+        let mut timing = HashMap::new();
+        for ev in &r.events {
+            for comp in &ev.competitions {
+                for c in &comp.competitors {
+                    let Ok(raw) = std::fs::read_to_string(format!("{dir}/stats-{}.json", c.id)) else { continue };
+                    let Ok(stats) = serde_json::from_str::<CoreStatistics>(&raw) else { continue };
+                    timing.insert((comp.id.clone(), c.id.clone()), f1_timing(&stats));
+                }
+            }
+        }
+        for ev in r.events {
+            for g in parse_f1(ev, &timing) {
+                let (_, px, _) = crate::render::render_board_frame(
+                    &g, crate::render::LEADERBOARD_MAX_ROWS, None, None, scoreboard_protocol::NameStyle::Name,
+                );
+                let path = format!("{out}/{}.png", g.id);
+                std::fs::write(&path, crate::render_png(&px)).unwrap();
+                eprintln!("wrote {path} ({})", g.leaderboard.as_ref().map(|l| l.name.as_str()).unwrap_or(""));
+            }
+        }
     }
 
     /// ESPN's post-chequered racing status, observed live: SESSION_COMPLETE
@@ -2769,7 +3116,10 @@ mod leader_tests {
         )
         .unwrap();
         let mut gaps = HashMap::new();
-        gaps.insert(("401839097".to_string(), "5829".to_string()), "+0.29".to_string());
+        gaps.insert(
+            ("401839097".to_string(), "5829".to_string()),
+            F1Timing { gap: Some("+0.29".into()), ..Default::default() },
+        );
         let games = parse_f1(ev, &gaps);
         assert_eq!(games.len(), 1);
         let rows = &games[0].leaderboard.as_ref().unwrap().rows;
@@ -2820,6 +3170,51 @@ mod leader_tests {
         assert_eq!(rows.first().map(|r| (r.rank.as_str(), r.name.as_str())), Some(("1", "VER")));
         assert_eq!(rows.get(1).map(|r| r.name.as_str()), Some("NOR"));
         assert!(rows.first().unwrap().color.is_some(), "VER maps to a team color");
+    }
+
+    /// MAR-116: a race or sprint at a known circuit carries the leader's
+    /// lap count (status `period`) against the scheduled distance; quali
+    /// and a race that has not started carry nothing, and so does a
+    /// circuit the table does not know.
+    #[test]
+    fn f1_race_and_sprint_carry_lap_progress() {
+        use crate::model::LapProgress;
+        let json = r#"{
+            "id": "evt2",
+            "shortName": "Pirelli British GP",
+            "circuit": {"fullName": "Silverstone Circuit"},
+            "competitions": [
+                {"date":"2026-07-04T15:00Z","status":{"type":{"name":"STATUS_IN_PROGRESS"},"period":9},
+                 "type":{"abbreviation":"Qual"},
+                 "competitors":[{"order":1,"athlete":{"displayName":"Lando Norris"}}]},
+                {"date":"2026-07-04T11:00Z","status":{"type":{"name":"STATUS_FINAL"},"period":17},
+                 "type":{"abbreviation":"SR"},
+                 "competitors":[{"order":1,"athlete":{"displayName":"Lando Norris"}}]},
+                {"date":"2026-07-05T14:00Z","status":{"type":{"name":"STATUS_IN_PROGRESS"},"period":23},
+                 "type":{"abbreviation":"Race"},
+                 "competitors":[{"order":1,"athlete":{"displayName":"Max Verstappen"}}]}
+            ]
+        }"#;
+        let ev: LeaderEvent = serde_json::from_str(json).unwrap();
+        let games = parse_f1(ev, &HashMap::new());
+        let laps = |s: &str| games.iter().find(|g| g.session.as_deref() == Some(s)).unwrap().leaderboard.as_ref().unwrap().laps;
+        assert_eq!(laps("race"), Some(LapProgress { completed: 23, total: 52 }));
+        assert_eq!(laps("sprint"), Some(LapProgress { completed: 17, total: 17 }));
+        assert_eq!(laps("quali"), None, "qualifying has no distance");
+
+        // Not started: period 0 and a scheduled status — nothing to draw yet.
+        let pre = json.replace(r#""name":"STATUS_IN_PROGRESS"},"period":23"#, r#""name":"STATUS_SCHEDULED"},"period":0"#);
+        let ev: LeaderEvent = serde_json::from_str(&pre).unwrap();
+        let games = parse_f1(ev, &HashMap::new());
+        let race = games.iter().find(|g| g.session.as_deref() == Some("race")).unwrap();
+        assert_eq!(race.leaderboard.as_ref().unwrap().laps, None);
+
+        // An unknown circuit: no bar rather than a guess.
+        let odd = json.replace("Silverstone Circuit", "Brands Hatch");
+        let ev: LeaderEvent = serde_json::from_str(&odd).unwrap();
+        let games = parse_f1(ev, &HashMap::new());
+        let race = games.iter().find(|g| g.session.as_deref() == Some("race")).unwrap();
+        assert_eq!(race.leaderboard.as_ref().unwrap().laps, None);
     }
 
     /// Multi-day leaderboard events carry ESPN's event-level endDate as

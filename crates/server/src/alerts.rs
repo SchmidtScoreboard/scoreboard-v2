@@ -58,7 +58,7 @@ impl Mailer {
         Some(Self {
             api_key,
             from: std::env::var("ALERT_EMAIL_FROM")
-                .unwrap_or_else(|_| "Scoreboard <onboarding@resend.dev>".into()),
+                .unwrap_or_else(|_| "OpenScoreboard <onboarding@resend.dev>".into()),
             to,
         })
     }
@@ -179,7 +179,7 @@ pub async fn watchdog(state: AppState, mailer: Mailer) {
             if ALERTING.swap(false, Ordering::Relaxed) {
                 let _ = mailer
                     .send(
-                        "Scoreboard: recovered",
+                        "OpenScoreboard: recovered",
                         "The server is answering normally again.\n\nBoards connected: \
                          see /health for current numbers.",
                     )
@@ -202,7 +202,7 @@ pub async fn watchdog(state: AppState, mailer: Mailer) {
             p.boards.map(|n| n.to_string()).unwrap_or_else(|| "unknown".into()),
             p.games.map(|n| n.to_string()).unwrap_or_else(|| "unknown".into()),
         );
-        match mailer.send("Scoreboard: server is not answering", &body).await {
+        match mailer.send("OpenScoreboard: server is not answering", &body).await {
             Ok(()) => tracing::error!("alert sent: {}", p.describe().replace('\n', " ")),
             Err(e) => {
                 tracing::error!("alert FAILED to send: {e}");
@@ -272,7 +272,7 @@ pub async fn daily_report(state: AppState, mailer: Mailer) {
             report["version"],
             report["loops"],
         );
-        match mailer.send(&format!("Scoreboard daily report ({})", if ok { "ok" } else { "DEGRADED" }), &body).await {
+        match mailer.send(&format!("OpenScoreboard daily report ({})", if ok { "ok" } else { "DEGRADED" }), &body).await {
             Ok(()) => tracing::info!("daily report sent"),
             Err(e) => tracing::warn!("daily report failed: {e}"),
         }

@@ -1,4 +1,4 @@
-# Scoreboard
+# OpenScoreboard
 
 A friends-and-family LED-matrix sports scoreboard: a small wall device that
 shows live scores for your favorite teams and turns itself on and off around
