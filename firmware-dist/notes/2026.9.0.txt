@@ -1,0 +1,1 @@
+- Long leaderboards keep their title in place while the list scrolls: the tournament name and round for golf, the race name and lap bar for F1, and the cup score for team events like the Presidents Cup.
