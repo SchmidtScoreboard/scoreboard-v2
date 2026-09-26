@@ -1246,6 +1246,16 @@ pub const LEADERBOARD_MAX_ROWS: usize = 20;
 /// same 6px pitch) for the board to scroll through; returns whether it
 /// scrolls. A cap of 4 is the static panel layout — no scrolling. App cards
 /// and HTTP renders keep the static 4-row `render_game`.
+/// How many tower rows a leaderboard draws at full depth: its stroke-play
+/// rows, or match play's row per player. Deeper than 4 means the board frame
+/// renders tall and scrolls.
+pub fn leaderboard_row_count(lb: &crate::model::Leaderboard) -> usize {
+    match &lb.matchplay {
+        Some(mp) => matchplay_rows(mp, LEADERBOARD_MAX_ROWS, None).len(),
+        None => lb.rows.len(),
+    }
+}
+
 /// Rows at the top of a scrolling leaderboard that hold still while the
 /// field scrolls beneath them (the manifest's `pin_rows`): the title row and
 /// the gap under it — golf's name and round, F1's GP name and lap bar, match
@@ -1262,10 +1272,7 @@ pub fn render_board_frame(g: &Game, rows_cap: usize, spoiler: Option<SpoilerMode
     let rows_cap = rows_cap.clamp(4, LEADERBOARD_MAX_ROWS);
     let deep = rows_cap > 4
         && g.status != GameStatus::Pregame
-        && g.leaderboard.as_ref().is_some_and(|lb| match &lb.matchplay {
-            Some(mp) => matchplay_rows(mp, LEADERBOARD_MAX_ROWS, tz).len() > 4,
-            None => lb.rows.len() > 4,
-        });
+        && g.leaderboard.as_ref().is_some_and(|lb| leaderboard_row_count(lb) > 4);
     if !deep {
         let (id, px) = render_game(g, tz, style);
         return (id, px, false);

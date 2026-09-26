@@ -360,6 +360,15 @@ pub struct GameSummary {
     /// the app offers its per-game scroll toggle only for these.
     #[serde(default)]
     pub scrolls: bool,
+    /// For a game whose board rendering scrolls: the dwell of its scroll pass
+    /// on this board (ms; the speed's dwell times [`SCROLL_DWELL_FACTOR`]),
+    /// so the app's card can glide exactly as the panel does. 0 otherwise.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub scroll_dwell_ms: u32,
+    /// Rows at the top of that scrolling frame that stay put (the
+    /// leaderboard's title), as in [`RotationEntry::pin_rows`]. 0 otherwise.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub pin_rows: u8,
     /// Deep link to ESPN's full human-readable game page ("View on ESPN"),
     /// when one can be formed — a numeric ESPN event id in a sport with a game
     /// page. None for demo games, leaderboard sports (golf/F1), and anything
@@ -426,6 +435,10 @@ pub struct RotationEntry {
 }
 
 fn is_zero_u8(n: &u8) -> bool {
+    *n == 0
+}
+
+fn is_zero_u32(n: &u32) -> bool {
     *n == 0
 }
 
@@ -814,7 +827,56 @@ pub const MODE_SCORES: &str = "scores";
 pub const MODE_OFF: &str = "off";
 
 fn default_dwell_secs() -> u32 {
-    10
+    DWELL_STANDARD_SECS
+}
+
+/// The screen speeds a board offers, in seconds per screen: Fast, Standard,
+/// Slow. Seconds stay the stored and wire unit (old apps write them, old
+/// configs hold them); every reader snaps through [`snap_dwell_secs`], so a
+/// legacy 7s or 30s behaves as the preset its label says it is.
+pub const DWELL_FAST_SECS: u32 = 10;
+pub const DWELL_STANDARD_SECS: u32 = 15;
+pub const DWELL_SLOW_SECS: u32 = 20;
+pub const DWELL_PRESETS_SECS: [u32; 3] = [DWELL_FAST_SECS, DWELL_STANDARD_SECS, DWELL_SLOW_SECS];
+
+/// A scrolling screen (a deep leaderboard) holds the panel this many times as
+/// long as its speed's dwell: the scroll pass needs the time to be readable.
+pub const SCROLL_DWELL_FACTOR: u32 = 2;
+
+/// The preset nearest `secs`; an exact midpoint (12.5s never happens in
+/// whole seconds, but 0 or a huge value might) goes to the slower preset.
+pub fn snap_dwell_secs(secs: u32) -> u32 {
+    let mut best = DWELL_PRESETS_SECS[0];
+    for p in DWELL_PRESETS_SECS {
+        if secs.abs_diff(p) <= secs.abs_diff(best) {
+            best = p;
+        }
+    }
+    best
+}
+
+/// Vertical scroll offset `t` ms into a dwell, for a frame `max_off` rows
+/// taller than the panel. The dwell splits into five equal phases — hold at
+/// the top, glide down, hold at the bottom, glide up, hold at the top — so
+/// one full pass exactly fits the dwell and the frame is at rest when the
+/// rotation advances. Repeats (via modulo) for a dwell that never advances.
+///
+/// Shared by the board (which draws it) and the app core (which animates the
+/// app's cards with it), so the two scroll identically. Total for any input:
+/// on the board a panic is a reboot.
+pub fn scroll_offset(t: u64, dwell_ms: u64, max_off: usize) -> usize {
+    let phase = dwell_ms / 5;
+    if phase == 0 || max_off == 0 {
+        return 0;
+    }
+    let t = t % dwell_ms;
+    match t / phase {
+        0 => 0,
+        1 => (max_off as u64 * (t - phase) / phase) as usize,
+        2 => max_off,
+        3 => max_off - (max_off as u64 * (t - 3 * phase) / phase) as usize,
+        _ => 0,
+    }
 }
 
 fn default_brightness() -> u8 {
@@ -1843,6 +1905,35 @@ mod calver_tests {
         // Unparseable on either side = never newer.
         assert!(!version_newer("garbage", "2026.7.0"));
         assert!(!version_newer("2026.7.0", "garbage"));
+    }
+}
+
+#[cfg(test)]
+mod dwell_tests {
+    use super::*;
+
+    /// Every stored value lands on a preset, and the presets land on
+    /// themselves: old 5/7s are Fast, 30s is Slow.
+    #[test]
+    fn stored_dwell_snaps_to_the_nearest_preset() {
+        for (secs, want) in [(0, 10), (5, 10), (7, 10), (10, 10), (12, 10), (13, 15), (15, 15), (17, 15), (18, 20), (20, 20), (30, 20), (u32::MAX, 20)] {
+            assert_eq!(snap_dwell_secs(secs), want, "{secs}s");
+        }
+        assert_eq!(default_dwell_secs(), DWELL_STANDARD_SECS, "new boards are Standard");
+    }
+
+    /// The five phases, and at rest at both ends of the dwell.
+    #[test]
+    fn scroll_offset_holds_glides_and_rests() {
+        let (dwell, max) = (10_000, 80);
+        assert_eq!(scroll_offset(1_000, dwell, max), 0, "hold top");
+        assert_eq!(scroll_offset(3_000, dwell, max), 40, "halfway down");
+        assert_eq!(scroll_offset(5_000, dwell, max), 80, "hold bottom");
+        assert_eq!(scroll_offset(7_000, dwell, max), 40, "halfway up");
+        assert_eq!(scroll_offset(9_999, dwell, max), 0, "at rest before the advance");
+        assert_eq!(scroll_offset(13_000, dwell, max), 40, "repeats");
+        assert_eq!(scroll_offset(3_000, 0, max), 0, "no dwell, no scroll");
+        assert_eq!(scroll_offset(3_000, dwell, 0), 0, "nothing to scroll");
     }
 }
 

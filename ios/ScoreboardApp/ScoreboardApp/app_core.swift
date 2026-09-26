@@ -2179,6 +2179,67 @@ public func FfiConverterTypeUiDepthOption_lower(_ value: UiDepthOption) -> RustB
     return FfiConverterTypeUiDepthOption.lower(value)
 }
 
+public struct UiDwellOption {
+    public var secs: UInt32
+    public var label: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(secs: UInt32, label: String) {
+        self.secs = secs
+        self.label = label
+    }
+}
+
+extension UiDwellOption: Equatable, Hashable {
+    public static func == (lhs: UiDwellOption, rhs: UiDwellOption) -> Bool {
+        if lhs.secs != rhs.secs {
+            return false
+        }
+        if lhs.label != rhs.label {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(secs)
+        hasher.combine(label)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiDwellOption: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiDwellOption {
+        return
+            try UiDwellOption(
+                secs: FfiConverterUInt32.read(from: &buf),
+                label: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UiDwellOption, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.secs, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiDwellOption_lift(_ buf: RustBuffer) throws -> UiDwellOption {
+    return try FfiConverterTypeUiDwellOption.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiDwellOption_lower(_ value: UiDwellOption) -> RustBuffer {
+    return FfiConverterTypeUiDwellOption.lower(value)
+}
+
 /**
  * One firmware image the server currently hosts (protocol `FwImage`), as
  * listed for the DEBUG firmware picker. `channel` is a lowercase route name
@@ -2290,6 +2351,17 @@ public struct UiGame {
      */
     public var scrolls: Bool
     /**
+     * The board's dwell for this game's scroll pass (ms), so the card can
+     * glide exactly as the panel does: feed it to [`scroll_window_offset`]
+     * with the frame's height. 0 when the game does not scroll.
+     */
+    public var scrollDwellMs: UInt32
+    /**
+     * Rows at the top of the scrolling frame that hold still (the title);
+     * draw them unmoved over the scrolling window. 0 when it does not scroll.
+     */
+    public var pinRows: UInt32
+    /**
      * ESPN game-page URL for the "View on ESPN" menu item; nil when none can
      * be formed (demo games, golf/F1 leaderboards).
      */
@@ -2332,6 +2404,15 @@ public struct UiGame {
                     * — the card menu offers its scroll toggle only for these.
                     */ scrolls: Bool,
                 /**
+                    * The board's dwell for this game's scroll pass (ms), so the card can
+                    * glide exactly as the panel does: feed it to [`scroll_window_offset`]
+                    * with the frame's height. 0 when the game does not scroll.
+                    */ scrollDwellMs: UInt32,
+                /**
+                    * Rows at the top of the scrolling frame that hold still (the title);
+                    * draw them unmoved over the scrolling window. 0 when it does not scroll.
+                    */ pinRows: UInt32,
+                /**
                     * ESPN game-page URL for the "View on ESPN" menu item; nil when none can
                     * be formed (demo games, golf/F1 leaderboards).
                     */ espnUrl: String?,
@@ -2355,6 +2436,8 @@ public struct UiGame {
         self.champ = champ
         self.spoiled = spoiled
         self.scrolls = scrolls
+        self.scrollDwellMs = scrollDwellMs
+        self.pinRows = pinRows
         self.espnUrl = espnUrl
         self.queued = queued
     }
@@ -2407,6 +2490,12 @@ extension UiGame: Equatable, Hashable {
         if lhs.scrolls != rhs.scrolls {
             return false
         }
+        if lhs.scrollDwellMs != rhs.scrollDwellMs {
+            return false
+        }
+        if lhs.pinRows != rhs.pinRows {
+            return false
+        }
         if lhs.espnUrl != rhs.espnUrl {
             return false
         }
@@ -2432,6 +2521,8 @@ extension UiGame: Equatable, Hashable {
         hasher.combine(champ)
         hasher.combine(spoiled)
         hasher.combine(scrolls)
+        hasher.combine(scrollDwellMs)
+        hasher.combine(pinRows)
         hasher.combine(espnUrl)
         hasher.combine(queued)
     }
@@ -2459,6 +2550,8 @@ public struct FfiConverterTypeUiGame: FfiConverterRustBuffer {
                 champ: FfiConverterOptionString.read(from: &buf),
                 spoiled: FfiConverterBool.read(from: &buf),
                 scrolls: FfiConverterBool.read(from: &buf),
+                scrollDwellMs: FfiConverterUInt32.read(from: &buf),
+                pinRows: FfiConverterUInt32.read(from: &buf),
                 espnUrl: FfiConverterOptionString.read(from: &buf),
                 queued: FfiConverterBool.read(from: &buf)
             )
@@ -2480,6 +2573,8 @@ public struct FfiConverterTypeUiGame: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.champ, into: &buf)
         FfiConverterBool.write(value.spoiled, into: &buf)
         FfiConverterBool.write(value.scrolls, into: &buf)
+        FfiConverterUInt32.write(value.scrollDwellMs, into: &buf)
+        FfiConverterUInt32.write(value.pinRows, into: &buf)
         FfiConverterOptionString.write(value.espnUrl, into: &buf)
         FfiConverterBool.write(value.queued, into: &buf)
     }
@@ -4948,6 +5043,30 @@ private struct FfiConverterOptionTypeUiNameStyle: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterOptionSequenceTypeUiGame: FfiConverterRustBuffer {
+    typealias SwiftType = [UiGame]?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterSequenceTypeUiGame.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterSequenceTypeUiGame.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -5065,6 +5184,31 @@ private struct FfiConverterSequenceTypeUiDepthOption: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             try seq.append(FfiConverterTypeUiDepthOption.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeUiDwellOption: FfiConverterRustBuffer {
+    typealias SwiftType = [UiDwellOption]
+
+    static func write(_ value: [UiDwellOption], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeUiDwellOption.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UiDwellOption] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UiDwellOption]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeUiDwellOption.read(from: &buf))
         }
         return seq
     }
@@ -5579,6 +5723,51 @@ public func displayedNowShowing(games: [UiGame], focusedGameId: String?) -> [UiG
 }
 
 /**
+ * A stored speed's name: "Fast", "Standard", "Slow".
+ */
+public func dwellLabel(secs: UInt32) -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_dwell_label(
+            FfiConverterUInt32.lower(secs), $0
+        )
+    })
+}
+
+/**
+ * The speed choices, fastest first: Fast (10s), Standard (15s), Slow (20s).
+ * A scrolling screen holds for twice its speed; the labels don't say so,
+ * because the choice is about pace, not arithmetic.
+ */
+public func dwellOptions() -> [UiDwellOption] {
+    return try! FfiConverterSequenceTypeUiDwellOption.lift(try! rustCall {
+        uniffi_app_core_fn_func_dwell_options($0
+        )
+    })
+}
+
+/**
+ * The option a stored value selects: its snapped preset. Compare
+ * `dwell_selected(secs) == option.secs` to place the checkmark.
+ */
+public func dwellSelected(secs: UInt32) -> UInt32 {
+    return try! FfiConverterUInt32.lift(try! rustCall {
+        uniffi_app_core_fn_func_dwell_selected(
+            FfiConverterUInt32.lower(secs), $0
+        )
+    })
+}
+
+/**
+ * The setting's title, in Settings and in a league's editor.
+ */
+public func dwellTitle() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_dwell_title($0
+        )
+    })
+}
+
+/**
  * The ring follows the GLASS: what the panel is actually showing, as a
  * picker id. `now_showing_empty` is [`panel_shows_nothing`], not the list's
  * length. Quiet hours force Off (the window darkens the panel whatever
@@ -5742,6 +5931,29 @@ public func leaderboardDepthOptions(sportId: String) -> [UiDepthOption] {
 }
 
 /**
+ * A league's "use the board's speed" choice, naming what that is:
+ * "Board default (Standard)".
+ */
+public func leagueDwellDefaultLabel(boardSecs: UInt32) -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_league_dwell_default_label(
+            FfiConverterUInt32.lower(boardSecs), $0
+        )
+    })
+}
+
+/**
+ * A league override as the dashboard's override row says it: "Slow speed".
+ */
+public func leagueDwellOverrideLabel(secs: UInt32) -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_league_dwell_override_label(
+            FfiConverterUInt32.lower(secs), $0
+        )
+    })
+}
+
+/**
  * The leagues worth showing on the dashboard, in catalog order.
  *
  * A league earns a card when it has favorites, subscribed rounds, or ANY
@@ -5833,11 +6045,17 @@ public func offModeValue(mode: UiOffMode, key: String, params: [String: String])
  * bumped one was pushed off by the cap — neither is on the glass. Passing
  * the raw list length instead put the ring on Scores while the panel sat
  * on the idle weather screen waiting for tonight's games.
+ *
+ * `None` is "not known yet": the board's state has not arrived (an app
+ * opening, a board just picked). That is NOT an empty panel — treating it as
+ * one made the picker jump to the idle screen for a moment on every open,
+ * then strand its rail there when the state landed. Unknown trusts the
+ * board's configured mode.
  */
-public func panelShowsNothing(nowShowing: [UiGame]) -> Bool {
+public func panelShowsNothing(nowShowing: [UiGame]?) -> Bool {
     return try! FfiConverterBool.lift(try! rustCall {
         uniffi_app_core_fn_func_panel_shows_nothing(
-            FfiConverterSequenceTypeUiGame.lower(nowShowing), $0
+            FfiConverterOptionSequenceTypeUiGame.lower(nowShowing), $0
         )
     })
 }
@@ -5987,6 +6205,23 @@ public func rotationRemove(gameId: String, extraGameIds: [String], excludedGameI
             FfiConverterString.lower(gameId),
             FfiConverterSequenceString.lower(extraGameIds),
             FfiConverterSequenceString.lower(excludedGameIds), $0
+        )
+    })
+}
+
+/**
+ * Which row of a scrolling frame the app's card shows at the top of its
+ * window, `elapsed_ms` into the animation: the board's own scroll curve
+ * (hold, glide down, hold, glide up, hold, one pass per `dwell_ms`), so the
+ * card moves exactly as the panel does. `frame_rows` is the frame's height;
+ * a panel-sized frame, or a dwell of 0, never moves.
+ */
+public func scrollWindowOffset(elapsedMs: UInt64, dwellMs: UInt32, frameRows: UInt32) -> UInt32 {
+    return try! FfiConverterUInt32.lift(try! rustCall {
+        uniffi_app_core_fn_func_scroll_window_offset(
+            FfiConverterUInt64.lower(elapsedMs),
+            FfiConverterUInt32.lower(dwellMs),
+            FfiConverterUInt32.lower(frameRows), $0
         )
     })
 }
@@ -6146,6 +6381,18 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_func_displayed_now_showing() != 48767 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_app_core_checksum_func_dwell_label() != 29753 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_dwell_options() != 20460 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_dwell_selected() != 52470 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_dwell_title() != 56098 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_func_effective_mode() != 65057 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6179,6 +6426,12 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_func_leaderboard_depth_options() != 20168 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_app_core_checksum_func_league_dwell_default_label() != 60263 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_league_dwell_override_label() != 11959 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_func_league_prefs() != 47967 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6194,7 +6447,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_func_off_mode_value() != 49163 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_func_panel_shows_nothing() != 2688 {
+    if uniffi_app_core_checksum_func_panel_shows_nothing() != 52572 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_parse_networks() != 61308 {
@@ -6225,6 +6478,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_rotation_remove() != 58838 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_scroll_window_offset() != 6953 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_server_presets() != 5410 {

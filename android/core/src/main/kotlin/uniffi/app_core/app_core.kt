@@ -1025,6 +1025,20 @@ internal open class UniffiVTableCallbackInterfaceClientListener(
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -1169,6 +1183,14 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_displayed_now_showing(`games`: RustBuffer.ByValue,`focusedGameId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_dwell_label(`secs`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_dwell_options(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_dwell_selected(`secs`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    fun uniffi_app_core_fn_func_dwell_title(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_effective_mode(`mode`: RustBuffer.ByValue,`quietActive`: Byte,`nowShowingEmpty`: Byte,`offMode`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_fallback_off_modes(uniffi_out_err: UniffiRustCallStatus, 
@@ -1190,6 +1212,10 @@ internal interface UniffiLib : Library {
     fun uniffi_app_core_fn_func_involves_favorite(`sportId`: RustBuffer.ByValue,`away`: RustBuffer.ByValue,`home`: RustBuffer.ByValue,`favoriteTeamIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     fun uniffi_app_core_fn_func_leaderboard_depth_options(`sportId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_league_dwell_default_label(`boardSecs`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_league_dwell_override_label(`secs`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_league_prefs(`config`: RustBuffer.ByValue,`sports`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1223,6 +1249,8 @@ internal interface UniffiLib : Library {
     ): Byte
     fun uniffi_app_core_fn_func_rotation_remove(`gameId`: RustBuffer.ByValue,`extraGameIds`: RustBuffer.ByValue,`excludedGameIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_scroll_window_offset(`elapsedMs`: Long,`dwellMs`: Int,`frameRows`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
     fun uniffi_app_core_fn_func_server_presets(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_snap_brightness(`value`: Double,uniffi_out_err: UniffiRustCallStatus, 
@@ -1371,6 +1399,14 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_app_core_checksum_func_displayed_now_showing(
     ): Short
+    fun uniffi_app_core_checksum_func_dwell_label(
+    ): Short
+    fun uniffi_app_core_checksum_func_dwell_options(
+    ): Short
+    fun uniffi_app_core_checksum_func_dwell_selected(
+    ): Short
+    fun uniffi_app_core_checksum_func_dwell_title(
+    ): Short
     fun uniffi_app_core_checksum_func_effective_mode(
     ): Short
     fun uniffi_app_core_checksum_func_fallback_off_modes(
@@ -1392,6 +1428,10 @@ internal interface UniffiLib : Library {
     fun uniffi_app_core_checksum_func_involves_favorite(
     ): Short
     fun uniffi_app_core_checksum_func_leaderboard_depth_options(
+    ): Short
+    fun uniffi_app_core_checksum_func_league_dwell_default_label(
+    ): Short
+    fun uniffi_app_core_checksum_func_league_dwell_override_label(
     ): Short
     fun uniffi_app_core_checksum_func_league_prefs(
     ): Short
@@ -1424,6 +1464,8 @@ internal interface UniffiLib : Library {
     fun uniffi_app_core_checksum_func_rotation_modified(
     ): Short
     fun uniffi_app_core_checksum_func_rotation_remove(
+    ): Short
+    fun uniffi_app_core_checksum_func_scroll_window_offset(
     ): Short
     fun uniffi_app_core_checksum_func_server_presets(
     ): Short
@@ -1618,6 +1660,18 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_app_core_checksum_func_displayed_now_showing() != 48767.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_app_core_checksum_func_dwell_label() != 29753.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_dwell_options() != 20460.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_dwell_selected() != 52470.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_dwell_title() != 56098.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_app_core_checksum_func_effective_mode() != 65057.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1651,6 +1705,12 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_app_core_checksum_func_leaderboard_depth_options() != 20168.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_app_core_checksum_func_league_dwell_default_label() != 60263.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_league_dwell_override_label() != 11959.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_app_core_checksum_func_league_prefs() != 47967.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1666,7 +1726,7 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_app_core_checksum_func_off_mode_value() != 49163.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_app_core_checksum_func_panel_shows_nothing() != 2688.toShort()) {
+    if (lib.uniffi_app_core_checksum_func_panel_shows_nothing() != 52572.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_parse_networks() != 61308.toShort()) {
@@ -1697,6 +1757,9 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_rotation_remove() != 58838.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_scroll_window_offset() != 6953.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_server_presets() != 5410.toShort()) {
@@ -3856,6 +3919,38 @@ public object FfiConverterTypeUiDepthOption: FfiConverterRustBuffer<UiDepthOptio
 
 
 
+data class UiDwellOption (
+    var `secs`: kotlin.UInt, 
+    var `label`: kotlin.String
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeUiDwellOption: FfiConverterRustBuffer<UiDwellOption> {
+    override fun read(buf: ByteBuffer): UiDwellOption {
+        return UiDwellOption(
+            FfiConverterUInt.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: UiDwellOption) = (
+            FfiConverterUInt.allocationSize(value.`secs`) +
+            FfiConverterString.allocationSize(value.`label`)
+    )
+
+    override fun write(value: UiDwellOption, buf: ByteBuffer) {
+            FfiConverterUInt.write(value.`secs`, buf)
+            FfiConverterString.write(value.`label`, buf)
+    }
+}
+
+
+
 /**
  * One firmware image the server currently hosts (protocol `FwImage`), as
  * listed for the DEBUG firmware picker. `channel` is a lowercase route name
@@ -3938,6 +4033,17 @@ data class UiGame (
      */
     var `scrolls`: kotlin.Boolean, 
     /**
+     * The board's dwell for this game's scroll pass (ms), so the card can
+     * glide exactly as the panel does: feed it to [`scroll_window_offset`]
+     * with the frame's height. 0 when the game does not scroll.
+     */
+    var `scrollDwellMs`: kotlin.UInt, 
+    /**
+     * Rows at the top of the scrolling frame that hold still (the title);
+     * draw them unmoved over the scrolling window. 0 when it does not scroll.
+     */
+    var `pinRows`: kotlin.UInt, 
+    /**
      * ESPN game-page URL for the "View on ESPN" menu item; nil when none can
      * be formed (demo games, golf/F1 leaderboards).
      */
@@ -3973,6 +4079,8 @@ public object FfiConverterTypeUiGame: FfiConverterRustBuffer<UiGame> {
             FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterBoolean.read(buf),
         )
@@ -3994,6 +4102,8 @@ public object FfiConverterTypeUiGame: FfiConverterRustBuffer<UiGame> {
             FfiConverterOptionalString.allocationSize(value.`champ`) +
             FfiConverterBoolean.allocationSize(value.`spoiled`) +
             FfiConverterBoolean.allocationSize(value.`scrolls`) +
+            FfiConverterUInt.allocationSize(value.`scrollDwellMs`) +
+            FfiConverterUInt.allocationSize(value.`pinRows`) +
             FfiConverterOptionalString.allocationSize(value.`espnUrl`) +
             FfiConverterBoolean.allocationSize(value.`queued`)
     )
@@ -4014,6 +4124,8 @@ public object FfiConverterTypeUiGame: FfiConverterRustBuffer<UiGame> {
             FfiConverterOptionalString.write(value.`champ`, buf)
             FfiConverterBoolean.write(value.`spoiled`, buf)
             FfiConverterBoolean.write(value.`scrolls`, buf)
+            FfiConverterUInt.write(value.`scrollDwellMs`, buf)
+            FfiConverterUInt.write(value.`pinRows`, buf)
             FfiConverterOptionalString.write(value.`espnUrl`, buf)
             FfiConverterBoolean.write(value.`queued`, buf)
     }
@@ -5603,6 +5715,38 @@ public object FfiConverterOptionalTypeUiNameStyle: FfiConverterRustBuffer<UiName
 /**
  * @suppress
  */
+public object FfiConverterOptionalSequenceTypeUiGame: FfiConverterRustBuffer<List<UiGame>?> {
+    override fun read(buf: ByteBuffer): List<UiGame>? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterSequenceTypeUiGame.read(buf)
+    }
+
+    override fun allocationSize(value: List<UiGame>?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterSequenceTypeUiGame.allocationSize(value)
+        }
+    }
+
+    override fun write(value: List<UiGame>?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterSequenceTypeUiGame.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
     override fun read(buf: ByteBuffer): List<kotlin.String> {
         val len = buf.getInt()
@@ -5733,6 +5877,34 @@ public object FfiConverterSequenceTypeUiDepthOption: FfiConverterRustBuffer<List
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeUiDepthOption.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeUiDwellOption: FfiConverterRustBuffer<List<UiDwellOption>> {
+    override fun read(buf: ByteBuffer): List<UiDwellOption> {
+        val len = buf.getInt()
+        return List<UiDwellOption>(len) {
+            FfiConverterTypeUiDwellOption.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<UiDwellOption>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeUiDwellOption.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<UiDwellOption>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeUiDwellOption.write(it, buf)
         }
     }
 }
@@ -6313,6 +6485,57 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     
 
         /**
+         * A stored speed's name: "Fast", "Standard", "Slow".
+         */ fun `dwellLabel`(`secs`: kotlin.UInt): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_dwell_label(
+        FfiConverterUInt.lower(`secs`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * The speed choices, fastest first: Fast (10s), Standard (15s), Slow (20s).
+         * A scrolling screen holds for twice its speed; the labels don't say so,
+         * because the choice is about pace, not arithmetic.
+         */ fun `dwellOptions`(): List<UiDwellOption> {
+            return FfiConverterSequenceTypeUiDwellOption.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_dwell_options(
+        _status)
+}
+    )
+    }
+    
+
+        /**
+         * The option a stored value selects: its snapped preset. Compare
+         * `dwell_selected(secs) == option.secs` to place the checkmark.
+         */ fun `dwellSelected`(`secs`: kotlin.UInt): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_dwell_selected(
+        FfiConverterUInt.lower(`secs`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * The setting's title, in Settings and in a league's editor.
+         */ fun `dwellTitle`(): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_dwell_title(
+        _status)
+}
+    )
+    }
+    
+
+        /**
          * The ring follows the GLASS: what the panel is actually showing, as a
          * picker id. `now_showing_empty` is [`panel_shows_nothing`], not the list's
          * length. Quiet hours force Off (the window darkens the panel whatever
@@ -6472,6 +6695,31 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     
 
         /**
+         * A league's "use the board's speed" choice, naming what that is:
+         * "Board default (Standard)".
+         */ fun `leagueDwellDefaultLabel`(`boardSecs`: kotlin.UInt): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_league_dwell_default_label(
+        FfiConverterUInt.lower(`boardSecs`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * A league override as the dashboard's override row says it: "Slow speed".
+         */ fun `leagueDwellOverrideLabel`(`secs`: kotlin.UInt): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_league_dwell_override_label(
+        FfiConverterUInt.lower(`secs`),_status)
+}
+    )
+    }
+    
+
+        /**
          * The leagues worth showing on the dashboard, in catalog order.
          *
          * A league earns a card when it has favorites, subscribed rounds, or ANY
@@ -6564,11 +6812,17 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
          * bumped one was pushed off by the cap — neither is on the glass. Passing
          * the raw list length instead put the ring on Scores while the panel sat
          * on the idle weather screen waiting for tonight's games.
-         */ fun `panelShowsNothing`(`nowShowing`: List<UiGame>): kotlin.Boolean {
+         *
+         * `None` is "not known yet": the board's state has not arrived (an app
+         * opening, a board just picked). That is NOT an empty panel — treating it as
+         * one made the picker jump to the idle screen for a moment on every open,
+         * then strand its rail there when the state landed. Unknown trusts the
+         * board's configured mode.
+         */ fun `panelShowsNothing`(`nowShowing`: List<UiGame>?): kotlin.Boolean {
             return FfiConverterBoolean.lift(
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_app_core_fn_func_panel_shows_nothing(
-        FfiConverterSequenceTypeUiGame.lower(`nowShowing`),_status)
+        FfiConverterOptionalSequenceTypeUiGame.lower(`nowShowing`),_status)
 }
     )
     }
@@ -6713,6 +6967,22 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_app_core_fn_func_rotation_remove(
         FfiConverterString.lower(`gameId`),FfiConverterSequenceString.lower(`extraGameIds`),FfiConverterSequenceString.lower(`excludedGameIds`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * Which row of a scrolling frame the app's card shows at the top of its
+         * window, `elapsed_ms` into the animation: the board's own scroll curve
+         * (hold, glide down, hold, glide up, hold, one pass per `dwell_ms`), so the
+         * card moves exactly as the panel does. `frame_rows` is the frame's height;
+         * a panel-sized frame, or a dwell of 0, never moves.
+         */ fun `scrollWindowOffset`(`elapsedMs`: kotlin.ULong, `dwellMs`: kotlin.UInt, `frameRows`: kotlin.UInt): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_scroll_window_offset(
+        FfiConverterULong.lower(`elapsedMs`),FfiConverterUInt.lower(`dwellMs`),FfiConverterUInt.lower(`frameRows`),_status)
 }
     )
     }

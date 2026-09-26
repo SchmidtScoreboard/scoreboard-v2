@@ -98,10 +98,13 @@ private fun SettingsRoot(
                         if (name.isNotBlank() && name != cfg?.name) session.rename(boardId, name)
                     }
                     if (cfg != null) {
+                        // Stored seconds that are not a preset (an older app's
+                        // 7s or 30s) select the preset they snap to — the one
+                        // the board uses.
                         ChoiceRow(
-                            "Seconds per screen",
-                            listOf(5u, 7u, 10u, 15u, 20u, 30u).map { it to "$it seconds" },
-                            cfg.dwellSecs,
+                            uniffi.app_core.dwellTitle(),
+                            uniffi.app_core.dwellOptions().map { it.secs to it.label },
+                            uniffi.app_core.dwellSelected(cfg.dwellSecs),
                             icon = Icons.Outlined.Timer,
                         ) { session.setDwell(boardId, it) }
                     }

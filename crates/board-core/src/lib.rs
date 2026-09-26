@@ -2045,26 +2045,9 @@ fn draw_server_node(c: &mut Canvas) {
 }
 
 /// Scale every pixel by `brightness` (10..=100) — the encoder's global dimmer.
-/// Vertical scroll offset at `t` ms into a dwell: the dwell splits into five
-/// equal phases — hold top, glide down, hold bottom, glide up, hold top — so
-/// one full pass exactly fits the user's "Time per game" and the frame is at
-/// rest when the rotation advances. Repeats (via modulo) for single-entry
-/// rotations that never advance. Total for any input: a panic here is a
-/// device reboot.
-fn scroll_offset(t: u64, dwell_ms: u64, max_off: usize) -> usize {
-    let phase = dwell_ms / 5;
-    if phase == 0 || max_off == 0 {
-        return 0;
-    }
-    let t = t % dwell_ms;
-    match t / phase {
-        0 => 0,                                                    // hold top
-        1 => (max_off as u64 * (t - phase) / phase) as usize,      // glide down
-        2 => max_off,                                              // hold bottom
-        3 => max_off - (max_off as u64 * (t - 3 * phase) / phase) as usize, // glide up
-        _ => 0,                                                    // hold top (+ dwell%5 remainder)
-    }
-}
+/// The scroll curve is shared with the app core (it animates the app's cards
+/// with it), so it lives in the protocol crate.
+use scoreboard_protocol::scroll_offset;
 
 /// Blit a panel-sized window of an RGB565-LE frame into a 0RGB buffer,
 /// starting at source row `row0` (tall frames scroll by moving the window).

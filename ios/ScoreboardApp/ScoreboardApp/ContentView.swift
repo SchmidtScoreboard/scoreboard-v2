@@ -83,7 +83,9 @@ final class ListenerAdapter: ClientListener {
         Task { @MainActor in self.model?.applyGames(self.serverUrl, games) }
     }
     func onFrame(frameId: String, rgba: Data) {
-        let img = cgImageFromRGBA(rgba)
+        // Whole frame, not the top window: a deep leaderboard's card scrolls
+        // (PanelFrame) exactly as the panel does.
+        let img = cgImageFromRGBA(rgba, maxRows: nil)
         Task { @MainActor in if let img { self.model?.frames[frameId] = img } }
     }
     func onPaired(boardId: String) {
@@ -122,6 +124,10 @@ struct BoardInfo {
     /// CONTINUOUSLY — only then does it claim the board is actually offline.
     var offlineSince: Date?
     var nowShowing: [UiGame] = []
+    /// Whether a board state has arrived at all. Until it has, `nowShowing`
+    /// is unknown, not empty — and an empty panel would put the picker on
+    /// the idle screen (the core's `panelShowsNothing` takes nil for this).
+    var stateReceived = false
     var brightness: Double = 80
     var power = true
     var favorites: [String: [String]] = [:]      // sportId -> team ids, USER ORDER
@@ -670,7 +676,7 @@ final class BoardViewModel: ObservableObject {
         ScoreboardApp.effectiveMode(
             mode: current.mode,
             quietActive: current.quietActive,
-            nowShowingEmpty: ScoreboardApp.panelShowsNothing(nowShowing: nowShowing),
+            nowShowingEmpty: ScoreboardApp.panelShowsNothing(nowShowing: current.stateReceived ? nowShowing : nil),
             offMode: current.offMode
         )
     }
@@ -1053,6 +1059,7 @@ final class BoardViewModel: ObservableObject {
         if selectedBoardId == nil { selectedBoardId = boardId }
         mutate(boardId) {
             $0.nowShowing = nowShowing
+            $0.stateReceived = true
             // Start the offline clock only on the true→false EDGE (or the very
             // first offline report), so repeated offline pushes don't keep
             // resetting the 30s "Connecting…" grace the dashboard shows.
@@ -1730,13 +1737,13 @@ struct SetupView: View {
 /// height (a deep leaderboard renders up to 128 rows for the board to scroll,
 /// and the frame cache is shared, so those bytes can reach the app). The old
 /// signature took a hardcoded height and returned nil for anything else,
-/// which silently dropped every tall frame. Anything taller than the panel is
-/// cropped to the top 32 rows — the title and leading rows, the same window
-/// the static app render shows — so cards stay uniform.
-func cgImageFromRGBA(_ data: Data, width: Int = 64) -> CGImage? {
+/// which silently dropped every tall frame. `maxRows` crops to the top rows
+/// (32 = the panel's resting window); nil keeps the whole strip, which the
+/// cards scroll (PanelFrame).
+func cgImageFromRGBA(_ data: Data, width: Int = 64, maxRows: Int? = 32) -> CGImage? {
     let rowBytes = width * 4
     guard rowBytes > 0, data.count >= rowBytes, data.count % rowBytes == 0 else { return nil }
-    let height = min(data.count / rowBytes, 32)
+    let height = min(data.count / rowBytes, maxRows ?? Int.max)
     let visible = data.prefix(height * rowBytes)
     guard let provider = CGDataProvider(data: visible as CFData) else { return nil }
     return CGImage(
@@ -1815,19 +1822,73 @@ struct GameFrame: View {
         // `spoiled` participates so a reveal/hide toggle busts the cache.
         let v = "\(game.awayScore)-\(game.homeScore)-\(game.status)-\(game.detail)-\(game.spoiled)"
             .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        return URL(string: "\(httpBase)/render/\(id).png?v=\(v)&r=\(refresh)&board=\(board)")
+        // A scrolling game asks for the BOARD's tall frame, which the card
+        // then glides through; everything else gets the panel-sized render.
+        let tall = game.scrollDwellMs > 0 ? "&tall=1" : ""
+        return URL(string: "\(httpBase)/render/\(id).png?v=\(v)&r=\(refresh)&board=\(board)\(tall)")
     }
 
     var body: some View {
         Group {
             if let frame {
-                Image(decorative: frame, scale: 1)
-                    .resizable().interpolation(.none).aspectRatio(2, contentMode: .fit)
+                PanelFrame(image: frame, dwellMs: game.scrollDwellMs, pinRows: game.pinRows)
             } else {
-                FetchedFrameImage(url: url)
+                FetchedFrameImage(url: url, dwellMs: game.scrollDwellMs, pinRows: game.pinRows)
             }
         }
         .ledPanel()
+    }
+}
+
+/// A board frame as the PANEL shows it. A frame taller than the panel with a
+/// scroll dwell glides on the board's own curve (the core's
+/// `scrollWindowOffset`: hold, glide down, hold, glide up, hold, one pass per
+/// dwell) with its pinned title rows held still on top — the same window the
+/// panel draws. Anything else shows its top 32 rows, the panel at rest.
+struct PanelFrame: View {
+    let image: CGImage
+    var dwellMs: UInt32 = 0
+    var pinRows: UInt32 = 0
+    @State private var start = Date()
+
+    var body: some View {
+        Group {
+            if image.height > 32 && dwellMs > 0 {
+                // 30fps is plenty: the window moves a whole row at a time.
+                TimelineView(.animation(minimumInterval: 1.0 / 30)) { ctx in
+                    let elapsed = UInt64(max(0, ctx.date.timeIntervalSince(start)) * 1000)
+                    let offset = scrollWindowOffset(elapsedMs: elapsed, dwellMs: dwellMs, frameRows: UInt32(image.height))
+                    panel(Self.window(image, offset: Int(offset), pin: Int(pinRows)) ?? image)
+                }
+            } else {
+                panel(image.cropping(to: CGRect(x: 0, y: 0, width: image.width, height: min(image.height, 32))) ?? image)
+            }
+        }
+    }
+
+    private func panel(_ img: CGImage) -> some View {
+        Image(decorative: img, scale: 1).resizable().interpolation(.none).aspectRatio(2, contentMode: .fit)
+    }
+
+    /// The 64x32 the panel shows `offset` rows into the strip: rows
+    /// 0..<pin from the top of the frame, the rest from `offset + pin` on.
+    static func window(_ image: CGImage, offset: Int, pin: Int) -> CGImage? {
+        let (w, h) = (image.width, 32)
+        let pin = min(max(pin, 0), h)
+        guard let ctx = CGContext(
+            data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        ) else { return nil }
+        ctx.interpolationQuality = .none
+        // Core Graphics counts rows from the BOTTOM: the title's rect sits at
+        // the top of the context, the scrolled body beneath it.
+        if pin > 0, let head = image.cropping(to: CGRect(x: 0, y: 0, width: w, height: pin)) {
+            ctx.draw(head, in: CGRect(x: 0, y: h - pin, width: w, height: pin))
+        }
+        if let body = image.cropping(to: CGRect(x: 0, y: offset + pin, width: w, height: h - pin)) {
+            ctx.draw(body, in: CGRect(x: 0, y: 0, width: w, height: h - pin))
+        }
+        return ctx.makeImage()
     }
 }
 
@@ -1845,12 +1906,18 @@ struct FetchedFrameImage: View {
     /// consulted while the network is ALREADY suspect, and may 404 on an older
     /// server, so an alarming badge there is noise, not signal.
     var grayFailure = false
+    /// A scrolling game's board dwell and pinned rows: the fetched frame is
+    /// then the tall strip, drawn through PanelFrame. 0 = a plain frame.
+    var dwellMs: UInt32 = 0
+    var pinRows: UInt32 = 0
     @State private var image: UIImage?
     @State private var failed = false
 
     var body: some View {
         Group {
-            if let image {
+            if let image, dwellMs > 0, let cg = image.cgImage {
+                PanelFrame(image: cg, dwellMs: dwellMs, pinRows: pinRows)
+            } else if let image {
                 Image(uiImage: image)
                     .resizable().interpolation(.none).aspectRatio(2, contentMode: .fit)
             } else if failed {
@@ -2497,9 +2564,13 @@ struct DashboardView: View {
         // selection reads as "nothing is selected" (MAR-110).
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
+                // The 20pt inset is the tiles' own PADDING, not a content
+                // margin: `scrollTo` ignores content margins when it clamps,
+                // so centring the first tile slid it 20pt under the card's
+                // edge. As padding, the clamp lands on the leading line.
                 modePickerTiles
+                    .padding(.horizontal, 20)
             }
-            .contentMargins(.horizontal, 20, for: .scrollContent)
             // On entry AND whenever the selection moves. On entry alone it
             // aimed at a placeholder: the row appears before the board's
             // state arrives, when `current` is still the default record
@@ -2511,15 +2582,11 @@ struct DashboardView: View {
             // settles on Weather, and a scroll to a tile that does not exist
             // yet is dropped — Android hit exactly this on a cold start.
             .onChange(of: [model.effectiveMode] + model.pickableModes.map(\.id), initial: true) { _, key in
-                let mode = key[0]
-                // Never for the FIRST tile: `scrollTo` ignores the content
-                // margin when it clamps, so centring a tile already at the
-                // leading edge slid the rail 20pt and cut Scores off at the
-                // card's edge. The first tile is on-screen at rest anyway.
-                // (Android's picker has the same guard.)
-                if model.pickableModes.first?.id != mode {
-                    proxy.scrollTo(mode, anchor: .center)
-                }
+                // Every tile, the first included: a rail moved off Scores
+                // must come back when the selection does. (It used to skip
+                // the first tile, and stranded the rail wherever it last
+                // was — Scores cut off at the card's edge on every open.)
+                proxy.scrollTo(key[0], anchor: .center)
             }
         }
     }
@@ -2748,17 +2815,17 @@ struct DashboardView: View {
             // cards stay clean for leagues riding the board default.
             if let secs = model.leagueDwellSecs(pref.sport.id) {
                 Menu {
-                    Button("Board default (\(model.current.dwellSecs)s)") {
+                    Button(leagueDwellDefaultLabel(boardSecs: model.current.dwellSecs)) {
                         model.setLeagueDwell(pref.sport.id, nil)
                     }
-                    ForEach([UInt32(5), 7, 10, 15, 20, 30], id: \.self) { s in
+                    ForEach(dwellOptions(), id: \.secs) { o in
                         Button {
-                            model.setLeagueDwell(pref.sport.id, s)
+                            model.setLeagueDwell(pref.sport.id, o.secs)
                         } label: {
-                            if s == secs {
-                                Label("\(s) seconds", systemImage: "checkmark")
+                            if o.secs == dwellSelected(secs: secs) {
+                                Label(o.label, systemImage: "checkmark")
                             } else {
-                                Text("\(s) seconds")
+                                Text(o.label)
                             }
                         }
                     }
@@ -2767,7 +2834,7 @@ struct DashboardView: View {
                         Image(systemName: "timer")
                             .foregroundStyle(.cyan)
                             .frame(width: 24)
-                        Text("\(secs) seconds per event")
+                        Text(leagueDwellOverrideLabel(secs: secs))
                             .foregroundStyle(.primary)
                         Spacer()
                         Image(systemName: "chevron.up.chevron.down")
@@ -4270,13 +4337,13 @@ struct LeagueEditorView: View {
                 }
             }
             Section {
-                Picker("Seconds per screen", selection: Binding(
-                    get: { model.leagueDwellSecs(sport.id) ?? 0 },
+                Picker(dwellTitle(), selection: Binding(
+                    get: { model.leagueDwellSecs(sport.id).map { dwellSelected(secs: $0) } ?? 0 },
                     set: { model.setLeagueDwell(sport.id, $0 == 0 ? nil : $0) }
                 )) {
-                    Text("Board default (\(model.current.dwellSecs)s)").tag(UInt32(0))
-                    ForEach([UInt32(5), 7, 10, 15, 20, 30], id: \.self) { s in
-                        Text("\(s) seconds").tag(s)
+                    Text(leagueDwellDefaultLabel(boardSecs: model.current.dwellSecs)).tag(UInt32(0))
+                    ForEach(dwellOptions(), id: \.secs) { o in
+                        Text(o.label).tag(o.secs)
                     }
                 }
             }
@@ -5383,14 +5450,16 @@ struct SettingsView: View {
     /// race weekend at once, and "event" was doing all the work.
     private var dwellRow: some View {
         HStack(spacing: 6) {
-            Label("Seconds per screen", systemImage: "timer")
+            Label(dwellTitle(), systemImage: "timer")
             Spacer()
-            Picker("Seconds per screen", selection: Binding(
-                get: { model.current.dwellSecs },
+            // Stored seconds that are not a preset (an older app's 7s or
+            // 30s) select the preset they snap to — the one the board uses.
+            Picker(dwellTitle(), selection: Binding(
+                get: { dwellSelected(secs: model.current.dwellSecs) },
                 set: { model.setDwell($0) }
             )) {
-                ForEach([UInt32(5), 7, 10, 15, 20, 30], id: \.self) { s in
-                    Text("\(s) seconds").tag(s)
+                ForEach(dwellOptions(), id: \.secs) { o in
+                    Text(o.label).tag(o.secs)
                 }
             }
             .pickerStyle(.menu)

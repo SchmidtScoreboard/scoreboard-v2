@@ -277,6 +277,13 @@ pub struct UiGame {
     /// True when this game's board rendering scrolls (deep golf/F1 leaderboard)
     /// — the card menu offers its scroll toggle only for these.
     pub scrolls: bool,
+    /// The board's dwell for this game's scroll pass (ms), so the card can
+    /// glide exactly as the panel does: feed it to [`scroll_window_offset`]
+    /// with the frame's height. 0 when the game does not scroll.
+    pub scroll_dwell_ms: u32,
+    /// Rows at the top of the scrolling frame that hold still (the title);
+    /// draw them unmoved over the scrolling window. 0 when it does not scroll.
+    pub pin_rows: u32,
     /// ESPN game-page URL for the "View on ESPN" menu item; nil when none can
     /// be formed (demo games, golf/F1 leaderboards).
     pub espn_url: Option<String>,
@@ -1250,6 +1257,8 @@ fn to_ui_games(games: Vec<GameSummary>) -> Vec<UiGame> {
             champ: g.champ,
             spoiled: g.spoiled,
             scrolls: g.scrolls,
+            scroll_dwell_ms: g.scroll_dwell_ms,
+            pin_rows: g.pin_rows as u32,
             espn_url: g.espn_url,
             queued: g.queued,
         })

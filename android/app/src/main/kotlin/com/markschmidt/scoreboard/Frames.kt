@@ -7,17 +7,17 @@ import android.graphics.Bitmap
  * count — frames are variable height (a deep leaderboard renders up to 128
  * rows for the physical board to scroll). Hardcoding 64x32 and rejecting the
  * rest silently dropped tall frames on iOS once; don't inherit that bug.
- * Anything taller than the panel is cropped to the top 32 rows, the same
- * window the iOS cards show.
+ * `maxRows` crops to the top rows (the panel's resting window); null keeps
+ * the whole strip, which the cards scroll (LedFrame) as the panel does.
  */
 object Frames {
     const val WIDTH = 64
     const val PANEL_HEIGHT = 32
 
-    fun toBitmap(rgba: ByteArray): Bitmap? {
+    fun toBitmap(rgba: ByteArray, maxRows: Int? = PANEL_HEIGHT): Bitmap? {
         val rowBytes = WIDTH * 4
         if (rgba.isEmpty() || rgba.size % rowBytes != 0) return null
-        val height = minOf(rgba.size / rowBytes, PANEL_HEIGHT)
+        val height = minOf(rgba.size / rowBytes, maxRows ?: Int.MAX_VALUE)
         val pixels = IntArray(WIDTH * height)
         for (i in 0 until WIDTH * height) {
             val r = rgba[i * 4].toInt() and 0xFF
@@ -27,4 +27,8 @@ object Frames {
         }
         return Bitmap.createBitmap(pixels, WIDTH, height, Bitmap.Config.ARGB_8888)
     }
+
+    /** The panel at rest: a tall strip's top 32 rows (shares, static cards). */
+    fun topWindow(bitmap: Bitmap): Bitmap =
+        if (bitmap.height > PANEL_HEIGHT) Bitmap.createBitmap(bitmap, 0, 0, WIDTH, PANEL_HEIGHT) else bitmap
 }

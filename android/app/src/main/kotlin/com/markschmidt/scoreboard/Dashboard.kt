@@ -260,7 +260,7 @@ private fun ModePicker(session: Session, state: Session.AppState, boardId: Strin
     val modes = remember(state.offModes) { pickableModes(state.offModes) }
     if (modes.isEmpty()) return
     // Upcoming/bumped entries are not on the panel — the core decides.
-    val nothingShowing = panelShowsNothing(board.nowShowing)
+    val nothingShowing = panelShowsNothing(if (board.stateReceived) board.nowShowing else null)
     val selected = remember(cfg.mode, board.quietActive, nothingShowing, cfg.offMode) {
         effectiveMode(cfg.mode, board.quietActive, nothingShowing, cfg.offMode)
     }
@@ -276,7 +276,10 @@ private fun ModePicker(session: Session, state: Session.AppState, boardId: Strin
     val listState = rememberLazyListState()
     LaunchedEffect(selected, modes) {
         val i = modes.indexOfFirst { it.id == selected }
-        if (i > 0) listState.scrollToItem(i)
+        // Every tile, the first included: a rail moved off Scores must come
+        // back when the selection does. (Skipping index 0 stranded the rail
+        // on the idle tile it was sent to before the board's state landed.)
+        if (i >= 0) listState.scrollToItem(i)
     }
     LazyRow(state = listState, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         items(modes, key = { it.id }) { m ->
@@ -447,7 +450,7 @@ private fun LeagueBlock(
                 ) { session.setLeagueRows(boardId, sport.id, null) }
             }
             sc?.dwellSecs?.let { secs ->
-                OverrideRow(Icons.Outlined.Timer, "$secs seconds per event") {
+                OverrideRow(Icons.Outlined.Timer, uniffi.app_core.leagueDwellOverrideLabel(secs)) {
                     session.setLeagueDwell(boardId, sport.id, null)
                 }
             }

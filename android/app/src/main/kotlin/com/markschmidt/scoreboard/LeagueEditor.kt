@@ -353,29 +353,30 @@ fun LeagueEditorScreen(
             }
 
             // Dwell
-            item { EditorHeader("Seconds per screen") }
+            item { EditorHeader(uniffi.app_core.dwellTitle()) }
             item {
-                val current = sc?.dwellSecs
+                val current = sc?.dwellSecs?.let { uniffi.app_core.dwellSelected(it) }
+                val boardDefault = uniffi.app_core.leagueDwellDefaultLabel(cfg.dwellSecs)
                 var open by remember { mutableStateOf(false) }
                 ListItem(
                     headlineContent = {
-                        Text(current?.let { "$it seconds" } ?: "Board default (${cfg.dwellSecs}s)")
+                        Text(current?.let { uniffi.app_core.dwellLabel(it) } ?: boardDefault)
                     },
                     trailingContent = { Icon(Icons.Filled.ArrowDropDown, null) },
                     modifier = Modifier.clickable { open = true },
                 )
                 DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
                     DropdownMenuItem(
-                        text = { Text("Board default (${cfg.dwellSecs}s)") },
+                        text = { Text(boardDefault) },
                         onClick = { session.setLeagueDwell(boardId, sportId, null); open = false },
                     )
-                    for (s in listOf(5u, 7u, 10u, 15u, 20u, 30u)) {
+                    for (o in uniffi.app_core.dwellOptions()) {
                         DropdownMenuItem(
-                            text = { Text("$s seconds") },
+                            text = { Text(o.label) },
                             leadingIcon = {
-                                if (current == s) Icon(Icons.Filled.Check, null, Modifier.size(18.dp))
+                                if (current == o.secs) Icon(Icons.Filled.Check, null, Modifier.size(18.dp))
                             },
-                            onClick = { session.setLeagueDwell(boardId, sportId, s); open = false },
+                            onClick = { session.setLeagueDwell(boardId, sportId, o.secs); open = false },
                         )
                     }
                 }

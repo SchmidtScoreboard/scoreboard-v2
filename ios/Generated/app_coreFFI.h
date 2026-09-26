@@ -690,6 +690,28 @@ RustBuffer uniffi_app_core_fn_func_demo_games_explainer(RustCallStatus *_Nonnull
 RustBuffer uniffi_app_core_fn_func_displayed_now_showing(RustBuffer games, RustBuffer focused_game_id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_DWELL_LABEL
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_DWELL_LABEL
+RustBuffer uniffi_app_core_fn_func_dwell_label(uint32_t secs, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_DWELL_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_DWELL_OPTIONS
+RustBuffer uniffi_app_core_fn_func_dwell_options(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_DWELL_SELECTED
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_DWELL_SELECTED
+uint32_t uniffi_app_core_fn_func_dwell_selected(uint32_t secs, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_DWELL_TITLE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_DWELL_TITLE
+RustBuffer uniffi_app_core_fn_func_dwell_title(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_EFFECTIVE_MODE
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_EFFECTIVE_MODE
 RustBuffer uniffi_app_core_fn_func_effective_mode(RustBuffer mode, int8_t quiet_active, int8_t now_showing_empty, RustBuffer off_mode, RustCallStatus *_Nonnull out_status
@@ -744,6 +766,16 @@ int8_t uniffi_app_core_fn_func_involves_favorite(RustBuffer sport_id, RustBuffer
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_LEADERBOARD_DEPTH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_LEADERBOARD_DEPTH_OPTIONS
 RustBuffer uniffi_app_core_fn_func_leaderboard_depth_options(RustBuffer sport_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_LEAGUE_DWELL_DEFAULT_LABEL
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_LEAGUE_DWELL_DEFAULT_LABEL
+RustBuffer uniffi_app_core_fn_func_league_dwell_default_label(uint32_t board_secs, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_LEAGUE_DWELL_OVERRIDE_LABEL
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_LEAGUE_DWELL_OVERRIDE_LABEL
+RustBuffer uniffi_app_core_fn_func_league_dwell_override_label(uint32_t secs, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_LEAGUE_PREFS
@@ -824,6 +856,11 @@ int8_t uniffi_app_core_fn_func_rotation_modified(RustBuffer focused_game_id, Rus
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_ROTATION_REMOVE
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_ROTATION_REMOVE
 RustBuffer uniffi_app_core_fn_func_rotation_remove(RustBuffer game_id, RustBuffer extra_game_ids, RustBuffer excluded_game_ids, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_SCROLL_WINDOW_OFFSET
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_SCROLL_WINDOW_OFFSET
+uint32_t uniffi_app_core_fn_func_scroll_window_offset(uint64_t elapsed_ms, uint32_t dwell_ms, uint32_t frame_rows, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_SERVER_PRESETS
@@ -1209,6 +1246,30 @@ uint16_t uniffi_app_core_checksum_func_displayed_now_showing(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_DWELL_LABEL
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_DWELL_LABEL
+uint16_t uniffi_app_core_checksum_func_dwell_label(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_DWELL_OPTIONS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_DWELL_OPTIONS
+uint16_t uniffi_app_core_checksum_func_dwell_options(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_DWELL_SELECTED
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_DWELL_SELECTED
+uint16_t uniffi_app_core_checksum_func_dwell_selected(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_DWELL_TITLE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_DWELL_TITLE
+uint16_t uniffi_app_core_checksum_func_dwell_title(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_EFFECTIVE_MODE
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_EFFECTIVE_MODE
 uint16_t uniffi_app_core_checksum_func_effective_mode(void
@@ -1272,6 +1333,18 @@ uint16_t uniffi_app_core_checksum_func_involves_favorite(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_LEADERBOARD_DEPTH_OPTIONS
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_LEADERBOARD_DEPTH_OPTIONS
 uint16_t uniffi_app_core_checksum_func_leaderboard_depth_options(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_LEAGUE_DWELL_DEFAULT_LABEL
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_LEAGUE_DWELL_DEFAULT_LABEL
+uint16_t uniffi_app_core_checksum_func_league_dwell_default_label(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_LEAGUE_DWELL_OVERRIDE_LABEL
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_LEAGUE_DWELL_OVERRIDE_LABEL
+uint16_t uniffi_app_core_checksum_func_league_dwell_override_label(void
     
 );
 #endif
@@ -1368,6 +1441,12 @@ uint16_t uniffi_app_core_checksum_func_rotation_modified(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_ROTATION_REMOVE
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_ROTATION_REMOVE
 uint16_t uniffi_app_core_checksum_func_rotation_remove(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_SCROLL_WINDOW_OFFSET
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_SCROLL_WINDOW_OFFSET
+uint16_t uniffi_app_core_checksum_func_scroll_window_offset(void
     
 );
 #endif

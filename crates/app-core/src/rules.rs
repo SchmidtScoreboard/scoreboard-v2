@@ -461,6 +461,76 @@ pub struct UiDepthOption {
     pub label: String,
 }
 
+// ---- screen speed ----
+//
+// How long each screen holds the panel, as three named speeds rather than a
+// seconds picker. Seconds stay the stored unit (old apps write them), and a
+// stored value that is not a preset reads as the preset it snaps to — the
+// server times the board by the same snap, so label and panel agree.
+
+/// The speed choices, fastest first: Fast (10s), Standard (15s), Slow (20s).
+/// A scrolling screen holds for twice its speed; the labels don't say so,
+/// because the choice is about pace, not arithmetic.
+#[uniffi::export]
+pub fn dwell_options() -> Vec<UiDwellOption> {
+    use scoreboard_protocol::{DWELL_FAST_SECS, DWELL_SLOW_SECS, DWELL_STANDARD_SECS};
+    vec![
+        UiDwellOption { secs: DWELL_FAST_SECS, label: "Fast".into() },
+        UiDwellOption { secs: DWELL_STANDARD_SECS, label: "Standard".into() },
+        UiDwellOption { secs: DWELL_SLOW_SECS, label: "Slow".into() },
+    ]
+}
+
+#[derive(uniffi::Record, Clone)]
+pub struct UiDwellOption {
+    pub secs: u32,
+    pub label: String,
+}
+
+/// The option a stored value selects: its snapped preset. Compare
+/// `dwell_selected(secs) == option.secs` to place the checkmark.
+#[uniffi::export]
+pub fn dwell_selected(secs: u32) -> u32 {
+    scoreboard_protocol::snap_dwell_secs(secs)
+}
+
+/// A stored speed's name: "Fast", "Standard", "Slow".
+#[uniffi::export]
+pub fn dwell_label(secs: u32) -> String {
+    let snapped = dwell_selected(secs);
+    dwell_options().into_iter().find(|o| o.secs == snapped).map(|o| o.label).unwrap_or_default()
+}
+
+/// The setting's title, in Settings and in a league's editor.
+#[uniffi::export]
+pub fn dwell_title() -> String {
+    "Screen speed".into()
+}
+
+/// A league's "use the board's speed" choice, naming what that is:
+/// "Board default (Standard)".
+#[uniffi::export]
+pub fn league_dwell_default_label(board_secs: u32) -> String {
+    format!("Board default ({})", dwell_label(board_secs))
+}
+
+/// A league override as the dashboard's override row says it: "Slow speed".
+#[uniffi::export]
+pub fn league_dwell_override_label(secs: u32) -> String {
+    format!("{} speed", dwell_label(secs))
+}
+
+/// Which row of a scrolling frame the app's card shows at the top of its
+/// window, `elapsed_ms` into the animation: the board's own scroll curve
+/// (hold, glide down, hold, glide up, hold, one pass per `dwell_ms`), so the
+/// card moves exactly as the panel does. `frame_rows` is the frame's height;
+/// a panel-sized frame, or a dwell of 0, never moves.
+#[uniffi::export]
+pub fn scroll_window_offset(elapsed_ms: u64, dwell_ms: u32, frame_rows: u32) -> u32 {
+    let max_off = frame_rows.saturating_sub(scoreboard_protocol::FRAME_HEIGHT as u32) as usize;
+    scoreboard_protocol::scroll_offset(elapsed_ms, dwell_ms as u64, max_off) as u32
+}
+
 // ---- endpoints ----
 
 /// The HTTP origin for a board's server, derived from its websocket URL:
@@ -817,9 +887,15 @@ fn urlencode(s: &str) -> String {
 /// bumped one was pushed off by the cap — neither is on the glass. Passing
 /// the raw list length instead put the ring on Scores while the panel sat
 /// on the idle weather screen waiting for tonight's games.
+///
+/// `None` is "not known yet": the board's state has not arrived (an app
+/// opening, a board just picked). That is NOT an empty panel — treating it as
+/// one made the picker jump to the idle screen for a moment on every open,
+/// then strand its rail there when the state landed. Unknown trusts the
+/// board's configured mode.
 #[uniffi::export]
-pub fn panel_shows_nothing(now_showing: Vec<UiGame>) -> bool {
-    !now_showing.iter().any(|g| !g.queued && !g.bumped)
+pub fn panel_shows_nothing(now_showing: Option<Vec<UiGame>>) -> bool {
+    now_showing.is_some_and(|games| !games.iter().any(|g| !g.queued && !g.bumped))
 }
 
 /// The ring follows the GLASS: what the panel is actually showing, as a
@@ -894,8 +970,34 @@ mod tests {
             champ: None,
             spoiled: false,
             scrolls: false,
+            scroll_dwell_ms: 0,
+            pin_rows: 0,
             queued: false,
         }
+    }
+
+    /// Three named speeds, and every stored value reads as one of them.
+    #[test]
+    fn speeds_are_named_and_stored_values_snap() {
+        let labels: Vec<(u32, String)> = dwell_options().into_iter().map(|o| (o.secs, o.label)).collect();
+        assert_eq!(labels, [(10, "Fast".to_string()), (15, "Standard".into()), (20, "Slow".into())]);
+        assert_eq!(dwell_label(7), "Fast", "a legacy 7s reads as Fast");
+        assert_eq!(dwell_label(30), "Slow", "a legacy 30s reads as Slow");
+        assert_eq!(dwell_selected(30), 20);
+        assert_eq!(league_dwell_default_label(15), "Board default (Standard)");
+        assert_eq!(league_dwell_override_label(20), "Slow speed");
+    }
+
+    /// The card's window follows the board's curve; a panel-sized frame
+    /// never moves.
+    #[test]
+    fn the_card_scrolls_on_the_boards_curve() {
+        // 107 rows: 75 rows to travel. 30s dwell: 6s phases.
+        assert_eq!(scroll_window_offset(3_000, 30_000, 107), 0, "holding at the top");
+        assert_eq!(scroll_window_offset(9_000, 30_000, 107), 37, "halfway down");
+        assert_eq!(scroll_window_offset(15_000, 30_000, 107), 75, "holding at the bottom");
+        assert_eq!(scroll_window_offset(15_000, 30_000, 32), 0, "a panel-sized frame");
+        assert_eq!(scroll_window_offset(15_000, 0, 107), 0, "no dwell");
     }
 
     /// Both feed spellings of "not started", pinned — missing one once split
@@ -1116,9 +1218,12 @@ mod tests {
     fn upcoming_games_do_not_light_the_scores_ring() {
         let mut queued = game("later", "upcoming", false);
         queued.queued = true;
-        assert!(panel_shows_nothing(vec![]));
-        assert!(panel_shows_nothing(vec![queued.clone(), game("cut", "live", true)]));
-        assert!(!panel_shows_nothing(vec![queued, game("on", "live", false)]));
+        assert!(panel_shows_nothing(Some(vec![])));
+        assert!(panel_shows_nothing(Some(vec![queued.clone(), game("cut", "live", true)])));
+        assert!(!panel_shows_nothing(Some(vec![queued, game("on", "live", false)])));
+        // Not known yet (the state has not arrived) is not an empty panel:
+        // the picker keeps the configured mode instead of flashing idle.
+        assert!(!panel_shows_nothing(None));
     }
 
     #[test]

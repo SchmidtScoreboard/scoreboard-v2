@@ -68,12 +68,16 @@ fun rememberGameFrame(
     refresh: Long,
 ): Pair<Bitmap?, Boolean> {
     val bytes = state.frames[game.frameId]
-    val pushed = remember(game.frameId, bytes != null) { bytes?.let { Frames.toBitmap(it) } }
+    // The whole strip: a deep leaderboard's card scrolls (LedFrame).
+    val pushed = remember(game.frameId, bytes != null) { bytes?.let { Frames.toBitmap(it, maxRows = null) } }
     if (pushed != null) return pushed to false
     // v mirrors iOS: any content or spoiler change busts the HTTP cache.
     val v = "${game.awayScore}-${game.homeScore}-${game.status}-${game.detail}-${game.spoiled}"
+    // A scrolling game asks for the BOARD's tall frame, which the card then
+    // glides through; everything else gets the panel-sized render.
+    val tall = if (game.scrollDwellMs > 0u) "&tall=1" else ""
     val url = "${session.httpBase}/render/${android.net.Uri.encode(game.id)}.png" +
-        "?v=${android.net.Uri.encode(v)}&r=$refresh&board=${android.net.Uri.encode(boardId)}"
+        "?v=${android.net.Uri.encode(v)}&r=$refresh&board=${android.net.Uri.encode(boardId)}$tall"
     var bmp by remember(url) { mutableStateOf<Bitmap?>(null) }
     var failed by remember(url) { mutableStateOf(false) }
     LaunchedEffect(url) {
@@ -162,7 +166,7 @@ fun GameCard(
             Box {
                 val (frame, failed) = rememberGameFrame(session, state, game, boardId, refresh)
                 Box(Modifier.clickable { menuOpen = true }) {
-                    LedFrame(frame)
+                    LedFrame(frame, dwellMs = game.scrollDwellMs, pinRows = game.pinRows)
                     if (failed) {
                         Icon(
                             Icons.Filled.WifiOff, contentDescription = "Couldn't load",
@@ -270,7 +274,8 @@ private fun CardMenu(
             onClick = {
                 onDismiss()
                 scope.launch {
-                    val bmp = frame ?: fetchRenderBitmap(session, state, game, boardId)
+                    // A share is the panel at rest: a tall strip's top window.
+                    val bmp = frame?.let { Frames.topWindow(it) } ?: fetchRenderBitmap(session, state, game, boardId)
                     if (bmp != null) Share.shareBitmap(ctx, bmp, shareTitle(game))
                 }
             },

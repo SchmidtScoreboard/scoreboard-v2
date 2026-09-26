@@ -25,6 +25,11 @@ class Session(context: Context) : ClientListener {
     data class BoardSnapshot(
         val config: UiBoardConfig? = null,
         val nowShowing: List<UiGame> = emptyList(),
+        /** Whether a board state has arrived at all. Until it has,
+         *  `nowShowing` is unknown, not empty — the core's
+         *  `panelShowsNothing` takes null for that, so the picker doesn't
+         *  jump to the idle screen on every open. */
+        val stateReceived: Boolean = false,
         val online: Boolean = false,
         val quietActive: Boolean = false,
         val firmwareVersion: String? = null,
@@ -298,10 +303,10 @@ class Session(context: Context) : ClientListener {
 
     override fun onBoardState(boardId: String, nowShowing: List<UiGame>, online: Boolean) {
         val prior = _state.value.boards[boardId]
-        if (prior != null && prior.nowShowing == nowShowing && prior.online == online) return
+        if (prior != null && prior.stateReceived && prior.nowShowing == nowShowing && prior.online == online) return
         val boards = _state.value.boards.toMutableMap()
         val prev = boards[boardId] ?: BoardSnapshot()
-        boards[boardId] = prev.copy(nowShowing = nowShowing, online = online)
+        boards[boardId] = prev.copy(nowShowing = nowShowing, stateReceived = true, online = online)
         val order = if (boardId in _state.value.boardOrder) _state.value.boardOrder
         else _state.value.boardOrder + boardId
         _state.value = _state.value.copy(
