@@ -1522,7 +1522,13 @@ fn matchplay_rows(mp: &crate::model::MatchPlay, max_rows: usize, tz: Option<chro
     let mut out: Vec<MpRow> = Vec::new();
     for (k, m) in mp.matches.iter().enumerate() {
         let n = m.players[0].len() + m.players[1].len();
-        if out.len() + n > max_rows {
+        // Whole matches only, and the frame must fit: the tall tower stays
+        // within the 128 rows the board's frame buffer holds uncompressed
+        // (each match boundary costs a row of padding, see
+        // `matchplay_baseline`); the static frame within the panel.
+        let last_by = matchplay_baseline(out.len() + n - 1, k);
+        let fits = if max_rows > 4 { last_by + 2 <= 128 } else { last_by <= FRAME_HEIGHT as i32 - 1 };
+        if out.len() + n > max_rows || !fits {
             break;
         }
         let mut pending_thru: Option<u32> = None;
@@ -1600,13 +1606,26 @@ fn cup_title_layout(mp: &crate::model::MatchPlay) -> CupTitle {
     CupTitle { a_points_x, a_end, b_points_right, b_start }
 }
 
+/// Baseline of tower row `i`, which belongs to match `match_idx`. Rows sit
+/// on the leaderboard's 6px pitch, plus one extra row per match boundary:
+/// consecutive matches would otherwise SHARE the one blank row between
+/// them, so a match's band could pad its text on one side only.
+fn matchplay_baseline(i: usize, match_idx: usize) -> i32 {
+    12 + i as i32 * 6 + match_idx as i32
+}
+
 /// Team match play (Presidents Cup, Ryder Cup) in the leaderboard's own
 /// geometry: the cup score as the title row, then the session's matches a
 /// row per player on the 6px pitch, names left, holes played in the grey
 /// column golf uses, values right-aligned in the tabular timing cells.
 fn render_matchplay(mp: &crate::model::MatchPlay, max_rows: usize, tz: Option<chrono_tz::Tz>) -> (FrameId, Vec<u8>) {
     let rows = matchplay_rows(mp, max_rows, tz);
-    let height = if rows.len() > 4 { 12 + (rows.len() as i32 - 1) * 6 + 2 } else { FRAME_HEIGHT as i32 };
+    let by_of = |i: usize| matchplay_baseline(i, rows[i].match_idx);
+    // The last match's bottom padding row is the frame's last row.
+    let height = match rows.len() {
+        n if n > 4 => by_of(n - 1) + 2,
+        _ => FRAME_HEIGHT as i32,
+    };
     let mut c = Canvas::with_height(height as usize);
 
     // Title: "USA 3" left, "7 INTL" right. Once the cup is decided the
@@ -1631,19 +1650,24 @@ fn render_matchplay(mp: &crate::model::MatchPlay, max_rows: usize, tz: Option<ch
 
     // The holes-played column anchors off the widest value on the frame,
     // like golf's thru column, so it does not zigzag row to row.
-    // Bands first, text over them. A band covers its rows' 6px slots: the
-    // blank row above each line of text plus the text itself.
-    for (i, r) in rows.iter().enumerate() {
-        if r.match_idx % 2 == 1 {
-            fill(&mut c, 0, 12 + i as i32 * 6 - 5, FRAME_WIDTH as u32, 6, MATCH_BAND);
+    // Bands first, text over them. A band spans its match from the blank row
+    // above the first line of text to the blank row below the last: one
+    // row of background padding on each side.
+    let mut i = 0;
+    while i < rows.len() {
+        let k = rows[i].match_idx;
+        let j = (i..rows.len()).take_while(|&j| rows[j].match_idx == k).last().unwrap();
+        if k % 2 == 1 {
+            let (top, bottom) = (by_of(i) - 5, by_of(j) + 1);
+            fill(&mut c, 0, top, FRAME_WIDTH as u32, (bottom - top + 1) as u32, MATCH_BAND);
         }
+        i = j + 1;
     }
-    let mut by = 12;
-    for r in &rows {
+    for (i, r) in rows.iter().enumerate() {
+        let by = by_of(i);
         let name_max = 63 - tabular_width(&r.value, false) - 2;
         draw_text_clip(&mut c, &r.name, 1, by, name_max, false, r.ink);
         draw_text_right_tabular(&mut c, &r.value, 63, by, false, r.value_ink);
-        by += 6;
     }
     let px = c.to_rgb565();
     (frame_id(&px), px)
@@ -4619,7 +4643,7 @@ mod matchplay_tests {
         let g = game(&fixture());
         let (_, frame, scrolls) = render_board_frame(&g, LEADERBOARD_DEFAULT_ROWS, None, None, NameStyle::Name);
         assert!(scrolls, "a whole session scrolls");
-        assert_eq!(frame.len(), (12 + 15 * 6 + 2) * FRAME_WIDTH * 2, "16 rows: the whole session");
+        assert_eq!(frame.len(), (12 + 15 * 6 + 3 + 2) * FRAME_WIDTH * 2, "16 rows + 3 match gaps: the whole session");
         // The static frame (depth 4 = "Disable scrolling") shows the first match.
         let (_, flat, scrolls) = render_board_frame(&g, 4, None, None, NameStyle::Name);
         assert!(!scrolls);
@@ -4637,10 +4661,16 @@ mod matchplay_tests {
         let bg = |y: i32| px(&frame, 0, y);
         let band = c565(MATCH_BAND);
         for k in 0..4 {
-            // A pair-vs-pair match is 4 rows = 24px, rows from y = 7.
-            let (top, bottom) = (7 + k * 24, 7 + k * 24 + 23);
+            // A pair-vs-pair match is 4 rows plus its padding row = 25px,
+            // from y = 7: a background row, text, a background row.
+            let (top, bottom) = (7 + k * 25, 7 + k * 25 + 24);
             let want = if k % 2 == 1 { band } else { 0 };
             assert!((top..=bottom).all(|y| bg(y) == want), "match {k} background");
+            // One row of pure background above the first line and below the
+            // last, on BOTH sides of the match.
+            for y in [top, bottom] {
+                assert!((0..64).all(|x| px(&frame, x, y) == want), "match {k}: padding row {y}");
+            }
         }
         assert!((0..7).all(|y| bg(y) == 0), "the title rows stay black");
         // Match 1 (Thomas/Koivun 1UP through 2): "1UP" on the first row
@@ -4665,6 +4695,22 @@ mod matchplay_tests {
         let rows = matchplay_rows(mp_of(&g), LEADERBOARD_MAX_ROWS, None);
         let values: Vec<&str> = rows.iter().map(|r| r.value.as_str()).collect();
         assert_eq!(values, ["2UP", "15", "14", "1UP"]);
+    }
+
+    /// The padding row between matches costs height, and the tower must
+    /// still fit the 128 rows the board's frame buffer holds: whole matches
+    /// only, four of a five-match pairs session, nine singles.
+    #[test]
+    fn the_padded_tower_fits_the_frame_buffer() {
+        let mut g = game(&fixture());
+        let pair = mp_of(&g).matches[0].clone();
+        let single = Match { players: [vec!["A".into()], vec!["B".into()]], state: MatchState::Scheduled { tee: None } };
+        for (label, matches, shown) in [("five pairs", vec![pair; 5], 16), ("twelve singles", vec![single; 12], 18)] {
+            mp_mut(&mut g).matches = matches;
+            assert_eq!(matchplay_rows(mp_of(&g), LEADERBOARD_MAX_ROWS, None).len(), shown, "{label}");
+            let (_, frame, _) = render_board_frame(&g, LEADERBOARD_DEFAULT_ROWS, None, None, NameStyle::Name);
+            assert!(frame.len() / (FRAME_WIDTH * 2) <= 128, "{label}: {} rows", frame.len() / (FRAME_WIDTH * 2));
+        }
     }
 
     /// Half points read as a decimal: "7.5", never the 4x6 "½".
