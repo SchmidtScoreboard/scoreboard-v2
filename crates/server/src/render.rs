@@ -1484,9 +1484,9 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
 /// a match's rows read as one block without a divider line. The first match
 /// is on black, keeping the band clear of the pinned title rows.
 // Deliberately faint: the switch between matches should be felt more than
-// seen. Lighter bands (64, 80) competed with the text and washed out the
-// grey of a beaten pair.
-const MATCH_BAND: Rgb888 = Rgb888::new(24, 24, 24);
+// seen. Lighter bands (24, 64, 80) competed with the text. Steps of 8 keep
+// it neutral: the panel is RGB565, and a grey between steps turns green.
+const MATCH_BAND: Rgb888 = Rgb888::new(16, 16, 16);
 
 /// One row of a match-play tower: a player, and — on the first row of a
 /// side — the match's value or holes played.
