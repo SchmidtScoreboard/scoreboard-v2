@@ -414,6 +414,19 @@ pub struct RotationEntry {
     /// 2s per phase.) Omitted when false, so static manifests read identically.
     #[serde(default, skip_serializing_if = "is_false")]
     pub scroll: bool,
+    /// Rows at the TOP of a scrolling frame that stay put while the rest
+    /// scrolls beneath them: a leaderboard's title (golf's name and round,
+    /// F1's GP name and lap bar, match play's cup score) holds still and the
+    /// field glides under it. The scroll range is unchanged — the frame's
+    /// last row still reaches the panel's bottom edge. Only meaningful with
+    /// `scroll`. Omitted when 0; firmware that predates it ignores the field
+    /// and scrolls the whole frame, as before.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub pin_rows: u8,
+}
+
+fn is_zero_u8(n: &u8) -> bool {
+    *n == 0
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

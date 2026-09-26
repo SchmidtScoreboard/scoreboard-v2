@@ -270,6 +270,81 @@ impl OpenF1 {
     }
 }
 
+/// Replay `fetch_latest` over one captured OpenF1 folder (`sessions.json`,
+/// `drivers.json`, `position.json`, … as `scripts/capture-f1.py` writes them),
+/// as if the poll had run at `at`. A MIRROR of `fetch_latest`'s precedence —
+/// classification first for quali and ended sessions, live timing otherwise,
+/// each falling back to the other, no flag once ended — with the network
+/// replaced by files. Keep the two in step: a replay that disagrees with the
+/// server is worse than none.
+///
+/// Two capture-shaped differences, both harmless to the rows: `intervals.json`
+/// holds the last three minutes rather than the whole session (every running
+/// car reports every few seconds, so the latest-per-driver is the same), and
+/// for a race `laps.json` holds only the leader's laps, which is all the
+/// server fetches too.
+#[cfg(test)]
+pub(crate) fn replay_snapshot(dir: &std::path::Path, at: chrono::DateTime<chrono::Utc>) -> Option<SessionRows> {
+    fn load<T: serde::de::DeserializeOwned>(dir: &std::path::Path, name: &str) -> Vec<T> {
+        std::fs::read_to_string(dir.join(format!("{name}.json")))
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
+    let session = load::<Session>(dir, "sessions").into_iter().next()?;
+    let kind = session_kind(&session.session_name)?;
+    let drivers: Vec<Driver> = load(dir, "drivers");
+    let ended = session.date_end.as_deref().and_then(parse_rfc3339).map(|end| end < at).unwrap_or(false);
+    let is_quali = kind == "quali" || kind == "sprint-quali";
+    let results_first = ended || is_quali;
+    let from_results = || {
+        let r = rows_from_results(&load::<SessionResult>(dir, "session_result"), &drivers);
+        (!r.is_empty()).then_some(r)
+    };
+    let mut rows = None;
+    let mut laps_done: Option<u32> = None;
+    if results_first {
+        rows = from_results();
+        laps_done = rows.as_ref().map(|_| u32::MAX);
+    }
+    let msgs: Vec<RaceControl> = if ended && !is_quali { Vec::new() } else { load(dir, "race_control") };
+    let (mut stage, mut zones) = (None, None);
+    if rows.is_none() {
+        let positions: Vec<Position> = load(dir, "position");
+        let stints: Vec<Stint> = load(dir, "stints");
+        if is_quali {
+            let laps: Vec<Lap> = load(dir, "laps");
+            let (live, st, z) = quali_rows_live(&positions, &laps, &msgs, &stints, &drivers);
+            if !live.is_empty() {
+                rows = Some(live);
+                stage = Some(st);
+                zones = z;
+            }
+        } else {
+            let intervals: Vec<Interval> = load(dir, "intervals");
+            let live = rows_from_live(&positions, &intervals, &stints, &drivers);
+            if !live.is_empty() {
+                rows = Some(live);
+            }
+            if leader_number(&positions).is_some() {
+                laps_done = Some(laps_completed(&load::<Lap>(dir, "laps")));
+            }
+        }
+    }
+    if rows.is_none() && !results_first {
+        rows = from_results();
+        laps_done = rows.as_ref().map(|_| u32::MAX);
+    }
+    let rows = rows.filter(|r| !r.is_empty())?;
+    let flag = if ended { None } else { track_flag(&msgs) };
+    let laps = match kind {
+        "race" | "sprint" => crate::laps::total_laps(&session.circuit_short_name, kind == "sprint")
+            .map(|total| crate::model::LapProgress { completed: laps_done.unwrap_or(0).min(total), total }),
+        _ => None,
+    };
+    Some(SessionRows { session: kind, rows, stage, quali: zones, flag, laps, fetched: Instant::now() })
+}
+
 // ---- wire shapes (all fields optional-ish: this API evolves) ----
 
 #[derive(Deserialize)]
@@ -1022,7 +1097,7 @@ mod tests {
             clock: String::new(),
             start_time: String::new(),
             end_time: None,
-            leaderboard: Some(crate::model::Leaderboard { laps: None,
+            leaderboard: Some(crate::model::Leaderboard { matchplay: None, laps: None,
                 name: "SPANISH GP Q".into(),
                 flag: track_flag(&msgs).map(String::from),
                 stage: Some(stage),

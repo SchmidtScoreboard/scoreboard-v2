@@ -1246,6 +1246,12 @@ pub const LEADERBOARD_MAX_ROWS: usize = 20;
 /// same 6px pitch) for the board to scroll through; returns whether it
 /// scrolls. A cap of 4 is the static panel layout — no scrolling. App cards
 /// and HTTP renders keep the static 4-row `render_game`.
+/// Rows at the top of a scrolling leaderboard that hold still while the
+/// field scrolls beneath them (the manifest's `pin_rows`): the title row and
+/// the gap under it — golf's name and round, F1's GP name and lap bar, match
+/// play's cup score. Every leaderboard's first row inks from row 8.
+pub const LEADERBOARD_PIN_ROWS: u8 = 8;
+
 pub fn render_board_frame(g: &Game, rows_cap: usize, spoiler: Option<SpoilerMode>, tz: Option<chrono_tz::Tz>, style: NameStyle) -> (FrameId, Vec<u8>, bool) {
     // Spoiler-protected leaderboards hide their rows entirely — nothing tall
     // to scroll, and the panel-sized spoiled frame is the whole story.
@@ -1256,7 +1262,10 @@ pub fn render_board_frame(g: &Game, rows_cap: usize, spoiler: Option<SpoilerMode
     let rows_cap = rows_cap.clamp(4, LEADERBOARD_MAX_ROWS);
     let deep = rows_cap > 4
         && g.status != GameStatus::Pregame
-        && g.leaderboard.as_ref().is_some_and(|lb| lb.rows.len() > 4);
+        && g.leaderboard.as_ref().is_some_and(|lb| match &lb.matchplay {
+            Some(mp) => matchplay_rows(mp, LEADERBOARD_MAX_ROWS, tz).len() > 4,
+            None => lb.rows.len() > 4,
+        });
     if !deep {
         let (id, px) = render_game(g, tz, style);
         return (id, px, false);
@@ -1267,22 +1276,26 @@ pub fn render_board_frame(g: &Game, rows_cap: usize, spoiler: Option<SpoilerMode
 
 fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>) -> (FrameId, Vec<u8>) {
     let lb = g.leaderboard.as_ref().unwrap();
+    if let Some(mp) = &lb.matchplay {
+        // A session is shown WHOLE (up to the tower's 20 rows) whatever the
+        // golf depth setting says, except the static 4-row frame: cutting
+        // the tower at 10 rows would hide matches still on the course.
+        let cap = if max_rows > 4 { LEADERBOARD_MAX_ROWS } else { 4 };
+        return render_matchplay(mp, cap, tz);
+    }
     // Title baseline 5 + rows on a 6px pitch from baseline 12 (1px gap top and
     // bottom): 4 rows land exactly on the 32px panel; more rows grow the frame
     // by 6px each and the board scrolls the window.
     let rows = lb.rows.len().min(max_rows);
     let f1 = g.sport_id == "f1";
-    // A race with a known distance wears a LAP BAR under the title: one
-    // pixel per lap, filled as the leader completes them, wrapping onto a
-    // second row past 64 laps (Monaco). The bar takes a blank row on each
-    // side, and the panel only has that row if the title moves up to the
-    // top edge: title 5 + gap + bar + gap + four rows of 5 on their 6px
-    // pitch = 31 of 32. A two-row bar needs the 32nd as well, so the rows
-    // move down one and the last row's descender row is the panel edge.
+    // A race with a known distance wears a LAP BAR under the title: the
+    // panel's full width is the race, filled as the leader completes laps.
+    // The bar takes a blank row on each side, and the panel only has that
+    // row if the title moves up to the top edge: title 5 + gap + bar + gap
+    // + four rows of 5 on their 6px pitch = 31 of 32.
     let laps = if f1 { lb.laps.filter(|l| l.total > 0) } else { None };
-    let bar_rows = laps.map_or(0, |l| (l.total as i32 + FRAME_WIDTH as i32 - 1) / FRAME_WIDTH as i32).min(2);
-    let title_by = if bar_rows > 0 { 4 } else { 5 };
-    let first_by = 12 + (bar_rows - 1).max(0);
+    let title_by = if laps.is_some() { 4 } else { 5 };
+    let first_by = 12;
     let height = if rows > 4 { first_by + (rows as i32 - 1) * 6 + 2 } else { FRAME_HEIGHT as i32 };
     let mut c = Canvas::with_height(height as usize);
     let accent = if f1 {
@@ -1342,13 +1355,13 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
             }
         }
         if let Some(l) = laps {
-            // Row 6, then row 7 for laps past 64. Unfilled laps are a dim
-            // track so the bar reads as a bar before the first lap is done.
-            let done = l.completed.min(l.total);
-            for lap in 0..l.total.min(2 * FRAME_WIDTH as u32) {
-                let (x, y) = ((lap % FRAME_WIDTH as u32) as i32, 6 + (lap / FRAME_WIDTH as u32) as i32);
-                fill(&mut c, x, y, 1, 1, if lap < done { WHITE } else { LAP_TRACK });
-            }
+            // Row 6, all 64 columns: the share of the distance done, rounded
+            // to the nearest pixel. Unfilled is a dim track so the bar reads
+            // as a bar before the first lap is done.
+            let (w, done) = (FRAME_WIDTH as u32, l.completed.min(l.total));
+            let filled = (w * done + l.total / 2) / l.total;
+            fill(&mut c, 0, 6, w, 1, LAP_TRACK);
+            fill(&mut c, 0, 6, filled, 1, WHITE);
         }
     } else {
         // Golf's round, right-aligned on the title row — the one thing the
@@ -1463,6 +1476,152 @@ fn render_leaderboard_rows(g: &Game, max_rows: usize, tz: Option<chrono_tz::Tz>)
         }
     }
 
+    let px = c.to_rgb565();
+    (frame_id(&px), px)
+}
+
+/// The faint line between matches in a match-play tower.
+const MATCH_DIVIDER: Rgb888 = Rgb888::new(48, 48, 48);
+
+/// One row of a match-play tower: a player, and — on the first row of a
+/// side — the match's value or holes played.
+struct MpRow {
+    name: String,
+    ink: Rgb888,
+    thru: Option<u32>,
+    value: String,
+    value_ink: Rgb888,
+    /// First row of a match after the first: a divider goes above it.
+    new_match: bool,
+}
+
+/// A tee time in the board's zone, clock only ("7:56"): the rows are all
+/// today, and the meridiem does not fit beside a name.
+fn tee_label(iso: &str, tz: Option<chrono_tz::Tz>) -> Option<String> {
+    let t = crate::parse_espn_time(iso)?;
+    const FMT: &str = "%-I:%M";
+    Some(match tz {
+        Some(tz) => t.with_timezone(&tz).format(FMT).to_string(),
+        None => t.with_timezone(&chrono::Local).format(FMT).to_string(),
+    })
+}
+
+/// The tower's rows, a row per PLAYER so every name is whole — a
+/// leaderboard of the players on the course. Whole matches only, up to
+/// `max_rows`. The match's value rides on the leading side's first row
+/// (white "AS" on the first side when level); holes played go on the OTHER
+/// side's first row, which has the width to spare. A finished match puts the
+/// result on the winner's row and greys the losers; one not yet started
+/// shows its tee time.
+fn matchplay_rows(mp: &crate::model::MatchPlay, max_rows: usize, tz: Option<chrono_tz::Tz>) -> Vec<MpRow> {
+    use crate::model::MatchState;
+    let mut out = Vec::new();
+    for m in &mp.matches {
+        let n = m.players[0].len() + m.players[1].len();
+        if out.len() + n > max_rows {
+            break;
+        }
+        let first = out.len();
+        for i in 0..2 {
+            let team = mp.teams[i].color;
+            let (value, value_ink, thru, ink) = match &m.state {
+                MatchState::Live { leader: Some(l), margin, .. } if *l == i => (margin.clone(), team, None, team),
+                MatchState::Live { leader: Some(_), thru, .. } => (String::new(), team, Some(*thru), team),
+                MatchState::Live { leader: None, .. } if i == 0 => ("AS".into(), WHITE, None, team),
+                MatchState::Live { thru, .. } => (String::new(), WHITE, Some(*thru), team),
+                MatchState::Final { winner: Some(w), result } if *w == i => (result.clone(), team, None, team),
+                MatchState::Final { winner: Some(_), .. } => (String::new(), GREY, None, GREY),
+                MatchState::Final { winner: None, .. } if i == 0 => ("HALF".into(), WHITE, None, team),
+                MatchState::Final { .. } => (String::new(), WHITE, None, team),
+                MatchState::Scheduled { tee } if i == 0 => {
+                    (tee.as_deref().and_then(|t| tee_label(t, tz)).unwrap_or_default(), GREY, None, team)
+                }
+                MatchState::Scheduled { .. } => (String::new(), GREY, None, team),
+            };
+            for (j, player) in m.players[i].iter().enumerate() {
+                let lead = j == 0;
+                out.push(MpRow {
+                    name: player.clone(),
+                    ink,
+                    thru: if lead { thru } else { None },
+                    value: if lead { value.clone() } else { String::new() },
+                    value_ink,
+                    new_match: first > 0 && out.len() == first,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Where the cup title's pieces go: "USA 13.5" from the left edge, "16.5
+/// INTL" from the right. Points use the tabular cells (a 2px period), 1px
+/// after each abbreviation — which reads as two blank columns, since every
+/// measured width already ends in its glyph's blank column. At kerned widths
+/// and wider gaps, two four-character scores ran into each other ("13.516.5").
+struct CupTitle {
+    a_points_x: i32,
+    a_end: i32,
+    b_points_right: i32,
+    b_start: i32,
+}
+fn cup_title_layout(mp: &crate::model::MatchPlay) -> CupTitle {
+    let (a, b) = (&mp.teams[0], &mp.teams[1]);
+    let a_points_x = 1 + text_width(&a.abbrev, false) + 1;
+    let a_end = a_points_x + tabular_width(&crate::model::cup_points(a.points), false);
+    let b_points_right = 63 - text_width(&b.abbrev, false) - 1;
+    let b_start = b_points_right - tabular_width(&crate::model::cup_points(b.points), false);
+    CupTitle { a_points_x, a_end, b_points_right, b_start }
+}
+
+/// Team match play (Presidents Cup, Ryder Cup) in the leaderboard's own
+/// geometry: the cup score as the title row, then the session's matches a
+/// row per player on the 6px pitch, names left, holes played in the grey
+/// column golf uses, values right-aligned in the tabular timing cells.
+fn render_matchplay(mp: &crate::model::MatchPlay, max_rows: usize, tz: Option<chrono_tz::Tz>) -> (FrameId, Vec<u8>) {
+    let rows = matchplay_rows(mp, max_rows, tz);
+    let height = if rows.len() > 4 { 12 + (rows.len() as i32 - 1) * 6 + 2 } else { FRAME_HEIGHT as i32 };
+    let mut c = Canvas::with_height(height as usize);
+
+    // Title: "USA 3" left, "7 INTL" right. Once the cup is decided the
+    // winner's abbreviation and score take its colour and the loser's go
+    // grey; until then the points are white.
+    let winner = mp.cup_winner();
+    let abbrev_ink = |i: usize| match winner {
+        Some(w) if w != i => GREY,
+        _ => mp.teams[i].color,
+    };
+    let points_ink = |i: usize| match winner {
+        Some(w) if w == i => mp.teams[i].color,
+        Some(_) => GREY,
+        None => WHITE,
+    };
+    let (a, b) = (&mp.teams[0], &mp.teams[1]);
+    let t = cup_title_layout(mp);
+    draw_text(&mut c, &a.abbrev, 1, 5, false, abbrev_ink(0));
+    draw_text_tabular(&mut c, &crate::model::cup_points(a.points), t.a_points_x, 5, false, points_ink(0));
+    draw_text_right(&mut c, &b.abbrev, 63, 5, false, abbrev_ink(1));
+    draw_text_right_tabular(&mut c, &crate::model::cup_points(b.points), t.b_points_right, 5, false, points_ink(1));
+
+    // The holes-played column anchors off the widest value on the frame,
+    // like golf's thru column, so it does not zigzag row to row.
+    let value_col = rows.iter().map(|r| tabular_width(&r.value, false)).max().unwrap_or(0);
+    let mut by = 12;
+    for r in &rows {
+        if r.new_match {
+            fill(&mut c, 0, by - 5, FRAME_WIDTH as u32, 1, MATCH_DIVIDER);
+        }
+        let mut name_max = 63 - tabular_width(&r.value, false) - 2;
+        if let Some(t) = r.thru {
+            let thru_right = 63 - value_col - 3;
+            let ts = t.to_string();
+            draw_text_right(&mut c, &ts, thru_right, by, false, GREY);
+            name_max = thru_right - text_width(&ts, false) - 2;
+        }
+        draw_text_clip(&mut c, &r.name, 1, by, name_max, false, r.ink);
+        draw_text_right_tabular(&mut c, &r.value, 63, by, false, r.value_ink);
+        by += 6;
+    }
     let px = c.to_rgb565();
     (frame_id(&px), px)
 }
@@ -2078,7 +2237,7 @@ mod kern_tests {
             clock: String::new(),
             start_time: "2026-08-08T11:00Z".into(),
             end_time: None,
-            leaderboard: Some(crate::model::Leaderboard { laps: None,
+            leaderboard: Some(crate::model::Leaderboard { matchplay: None, laps: None,
                 flag: None,
                 stage: None,
                 quali: None,
@@ -2248,7 +2407,7 @@ mod kern_tests {
             ordinal: String::new(),
             clock: String::new(),
             start_time: String::new(), end_time: None,
-            leaderboard: Some(Leaderboard { laps: None,
+            leaderboard: Some(Leaderboard { matchplay: None, laps: None,
                 flag: None,
                 stage: None,
                 quali: None,
@@ -2325,7 +2484,7 @@ mod kern_tests {
             ordinal: String::new(),
             clock: String::new(),
             start_time: String::new(), end_time: None,
-            leaderboard: Some(Leaderboard { laps: None, flag: None, stage: None, quali: None, name: "SPANISH GP".into(), rows }),
+            leaderboard: Some(Leaderboard { matchplay: None, laps: None, flag: None, stage: None, quali: None, name: "SPANISH GP".into(), rows }),
             champ: None,
             series: None,
             session: Some("race".into()),
@@ -2366,7 +2525,7 @@ mod kern_tests {
             ordinal: String::new(),
             clock: String::new(),
             start_time: String::new(), end_time: None,
-            leaderboard: Some(Leaderboard {
+            leaderboard: Some(Leaderboard { matchplay: None,
                 laps,
                 flag: None,
                 stage: None,
@@ -2384,7 +2543,8 @@ mod kern_tests {
 
     /// MAR-116: the lap bar sits one blank row under the title and one
     /// above the first driver row, and the title moves to the panel's top
-    /// edge to pay for it. The rows themselves do not move.
+    /// edge to pay for it. The rows themselves do not move. The bar is the
+    /// share of the distance across the full width.
     #[test]
     fn lap_bar_moves_the_title_up_and_keeps_a_gap_each_side() {
         use crate::model::LapProgress;
@@ -2399,12 +2559,27 @@ mod kern_tests {
         assert!(row_lit(&px, 0) > 0, "title ink starts on row 0");
         assert_eq!(row_lit(&px, 5), 0, "blank row between title and bar");
         let bar: Vec<u16> = (0..FRAME_WIDTH as i32).map(|x| px565(&px, x, 6)).collect();
-        assert_eq!(bar.iter().filter(|&&p| p == c565(WHITE)).count(), 23, "23 laps done");
-        assert_eq!(bar.iter().filter(|&&p| p == c565(LAP_TRACK)).count(), 57 - 23, "34 to go");
-        assert_eq!(bar.iter().filter(|&&p| p == 0).count(), 64 - 57, "nothing past the distance");
+        // 23/57 of 64 columns = 25.8 -> 26.
+        assert_eq!(bar.iter().filter(|&&p| p == c565(WHITE)).count(), 26, "23 of 57 laps");
+        assert_eq!(bar.iter().filter(|&&p| p == c565(LAP_TRACK)).count(), 64 - 26, "the rest is track");
         assert_eq!(row_lit(&px, 7), 0, "blank row between bar and rows");
         assert!(row_lit(&px, 8) > 0, "first driver row where it always was");
         assert_eq!(row_lit(&px, 31), 0, "bottom margin kept");
+    }
+
+    /// Any distance uses the full width, Monaco's 78 laps included, and the
+    /// ends are exact: nothing lit before the first lap, all lit at the flag.
+    #[test]
+    fn lap_bar_spans_the_panel_at_any_distance() {
+        use crate::model::LapProgress;
+        let lit = |done, total| {
+            let (_, px) = render_leaderboard(&race_with_laps(Some(LapProgress { completed: done, total })), None);
+            (0..FRAME_WIDTH as i32).filter(|&x| px565(&px, x, 6) == c565(WHITE)).count()
+        };
+        assert_eq!(lit(0, 78), 0);
+        assert_eq!(lit(39, 78), 32, "half distance, half the panel");
+        assert_eq!(lit(78, 78), 64);
+        assert_eq!(lit(51, 51), 64);
     }
 
     /// Writes the lap-bar frames as LED-style PNGs for eyeballing:
@@ -2418,7 +2593,7 @@ mod kern_tests {
         for (name, laps) in [
             ("lap-bar-none", None),
             ("lap-bar-23-of-57", Some(LapProgress { completed: 23, total: 57 })),
-            ("lap-bar-70-of-78", Some(LapProgress { completed: 70, total: 78 })),
+            ("lap-bar-70-of-78", Some(LapProgress { completed: 70, total: 78 })), // Monaco
         ] {
             let (_, px) = render_leaderboard(&race_with_laps(laps), None);
             let mut img = image::RgbImage::new(FRAME_WIDTH as u32 * 8, FRAME_HEIGHT as u32 * 8);
@@ -2434,30 +2609,6 @@ mod kern_tests {
             }
             img.save(out.join(format!("{name}.png"))).unwrap();
         }
-    }
-
-    /// Past 64 laps the bar wraps onto row 7 and the rows move down one,
-    /// spending the bottom margin: 32 rows exactly.
-    #[test]
-    fn two_row_lap_bar_spends_the_bottom_margin() {
-        use crate::model::LapProgress;
-        let row_lit = |px: &[u8], y: i32| (0..FRAME_WIDTH as i32).filter(|&x| px565(px, x, y) != 0).count();
-        let (_, px) = render_leaderboard(&race_with_laps(Some(LapProgress { completed: 70, total: 78 })), None);
-        assert_eq!(row_lit(&px, 6), 64, "first bar row full");
-        assert_eq!(row_lit(&px, 7), 78 - 64, "second bar row carries the rest");
-        assert_eq!((0..64).filter(|&x| px565(&px, x, 6) == c565(WHITE)).count(), 64);
-        assert_eq!((0..64).filter(|&x| px565(&px, x, 7) == c565(WHITE)).count(), 6, "70 done = 64 + 6");
-        assert_eq!(row_lit(&px, 8), 0, "blank row under the bar");
-        assert!(row_lit(&px, 9) > 0, "rows start one lower");
-        assert!(row_lit(&px, 31) > 0, "last row's baseline is the panel edge");
-        // A deep tower keeps the same pitch below the bar.
-        let mut g = race_with_laps(Some(LapProgress { completed: 70, total: 78 }));
-        let lb = g.leaderboard.as_mut().unwrap();
-        for i in 5..=8 {
-            lb.rows.push(crate::model::LeaderRow { rank: i.to_string(), name: "XXX".into(), ..Default::default() });
-        }
-        let (_, tall) = render_leaderboard_rows(&g, 8, None);
-        assert_eq!(tall.len(), (13 + 7 * 6 + 2) * FRAME_WIDTH * 2, "8 rows from baseline 13, plus the descender row");
     }
 
     // ---- situational layouts (ported from the original football/baseball/hockey.rs) ----
@@ -2704,7 +2855,7 @@ mod kern_tests {
                 down_string: String::new(), ball_position: String::new(), home_possession: None,
             });
             g.situation = None;
-            g.leaderboard = Some(crate::model::Leaderboard { laps: None,
+            g.leaderboard = Some(crate::model::Leaderboard { matchplay: None, laps: None,
                 flag: None,
                 stage: None,
                 quali: None,
@@ -3147,7 +3298,7 @@ mod kern_tests {
         });
         g.situation = None;
         g.home = TeamSide::empty("");
-        let lb = |name: &str| Some(Leaderboard { laps: None,
+        let lb = |name: &str| Some(Leaderboard { matchplay: None, laps: None,
             flag: None,
             stage: None,
             quali: None,
@@ -3186,7 +3337,7 @@ mod kern_tests {
         g.situation = None;
         g.home = TeamSide::empty("");
         // A fixture-sized field: ranks 1..4, cut after 2, out from 4.
-        g.leaderboard = Some(Leaderboard { laps: None,
+        g.leaderboard = Some(Leaderboard { matchplay: None, laps: None,
             flag: None,
             name: "SPANISH GP Q".into(),
             stage: Some(2),
@@ -3236,7 +3387,7 @@ mod kern_tests {
         });
         g.situation = None;
         g.home = TeamSide::empty("");
-        g.leaderboard = Some(Leaderboard { laps: None, flag: None, stage: None, quali: None, name: "GP".into(), rows: vec![row("1"), row("20")] });
+        g.leaderboard = Some(Leaderboard { matchplay: None, laps: None, flag: None, stage: None, quali: None, name: "GP".into(), rows: vec![row("1"), row("20")] });
         let (_, px) = render_game(&g, None, NameStyle::Name);
 
         // Leftmost lit pixel past the rank column, per row band (baselines 12, 18).
@@ -3263,7 +3414,7 @@ mod kern_tests {
         });
         g.situation = None;
         g.home = TeamSide::empty("");
-        let rows = |n: usize| Some(Leaderboard { laps: None,
+        let rows = |n: usize| Some(Leaderboard { matchplay: None, laps: None,
             flag: None,
             stage: None,
             quali: None,
@@ -4234,7 +4385,7 @@ mod wx_dump {
             clock: String::new(),
             start_time: "2026-08-23T13:00Z".into(),
             end_time: None,
-            leaderboard: Some(crate::model::Leaderboard { laps: None,
+            leaderboard: Some(crate::model::Leaderboard { matchplay: None, laps: None,
                 flag: flag.map(String::from),
                 stage: None,
                 quali: None,
@@ -4286,7 +4437,7 @@ mod wx_dump {
             clock: String::new(),
             start_time: "2026-08-24T11:00Z".into(),
             end_time: None,
-            leaderboard: Some(crate::model::Leaderboard { laps: None,
+            leaderboard: Some(crate::model::Leaderboard { matchplay: None, laps: None,
                 flag: None,
                 stage: None,
                 quali: None,
@@ -4336,7 +4487,7 @@ mod wx_dump {
             clock: String::new(),
             start_time: "2026-08-22T11:00Z".into(),
             end_time: None,
-            leaderboard: Some(crate::model::Leaderboard { laps: None,
+            leaderboard: Some(crate::model::Leaderboard { matchplay: None, laps: None,
                 flag: None,
                 stage: None,
                 quali: None,
@@ -4399,8 +4550,199 @@ mod wx_dump {
     }
 }
 
+/// Team match play on the board: the production frame over the captured
+/// 2026 Presidents Cup feed (design/golf-logs) and states derived from it.
+#[cfg(test)]
+mod matchplay_tests {
+    use super::*;
+    use crate::model::{Match, MatchPlay, MatchState};
 
+    fn fixture() -> serde_json::Value {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../design/golf-logs");
+        let f = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .find(|p| p.to_string_lossy().contains("presidents-cup"))
+            .expect("the Presidents Cup fixture");
+        serde_json::from_str(&std::fs::read_to_string(f).unwrap()).unwrap()
+    }
+    fn game(v: &serde_json::Value) -> Game {
+        crate::espn::parse_feed("pga", &v.to_string()).unwrap().remove(0)
+    }
+    fn mp_of(g: &Game) -> &MatchPlay {
+        g.leaderboard.as_ref().unwrap().matchplay.as_ref().unwrap()
+    }
+    fn mp_mut(g: &mut Game) -> &mut MatchPlay {
+        g.leaderboard.as_mut().unwrap().matchplay.as_mut().unwrap()
+    }
+    fn px(px: &[u8], x: i32, y: i32) -> u16 {
+        let i = (y as usize * FRAME_WIDTH + x as usize) * 2;
+        u16::from_le_bytes([px[i], px[i + 1]])
+    }
+    fn c565(c: Rgb888) -> u16 {
+        rgb888_to_565(c.r(), c.g(), c.b())
+    }
+    /// Every colour drawn in the title row's left or right half.
+    fn title_inks(frame: &[u8], right: bool) -> std::collections::HashSet<u16> {
+        let xs = if right { 40..64 } else { 0..24 };
+        xs.flat_map(|x| (0..7).map(move |y| (x, y))).map(|(x, y)| px(frame, x, y)).filter(|&v| v != 0).collect()
+    }
 
+    /// A live Four-Balls session is a row per player — 16 rows for four
+    /// matches — so the board frame goes tall and scrolls, even though the
+    /// golf depth check (stroke-play rows) would never see a row.
+    #[test]
+    fn a_live_session_is_a_scrolling_tower() {
+        let g = game(&fixture());
+        let (_, frame, scrolls) = render_board_frame(&g, LEADERBOARD_DEFAULT_ROWS, None, None, NameStyle::Name);
+        assert!(scrolls, "a whole session scrolls");
+        assert_eq!(frame.len(), (12 + 15 * 6 + 2) * FRAME_WIDTH * 2, "16 rows: the whole session");
+        // The static frame (depth 4 = "Disable scrolling") shows the first match.
+        let (_, flat, scrolls) = render_board_frame(&g, 4, None, None, NameStyle::Name);
+        assert!(!scrolls);
+        assert_eq!(flat.len(), FRAME_WIDTH * FRAME_HEIGHT * 2);
+    }
 
+    /// Half points read as a decimal: "7.5", never the 4x6 "½".
+    #[test]
+    fn half_points_read_as_decimals() {
+        assert_eq!(crate::model::cup_points(7.5), "7.5");
+        assert_eq!(crate::model::cup_points(7.0), "7");
+        assert_eq!(crate::model::cup_points(0.5), "0.5");
+    }
 
+    /// Until the cup is decided both abbreviations wear their team colours
+    /// and the points are white. Decided, the winner's abbreviation AND
+    /// score take its colour and the loser's go grey — no marker word.
+    #[test]
+    fn a_decided_cup_colours_the_winner_and_greys_the_loser() {
+        let mut g = game(&fixture());
+        let (usa, intl) = (mp_of(&g).teams[0].color, mp_of(&g).teams[1].color);
+        let (_, frame) = render_frame(&g, None, None, NameStyle::Name);
+        assert!(title_inks(&frame, false).contains(&c565(usa)));
+        assert!(title_inks(&frame, false).contains(&c565(WHITE)), "live points are white");
 
+        let mp = mp_mut(&mut g);
+        mp.teams[0].points = 13.5;
+        mp.teams[1].points = 16.5;
+        let (_, frame) = render_frame(&g, None, None, NameStyle::Name);
+        let (left, right) = (title_inks(&frame, false), title_inks(&frame, true));
+        assert_eq!(left, [c565(GREY)].into(), "the loser is all grey");
+        assert_eq!(right, [c565(intl)].into(), "the winner is all team colour");
+        // No marker word anywhere on the title row: only grey (the loser)
+        // and the winner's colour are drawn there.
+        let inks: std::collections::HashSet<u16> =
+            (0..64).flat_map(|x| (0..7).map(move |y| (x, y))).map(|(x, y)| px(&frame, x, y)).filter(|&v| v != 0).collect();
+        assert_eq!(inks, [c565(GREY), c565(intl)].into(), "no marker on the title row");
+    }
+
+    /// The title's two halves never touch, even at the widest scores the
+    /// cup can reach (two four-character halves: "14.5" / "15.5").
+    #[test]
+    fn the_cup_title_halves_never_touch() {
+        let mut g = game(&fixture());
+        for (a, b) in [(13.5, 16.5), (14.5, 15.5), (15.5, 14.5), (3.0, 7.0), (0.5, 0.5)] {
+            let mp = mp_mut(&mut g);
+            mp.teams[0].points = a;
+            mp.teams[1].points = b;
+            let t = cup_title_layout(mp_of(&g));
+            assert!(t.b_start - t.a_end >= 3, "{a} / {b}: {} to {}", t.a_end, t.b_start);
+        }
+    }
+
+    /// Spoiler redaction takes the cup score and match states with it.
+    #[test]
+    fn spoiled_match_play_carries_no_results() {
+        let g = game(&fixture());
+        let r = crate::redact_game(&g, scoreboard_protocol::SpoilerMode::Normal);
+        assert!(r.leaderboard.as_ref().unwrap().matchplay.is_none());
+    }
+
+    /// The app card's detail line is the cup score.
+    #[test]
+    fn the_card_detail_is_the_cup_score() {
+        let g = game(&fixture());
+        let s = crate::to_summary(&g, None);
+        assert_eq!(s.away, "PRESIDENTS CUP");
+        assert_eq!(s.detail, "USA 3 · INTL 7");
+    }
+
+    fn states() -> Vec<(&'static str, Game)> {
+        let v = fixture();
+        let today = game(&v);
+        let mut fri = v.clone();
+        fri["events"][0]["competitions"].as_array_mut().unwrap().pop();
+        let friday = game(&fri);
+        let usa = ["SCHEFFLER", "SCHAUFFELE", "MORIKAWA", "THOMAS", "CANTLAY", "CLARK", "BURNS", "YOUNG", "HENLEY", "GOTTERUP", "KOIVUN", "BRIDGEMAN"];
+        let intl = ["MATSUYAMA", "IM", "KIM", "SCOTT", "CONNERS", "TAYLOR", "LEE", "FOX", "HISATSUNE", "KIM", "BEZUIDENHOUT", "ECHAVARRIA"];
+        let live = |i: usize, m: &str, thru: u32| MatchState::Live { leader: Some(i), margin: m.into(), thru };
+        let sun = [
+            MatchState::Final { winner: Some(0), result: "3&2".into() },
+            MatchState::Final { winner: Some(1), result: "2&1".into() },
+            MatchState::Final { winner: None, result: "HALVED".into() },
+            live(0, "2UP", 15),
+            live(1, "1UP", 14),
+            MatchState::Live { leader: None, margin: "AS".into(), thru: 13 },
+            live(0, "4UP", 11),
+            live(1, "2UP", 10),
+            live(0, "1UP", 8),
+            MatchState::Scheduled { tee: Some("2026-09-27T18:30Z".into()) },
+            MatchState::Scheduled { tee: Some("2026-09-27T18:41Z".into()) },
+            MatchState::Scheduled { tee: Some("2026-09-27T18:52Z".into()) },
+        ];
+        let mut sunday = today.clone();
+        {
+            let mp = mp_mut(&mut sunday);
+            mp.session = "Sunday Singles".into();
+            mp.format = "singles".into();
+            mp.teams[0].points = 11.5;
+            mp.teams[1].points = 13.5;
+            mp.matches = (0..12).map(|k| Match { players: [vec![usa[k].into()], vec![intl[k].into()]], state: sun[k].clone() }).collect();
+        }
+        let mut pm = today.clone();
+        for (k, m) in mp_mut(&mut pm).matches.iter_mut().enumerate() {
+            m.state = MatchState::Scheduled { tee: Some(format!("2026-09-26T{:02}:{:02}Z", 18 + (k * 12 + 5) / 60, (k * 12 + 5) % 60)) };
+        }
+        let mut won = sunday.clone();
+        {
+            let mp = mp_mut(&mut won);
+            mp.teams[0].points = 13.5;
+            mp.teams[1].points = 16.5;
+            for m in mp.matches.iter_mut() {
+                if !matches!(m.state, MatchState::Final { .. }) {
+                    m.state = MatchState::Final { winner: Some(1), result: "1UP".into() };
+                }
+            }
+        }
+        vec![("1-today-live", today), ("2-friday-final", friday), ("3-sunday-singles", sunday), ("4-afternoon-pregame", pm), ("5-cup-decided", won)]
+    }
+
+    /// Writes the production match-play board frames as LED-style PNGs:
+    ///   MOCKUP_OUT=/tmp/mp cargo test -p server dump_matchplay_frames -- --ignored
+    #[test]
+    #[ignore = "writes preview PNGs; run with --ignored and MOCKUP_OUT"]
+    fn dump_matchplay_frames() {
+        let out = std::path::PathBuf::from(std::env::var("MOCKUP_OUT").expect("MOCKUP_OUT"));
+        std::fs::create_dir_all(&out).unwrap();
+        for (name, g) in states() {
+            let (_, frame, _) = render_board_frame(&g, LEADERBOARD_DEFAULT_ROWS, None, Some(chrono_tz::America::Chicago), NameStyle::Name);
+            let h = (frame.len() / (FRAME_WIDTH * 2)) as u32;
+            let mut img = image::RgbImage::new(FRAME_WIDTH as u32 * 8, h * 8);
+            for y in 0..h {
+                for x in 0..FRAME_WIDTH as u32 {
+                    let v = px(&frame, x as i32, y as i32);
+                    if v == 0 {
+                        continue;
+                    }
+                    let (r, g, b) = (((v >> 11) as u8) << 3, (((v >> 5) & 0x3F) as u8) << 2, ((v & 0x1F) as u8) << 3);
+                    for dy in 1..7 {
+                        for dx in 1..7 {
+                            img.put_pixel(x * 8 + dx, y * 8 + dy, image::Rgb([r, g, b]));
+                        }
+                    }
+                }
+            }
+            img.save(out.join(format!("{name}.png"))).unwrap();
+        }
+    }
+}

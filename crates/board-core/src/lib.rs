@@ -1425,7 +1425,8 @@ impl Board {
         // refreshes deliberately preserve — a score update mid-scroll doesn't
         // yank the view back to the top.
         let frame_h = px.len() / (FRAME_WIDTH * 2);
-        let row0 = if entry.scroll && frame_h > FRAME_HEIGHT {
+        let scrolls = entry.scroll && frame_h > FRAME_HEIGHT;
+        let row0 = if scrolls {
             scroll_offset(
                 self.clock.saturating_sub(self.last_advance),
                 entry.dwell_ms as u64,
@@ -1434,10 +1435,14 @@ impl Board {
         } else {
             0
         };
+        // A pinned header (the leaderboard's title rows) holds still while
+        // the rest glides beneath it. Clamped: a bogus count can at most pin
+        // the whole panel, never index past it.
+        let pin = if scrolls { (entry.pin_rows as usize).min(FRAME_HEIGHT) } else { 0 };
         // No dimming here — brightness is applied once to the whole framebuffer
         // in `framebuffer()`. Scaling the frame by the manifest value here too
         // would square the dim (50% knob × 50% manifest = 25%).
-        blit_frame_window(&mut buf, px, row0);
+        blit_frame_window(&mut buf, px, row0, pin);
         buf
     }
 
@@ -2063,10 +2068,13 @@ fn scroll_offset(t: u64, dwell_ms: u64, max_off: usize) -> usize {
 
 /// Blit a panel-sized window of an RGB565-LE frame into a 0RGB buffer,
 /// starting at source row `row0` (tall frames scroll by moving the window).
-fn blit_frame_window(buf: &mut [u32], px: &[u8], row0: usize) {
+/// The first `pin` panel rows always come from the frame's first `pin` rows:
+/// a pinned header, with the window scrolling beneath it.
+fn blit_frame_window(buf: &mut [u32], px: &[u8], row0: usize, pin: usize) {
     for y in 0..FRAME_HEIGHT {
+        let src_y = if y < pin { y } else { row0 + y };
         for x in 0..FRAME_WIDTH {
-            let src = ((row0 + y) * FRAME_WIDTH + x) * 2;
+            let src = (src_y * FRAME_WIDTH + x) * 2;
             if src + 1 < px.len() {
                 let c = u16::from_le_bytes([px[src], px[src + 1]]);
                 let (r, g, b) = rgb565_to_888(c);
@@ -2553,7 +2561,7 @@ mod tests {
             countdown_ms: None,
             rotation: ids
                 .iter()
-                .map(|i| RotationEntry { frame_id: (*i).into(), dwell_ms: 1000, scroll: false })
+                .map(|i| RotationEntry { frame_id: (*i).into(), dwell_ms: 1000, scroll: false, pin_rows: 0 })
                 .collect(),
             display_on: true,
             off_state: Default::default(),
@@ -2594,6 +2602,50 @@ mod tests {
         assert_eq!(b.framebuffer()[0], 0x00FF00, "new-shape rotation restarts at slot 0");
     }
 
+    /// A pinned header holds still while the rows beneath it scroll: the
+    /// leaderboard's title stays up, the field glides under it, and the scroll
+    /// still reaches the frame's last row.
+    #[test]
+    fn pinned_rows_hold_while_the_rest_scrolls() {
+        use scoreboard_protocol::RotationEntry;
+        let tall_h = 40usize; // max_off = 8
+        let px: Vec<u8> = (0..tall_h)
+            .flat_map(|y| {
+                // Row index in GREEN (6 bits, steps of 4): 40 rows never wrap.
+                let row = scoreboard_protocol::rgb888_to_565(0, (y * 4 + 4) as u8, 0).to_le_bytes();
+                core::iter::repeat(row).take(FRAME_WIDTH).flatten().collect::<Vec<u8>>()
+            })
+            .collect();
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.tick(0);
+        b.on_manifest(Manifest {
+            mode: String::new(),
+            modes: Vec::new(),
+            countdown_ms: None,
+            rotation: vec![RotationEntry { frame_id: "tall".into(), dwell_ms: 10_000, scroll: true, pin_rows: 8 }],
+            display_on: true,
+            off_state: Default::default(),
+            local_clock: false,
+            clock_hour24: false,
+            epoch: 0,
+            brightness: 100,
+        });
+        b.on_frame("tall".into(), payload(&px));
+        let row_at = |b: &Board, y: usize| ((b.framebuffer()[y * FRAME_WIDTH] >> 8 & 0xFF) >> 2) as usize - 1;
+
+        b.tick(1_000); // top hold: the plain top window
+        let (head, body) = (row_at(&b, 0), row_at(&b, 8));
+        assert_eq!(body, head + 8, "at rest the window is the frame's top");
+        b.tick(5_000); // bottom hold: offset 8
+        for y in 0..8 {
+            assert_eq!(row_at(&b, y), head + y, "header row {y} pinned");
+        }
+        assert_eq!(row_at(&b, 8), body + 8, "the body scrolled under the header");
+        assert_eq!(row_at(&b, 31), head + 39, "the frame's last row reaches the bottom");
+    }
+
     /// A frame taller than the panel scrolls one full pass per dwell, in
     /// fifths: hold, glide down, hold, glide up, hold — ending at rest so the
     /// advance never cuts mid-glide. Pure clock math: simulator and firmware
@@ -2622,6 +2674,7 @@ mod tests {
                 frame_id: "tall".into(),
                 dwell_ms: 10_000, // fifths: 2s hold / 2s down / 2s hold / 2s up / 2s hold
                 scroll: true,
+                pin_rows: 0,
             }],
             display_on: true,
             off_state: Default::default(),
@@ -2651,7 +2704,7 @@ mod tests {
             mode: String::new(),
             modes: Vec::new(),
             countdown_ms: None,
-            rotation: vec![RotationEntry { frame_id: "tall".into(), dwell_ms: 10_000, scroll: false }],
+            rotation: vec![RotationEntry { frame_id: "tall".into(), dwell_ms: 10_000, scroll: false, pin_rows: 0 }],
             display_on: true,
             off_state: Default::default(),
             local_clock: false,
@@ -2724,6 +2777,7 @@ mod tests {
                 frame_id: "n1".into(),
                 dwell_ms: 6000,
                 scroll: false,
+                pin_rows: 0,
             }],
             display_on: true,
             off_state: Default::default(),
@@ -3324,7 +3378,7 @@ mod tests {
             mode: String::new(),
             modes: Vec::new(),
             countdown_ms: None,
-            rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 1000, scroll: false }],
+            rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 1000, scroll: false, pin_rows: 0 }],
             display_on: true,
             off_state: Default::default(),
             local_clock: false,
@@ -3405,7 +3459,7 @@ mod tests {
             countdown_ms: None,
             rotation: ids
                 .iter()
-                .map(|id| RotationEntry { frame_id: (*id).into(), dwell_ms: 1000, scroll: false })
+                .map(|id| RotationEntry { frame_id: (*id).into(), dwell_ms: 1000, scroll: false, pin_rows: 0 })
                 .collect(),
             display_on: true,
             off_state: Default::default(),
@@ -3563,7 +3617,7 @@ mod tests {
             mode: String::new(),
             modes: Vec::new(),
             countdown_ms: None,
-            rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 1000, scroll: false }],
+            rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 1000, scroll: false, pin_rows: 0 }],
             display_on: true,
             off_state: Default::default(),
             local_clock: false,
@@ -3719,7 +3773,7 @@ mod tests {
             modes: Vec::new(),
             countdown_ms: None,
             rotation: if on {
-                vec![RotationEntry { frame_id: "a".into(), dwell_ms: 1000, scroll: false }]
+                vec![RotationEntry { frame_id: "a".into(), dwell_ms: 1000, scroll: false, pin_rows: 0 }]
             } else {
                 vec![]
             },
@@ -3818,7 +3872,7 @@ mod tests {
             mode: String::new(),
             modes: Vec::new(),
             countdown_ms: None,
-            rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 1000, scroll: false }],
+            rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 1000, scroll: false, pin_rows: 0 }],
             display_on: true,
             off_state: Default::default(),
             local_clock: false,
@@ -3947,7 +4001,7 @@ mod tests {
             mode: String::new(),
             modes: Vec::new(),
             countdown_ms: None,
-            rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 10_000, scroll: false }],
+            rotation: vec![RotationEntry { frame_id: "a".into(), dwell_ms: 10_000, scroll: false, pin_rows: 0 }],
             display_on: true,
             off_state: Default::default(),
             local_clock: false,
@@ -4109,7 +4163,7 @@ mod tests {
             countdown_ms: None,
             rotation: ids
                 .iter()
-                .map(|i| RotationEntry { frame_id: (*i).into(), dwell_ms, scroll })
+                .map(|i| RotationEntry { frame_id: (*i).into(), dwell_ms, scroll, pin_rows: 0 })
                 .collect(),
             display_on: true,
             off_state: Default::default(),

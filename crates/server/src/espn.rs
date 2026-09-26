@@ -267,10 +267,7 @@ pub(crate) fn parse_feed(feed: &str, raw: &str) -> Result<Vec<Game>, String> {
     match feed {
         "demo" => Ok(demo_games(0, 0)),
         "nhl-aux" => Err("nhl-aux is a situation overlay, not a game feed".into()),
-        "pga" | "lpga" => {
-            let r: LeaderboardResponse = serde_json::from_str(raw).map_err(|e| e.to_string())?;
-            Ok(r.events.into_iter().filter_map(|ev| parse_golf(feed, ev)).collect())
-        }
+        "pga" | "lpga" => golf_games(feed, raw),
         "f1" => {
             let r: LeaderboardResponse = serde_json::from_str(raw).map_err(|e| e.to_string())?;
             // The debug/TUI path shows the scoreboard feed as-is; the
@@ -480,11 +477,11 @@ impl EspnSource {
         for tour in ["pga", "lpga"] {
             let url =
                 format!("https://site.api.espn.com/apis/site/v2/sports/golf/leaderboard?league={tour}");
-            let events = match self.client.get(&url).send().await {
-                Ok(r) => match r.json::<LeaderboardResponse>().await {
-                    Ok(g) => g.events,
+            let body = match self.client.get(&url).send().await {
+                Ok(r) => match r.text().await {
+                    Ok(b) => b,
                     Err(e) => {
-                        tracing::warn!("golf parse {tour}: {e}");
+                        tracing::warn!("golf fetch {tour}: {e}");
                         continue;
                     }
                 },
@@ -493,10 +490,9 @@ impl EspnSource {
                     continue;
                 }
             };
-            for ev in events {
-                if let Some(g) = parse_golf(tour, ev) {
-                    out.push(g);
-                }
+            match golf_games(tour, &body) {
+                Ok(games) => out.extend(games),
+                Err(e) => tracing::warn!("golf parse {tour}: {e}"),
             }
         }
         out
@@ -856,7 +852,7 @@ fn parse_golf(sport_id: &str, ev: LeaderEvent) -> Option<Game> {
         start_time: tee_off.unwrap_or(comp.date),
         // Tournaments run for days — surface when this one wraps up.
         end_time: (!ev.end_date.is_empty()).then(|| ev.end_date.clone()),
-        leaderboard: Some(Leaderboard { laps: None, name, flag: None, stage: None, quali: None, rows }),
+        leaderboard: Some(Leaderboard { matchplay: None, laps: None, name, flag: None, stage: None, quali: None, rows }),
         champ,
         series: None,
         session: None,
@@ -907,6 +903,313 @@ fn first_tee_time(comp: &LeaderComp) -> Option<String> {
         // RFC3339 in a fixed UTC format, so lexical order IS chronological.
         .min()
         .map(str::to_string)
+}
+
+/// Replay one captured ESPN folder (`scoreboard.json` plus a
+/// `stats-<competitor>.json` per driver, as `scripts/capture-f1.py` and the
+/// earlier quali captures write them) through the live parser: the games the
+/// server would have built from exactly those responses.
+#[cfg(test)]
+pub(crate) fn replay_f1_snapshot(dir: &std::path::Path) -> Vec<Game> {
+    use std::collections::HashMap;
+    let Ok(raw) = std::fs::read_to_string(dir.join("scoreboard.json")) else { return Vec::new() };
+    let Ok(r) = serde_json::from_str::<LeaderboardResponse>(&raw) else { return Vec::new() };
+    let mut timing = HashMap::new();
+    for ev in &r.events {
+        for comp in &ev.competitions {
+            for c in &comp.competitors {
+                let Ok(raw) = std::fs::read_to_string(dir.join(format!("stats-{}.json", c.id))) else { continue };
+                let Ok(stats) = serde_json::from_str::<CoreStatistics>(&raw) else { continue };
+                timing.insert((comp.id.clone(), c.id.clone()), f1_timing(&stats));
+            }
+        }
+    }
+    r.events.into_iter().flat_map(|ev| parse_f1(ev, &timing)).collect()
+}
+
+/// Every game in one golf leaderboard response: stroke-play events through
+/// `parse_golf`, team match play through `parse_matchplay`. The poll and the
+/// debug tools both come through here.
+fn golf_games(tour: &str, raw: &str) -> Result<Vec<Game>, String> {
+    let r: LeaderboardResponse = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+    let mut games: Vec<Game> = r.events.into_iter().filter_map(|ev| parse_golf(tour, ev)).collect();
+    #[derive(Deserialize)]
+    struct Raw {
+        #[serde(default)]
+        events: Vec<serde_json::Value>,
+    }
+    let raw: Raw = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+    for v in raw.events.into_iter().filter(is_match_play) {
+        match serde_json::from_value::<MpEvent>(v) {
+            Ok(ev) => games.extend(parse_matchplay(tour, ev)),
+            Err(e) => tracing::warn!("match play event skipped: {e}"),
+        }
+    }
+    Ok(games)
+}
+
+/// Team match play (Presidents Cup, Ryder Cup). ESPN nests these events'
+/// competitions BY SESSION — `[[cup], [Thursday's matches], …]` — where a
+/// stroke-play event has one flat competition; that nesting is the tell.
+fn is_match_play(ev: &serde_json::Value) -> bool {
+    ev.get("competitions")
+        .and_then(|c| c.as_array())
+        .is_some_and(|c| c.iter().any(|x| x.is_array()))
+}
+
+#[derive(Deserialize)]
+struct MpEvent {
+    #[serde(default)]
+    id: String,
+    #[serde(default, rename = "shortName")]
+    short_name: String,
+    #[serde(default, rename = "endDate")]
+    end_date: String,
+    #[serde(default)]
+    competitions: Vec<Vec<MpComp>>,
+}
+#[derive(Deserialize)]
+struct MpComp {
+    #[serde(default)]
+    date: String,
+    /// "Saturday Morning Four-Balls"; "tournament" on the cup itself.
+    #[serde(default)]
+    description: String,
+    status: Status,
+    /// "tournament" (the cup), "fourball", "foursome", "singles".
+    #[serde(default, rename = "type")]
+    kind: Option<MpType>,
+    #[serde(default)]
+    notes: Vec<MpNote>,
+    #[serde(default)]
+    competitors: Vec<MpCompetitor>,
+}
+#[derive(Deserialize)]
+struct MpType {
+    #[serde(default)]
+    text: String,
+}
+#[derive(Deserialize)]
+struct MpNote {
+    #[serde(default)]
+    text: String,
+}
+#[derive(Deserialize)]
+struct MpCompetitor {
+    team: Option<MpTeam>,
+    /// An object here ({value, displayValue, winner}); the scoreboard
+    /// endpoint sends a bare string for the same thing. Value takes both.
+    #[serde(default)]
+    score: serde_json::Value,
+    status: Option<MpCompStatus>,
+    #[serde(default)]
+    roster: Vec<MpRosterEntry>,
+}
+#[derive(Deserialize)]
+struct MpTeam {
+    #[serde(default)]
+    abbreviation: String,
+}
+#[derive(Deserialize)]
+struct MpCompStatus {
+    #[serde(default)]
+    thru: Option<i64>,
+    #[serde(default, rename = "teeTime")]
+    tee_time: String,
+}
+#[derive(Deserialize)]
+struct MpRosterEntry {
+    athlete: Option<MpAthlete>,
+}
+#[derive(Deserialize)]
+struct MpAthlete {
+    #[serde(default, rename = "lastName")]
+    last_name: String,
+    #[serde(default, rename = "displayName")]
+    display_name: String,
+}
+
+impl MpCompetitor {
+    fn abbrev(&self) -> &str {
+        self.team.as_ref().map(|t| t.abbreviation.as_str()).unwrap_or("")
+    }
+    fn score_text(&self) -> String {
+        match &self.score {
+            serde_json::Value::String(s) => s.clone(),
+            v => v.get("displayValue").and_then(|d| d.as_str()).unwrap_or("").to_string(),
+        }
+    }
+    fn score_value(&self) -> Option<f64> {
+        self.score.get("value").and_then(|v| v.as_f64())
+    }
+    fn winner(&self) -> bool {
+        self.score.get("winner").and_then(|v| v.as_bool()).unwrap_or(false)
+    }
+}
+
+/// "1 Up" -> "1UP", "3 & 2" -> "3&2", "AS" stays: golf's notation, packed.
+fn match_notation(s: &str) -> String {
+    s.to_uppercase().split_whitespace().collect::<Vec<_>>().join("")
+}
+
+/// The panel colour for a cup team. The feed carries none (both `color`
+/// fields are null), so these are ours: USA red; the International and
+/// European sides blue.
+fn cup_team_color(abbrev: &str) -> embedded_graphics::pixelcolor::Rgb888 {
+    match abbrev {
+        "USA" => hex_to_rgb("E0283C"),
+        "INTL" | "EUR" => hex_to_rgb("2F6FE0"),
+        _ => hex_to_rgb("C0C0C0"),
+    }
+}
+
+/// A team match-play event as one game: the cup score plus the matches of
+/// ONE session — the live one; else the latest with results (between
+/// sessions, and after the last, the scores just made are the news); else
+/// the next one scheduled (before the first tee shot).
+fn parse_matchplay(sport_id: &str, ev: MpEvent) -> Option<Game> {
+    use crate::model::{CupTeam, Match, MatchPlay, MatchState};
+    let is_cup = |c: &MpComp| c.kind.as_ref().is_some_and(|k| k.text == "tournament");
+    let comps: Vec<&MpComp> = ev.competitions.iter().flatten().collect();
+    let cup = comps.iter().copied().find(|c| is_cup(c))?;
+    if cup.competitors.len() != 2 {
+        return None;
+    }
+    let team = |i: usize| {
+        let c = &cup.competitors[i];
+        CupTeam {
+            abbrev: c.abbrev().to_string(),
+            points: c.score_value().unwrap_or(0.0) as f32,
+            color: cup_team_color(c.abbrev()),
+        }
+    };
+    let teams = [team(0), team(1)];
+    let side = |abbrev: &str| teams.iter().position(|t| t.abbrev == abbrev);
+    // "FIRST TEAM TO 15.5 POINTS WINS THE PRESIDENTS CUP"
+    let target = cup.notes.iter().find_map(|n| {
+        let up = n.text.to_uppercase();
+        let rest = up.split(" TO ").nth(1)?;
+        let num: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+        (!num.is_empty()).then_some(num)
+    });
+
+    let sessions: Vec<&Vec<MpComp>> =
+        ev.competitions.iter().filter(|g| !g.is_empty() && !g.iter().any(|c| is_cup(c))).collect();
+    let state_of = |c: &MpComp| map_status(&c.status.type_);
+    let live = |g: &&Vec<MpComp>| g.iter().any(|c| matches!(state_of(c), Some(GameStatus::Active | GameStatus::Intermission)));
+    let played = |g: &&Vec<MpComp>| g.iter().any(|c| matches!(state_of(c), Some(GameStatus::Final)));
+    let session: &Vec<MpComp> = sessions
+        .iter()
+        .copied()
+        .find(live)
+        .or_else(|| sessions.iter().rev().copied().find(played))
+        .or_else(|| sessions.first().copied())?;
+
+    let matches: Vec<Match> = session
+        .iter()
+        .filter_map(|m| {
+            let mut players: [Vec<String>; 2] = [Vec::new(), Vec::new()];
+            let mut by_side: [Option<&MpCompetitor>; 2] = [None, None];
+            for c in &m.competitors {
+                let i = side(c.abbrev())?;
+                by_side[i] = Some(c);
+                let athletes: Vec<&MpAthlete> = c.roster.iter().filter_map(|r| r.athlete.as_ref()).collect();
+                let lasts: Vec<String> = athletes.iter().map(|a| a.last_name.to_uppercase()).collect();
+                players[i] = athletes
+                    .iter()
+                    .zip(&lasts)
+                    .map(|(a, last)| {
+                        // Tom Kim and Si Woo Kim, partners: "T KIM" / "S KIM".
+                        if lasts.iter().filter(|l| *l == last).count() > 1 {
+                            let initial = a.display_name.chars().next().unwrap_or(' ');
+                            format!("{initial} {last}")
+                        } else {
+                            last.clone()
+                        }
+                    })
+                    .collect();
+            }
+            let [Some(a), Some(b)] = by_side else { return None };
+            let thru = [a, b]
+                .iter()
+                .filter_map(|c| c.status.as_ref().and_then(|s| s.thru))
+                .max()
+                .unwrap_or(0)
+                .max(0) as u32;
+            let state = match state_of(m)? {
+                GameStatus::Pregame => MatchState::Scheduled {
+                    tee: [a, b]
+                        .iter()
+                        .filter_map(|c| c.status.as_ref())
+                        .map(|s| s.tee_time.clone())
+                        .find(|t| !t.is_empty())
+                        .or_else(|| (!m.date.is_empty()).then(|| m.date.clone())),
+                },
+                GameStatus::Final => {
+                    let winner = [a, b].iter().position(|c| c.winner());
+                    let result = winner
+                        .map(|w| match_notation(&[a, b][w].score_text()))
+                        .filter(|r| !r.is_empty())
+                        .unwrap_or_else(|| "HALVED".into());
+                    MatchState::Final { winner, result }
+                }
+                _ => {
+                    // The leader's side carries "2 Up"; the other is blank.
+                    // "AS" on both is all square, and "-" before the first
+                    // hole is finished reads the same way.
+                    let leader = [a, b].iter().position(|c| match_notation(&c.score_text()).ends_with("UP"));
+                    let margin = leader.map(|l| match_notation(&[a, b][l].score_text())).unwrap_or_else(|| "AS".into());
+                    MatchState::Live { leader, margin, thru }
+                }
+            };
+            Some(Match { players, state })
+        })
+        .collect();
+    if matches.is_empty() {
+        return None;
+    }
+    let status = map_status(&cup.status.type_)?;
+    let format = session.first().and_then(|c| c.kind.as_ref()).map(|k| k.text.clone()).unwrap_or_default();
+    let first_tee = matches
+        .iter()
+        .filter_map(|m| match &m.state {
+            MatchState::Scheduled { tee } => tee.clone(),
+            _ => None,
+        })
+        .min();
+    Some(Game {
+        id: ev.id,
+        sport_id: sport_id.into(),
+        away: TeamSide::empty(&sport_id.to_uppercase()),
+        home: TeamSide::empty(""),
+        status,
+        ordinal: String::new(),
+        clock: String::new(),
+        start_time: first_tee.unwrap_or_else(|| cup.date.clone()),
+        end_time: (!ev.end_date.is_empty()).then_some(ev.end_date),
+        leaderboard: Some(Leaderboard {
+            matchplay: Some(MatchPlay {
+                teams,
+                target,
+                session: session.first().map(|c| c.description.clone()).unwrap_or_default(),
+                format,
+                matches,
+            }),
+            laps: None,
+            flag: None,
+            stage: None,
+            quali: None,
+            // Not `clean_golf_name`: it cuts at "PRES" (for "pres. by"
+            // sponsors) and would leave the Presidents Cup with no name.
+            name: ev.short_name.to_uppercase(),
+            rows: Vec::new(),
+        }),
+        champ: None,
+        series: None,
+        session: None,
+        situation: None,
+        pregame: None,
+    })
 }
 
 /// One F1 event is a whole race weekend; each session the user can subscribe to
@@ -1030,7 +1333,7 @@ fn parse_f1(
                 // so only the race session carries it.
                 end_time: (session == "race" && !ev.end_date.is_empty())
                     .then(|| ev.end_date.clone()),
-                leaderboard: Some(Leaderboard { laps, name, flag: None, stage, quali: zones, rows }),
+                leaderboard: Some(Leaderboard { matchplay: None, laps, name, flag: None, stage, quali: zones, rows }),
                 champ: None,
                 series: None,
                 session: Some(session.into()),
@@ -1340,8 +1643,43 @@ where
 // ---- leaderboard JSON (golf leaderboard + racing scoreboard share a shape) ----
 #[derive(Deserialize)]
 struct LeaderboardResponse {
-    #[serde(default)]
+    /// Decoded ONE EVENT AT A TIME: an event whose shape this parser does not
+    /// know is logged and skipped instead of failing the whole response. The
+    /// 2026 Presidents Cup (match play, with competitions nested by session)
+    /// used to take down the entire PGA feed this way, every poll, for the
+    /// whole week — along with any ordinary event sharing its response.
+    #[serde(default, deserialize_with = "de_events_one_by_one")]
     events: Vec<LeaderEvent>,
+}
+
+/// See `LeaderboardResponse::events`.
+fn de_events_one_by_one<'de, D>(d: D) -> Result<Vec<LeaderEvent>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Option<Vec<serde_json::Value>> = Option::deserialize(d)?;
+    Ok(raw
+        .unwrap_or_default()
+        .into_iter()
+        // Match play has its own parser (`golf_games`); not an error here.
+        .filter(|v| !is_match_play(v))
+        .filter_map(|v| {
+            let label = || {
+                format!(
+                    "{} ({})",
+                    v.get("id").and_then(|x| x.as_str()).unwrap_or("?"),
+                    v.get("shortName").and_then(|x| x.as_str()).unwrap_or("?")
+                )
+            };
+            match serde_json::from_value::<LeaderEvent>(v.clone()) {
+                Ok(ev) => Some(ev),
+                Err(e) => {
+                    tracing::warn!("leaderboard event {} skipped: {e}", label());
+                    None
+                }
+            }
+        })
+        .collect())
 }
 #[derive(Deserialize)]
 struct LeaderEvent {
@@ -1829,7 +2167,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             away: TeamSide::empty("PGA"), home: TeamSide::empty(""),
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
             // Ten deep so the board's scrolling leaderboard shows in demo mode.
-            leaderboard: Some(Leaderboard { laps: None, flag: None, stage: None, quali: None, name: "MASTERS".into(), rows: vec![
+            leaderboard: Some(Leaderboard { matchplay: None, laps: None, flag: None, stage: None, quali: None, name: "MASTERS".into(), rows: vec![
                 LeaderRow { name: "SCHEFFLER".into(), value: "-8".into(), ..Default::default() },
                 LeaderRow { name: "MCILROY".into(), value: "-6".into(), ..Default::default() },
                 LeaderRow { name: "MORIKAWA".into(), value: "-5".into(), ..Default::default() },
@@ -1851,7 +2189,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             id: "demo-golf-2".into(), sport_id: "lpga".into(),
             away: TeamSide::empty("LPGA"), home: TeamSide::empty(""),
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
-            leaderboard: Some(Leaderboard { laps: None, flag: None, stage: None, quali: None, name: "US OPEN".into(), rows: vec![
+            leaderboard: Some(Leaderboard { matchplay: None, laps: None, flag: None, stage: None, quali: None, name: "US OPEN".into(), rows: vec![
                 LeaderRow { name: "KORDA".into(), value: "-7".into(), ..Default::default() },
                 LeaderRow { name: "THITIKUL".into(), value: "-5".into(), ..Default::default() },
                 LeaderRow { name: "VU".into(), value: "-4".into(), ..Default::default() },
@@ -1869,7 +2207,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
             // Full broadcast treatment: team colors + tire compounds (live
             // ESPN rows carry no tire data, so the demo is where dots show).
-            leaderboard: Some(Leaderboard { laps: None, flag: None, stage: None, quali: None, name: "MONACO GP".into(), rows: vec![
+            leaderboard: Some(Leaderboard { matchplay: None, laps: None, flag: None, stage: None, quali: None, name: "MONACO GP".into(), rows: vec![
                 f1_row(1, "VER", "LAP 42", 'M'),
                 f1_row(2, "NOR", "+2.1", 'M'),
                 f1_row(3, "LEC", "+5.8", 'S'),
@@ -1905,7 +2243,7 @@ pub(crate) fn demo_games(n: u64, elapsed_secs: u64) -> Vec<Game> {
             id: "demo-f1-quali".into(), sport_id: "f1".into(),
             away: TeamSide::empty("F1"), home: TeamSide::empty(""),
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
-            leaderboard: Some(Leaderboard { laps: None, flag: None, stage: None, quali: None, name: "BRITISH GP Q".into(), rows: vec![
+            leaderboard: Some(Leaderboard { matchplay: None, laps: None, flag: None, stage: None, quali: None, name: "BRITISH GP Q".into(), rows: vec![
                 LeaderRow { rank: "1".into(), name: "NOR".into(), value: "1:24.8".into(), color: f1_team_color("NOR"), tire: None, thru: None },
                 LeaderRow { rank: "2".into(), name: "VER".into(), value: "+0.093".into(), color: f1_team_color("VER"), tire: None, thru: None },
                 LeaderRow { rank: "3".into(), name: "HAM".into(), value: "+0.210".into(), color: f1_team_color("HAM"), tire: None, thru: None },
@@ -3051,27 +3389,15 @@ mod leader_tests {
         let dir = std::env::var("F1_FIXTURE_DIR").expect("F1_FIXTURE_DIR");
         let out = std::env::var("F1_FIXTURE_OUT").unwrap_or_else(|_| dir.clone());
         std::fs::create_dir_all(&out).unwrap();
-        let raw = std::fs::read_to_string(format!("{dir}/scoreboard.json")).unwrap();
-        let r: LeaderboardResponse = serde_json::from_str(&raw).unwrap();
-        let mut timing = HashMap::new();
-        for ev in &r.events {
-            for comp in &ev.competitions {
-                for c in &comp.competitors {
-                    let Ok(raw) = std::fs::read_to_string(format!("{dir}/stats-{}.json", c.id)) else { continue };
-                    let Ok(stats) = serde_json::from_str::<CoreStatistics>(&raw) else { continue };
-                    timing.insert((comp.id.clone(), c.id.clone()), f1_timing(&stats));
-                }
-            }
-        }
-        for ev in r.events {
-            for g in parse_f1(ev, &timing) {
-                let (_, px, _) = crate::render::render_board_frame(
-                    &g, crate::render::LEADERBOARD_MAX_ROWS, None, None, scoreboard_protocol::NameStyle::Name,
-                );
-                let path = format!("{out}/{}.png", g.id);
-                std::fs::write(&path, crate::render_png(&px)).unwrap();
-                eprintln!("wrote {path} ({})", g.leaderboard.as_ref().map(|l| l.name.as_str()).unwrap_or(""));
-            }
+        let games = replay_f1_snapshot(std::path::Path::new(&dir));
+        assert!(!games.is_empty(), "no F1 games in {dir}/scoreboard.json");
+        for g in games {
+            let (_, px, _) = crate::render::render_board_frame(
+                &g, crate::render::LEADERBOARD_MAX_ROWS, None, None, scoreboard_protocol::NameStyle::Name,
+            );
+            let path = format!("{out}/{}.png", g.id);
+            std::fs::write(&path, crate::render_png(&px)).unwrap();
+            eprintln!("wrote {path} ({})", g.leaderboard.as_ref().map(|l| l.name.as_str()).unwrap_or(""));
         }
     }
 
@@ -3915,6 +4241,57 @@ mod champ_tests {
                 );
             }
         }
+    }
+
+    /// One event the parser cannot read must not take the rest of the
+    /// response with it: the Presidents Cup's nested competitions used to
+    /// fail the WHOLE PGA feed, so an ordinary event beside it vanished too.
+    #[test]
+    fn one_unreadable_golf_event_does_not_sink_the_feed() {
+        let body = r#"{"events":[
+          {"id":"401824815","shortName":"Presidents Cup",
+           "competitions":[[{"id":"12093","status":{"type":{"name":"STATUS_IN_PROGRESS"}},"competitors":[]}]]},
+          {"id":"401","shortName":"Wyndham","competitions":[{"date":"2026-08-06T04:00Z",
+           "status":{"period":3,"type":{"name":"STATUS_IN_PROGRESS","state":"in"}},
+           "competitors":[{"order":1,"athlete":{"displayName":"A Player"},"status":{"position":{"id":1}},"statistics":[]}]}]}
+        ]}"#;
+        let games = parse_feed("pga", body).expect("the response still parses");
+        assert_eq!(games.len(), 1, "the ordinary event survives");
+        assert_eq!(games[0].id, "401");
+    }
+
+    /// The 2026 Presidents Cup, verbatim from ESPN's golf leaderboard feed
+    /// on the Saturday morning (design/golf-logs): team match play with its
+    /// competitions nested by session. It becomes ONE game carrying the cup
+    /// score and the live session's matches, keyed to the cup's teams.
+    #[test]
+    fn presidents_cup_parses_as_match_play() {
+        use crate::model::MatchState;
+        let raw = include_str!("../../../design/golf-logs/espn-pga-leaderboard-presidents-cup-20260926T124348Z.json");
+        let games = parse_feed("pga", raw).expect("parses");
+        assert_eq!(games.len(), 1, "one game for the event");
+        let g = &games[0];
+        let lb = g.leaderboard.as_ref().unwrap();
+        assert_eq!(lb.name, "PRESIDENTS CUP", "not cut at PRES like a sponsor");
+        assert!(lb.rows.is_empty(), "no stroke-play rows");
+        let mp = lb.matchplay.as_ref().expect("match play");
+        assert_eq!((mp.teams[0].abbrev.as_str(), mp.teams[1].abbrev.as_str()), ("USA", "INTL"));
+        assert_eq!(mp.target.as_deref(), Some("15.5"));
+        assert_eq!(mp.session, "Saturday Morning Four-Balls", "the live session");
+        assert_eq!(mp.format, "fourball");
+        assert_eq!(mp.matches.len(), 4);
+        // Keyed to the CUP's sides: USA first even where the match lists
+        // INTL as home.
+        let m = &mp.matches[0];
+        assert_eq!(m.players, [vec!["THOMAS".to_string(), "KOIVUN".into()], vec!["IM".into(), "LEE".into()]]);
+        assert_eq!(m.state, MatchState::Live { leader: Some(0), margin: "1UP".into(), thru: 2 });
+        // All square, and the Kims told apart by initial.
+        assert_eq!(mp.matches[1].players[1], vec!["S KIM".to_string(), "T KIM".into()]);
+        assert_eq!(mp.matches[1].state, MatchState::Live { leader: None, margin: "AS".into(), thru: 1 });
+        // Not yet teed off: the tee time rides along.
+        assert_eq!(mp.matches[3].state, MatchState::Scheduled { tee: Some("2026-09-26T12:56Z".into()) });
+        assert_eq!(g.status, GameStatus::Active);
+        assert_eq!(g.start_time, "2026-09-26T12:56Z", "the next tee time");
     }
 
     /// The debug TUI's parse path is the server's parse path: parse_feed

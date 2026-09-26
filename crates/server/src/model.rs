@@ -129,7 +129,75 @@ pub struct Leaderboard {
     /// `laps.rs` does not know — no bar is better than a wrong one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub laps: Option<LapProgress>,
+    /// Team match play (Presidents Cup, Ryder Cup): the cup score and the
+    /// session's matches. `rows` is empty for these events — there is no
+    /// stroke-play leaderboard — and the renderer draws this instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matchplay: Option<MatchPlay>,
     pub rows: Vec<LeaderRow>,
+}
+
+/// A team match-play event: two teams, a running cup score, and the matches
+/// of the session on the board (see `espn::parse_matchplay` for which one).
+#[derive(Clone, Debug, Serialize)]
+pub struct MatchPlay {
+    /// In ESPN's cup order: the home side first ("USA", then "INTL").
+    pub teams: [CupTeam; 2],
+    /// Points that win the cup outright, when the feed says: "15.5".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// The session as the feed names it: "Saturday Morning Four-Balls".
+    pub session: String,
+    /// The format alone, from the feed's type: "fourball", "foursome",
+    /// "singles".
+    pub format: String,
+    pub matches: Vec<Match>,
+}
+
+/// Cup points as the board and the app cards write them: "7", "7.5". A
+/// decimal rather than "½": the fraction glyph is unreadable at 4x6.
+pub fn cup_points(p: f32) -> String {
+    if p.fract() >= 0.5 { format!("{}.5", p.floor() as i64) } else { format!("{}", p.floor() as i64) }
+}
+
+impl MatchPlay {
+    /// The team that has reached the target, once one has: the cup is
+    /// decided even with matches still on the course.
+    pub fn cup_winner(&self) -> Option<usize> {
+        let target: f32 = self.target.as_deref()?.parse().ok()?;
+        self.teams.iter().position(|t| t.points >= target)
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CupTeam {
+    pub abbrev: String,
+    /// Points, which come in halves: 7.0, 7.5.
+    pub points: f32,
+    #[serde(serialize_with = "ser_rgb")]
+    pub color: Rgb888,
+}
+
+/// One match. Sides are indexed like `MatchPlay::teams` (0 = the cup's home
+/// side), NOT by the match's own home/away, which ESPN flips match to match.
+#[derive(Clone, Debug, Serialize)]
+pub struct Match {
+    /// Each side's players, upper-case last names ("SCHEFFLER"); a pair
+    /// sharing one gets initials ("T KIM", "S KIM").
+    pub players: [Vec<String>; 2],
+    pub state: MatchState,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub enum MatchState {
+    /// Not teed off. `tee` is the feed's RFC3339 tee time, when it has one.
+    Scheduled { tee: Option<String> },
+    /// Under way. `leader` indexes `teams` (None = all square); `margin` is
+    /// golf's own notation ("1UP", "AS"); `thru` is holes completed.
+    Live { leader: Option<usize>, margin: String, thru: u32 },
+    /// Over. `winner` indexes `teams` (None = halved); `result` is how golf
+    /// writes it ("3&2", "1UP", "HALVED").
+    Final { winner: Option<usize>, result: String },
 }
 
 /// Laps the leader has completed out of the race's scheduled total.

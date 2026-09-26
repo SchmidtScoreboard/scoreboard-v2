@@ -1554,7 +1554,7 @@ fn sample_game_for(sport_id: &str, extras: bool, live: bool) -> model::Game {
             // the old fixture never produced one, so golf and F1 previewed
             // their spoiler setting with a basketball frame.
             let (title, rows) = sample_leaderboard(sport_id);
-            g.leaderboard = Some(model::Leaderboard {
+            g.leaderboard = Some(model::Leaderboard { matchplay: None,
                 // The F1 preview wears the lap bar: mid-race, so the
                 // filled and unfilled halves both show.
                 laps: (sport_id == "f1").then_some(model::LapProgress { completed: 42, total: 78 }),
@@ -2036,6 +2036,8 @@ pub(crate) fn redact_game(g: &Game, mode: SpoilerMode) -> Game {
     r.situation = None;
     if let Some(lb) = &mut r.leaderboard {
         lb.rows.clear();
+        // Match play's cup score and match states are results too.
+        lb.matchplay = None;
     }
     // Normal mode may show progress (period/quarter/lap) — but only while the
     // game is IN progress. A Final's lingering ordinal ("OT", "10th") is a
@@ -2210,6 +2212,17 @@ pub(crate) fn to_summary(g: &Game, tz: Option<chrono_tz::Tz>) -> GameSummary {
     // Leaderboard sports (golf/F1): no away/home — show the event + leader.
     if let Some(lb) = &g.leaderboard {
         let detail = pregame_detail().unwrap_or_else(|| {
+            // Match play has no leader row; its headline is the cup score.
+            if let Some(mp) = &lb.matchplay {
+                let [a, b] = &mp.teams;
+                return format!(
+                    "{} {} · {} {}",
+                    a.abbrev,
+                    model::cup_points(a.points),
+                    b.abbrev,
+                    model::cup_points(b.points)
+                );
+            }
             let leader = lb.rows.first().map(|r| format!("{} {}", r.name, r.value)).unwrap_or_default();
             // Golf's round leads the detail ("R3 · SCHEFFLER -6"). Without it a
             // tournament card reads identically on all four days. F1 has no
@@ -3047,7 +3060,10 @@ fn manifest_inner(state: &AppState, board_id: &str) -> Manifest {
                 let view = board_view_with(&cfg, g, of1.as_ref());
                 let (id, px, scrolls) = render::render_board_frame(&view, rows_cap, spoiler_for(&cfg, g), tz, style);
                 state.cache_frame(id.clone(), px);
-                rotation.push(RotationEntry { frame_id: id, dwell_ms, scroll: scrolls });
+                // Every scrolling frame is a leaderboard, and a leaderboard's
+                // title rows hold still while the field glides under them.
+                let pin_rows = if scrolls { render::LEADERBOARD_PIN_ROWS } else { 0 };
+                rotation.push(RotationEntry { frame_id: id, dwell_ms, scroll: scrolls, pin_rows });
             }
             return Manifest {
         mode: String::new(),
@@ -3092,6 +3108,7 @@ fn manifest_inner(state: &AppState, board_id: &str) -> Manifest {
                     frame_id: id,
                     dwell_ms: total_ms + 2000,
                     scroll: false,
+                    pin_rows: 0,
                 }];
                 return Manifest {
         mode: String::new(),
@@ -3126,7 +3143,7 @@ fn manifest_inner(state: &AppState, board_id: &str) -> Manifest {
         modes: Vec::new(),
             clock_hour24: false,
             local_clock: false,
-            rotation: vec![RotationEntry { frame_id: id, dwell_ms: 60_000, scroll: false }],
+            rotation: vec![RotationEntry { frame_id: id, dwell_ms: 60_000, scroll: false, pin_rows: 0 }],
             display_on: true,
             off_state: cfg.off_state,
             brightness: cfg.brightness,
@@ -3208,7 +3225,7 @@ fn screen_manifest(state: &AppState, cfg: &BoardConfig, tz: Option<chrono_tz::Tz
     .into_iter()
     .map(|f| {
         state.cache_frame(f.id.clone(), f.px);
-        RotationEntry { frame_id: f.id, dwell_ms: f.dwell_ms, scroll: false }
+        RotationEntry { frame_id: f.id, dwell_ms: f.dwell_ms, scroll: false, pin_rows: 0 }
     })
     .collect();
 
@@ -5053,7 +5070,7 @@ fn preview() {
             id: "g".into(), sport_id: "pga".into(),
             away: model::TeamSide::empty("PGA"), home: model::TeamSide::empty(""),
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
-            leaderboard: Some(model::Leaderboard { laps: None, flag: None, stage: None, quali: None, name: "MASTERS".into(), rows: vec![
+            leaderboard: Some(model::Leaderboard { matchplay: None, laps: None, flag: None, stage: None, quali: None, name: "MASTERS".into(), rows: vec![
                 model::LeaderRow { name: "SCHEFFLER".into(), value: "-8".into(), ..Default::default() },
                 model::LeaderRow { name: "MCILROY".into(), value: "-6".into(), ..Default::default() },
                 model::LeaderRow { name: "MORIKAWA".into(), value: "-5".into(), ..Default::default() },
@@ -5070,7 +5087,7 @@ fn preview() {
             id: "f".into(), sport_id: "f1".into(),
             away: model::TeamSide::empty("F1"), home: model::TeamSide::empty(""),
             status: GameStatus::Active, ordinal: String::new(), clock: String::new(), start_time: String::new(), end_time: None,
-            leaderboard: Some(model::Leaderboard { laps: Some(model::LapProgress { completed: 42, total: 78 }), flag: None, stage: None, quali: None, name: "MONACO GP".into(), rows: vec![
+            leaderboard: Some(model::Leaderboard { matchplay: None, laps: Some(model::LapProgress { completed: 42, total: 78 }), flag: None, stage: None, quali: None, name: "MONACO GP".into(), rows: vec![
                 model::LeaderRow { rank: "1".into(), name: "VER".into(), value: "LAP 42".into(), color: Some(model::hex_to_rgb("3671C6")), tire: Some('M'), thru: None },
                 model::LeaderRow { rank: "2".into(), name: "NOR".into(), value: "+2.1".into(), color: Some(model::hex_to_rgb("FF8000")), tire: Some('M'), thru: None },
                 model::LeaderRow { rank: "3".into(), name: "LEC".into(), value: "+5.8".into(), color: Some(model::hex_to_rgb("E8002D")), tire: Some('S'), thru: None },
@@ -5227,6 +5244,13 @@ mod tests {
         };
         let scroll_idx = m.rotation.iter().position(|e| e.scroll).expect("a scrolling entry");
         let dwell = m.rotation[scroll_idx].dwell_ms as u64;
+        // Every scrolling entry pins the leaderboard's title rows, and only
+        // scrolling entries do (the field is omitted otherwise, so static
+        // manifests stay byte-identical for older firmware).
+        for e in &m.rotation {
+            assert_eq!(e.pin_rows, if e.scroll { render::LEADERBOARD_PIN_ROWS } else { 0 }, "{}", e.frame_id);
+        }
+        assert!(json.contains("\"pin_rows\":8"), "the pin travels on the wire");
 
         let mut b = board_core::Board::new();
         b.gesture(board_core::Gesture::Long); // -> Setup (any non-boot mode)
@@ -5271,6 +5295,83 @@ mod tests {
         b.tick(now + dwell * 3 / 10); // t = 30%: halfway through the glide
         let gliding = b.framebuffer();
         assert_ne!(held, gliding, "scroll window should have moved mid-glide");
+    }
+
+    /// What the PANEL shows through one dwell of a scrolling leaderboard,
+    /// drawn by the real board code from the real server frame and manifest
+    /// entry: the pinned title holds while the field scrolls beneath it.
+    /// Writes `<out>/<name>/<nnn>.png` snapshots every 250ms of a 10s dwell.
+    ///
+    ///   SCROLL_OUT=/tmp/scroll F1_SNAPSHOT=<capture snapshot dir> GOLF_JSON=<lpga leaderboard json> \
+    ///     cargo test -p server dump_pinned_scroll -- --ignored
+    #[test]
+    #[ignore = "writes scroll previews; run with --ignored and SCROLL_OUT"]
+    fn dump_pinned_scroll() {
+        let out = std::path::PathBuf::from(std::env::var("SCROLL_OUT").expect("SCROLL_OUT"));
+        let mut games: Vec<(&str, Game)> = Vec::new();
+        if let Ok(dir) = std::env::var("F1_SNAPSHOT") {
+            let g = espn::replay_f1_snapshot(&std::path::Path::new(&dir).join("espn"))
+                .into_iter()
+                .find(|g| g.session.as_deref() == Some("race"))
+                .expect("a race game in the snapshot");
+            games.push(("f1", g));
+        }
+        if let Ok(f) = std::env::var("GOLF_JSON") {
+            let raw = std::fs::read_to_string(f).unwrap();
+            games.push(("golf", espn::parse_feed("lpga", &raw).unwrap().remove(0)));
+        }
+        let cup = std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../design/golf-logs"))
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .find(|p| p.to_string_lossy().contains("presidents-cup"))
+            .unwrap();
+        games.push(("matchplay", espn::parse_feed("pga", &std::fs::read_to_string(cup).unwrap()).unwrap().remove(0)));
+
+        for (name, g) in games {
+            let (id, px, scrolls) = render::render_board_frame(
+                &g, render::LEADERBOARD_MAX_ROWS, None, Some(chrono_tz::America::Chicago), NameStyle::Name,
+            );
+            assert!(scrolls, "{name} should scroll");
+            let m = Manifest {
+                rotation: vec![RotationEntry { frame_id: id.clone(), dwell_ms: 10_000, scroll: true, pin_rows: render::LEADERBOARD_PIN_ROWS }],
+                display_on: true,
+                local_clock: false,
+                clock_hour24: false,
+                off_state: Default::default(),
+                brightness: 100,
+                epoch: 0,
+                countdown_ms: None,
+                mode: String::new(),
+                modes: Vec::new(),
+            };
+            let mut b = board_core::Board::new();
+            b.gesture(board_core::Gesture::Long);
+            b.setup_done();
+            b.set_online(true);
+            b.tick(0);
+            b.on_manifest(m);
+            b.on_frame(id, encode_frame_payload(&px, board_core::SUPPORTED_FRAME_CODECS));
+            let dir = out.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            for (n, t) in (0..=10_000u64).step_by(250).enumerate() {
+                b.tick(t);
+                let fb = b.framebuffer();
+                let mut img = image::RgbImage::new(64 * 8, 32 * 8);
+                for (i, p) in fb.iter().enumerate() {
+                    let (x, y) = ((i % 64) as u32, (i / 64) as u32);
+                    let rgb = [(p >> 16 & 0xFF) as u8, (p >> 8 & 0xFF) as u8, (p & 0xFF) as u8];
+                    if rgb == [0, 0, 0] {
+                        continue;
+                    }
+                    for dy in 1..7 {
+                        for dx in 1..7 {
+                            img.put_pixel(x * 8 + dx, y * 8 + dy, image::Rgb(rgb));
+                        }
+                    }
+                }
+                img.save(dir.join(format!("{n:03}.png"))).unwrap();
+            }
+        }
     }
 
     /// Spoiler precedence: a one-off reveal beats every rule; team, league,
@@ -6603,7 +6704,7 @@ mod tests {
             clock: String::new(),
             start_time: "2026-08-08T11:00Z".into(),
             end_time: None,
-            leaderboard: Some(crate::model::Leaderboard { laps: None,
+            leaderboard: Some(crate::model::Leaderboard { matchplay: None, laps: None,
                 flag: None,
                 stage: None,
                 quali: None,
@@ -6661,7 +6762,7 @@ mod tests {
             clock: String::new(),
             start_time: "2026-08-22T14:00Z".into(),
             end_time: None,
-            leaderboard: Some(crate::model::Leaderboard { laps: None,
+            leaderboard: Some(crate::model::Leaderboard { matchplay: None, laps: None,
                 flag: None,
                 stage: None,
                 quali: None,
@@ -6729,6 +6830,89 @@ mod tests {
         let stale = rows("quali", Duration::from_secs(700));
         let v = board_view_with(&cfg_with(Some("openf1")), &f1, Some(&stale));
         assert_eq!(name_of(&v), "PIA", "stale rows are ignored");
+    }
+
+    /// Re-render a capture from `scripts/capture-f1.py` through the server's
+    /// own code, both feeds, every snapshot:
+    ///
+    ///   F1_CAPTURE_DIR=<capture root or one snapshot> F1_FIXTURE_OUT=/tmp/f1 \
+    ///     cargo test -p server render_f1_capture -- --ignored
+    ///
+    /// Per snapshot `<ts>`: `<ts>-espn.png` (the ESPN game as parsed from the
+    /// captured responses), `<ts>-openf1.png` (that same game with the
+    /// captured OpenF1 rows swapped in exactly as a board opted into OpenF1
+    /// sees it), both as full-depth board frames, and `<ts>-summary.json`
+    /// with each view's rows, flag and laps side by side.
+    #[test]
+    #[ignore = "renders a capture; run with --ignored and F1_CAPTURE_DIR"]
+    fn render_f1_capture() {
+        let root = std::path::PathBuf::from(std::env::var("F1_CAPTURE_DIR").expect("F1_CAPTURE_DIR"));
+        let out = std::path::PathBuf::from(std::env::var("F1_FIXTURE_OUT").expect("F1_FIXTURE_OUT"));
+        std::fs::create_dir_all(&out).unwrap();
+        let mut snaps: Vec<std::path::PathBuf> = if root.join("meta.json").exists() {
+            vec![root.clone()]
+        } else {
+            std::fs::read_dir(&root)
+                .unwrap()
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.join("meta.json").exists())
+                .collect()
+        };
+        snaps.sort();
+        assert!(!snaps.is_empty(), "no snapshots under {}", root.display());
+        let openf1_cfg = BoardConfig {
+            sports: vec![SportConfig { sport_id: "f1".into(), data_source: Some("openf1".into()), ..Default::default() }],
+            ..Default::default()
+        };
+        let summary = |g: &Game| {
+            let lb = g.leaderboard.as_ref();
+            serde_json::json!({
+                "status": format!("{:?}", g.status),
+                "title": lb.map(|l| l.name.clone()),
+                "flag": lb.and_then(|l| l.flag.clone()),
+                "laps": lb.and_then(|l| l.laps).map(|l| format!("{}/{}", l.completed, l.total)),
+                "rows": lb.map(|l| l.rows.iter().map(|r| format!("{:>2} {} {} {}", r.rank, r.name, r.value, r.tire.map(String::from).unwrap_or_default())).collect::<Vec<_>>()),
+            })
+        };
+        let draw = |g: &Game, path: &std::path::Path| {
+            let (_, px, _) = render::render_board_frame(
+                g, render::LEADERBOARD_MAX_ROWS, None, None, scoreboard_protocol::NameStyle::Name,
+            );
+            std::fs::write(path, render_png(&px)).unwrap();
+        };
+        let mut rendered = 0;
+        for snap in &snaps {
+            let meta: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(snap.join("meta.json")).unwrap()).unwrap();
+            let at = meta["captured_at"]
+                .as_str()
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                .map(|t| t.with_timezone(&chrono::Utc))
+                .expect("meta.json captured_at");
+            let session = meta["session"].as_str().unwrap_or("race");
+            let name = snap.file_name().unwrap().to_string_lossy().to_string();
+            let games = espn::replay_f1_snapshot(&snap.join("espn"));
+            let Some(game) = games.into_iter().find(|g| g.session.as_deref() == Some(session)) else {
+                eprintln!("{name}: no ESPN {session} game");
+                continue;
+            };
+            let espn_view = board_view_with(&BoardConfig::default(), &game, None).into_owned();
+            draw(&espn_view, &out.join(format!("{name}-espn.png")));
+            let of1 = openf1::replay_snapshot(&snap.join("openf1"), at);
+            let of1_view = of1.as_ref().map(|rows| board_view_with(&openf1_cfg, &game, Some(rows)).into_owned());
+            if let Some(v) = &of1_view {
+                draw(v, &out.join(format!("{name}-openf1.png")));
+            }
+            let s = serde_json::json!({
+                "captured_at": at.to_rfc3339(),
+                "espn": summary(&espn_view),
+                "openf1": of1_view.as_ref().map(summary),
+                "openf1_swapped": of1.as_ref().is_some_and(|r| r.session == session),
+            });
+            std::fs::write(out.join(format!("{name}-summary.json")), serde_json::to_vec_pretty(&s).unwrap()).unwrap();
+            rendered += 1;
+        }
+        eprintln!("rendered {rendered} of {} snapshots into {}", snaps.len(), out.display());
     }
 
     /// The catalog offers the alternate source ONLY for f1 and ONLY when the
@@ -6809,7 +6993,7 @@ mod tests {
             clock: String::new(),
             start_time: "2026-08-22T11:00Z".into(),
             end_time: None,
-            leaderboard: Some(crate::model::Leaderboard { laps: None,
+            leaderboard: Some(crate::model::Leaderboard { matchplay: None, laps: None,
                 flag: None,
                 stage: None,
                 quali: None,
@@ -7280,7 +7464,7 @@ mod tests {
     fn leaderboard_summaries_carry_the_espn_link() {
         let mut g = live_game("401811960");
         g.sport_id = "pga".into();
-        g.leaderboard = Some(crate::model::Leaderboard { laps: None,
+        g.leaderboard = Some(crate::model::Leaderboard { matchplay: None, laps: None,
             flag: None,
             stage: None,
             quali: None,
