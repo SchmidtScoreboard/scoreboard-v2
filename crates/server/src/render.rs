@@ -1523,17 +1523,7 @@ fn tee_label(iso: &str, tz: Option<chrono_tz::Tz>) -> Option<String> {
 fn matchplay_rows(mp: &crate::model::MatchPlay, max_rows: usize, tz: Option<chrono_tz::Tz>) -> Vec<MpRow> {
     use crate::model::MatchState;
     let mut out: Vec<MpRow> = Vec::new();
-    for (k, m) in mp.matches.iter().enumerate() {
-        let n = m.players[0].len() + m.players[1].len();
-        // Whole matches only, and the frame must fit: the tall tower stays
-        // within the 128 rows the board's frame buffer holds uncompressed
-        // (each match boundary costs a row of padding, see
-        // `matchplay_baseline`); the static frame within the panel.
-        let last_by = matchplay_baseline(out.len() + n - 1, k);
-        let fits = if max_rows > 4 { last_by + 2 <= 128 } else { last_by <= FRAME_HEIGHT as i32 - 1 };
-        if out.len() + n > max_rows || !fits {
-            break;
-        }
+    for (k, m) in matchplay_shown(mp, max_rows).into_iter().enumerate() {
         let mut pending_thru: Option<u32> = None;
         for i in 0..2 {
             let team = mp.teams[i].color;
@@ -1607,6 +1597,33 @@ fn cup_title_layout(mp: &crate::model::MatchPlay) -> CupTitle {
     let b_points_right = 63 - text_width(&b.abbrev, false) - 1;
     let b_start = b_points_right - tabular_width(&crate::model::cup_points(b.points), false);
     CupTitle { a_points_x, a_end, b_points_right, b_start }
+}
+
+/// Which matches the tower shows, in session order. Whole matches only, and
+/// the frame must fit: the tall tower within the 128 rows the board's frame
+/// buffer holds uncompressed (each match boundary costs a padding row, see
+/// `matchplay_baseline`), the static frame within the panel. When the whole
+/// session does not fit, FINISHED matches make room first, earliest first —
+/// a result is settled news, a live match is the point — and only then does
+/// the tower trim from the end (the last tee times).
+fn matchplay_shown(mp: &crate::model::MatchPlay, max_rows: usize) -> Vec<&crate::model::Match> {
+    use crate::model::MatchState;
+    let fits = |shown: &[&crate::model::Match]| {
+        let rows: usize = shown.iter().map(|m| m.players[0].len() + m.players[1].len()).sum();
+        if rows == 0 {
+            return true;
+        }
+        let last_by = matchplay_baseline(rows - 1, shown.len() - 1);
+        rows <= max_rows && if max_rows > 4 { last_by + 2 <= 128 } else { last_by <= FRAME_HEIGHT as i32 - 1 }
+    };
+    let mut shown: Vec<&crate::model::Match> = mp.matches.iter().collect();
+    while !fits(&shown) {
+        match shown.iter().position(|m| matches!(m.state, MatchState::Final { .. })) {
+            Some(i) => shown.remove(i),
+            None => shown.pop().unwrap(),
+        };
+    }
+    shown
 }
 
 /// Baseline of tower row `i`, which belongs to match `match_idx`. Rows sit
@@ -4735,6 +4752,42 @@ mod matchplay_tests {
             let (_, frame, _) = render_board_frame(&g, LEADERBOARD_DEFAULT_ROWS, None, None, NameStyle::Name);
             assert!(frame.len() / (FRAME_WIDTH * 2) <= 128, "{label}: {} rows", frame.len() / (FRAME_WIDTH * 2));
         }
+    }
+
+    /// When the session does not fit, finished matches make room first,
+    /// earliest first; only then does the tower trim from the end.
+    #[test]
+    fn finished_matches_make_room_first() {
+        let mut g = game(&fixture());
+        let single = |name: &str, state: MatchState| Match { players: [vec![name.into()], vec!["X".into()]], state };
+        let fin = || MatchState::Final { winner: Some(0), result: "3+2".into() };
+        let live = || MatchState::Live { leader: None, margin: "AS".into(), thru: 5 };
+        let tee = || MatchState::Scheduled { tee: None };
+        let names = |g: &Game| -> Vec<String> {
+            matchplay_rows(mp_of(g), LEADERBOARD_MAX_ROWS, None).iter().step_by(2).map(|r| r.name.clone()).collect()
+        };
+        // 12 singles: three finished, six live, three waiting. Nine fit: the
+        // finished three give way, and the rest keep session order.
+        let mut ms = vec![single("F1", fin()), single("F2", fin()), single("F3", fin())];
+        ms.extend((1..=6).map(|i| single(&format!("L{i}"), live())));
+        ms.extend((1..=3).map(|i| single(&format!("T{i}"), tee())));
+        mp_mut(&mut g).matches = ms;
+        assert_eq!(names(&g), ["L1", "L2", "L3", "L4", "L5", "L6", "T1", "T2", "T3"]);
+        // One finished match is enough room: only the EARLIEST goes, and the
+        // later results stay beside the live ones.
+        let mut ms = vec![single("F1", fin()), single("F2", fin())];
+        ms.extend((1..=10).map(|i| single(&format!("L{i}"), live())));
+        mp_mut(&mut g).matches = ms;
+        assert_eq!(names(&g)[0], "L1", "both results give way: 12 matches, 9 fit");
+        let mut ms = vec![single("F1", fin())];
+        ms.extend((1..=8).map(|i| single(&format!("L{i}"), live())));
+        ms.push(single("F2", fin()));
+        mp_mut(&mut g).matches = ms;
+        assert_eq!(names(&g), ["L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "F2"], "earliest result first");
+        // Nothing finished: the tower trims the last tee times, as before.
+        mp_mut(&mut g).matches = (1..=12).map(|i| single(&format!("L{i}"), live())).collect();
+        assert_eq!(names(&g).len(), 9);
+        assert_eq!(names(&g).last().unwrap(), "L9");
     }
 
     /// Half points read as a decimal: "7.5", never the 4x6 "½".
