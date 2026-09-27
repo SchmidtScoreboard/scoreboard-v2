@@ -1002,8 +1002,12 @@ struct MpCompetitor {
     #[serde(default)]
     score: serde_json::Value,
     status: Option<MpCompStatus>,
+    /// A pair's players (Four-Balls, Foursomes).
     #[serde(default)]
     roster: Vec<MpRosterEntry>,
+    /// A singles player: ESPN puts the one athlete on the competitor itself
+    /// and leaves `roster` empty.
+    athlete: Option<MpAthlete>,
 }
 #[derive(Deserialize)]
 struct MpTeam {
@@ -1116,7 +1120,11 @@ fn parse_matchplay(sport_id: &str, ev: MpEvent) -> Option<Game> {
             for c in &m.competitors {
                 let i = side(c.abbrev())?;
                 by_side[i] = Some(c);
-                let athletes: Vec<&MpAthlete> = c.roster.iter().filter_map(|r| r.athlete.as_ref()).collect();
+                // A pair's roster, else the singles player on the competitor.
+                let mut athletes: Vec<&MpAthlete> = c.roster.iter().filter_map(|r| r.athlete.as_ref()).collect();
+                if athletes.is_empty() {
+                    athletes.extend(c.athlete.as_ref());
+                }
                 let lasts: Vec<String> = athletes.iter().map(|a| a.last_name.to_uppercase()).collect();
                 players[i] = athletes
                     .iter()
@@ -4305,6 +4313,23 @@ mod champ_tests {
         assert_eq!(match_notation("2 & 1"), "2+1");
         assert_eq!(match_notation("1 Up"), "1UP");
         assert_eq!(match_notation("AS"), "AS");
+    }
+
+    /// Sunday singles, verbatim from ESPN (design/golf-logs): each
+    /// competitor carries its player as `athlete` with an EMPTY roster, which
+    /// the pairs-only parser read as no players at all — every singles row
+    /// blank on the board.
+    #[test]
+    fn presidents_cup_singles_name_their_players() {
+        let raw = include_str!("../../../design/golf-logs/espn-pga-leaderboard-presidents-cup-singles-20260927T1630Z.json");
+        let g = parse_feed("pga", raw).expect("parses").remove(0);
+        let mp = g.leaderboard.as_ref().unwrap().matchplay.as_ref().unwrap();
+        assert_eq!(mp.session, "Sunday Singles");
+        assert_eq!(mp.matches.len(), 12);
+        for m in &mp.matches {
+            assert_eq!((m.players[0].len(), m.players[1].len()), (1, 1), "one player a side");
+        }
+        assert_eq!(mp.matches[0].players[0], vec!["YOUNG".to_string()], "USA's first singles player");
     }
 
     /// The debug TUI's parse path is the server's parse path: parse_feed

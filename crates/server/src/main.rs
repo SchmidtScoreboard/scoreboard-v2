@@ -5388,7 +5388,7 @@ mod tests {
         let cup = std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../design/golf-logs"))
             .unwrap()
             .filter_map(|e| e.ok().map(|e| e.path()))
-            .find(|p| p.to_string_lossy().contains("presidents-cup"))
+            .find(|p| p.file_name().is_some_and(|n| n == "espn-pga-leaderboard-presidents-cup-20260926T124348Z.json"))
             .unwrap();
         games.push(("matchplay", espn::parse_feed("pga", &std::fs::read_to_string(cup).unwrap()).unwrap().remove(0)));
 

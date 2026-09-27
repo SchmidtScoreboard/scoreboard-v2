@@ -4633,7 +4633,7 @@ mod matchplay_tests {
         let f = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok().map(|e| e.path()))
-            .find(|p| p.to_string_lossy().contains("presidents-cup"))
+            .find(|p| p.file_name().is_some_and(|n| n == "espn-pga-leaderboard-presidents-cup-20260926T124348Z.json"))
             .expect("the Presidents Cup fixture");
         serde_json::from_str(&std::fs::read_to_string(f).unwrap()).unwrap()
     }
