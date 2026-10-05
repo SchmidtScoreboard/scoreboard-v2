@@ -699,6 +699,12 @@ public protocol ScoreboardClientProtocol: AnyObject {
      */
     func setGameSpoiler(boardId: String, gameId: String, hidden: Bool)
 
+    /**
+     * How long each checked screen holds the panel while the board idles
+     * through two or more, in seconds (one of `idle_cycle_options`).
+     */
+    func setIdleCycle(boardId: String, secs: UInt32)
+
     func setLeagueDataSource(boardId: String, sportId: String, source: String?)
 
     /**
@@ -742,8 +748,9 @@ public protocol ScoreboardClientProtocol: AnyObject {
     func setListener(listener: ClientListener)
 
     /**
-     * Put the board in a mode: "scores", "off", or an off-mode id. For the
-     * two modes the LEGACY command can express, the equivalent SetPower is
+     * Put the board in a mode: "scores", "off", or a screen INSTANCE id from
+     * the board's list ("weather.2"). For the two modes the LEGACY command
+     * can express, the equivalent SetPower is
      * sent alongside — a not-yet-deployed (or rolled-back) server drops the
      * unknown SetMode silently, and the alias keeps the picker working
      * through the skew. On a current server both arrive and both write the
@@ -752,7 +759,8 @@ public protocol ScoreboardClientProtocol: AnyObject {
     func setMode(boardId: String, mode: String)
 
     /**
-     * Configure a mode's timer, in hours. 0 = until changed.
+     * Configure a screen's hold timer, in hours, keyed by its INSTANCE id
+     * ("off", "weather.2"). 0 = until changed. See `hold_timer_options`.
      */
     func setModeHours(boardId: String, mode: String, hours: UInt32)
 
@@ -764,7 +772,9 @@ public protocol ScoreboardClientProtocol: AnyObject {
     func setOffMode(boardId: String, id: String)
 
     /**
-     * Set the selected mode's input value. An empty string clears it.
+     * Set a BOARD-WIDE off-mode value (a field whose `per_screen` is false:
+     * a location, 24-hour time) on old and new servers alike. An empty
+     * string clears it. Per-screen fields go through `set_screens`.
      */
     func setOffModeParam(boardId: String, key: String, value: String)
 
@@ -780,6 +790,40 @@ public protocol ScoreboardClientProtocol: AnyObject {
      * midnight. Equal values clear it.
      */
     func setQuietHours(boardId: String, startMin: UInt16, endMin: UInt16)
+
+    /**
+     * Save the board's whole screen list — every add, remove, reorder, idle
+     * toggle and per-screen layout change. Build `screens` with the
+     * optimistic mirrors in `rules` (`screens_added`, `screens_with_idle`,
+     * ...) so the app shows exactly what the server will store, starting
+     * from `resolved_screen_configs(config.screens, ...)` — never from the
+     * raw `config.screens`, which is empty on a server without lists. A list
+     * that cannot be a board's (empty; or, to such a server, nothing besides
+     * Sports and Off) sends nothing.
+     *
+     * A server that predates screen lists drops `SetScreens` silently, so
+     * for one of those (known from this board's last BoardState) the call is
+     * ROUTED to the legacy commands it does understand: `SetOffMode` naming
+     * the first idle member's kind ("blank" when none is checked), then one
+     * `SetOffModeParam` per per-screen value of that member. The single
+     * ordered writer guarantees the mode lands before its params, which the
+     * old server validates against the selected mode. Add, remove, reorder
+     * and a second idle screen cannot be expressed that way; the platforms
+     * hide them (`screens_editable`, `idle_single_select`).
+     *
+     * A board whose state has not arrived yet is sent NOTHING. Any list a
+     * platform could build then started from the core's synthesized
+     * default (the board's real list is unknown), so sending it — as
+     * `SetScreens`, which a queued command does the moment the socket
+     * re-auths, before the BoardState — would replace the board's real
+     * screens, layouts and checkmarks with that default.
+     *
+     * The route is chosen when the call is made. An edit queued across a
+     * server swap (a rollback to a server without lists while the socket
+     * was down) goes out as `SetScreens`, which that server drops; the next
+     * BoardState then shows the board as it really is.
+     */
+    func setScreens(boardId: String, screens: [UiScreenConfig])
 
     /**
      * How long a knob-press sleep lasts before the board wakes itself.
@@ -1154,6 +1198,17 @@ open class ScoreboardClient:
     }
     }
 
+    /**
+     * How long each checked screen holds the panel while the board idles
+     * through two or more, in seconds (one of `idle_cycle_options`).
+     */
+    open func setIdleCycle(boardId: String, secs: UInt32) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_set_idle_cycle(self.uniffiClonePointer(),
+                                                                  FfiConverterString.lower(boardId),
+                                                                  FfiConverterUInt32.lower(secs), $0)
+    }
+    }
+
     open func setLeagueDataSource(boardId: String, sportId: String, source: String?) { try! rustCall {
         uniffi_app_core_fn_method_scoreboardclient_set_league_data_source(self.uniffiClonePointer(),
                                                                           FfiConverterString.lower(boardId),
@@ -1249,8 +1304,9 @@ open class ScoreboardClient:
     }
 
     /**
-     * Put the board in a mode: "scores", "off", or an off-mode id. For the
-     * two modes the LEGACY command can express, the equivalent SetPower is
+     * Put the board in a mode: "scores", "off", or a screen INSTANCE id from
+     * the board's list ("weather.2"). For the two modes the LEGACY command
+     * can express, the equivalent SetPower is
      * sent alongside — a not-yet-deployed (or rolled-back) server drops the
      * unknown SetMode silently, and the alias keeps the picker working
      * through the skew. On a current server both arrive and both write the
@@ -1264,7 +1320,8 @@ open class ScoreboardClient:
     }
 
     /**
-     * Configure a mode's timer, in hours. 0 = until changed.
+     * Configure a screen's hold timer, in hours, keyed by its INSTANCE id
+     * ("off", "weather.2"). 0 = until changed. See `hold_timer_options`.
      */
     open func setModeHours(boardId: String, mode: String, hours: UInt32) { try! rustCall {
         uniffi_app_core_fn_method_scoreboardclient_set_mode_hours(self.uniffiClonePointer(),
@@ -1287,7 +1344,9 @@ open class ScoreboardClient:
     }
 
     /**
-     * Set the selected mode's input value. An empty string clears it.
+     * Set a BOARD-WIDE off-mode value (a field whose `per_screen` is false:
+     * a location, 24-hour time) on old and new servers alike. An empty
+     * string clears it. Per-screen fields go through `set_screens`.
      */
     open func setOffModeParam(boardId: String, key: String, value: String) { try! rustCall {
         uniffi_app_core_fn_method_scoreboardclient_set_off_mode_param(self.uniffiClonePointer(),
@@ -1323,6 +1382,45 @@ open class ScoreboardClient:
                                                                    FfiConverterString.lower(boardId),
                                                                    FfiConverterUInt16.lower(startMin),
                                                                    FfiConverterUInt16.lower(endMin), $0)
+    }
+    }
+
+    /**
+     * Save the board's whole screen list — every add, remove, reorder, idle
+     * toggle and per-screen layout change. Build `screens` with the
+     * optimistic mirrors in `rules` (`screens_added`, `screens_with_idle`,
+     * ...) so the app shows exactly what the server will store, starting
+     * from `resolved_screen_configs(config.screens, ...)` — never from the
+     * raw `config.screens`, which is empty on a server without lists. A list
+     * that cannot be a board's (empty; or, to such a server, nothing besides
+     * Sports and Off) sends nothing.
+     *
+     * A server that predates screen lists drops `SetScreens` silently, so
+     * for one of those (known from this board's last BoardState) the call is
+     * ROUTED to the legacy commands it does understand: `SetOffMode` naming
+     * the first idle member's kind ("blank" when none is checked), then one
+     * `SetOffModeParam` per per-screen value of that member. The single
+     * ordered writer guarantees the mode lands before its params, which the
+     * old server validates against the selected mode. Add, remove, reorder
+     * and a second idle screen cannot be expressed that way; the platforms
+     * hide them (`screens_editable`, `idle_single_select`).
+     *
+     * A board whose state has not arrived yet is sent NOTHING. Any list a
+     * platform could build then started from the core's synthesized
+     * default (the board's real list is unknown), so sending it — as
+     * `SetScreens`, which a queued command does the moment the socket
+     * re-auths, before the BoardState — would replace the board's real
+     * screens, layouts and checkmarks with that default.
+     *
+     * The route is chosen when the call is made. An edit queued across a
+     * server swap (a rollback to a server without lists while the socket
+     * was down) goes out as `SetScreens`, which that server drops; the next
+     * BoardState then shows the board as it really is.
+     */
+    open func setScreens(boardId: String, screens: [UiScreenConfig]) { try! rustCall {
+        uniffi_app_core_fn_method_scoreboardclient_set_screens(self.uniffiClonePointer(),
+                                                               FfiConverterString.lower(boardId),
+                                                               FfiConverterSequenceTypeUiScreenConfig.lower(screens), $0)
     }
     }
 
@@ -1542,6 +1640,201 @@ public func FfiConverterTypeGuideCopy_lower(_ value: GuideCopy) -> RustBuffer {
     return FfiConverterTypeGuideCopy.lower(value)
 }
 
+/**
+ * One section of the Add Screen chooser: a kind's presets under the
+ * descriptor's name, with its description.
+ */
+public struct UiAddableGroup {
+    /**
+     * A stable key for the section (the descriptor id). Never for branching.
+     */
+    public var kind: String
+    /**
+     * The section's heading: the descriptor's label ("Weather").
+     */
+    public var label: String
+    /**
+     * The descriptor's description, once per section.
+     */
+    public var description: String
+    public var screens: [UiAddableScreen]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * A stable key for the section (the descriptor id). Never for branching.
+         */ kind: String,
+        /**
+            * The section's heading: the descriptor's label ("Weather").
+            */ label: String,
+        /**
+            * The descriptor's description, once per section.
+            */ description: String, screens: [UiAddableScreen]
+    ) {
+        self.kind = kind
+        self.label = label
+        self.description = description
+        self.screens = screens
+    }
+}
+
+extension UiAddableGroup: Equatable, Hashable {
+    public static func == (lhs: UiAddableGroup, rhs: UiAddableGroup) -> Bool {
+        if lhs.kind != rhs.kind {
+            return false
+        }
+        if lhs.label != rhs.label {
+            return false
+        }
+        if lhs.description != rhs.description {
+            return false
+        }
+        if lhs.screens != rhs.screens {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(kind)
+        hasher.combine(label)
+        hasher.combine(description)
+        hasher.combine(screens)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiAddableGroup: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiAddableGroup {
+        return
+            try UiAddableGroup(
+                kind: FfiConverterString.read(from: &buf),
+                label: FfiConverterString.read(from: &buf),
+                description: FfiConverterString.read(from: &buf),
+                screens: FfiConverterSequenceTypeUiAddableScreen.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UiAddableGroup, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterString.write(value.description, into: &buf)
+        FfiConverterSequenceTypeUiAddableScreen.write(value.screens, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiAddableGroup_lift(_ buf: RustBuffer) throws -> UiAddableGroup {
+    return try FfiConverterTypeUiAddableGroup.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiAddableGroup_lower(_ value: UiAddableGroup) -> RustBuffer {
+    return FfiConverterTypeUiAddableGroup.lower(value)
+}
+
+/**
+ * One entry of the Add Screen sheet.
+ */
+public struct UiAddableScreen {
+    /**
+     * Pass with `params` to `screens_added`.
+     */
+    public var kind: String
+    public var params: [String: String]
+    public var label: String
+    public var description: String
+    public var preview: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Pass with `params` to `screens_added`.
+         */ kind: String, params: [String: String], label: String, description: String, preview: String?
+    ) {
+        self.kind = kind
+        self.params = params
+        self.label = label
+        self.description = description
+        self.preview = preview
+    }
+}
+
+extension UiAddableScreen: Equatable, Hashable {
+    public static func == (lhs: UiAddableScreen, rhs: UiAddableScreen) -> Bool {
+        if lhs.kind != rhs.kind {
+            return false
+        }
+        if lhs.params != rhs.params {
+            return false
+        }
+        if lhs.label != rhs.label {
+            return false
+        }
+        if lhs.description != rhs.description {
+            return false
+        }
+        if lhs.preview != rhs.preview {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(kind)
+        hasher.combine(params)
+        hasher.combine(label)
+        hasher.combine(description)
+        hasher.combine(preview)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiAddableScreen: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiAddableScreen {
+        return
+            try UiAddableScreen(
+                kind: FfiConverterString.read(from: &buf),
+                params: FfiConverterDictionaryStringString.read(from: &buf),
+                label: FfiConverterString.read(from: &buf),
+                description: FfiConverterString.read(from: &buf),
+                preview: FfiConverterOptionString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UiAddableScreen, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterDictionaryStringString.write(value.params, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterString.write(value.description, into: &buf)
+        FfiConverterOptionString.write(value.preview, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiAddableScreen_lift(_ buf: RustBuffer) throws -> UiAddableScreen {
+    return try FfiConverterTypeUiAddableScreen.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiAddableScreen_lower(_ value: UiAddableScreen) -> RustBuffer {
+    return FfiConverterTypeUiAddableScreen.lower(value)
+}
+
 public struct UiBleContract {
     public var deviceName: String
     public var service: String
@@ -1665,17 +1958,40 @@ public struct UiBoardConfig {
      */
     public var offMode: String
     /**
-     * What the board is DOING: "scores", "off", or an off-mode id held
-     * persistently. A string for the same closed-enum reason as `off_mode`.
+     * What the board is DOING: "scores", "off", or the id of the screen
+     * INSTANCE held persistently ("clock", "weather.2"). A string for the
+     * same closed-enum reason as `off_mode`. Label it with
+     * `screen_label_for`, never by matching a descriptor id.
      */
     public var mode: String
+    /**
+     * The board's screen list in the user's order, verbatim from the
+     * server — a current server always sends the resolved list. EMPTY means
+     * the server predates screen lists; `resolved_screen_configs` then
+     * synthesizes one from `off_mode`/`off_mode_params`.
+     */
+    public var screens: [UiScreenConfig]
+    /**
+     * Whether this board's server understands screen lists (`screens` is
+     * non-empty). Gates add/remove/reorder/the idle timer, and selects
+     * single- vs multi-select idle — see `screens_editable`,
+     * `idle_single_select`.
+     */
+    public var screensSupported: Bool
+    /**
+     * Seconds each checked screen holds the panel while the board idles
+     * through two or more, snapped to a preset (`idle_cycle_options`).
+     */
+    public var idleCycleSecs: UInt32
     /**
      * Per-mode timer durations in hours (0 = until changed); a missing mode
      * falls back to `sleep_hours`.
      */
     public var modeHours: [String: UInt32]
     /**
-     * Values the user typed for the selected mode's declared input.
+     * The board-wide off-mode values (location, 24-hour), plus a MIRROR of
+     * the per-screen values of each kind's first instance for older apps.
+     * Per-screen values are read from `screens`, not from here.
      */
     public var offModeParams: [String: String]
     public var sleepHours: UInt32
@@ -1741,15 +2057,35 @@ public struct UiBoardConfig {
                     * forked server named a mode this build had never heard of.
                     */ offMode: String,
                 /**
-                    * What the board is DOING: "scores", "off", or an off-mode id held
-                    * persistently. A string for the same closed-enum reason as `off_mode`.
+                    * What the board is DOING: "scores", "off", or the id of the screen
+                    * INSTANCE held persistently ("clock", "weather.2"). A string for the
+                    * same closed-enum reason as `off_mode`. Label it with
+                    * `screen_label_for`, never by matching a descriptor id.
                     */ mode: String,
+                /**
+                    * The board's screen list in the user's order, verbatim from the
+                    * server — a current server always sends the resolved list. EMPTY means
+                    * the server predates screen lists; `resolved_screen_configs` then
+                    * synthesizes one from `off_mode`/`off_mode_params`.
+                    */ screens: [UiScreenConfig],
+                /**
+                    * Whether this board's server understands screen lists (`screens` is
+                    * non-empty). Gates add/remove/reorder/the idle timer, and selects
+                    * single- vs multi-select idle — see `screens_editable`,
+                    * `idle_single_select`.
+                    */ screensSupported: Bool,
+                /**
+                    * Seconds each checked screen holds the panel while the board idles
+                    * through two or more, snapped to a preset (`idle_cycle_options`).
+                    */ idleCycleSecs: UInt32,
                 /**
                     * Per-mode timer durations in hours (0 = until changed); a missing mode
                     * falls back to `sleep_hours`.
                     */ modeHours: [String: UInt32],
                 /**
-                    * Values the user typed for the selected mode's declared input.
+                    * The board-wide off-mode values (location, 24-hour), plus a MIRROR of
+                    * the per-screen values of each kind's first instance for older apps.
+                    * Per-screen values are read from `screens`, not from here.
                     */ offModeParams: [String: String], sleepHours: UInt32,
                 /**
                     * Seconds each game holds the panel before the rotation advances.
@@ -1797,6 +2133,9 @@ public struct UiBoardConfig {
         self.name = name
         self.offMode = offMode
         self.mode = mode
+        self.screens = screens
+        self.screensSupported = screensSupported
+        self.idleCycleSecs = idleCycleSecs
         self.modeHours = modeHours
         self.offModeParams = offModeParams
         self.sleepHours = sleepHours
@@ -1842,6 +2181,15 @@ extension UiBoardConfig: Equatable, Hashable {
             return false
         }
         if lhs.mode != rhs.mode {
+            return false
+        }
+        if lhs.screens != rhs.screens {
+            return false
+        }
+        if lhs.screensSupported != rhs.screensSupported {
+            return false
+        }
+        if lhs.idleCycleSecs != rhs.idleCycleSecs {
             return false
         }
         if lhs.modeHours != rhs.modeHours {
@@ -1902,6 +2250,9 @@ extension UiBoardConfig: Equatable, Hashable {
         hasher.combine(name)
         hasher.combine(offMode)
         hasher.combine(mode)
+        hasher.combine(screens)
+        hasher.combine(screensSupported)
+        hasher.combine(idleCycleSecs)
         hasher.combine(modeHours)
         hasher.combine(offModeParams)
         hasher.combine(sleepHours)
@@ -1936,6 +2287,9 @@ public struct FfiConverterTypeUiBoardConfig: FfiConverterRustBuffer {
                 name: FfiConverterOptionString.read(from: &buf),
                 offMode: FfiConverterString.read(from: &buf),
                 mode: FfiConverterString.read(from: &buf),
+                screens: FfiConverterSequenceTypeUiScreenConfig.read(from: &buf),
+                screensSupported: FfiConverterBool.read(from: &buf),
+                idleCycleSecs: FfiConverterUInt32.read(from: &buf),
                 modeHours: FfiConverterDictionaryStringUInt32.read(from: &buf),
                 offModeParams: FfiConverterDictionaryStringString.read(from: &buf),
                 sleepHours: FfiConverterUInt32.read(from: &buf),
@@ -1964,6 +2318,9 @@ public struct FfiConverterTypeUiBoardConfig: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.name, into: &buf)
         FfiConverterString.write(value.offMode, into: &buf)
         FfiConverterString.write(value.mode, into: &buf)
+        FfiConverterSequenceTypeUiScreenConfig.write(value.screens, into: &buf)
+        FfiConverterBool.write(value.screensSupported, into: &buf)
+        FfiConverterUInt32.write(value.idleCycleSecs, into: &buf)
         FfiConverterDictionaryStringUInt32.write(value.modeHours, into: &buf)
         FfiConverterDictionaryStringString.write(value.offModeParams, into: &buf)
         FfiConverterUInt32.write(value.sleepHours, into: &buf)
@@ -2595,6 +2952,134 @@ public func FfiConverterTypeUiGame_lower(_ value: UiGame) -> RustBuffer {
 }
 
 /**
+ * One choice of a screen's hold timer.
+ */
+public struct UiHoldOption {
+    public var hours: UInt32
+    public var label: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(hours: UInt32, label: String) {
+        self.hours = hours
+        self.label = label
+    }
+}
+
+extension UiHoldOption: Equatable, Hashable {
+    public static func == (lhs: UiHoldOption, rhs: UiHoldOption) -> Bool {
+        if lhs.hours != rhs.hours {
+            return false
+        }
+        if lhs.label != rhs.label {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(hours)
+        hasher.combine(label)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiHoldOption: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiHoldOption {
+        return
+            try UiHoldOption(
+                hours: FfiConverterUInt32.read(from: &buf),
+                label: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UiHoldOption, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.hours, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiHoldOption_lift(_ buf: RustBuffer) throws -> UiHoldOption {
+    return try FfiConverterTypeUiHoldOption.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiHoldOption_lower(_ value: UiHoldOption) -> RustBuffer {
+    return FfiConverterTypeUiHoldOption.lower(value)
+}
+
+/**
+ * One choice of the idle timer.
+ */
+public struct UiIdleCycleOption {
+    public var secs: UInt32
+    public var label: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(secs: UInt32, label: String) {
+        self.secs = secs
+        self.label = label
+    }
+}
+
+extension UiIdleCycleOption: Equatable, Hashable {
+    public static func == (lhs: UiIdleCycleOption, rhs: UiIdleCycleOption) -> Bool {
+        if lhs.secs != rhs.secs {
+            return false
+        }
+        if lhs.label != rhs.label {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(secs)
+        hasher.combine(label)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiIdleCycleOption: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiIdleCycleOption {
+        return
+            try UiIdleCycleOption(
+                secs: FfiConverterUInt32.read(from: &buf),
+                label: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UiIdleCycleOption, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.secs, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiIdleCycleOption_lift(_ buf: RustBuffer) throws -> UiIdleCycleOption {
+    return try FfiConverterTypeUiIdleCycleOption.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiIdleCycleOption_lower(_ value: UiIdleCycleOption) -> RustBuffer {
+    return FfiConverterTypeUiIdleCycleOption.lower(value)
+}
+
+/**
  * One section of the league list: the category name and its league ids in
  * display order. Ids, not whole sports — the platform maps them back onto
  * whatever element type its screen holds (catalog entries, preference rows).
@@ -2934,13 +3419,26 @@ public struct UiOffModeChoice {
     public var value: String
     public var label: String
     public var preview: String?
+    /**
+     * Server-declared short name for a SCREEN using this choice, used when
+     * its kind appears more than once on a board. None = the core composes
+     * "{mode} · {choice}" (see `screen_list`, `addable_screens`).
+     */
+    public var screenLabel: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(value: String, label: String, preview: String?) {
+    public init(value: String, label: String, preview: String?,
+                /**
+                    * Server-declared short name for a SCREEN using this choice, used when
+                    * its kind appears more than once on a board. None = the core composes
+                    * "{mode} · {choice}" (see `screen_list`, `addable_screens`).
+                    */ screenLabel: String?)
+    {
         self.value = value
         self.label = label
         self.preview = preview
+        self.screenLabel = screenLabel
     }
 }
 
@@ -2955,6 +3453,9 @@ extension UiOffModeChoice: Equatable, Hashable {
         if lhs.preview != rhs.preview {
             return false
         }
+        if lhs.screenLabel != rhs.screenLabel {
+            return false
+        }
         return true
     }
 
@@ -2962,6 +3463,7 @@ extension UiOffModeChoice: Equatable, Hashable {
         hasher.combine(value)
         hasher.combine(label)
         hasher.combine(preview)
+        hasher.combine(screenLabel)
     }
 }
 
@@ -2974,7 +3476,8 @@ public struct FfiConverterTypeUiOffModeChoice: FfiConverterRustBuffer {
             try UiOffModeChoice(
                 value: FfiConverterString.read(from: &buf),
                 label: FfiConverterString.read(from: &buf),
-                preview: FfiConverterOptionString.read(from: &buf)
+                preview: FfiConverterOptionString.read(from: &buf),
+                screenLabel: FfiConverterOptionString.read(from: &buf)
             )
     }
 
@@ -2982,6 +3485,7 @@ public struct FfiConverterTypeUiOffModeChoice: FfiConverterRustBuffer {
         FfiConverterString.write(value.value, into: &buf)
         FfiConverterString.write(value.label, into: &buf)
         FfiConverterOptionString.write(value.preview, into: &buf)
+        FfiConverterOptionString.write(value.screenLabel, into: &buf)
     }
 }
 
@@ -3025,6 +3529,15 @@ public struct UiOffModeField {
      */
     public var visibleWhenKey: String?
     public var visibleWhenValue: String?
+    /**
+     * This field belongs to one SCREEN (a layout, a style), not the board:
+     * its value lives in `UiScreenConfig::params` and is written through
+     * `set_screens` (via `screens_with_param`). False = board-wide (a
+     * location, 24-hour time), written with `set_off_mode_param` and shared
+     * by every screen of the kind. Always false from a server that predates
+     * screen lists — which is exactly how such a server stores it.
+     */
+    public var perScreen: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -3041,7 +3554,15 @@ public struct UiOffModeField {
                     * Show only while `visible_when_key` holds `visible_when_value`. Two flat
                     * Options rather than a nested record: uniffi records nest fine, but the
                     * Swift is markedly simpler and this is never more than one condition.
-                    */ visibleWhenKey: String?, visibleWhenValue: String?)
+                    */ visibleWhenKey: String?, visibleWhenValue: String?,
+                /**
+                    * This field belongs to one SCREEN (a layout, a style), not the board:
+                    * its value lives in `UiScreenConfig::params` and is written through
+                    * `set_screens` (via `screens_with_param`). False = board-wide (a
+                    * location, 24-hour time), written with `set_off_mode_param` and shared
+                    * by every screen of the kind. Always false from a server that predates
+                    * screen lists — which is exactly how such a server stores it.
+                    */ perScreen: Bool)
     {
         self.key = key
         self.label = label
@@ -3052,6 +3573,7 @@ public struct UiOffModeField {
         self.options = options
         self.visibleWhenKey = visibleWhenKey
         self.visibleWhenValue = visibleWhenValue
+        self.perScreen = perScreen
     }
 }
 
@@ -3084,6 +3606,9 @@ extension UiOffModeField: Equatable, Hashable {
         if lhs.visibleWhenValue != rhs.visibleWhenValue {
             return false
         }
+        if lhs.perScreen != rhs.perScreen {
+            return false
+        }
         return true
     }
 
@@ -3097,6 +3622,7 @@ extension UiOffModeField: Equatable, Hashable {
         hasher.combine(options)
         hasher.combine(visibleWhenKey)
         hasher.combine(visibleWhenValue)
+        hasher.combine(perScreen)
     }
 }
 
@@ -3115,7 +3641,8 @@ public struct FfiConverterTypeUiOffModeField: FfiConverterRustBuffer {
                 default: FfiConverterString.read(from: &buf),
                 options: FfiConverterSequenceTypeUiOffModeChoice.read(from: &buf),
                 visibleWhenKey: FfiConverterOptionString.read(from: &buf),
-                visibleWhenValue: FfiConverterOptionString.read(from: &buf)
+                visibleWhenValue: FfiConverterOptionString.read(from: &buf),
+                perScreen: FfiConverterBool.read(from: &buf)
             )
     }
 
@@ -3129,6 +3656,7 @@ public struct FfiConverterTypeUiOffModeField: FfiConverterRustBuffer {
         FfiConverterSequenceTypeUiOffModeChoice.write(value.options, into: &buf)
         FfiConverterOptionString.write(value.visibleWhenKey, into: &buf)
         FfiConverterOptionString.write(value.visibleWhenValue, into: &buf)
+        FfiConverterBool.write(value.perScreen, into: &buf)
     }
 }
 
@@ -3385,6 +3913,87 @@ public func FfiConverterTypeUiProvisionStep_lower(_ value: UiProvisionStep) -> R
 }
 
 /**
+ * Which rail tiles wear the ring, and the one to scroll to.
+ */
+public struct UiRing {
+    /**
+     * Every ringed screen id, in list order. Several while the board idles
+     * through several screens: one of them is on the glass and the board
+     * never says which.
+     */
+    public var ids: [String]
+    /**
+     * The single tile to scroll into view — `ids[0]`.
+     */
+    public var scrollTarget: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Every ringed screen id, in list order. Several while the board idles
+         * through several screens: one of them is on the glass and the board
+         * never says which.
+         */ ids: [String],
+        /**
+            * The single tile to scroll into view — `ids[0]`.
+            */ scrollTarget: String
+    ) {
+        self.ids = ids
+        self.scrollTarget = scrollTarget
+    }
+}
+
+extension UiRing: Equatable, Hashable {
+    public static func == (lhs: UiRing, rhs: UiRing) -> Bool {
+        if lhs.ids != rhs.ids {
+            return false
+        }
+        if lhs.scrollTarget != rhs.scrollTarget {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(ids)
+        hasher.combine(scrollTarget)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiRing: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiRing {
+        return
+            try UiRing(
+                ids: FfiConverterSequenceString.read(from: &buf),
+                scrollTarget: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UiRing, into buf: inout [UInt8]) {
+        FfiConverterSequenceString.write(value.ids, into: &buf)
+        FfiConverterString.write(value.scrollTarget, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiRing_lift(_ buf: RustBuffer) throws -> UiRing {
+    return try FfiConverterTypeUiRing.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiRing_lower(_ value: UiRing) -> RustBuffer {
+    return FfiConverterTypeUiRing.lower(value)
+}
+
+/**
  * The two one-off sets, after a mutation — returned together because the
  * rules move ids BETWEEN them.
  */
@@ -3447,6 +4056,550 @@ public func FfiConverterTypeUiRotationSets_lift(_ buf: RustBuffer) throws -> UiR
 #endif
 public func FfiConverterTypeUiRotationSets_lower(_ value: UiRotationSets) -> RustBuffer {
     return FfiConverterTypeUiRotationSets.lower(value)
+}
+
+/**
+ * One row of the Screens list and one tile of the dashboard rail.
+ */
+public struct UiScreen {
+    /**
+     * The instance id — key rows and tiles by it, and pass it to
+     * `set_mode`, `set_mode_hours` and the mirrors.
+     */
+    public var id: String
+    /**
+     * The descriptor id (or "scores"/"off"). For looking up the descriptor
+     * whose fields the screen's page draws; never for branching.
+     */
+    public var kind: String
+    /**
+     * Distinct across the list (protocol `screen_labels`).
+     */
+    public var label: String
+    /**
+     * Complete server path for the preview; None draws a black panel (an
+     * all-black PNG cannot be told apart from a failed load).
+     */
+    public var preview: String?
+    /**
+     * Checked: shown when nothing is on.
+     */
+    public var idle: Bool
+    /**
+     * Sports or Off: pinned first and second, never removed, reordered or
+     * checked. Render them apart from the movable rows.
+     */
+    public var fixed: Bool
+    /**
+     * Has a page: Off (its hold timer) and every screen (fields, hold
+     * timer, Remove). False only for Sports.
+     */
+    public var hasSettings: Bool
+    /**
+     * Offer Remove (a swipe, a menu item, the page's button): a user's
+     * screen on a server that stores lists. False for Sports and Off, and
+     * for every row of a list synthesized for a server without lists (or
+     * before the board's config arrives) — removing there cannot land.
+     */
+    public var removable: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The instance id — key rows and tiles by it, and pass it to
+         * `set_mode`, `set_mode_hours` and the mirrors.
+         */ id: String,
+        /**
+            * The descriptor id (or "scores"/"off"). For looking up the descriptor
+            * whose fields the screen's page draws; never for branching.
+            */ kind: String,
+        /**
+            * Distinct across the list (protocol `screen_labels`).
+            */ label: String,
+        /**
+            * Complete server path for the preview; None draws a black panel (an
+            * all-black PNG cannot be told apart from a failed load).
+            */ preview: String?,
+        /**
+            * Checked: shown when nothing is on.
+            */ idle: Bool,
+        /**
+            * Sports or Off: pinned first and second, never removed, reordered or
+            * checked. Render them apart from the movable rows.
+            */ fixed: Bool,
+        /**
+            * Has a page: Off (its hold timer) and every screen (fields, hold
+            * timer, Remove). False only for Sports.
+            */ hasSettings: Bool,
+        /**
+            * Offer Remove (a swipe, a menu item, the page's button): a user's
+            * screen on a server that stores lists. False for Sports and Off, and
+            * for every row of a list synthesized for a server without lists (or
+            * before the board's config arrives) — removing there cannot land.
+            */ removable: Bool
+    ) {
+        self.id = id
+        self.kind = kind
+        self.label = label
+        self.preview = preview
+        self.idle = idle
+        self.fixed = fixed
+        self.hasSettings = hasSettings
+        self.removable = removable
+    }
+}
+
+extension UiScreen: Equatable, Hashable {
+    public static func == (lhs: UiScreen, rhs: UiScreen) -> Bool {
+        if lhs.id != rhs.id {
+            return false
+        }
+        if lhs.kind != rhs.kind {
+            return false
+        }
+        if lhs.label != rhs.label {
+            return false
+        }
+        if lhs.preview != rhs.preview {
+            return false
+        }
+        if lhs.idle != rhs.idle {
+            return false
+        }
+        if lhs.fixed != rhs.fixed {
+            return false
+        }
+        if lhs.hasSettings != rhs.hasSettings {
+            return false
+        }
+        if lhs.removable != rhs.removable {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(kind)
+        hasher.combine(label)
+        hasher.combine(preview)
+        hasher.combine(idle)
+        hasher.combine(fixed)
+        hasher.combine(hasSettings)
+        hasher.combine(removable)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiScreen: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiScreen {
+        return
+            try UiScreen(
+                id: FfiConverterString.read(from: &buf),
+                kind: FfiConverterString.read(from: &buf),
+                label: FfiConverterString.read(from: &buf),
+                preview: FfiConverterOptionString.read(from: &buf),
+                idle: FfiConverterBool.read(from: &buf),
+                fixed: FfiConverterBool.read(from: &buf),
+                hasSettings: FfiConverterBool.read(from: &buf),
+                removable: FfiConverterBool.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UiScreen, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterOptionString.write(value.preview, into: &buf)
+        FfiConverterBool.write(value.idle, into: &buf)
+        FfiConverterBool.write(value.fixed, into: &buf)
+        FfiConverterBool.write(value.hasSettings, into: &buf)
+        FfiConverterBool.write(value.removable, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiScreen_lift(_ buf: RustBuffer) throws -> UiScreen {
+    return try FfiConverterTypeUiScreen.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiScreen_lower(_ value: UiScreen) -> RustBuffer {
+    return FfiConverterTypeUiScreen.lower(value)
+}
+
+/**
+ * One row of a board's screen list, exactly as the wire carries it (protocol
+ * `ScreenConfig`): Sports, Off, or an INSTANCE of a server-declared off mode.
+ * Strings and a bool only — never an enum (see `UiBoardConfig::off_mode`).
+ *
+ * This is the raw record the optimistic mirrors in `rules` transform and
+ * `ScoreboardClient::set_screens` sends. What a row DRAWS (label, preview,
+ * flags) comes from `screen_list`, never from reading these fields.
+ */
+public struct UiScreenConfig {
+    /**
+     * Stable instance id: "scores", "off", the kind for a kind's first
+     * instance, "{kind}.{n}" after it. Never assume `id == kind`.
+     */
+    public var id: String
+    /**
+     * "scores", "off", or an off-mode descriptor id.
+     */
+    public var kind: String
+    /**
+     * This screen's own per-screen values (layout, style) only.
+     */
+    public var params: [String: String]
+    /**
+     * Shown when nothing is on (part of the idle rotation).
+     */
+    public var idle: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Stable instance id: "scores", "off", the kind for a kind's first
+         * instance, "{kind}.{n}" after it. Never assume `id == kind`.
+         */ id: String,
+        /**
+            * "scores", "off", or an off-mode descriptor id.
+            */ kind: String,
+        /**
+            * This screen's own per-screen values (layout, style) only.
+            */ params: [String: String],
+        /**
+            * Shown when nothing is on (part of the idle rotation).
+            */ idle: Bool
+    ) {
+        self.id = id
+        self.kind = kind
+        self.params = params
+        self.idle = idle
+    }
+}
+
+extension UiScreenConfig: Equatable, Hashable {
+    public static func == (lhs: UiScreenConfig, rhs: UiScreenConfig) -> Bool {
+        if lhs.id != rhs.id {
+            return false
+        }
+        if lhs.kind != rhs.kind {
+            return false
+        }
+        if lhs.params != rhs.params {
+            return false
+        }
+        if lhs.idle != rhs.idle {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(kind)
+        hasher.combine(params)
+        hasher.combine(idle)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiScreenConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiScreenConfig {
+        return
+            try UiScreenConfig(
+                id: FfiConverterString.read(from: &buf),
+                kind: FfiConverterString.read(from: &buf),
+                params: FfiConverterDictionaryStringString.read(from: &buf),
+                idle: FfiConverterBool.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UiScreenConfig, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.kind, into: &buf)
+        FfiConverterDictionaryStringString.write(value.params, into: &buf)
+        FfiConverterBool.write(value.idle, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiScreenConfig_lift(_ buf: RustBuffer) throws -> UiScreenConfig {
+    return try FfiConverterTypeUiScreenConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiScreenConfig_lower(_ value: UiScreenConfig) -> RustBuffer {
+    return FfiConverterTypeUiScreenConfig.lower(value)
+}
+
+/**
+ * What [`screens_added`] produced: the new list, and the new screen's id —
+ * empty when it did not survive (the list was full, or the server does not
+ * offer the kind).
+ */
+public struct UiScreensAdded {
+    public var screens: [UiScreenConfig]
+    public var id: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(screens: [UiScreenConfig], id: String) {
+        self.screens = screens
+        self.id = id
+    }
+}
+
+extension UiScreensAdded: Equatable, Hashable {
+    public static func == (lhs: UiScreensAdded, rhs: UiScreensAdded) -> Bool {
+        if lhs.screens != rhs.screens {
+            return false
+        }
+        if lhs.id != rhs.id {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(screens)
+        hasher.combine(id)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiScreensAdded: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiScreensAdded {
+        return
+            try UiScreensAdded(
+                screens: FfiConverterSequenceTypeUiScreenConfig.read(from: &buf),
+                id: FfiConverterString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UiScreensAdded, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeUiScreenConfig.write(value.screens, into: &buf)
+        FfiConverterString.write(value.id, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiScreensAdded_lift(_ buf: RustBuffer) throws -> UiScreensAdded {
+    return try FfiConverterTypeUiScreensAdded.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiScreensAdded_lower(_ value: UiScreensAdded) -> RustBuffer {
+    return FfiConverterTypeUiScreensAdded.lower(value)
+}
+
+/**
+ * The board after [`screens_removed`]: every field the server's remove
+ * changes, to apply to the platform's record in one go.
+ */
+public struct UiScreensRemoved {
+    public var screens: [UiScreenConfig]
+    /**
+     * The held screen: unchanged, or "scores" when the removed screen was
+     * the one held (the server's release).
+     */
+    public var mode: String
+    /**
+     * The `power` twin of `mode` ([`mode_power`]).
+     */
+    public var power: Bool
+    /**
+     * Cleared by a release; otherwise as it was.
+     */
+    public var wakeAt: UInt64?
+    /**
+     * The timers without the removed screen's — ids are reused, and a
+     * screen added later under the same id must start fresh. Removing a
+     * kind's first instance hands its timer to each sibling still
+     * inheriting it first (protocol `prune_screen_timers`).
+     */
+    public var modeHours: [String: UInt32]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(screens: [UiScreenConfig],
+                /**
+                    * The held screen: unchanged, or "scores" when the removed screen was
+                    * the one held (the server's release).
+                    */ mode: String,
+                /**
+                    * The `power` twin of `mode` ([`mode_power`]).
+                    */ power: Bool,
+                /**
+                    * Cleared by a release; otherwise as it was.
+                    */ wakeAt: UInt64?,
+                /**
+                    * The timers without the removed screen's — ids are reused, and a
+                    * screen added later under the same id must start fresh. Removing a
+                    * kind's first instance hands its timer to each sibling still
+                    * inheriting it first (protocol `prune_screen_timers`).
+                    */ modeHours: [String: UInt32])
+    {
+        self.screens = screens
+        self.mode = mode
+        self.power = power
+        self.wakeAt = wakeAt
+        self.modeHours = modeHours
+    }
+}
+
+extension UiScreensRemoved: Equatable, Hashable {
+    public static func == (lhs: UiScreensRemoved, rhs: UiScreensRemoved) -> Bool {
+        if lhs.screens != rhs.screens {
+            return false
+        }
+        if lhs.mode != rhs.mode {
+            return false
+        }
+        if lhs.power != rhs.power {
+            return false
+        }
+        if lhs.wakeAt != rhs.wakeAt {
+            return false
+        }
+        if lhs.modeHours != rhs.modeHours {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(screens)
+        hasher.combine(mode)
+        hasher.combine(power)
+        hasher.combine(wakeAt)
+        hasher.combine(modeHours)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiScreensRemoved: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiScreensRemoved {
+        return
+            try UiScreensRemoved(
+                screens: FfiConverterSequenceTypeUiScreenConfig.read(from: &buf),
+                mode: FfiConverterString.read(from: &buf),
+                power: FfiConverterBool.read(from: &buf),
+                wakeAt: FfiConverterOptionUInt64.read(from: &buf),
+                modeHours: FfiConverterDictionaryStringUInt32.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UiScreensRemoved, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeUiScreenConfig.write(value.screens, into: &buf)
+        FfiConverterString.write(value.mode, into: &buf)
+        FfiConverterBool.write(value.power, into: &buf)
+        FfiConverterOptionUInt64.write(value.wakeAt, into: &buf)
+        FfiConverterDictionaryStringUInt32.write(value.modeHours, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiScreensRemoved_lift(_ buf: RustBuffer) throws -> UiScreensRemoved {
+    return try FfiConverterTypeUiScreensRemoved.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiScreensRemoved_lower(_ value: UiScreensRemoved) -> RustBuffer {
+    return FfiConverterTypeUiScreensRemoved.lower(value)
+}
+
+/**
+ * What an optimistic screens edit writes into the board's record — the
+ * fields `set_screens` will actually change on the server. None = leave
+ * that field as it is.
+ */
+public struct UiScreensWrite {
+    public var screens: [UiScreenConfig]?
+    public var offMode: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(screens: [UiScreenConfig]?, offMode: String?) {
+        self.screens = screens
+        self.offMode = offMode
+    }
+}
+
+extension UiScreensWrite: Equatable, Hashable {
+    public static func == (lhs: UiScreensWrite, rhs: UiScreensWrite) -> Bool {
+        if lhs.screens != rhs.screens {
+            return false
+        }
+        if lhs.offMode != rhs.offMode {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(screens)
+        hasher.combine(offMode)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUiScreensWrite: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UiScreensWrite {
+        return
+            try UiScreensWrite(
+                screens: FfiConverterOptionSequenceTypeUiScreenConfig.read(from: &buf),
+                offMode: FfiConverterOptionString.read(from: &buf)
+            )
+    }
+
+    public static func write(_ value: UiScreensWrite, into buf: inout [UInt8]) {
+        FfiConverterOptionSequenceTypeUiScreenConfig.write(value.screens, into: &buf)
+        FfiConverterOptionString.write(value.offMode, into: &buf)
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiScreensWrite_lift(_ buf: RustBuffer) throws -> UiScreensWrite {
+    return try FfiConverterTypeUiScreensWrite.lift(buf)
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUiScreensWrite_lower(_ value: UiScreensWrite) -> RustBuffer {
+    return FfiConverterTypeUiScreensWrite.lower(value)
 }
 
 /**
@@ -5067,6 +6220,30 @@ private struct FfiConverterOptionSequenceTypeUiGame: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterOptionSequenceTypeUiScreenConfig: FfiConverterRustBuffer {
+    typealias SwiftType = [UiScreenConfig]?
+
+    static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterSequenceTypeUiScreenConfig.write(value, into: &buf)
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterSequenceTypeUiScreenConfig.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterSequenceString: FfiConverterRustBuffer {
     typealias SwiftType = [String]
 
@@ -5109,6 +6286,56 @@ private struct FfiConverterSequenceTypeGuideCopy: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             try seq.append(FfiConverterTypeGuideCopy.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeUiAddableGroup: FfiConverterRustBuffer {
+    typealias SwiftType = [UiAddableGroup]
+
+    static func write(_ value: [UiAddableGroup], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeUiAddableGroup.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UiAddableGroup] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UiAddableGroup]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeUiAddableGroup.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeUiAddableScreen: FfiConverterRustBuffer {
+    typealias SwiftType = [UiAddableScreen]
+
+    static func write(_ value: [UiAddableScreen], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeUiAddableScreen.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UiAddableScreen] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UiAddableScreen]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeUiAddableScreen.read(from: &buf))
         }
         return seq
     }
@@ -5259,6 +6486,56 @@ private struct FfiConverterSequenceTypeUiGame: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             try seq.append(FfiConverterTypeUiGame.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeUiHoldOption: FfiConverterRustBuffer {
+    typealias SwiftType = [UiHoldOption]
+
+    static func write(_ value: [UiHoldOption], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeUiHoldOption.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UiHoldOption] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UiHoldOption]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeUiHoldOption.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeUiIdleCycleOption: FfiConverterRustBuffer {
+    typealias SwiftType = [UiIdleCycleOption]
+
+    static func write(_ value: [UiIdleCycleOption], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeUiIdleCycleOption.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UiIdleCycleOption] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UiIdleCycleOption]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeUiIdleCycleOption.read(from: &buf))
         }
         return seq
     }
@@ -5467,6 +6744,56 @@ private struct FfiConverterSequenceTypeUiProvisionStep: FfiConverterRustBuffer {
 #if swift(>=5.8)
     @_documentation(visibility: private)
 #endif
+private struct FfiConverterSequenceTypeUiScreen: FfiConverterRustBuffer {
+    typealias SwiftType = [UiScreen]
+
+    static func write(_ value: [UiScreen], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeUiScreen.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UiScreen] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UiScreen]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeUiScreen.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+private struct FfiConverterSequenceTypeUiScreenConfig: FfiConverterRustBuffer {
+    typealias SwiftType = [UiScreenConfig]
+
+    static func write(_ value: [UiScreenConfig], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeUiScreenConfig.write(item, into: &buf)
+        }
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UiScreenConfig] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UiScreenConfig]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            try seq.append(FfiConverterTypeUiScreenConfig.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
 private struct FfiConverterSequenceTypeUiServerPreset: FfiConverterRustBuffer {
     typealias SwiftType = [UiServerPreset]
 
@@ -5616,9 +6943,89 @@ private struct FfiConverterDictionaryStringString: FfiConverterRustBuffer {
     }
 }
 
+public func addScreenLabel() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_add_screen_label($0
+        )
+    })
+}
+
+/**
+ * Why Add Screen is unavailable, or None when it is available. The list is
+ * full ([`crate::strings::screen_cap_note`]), or every screen the server
+ * offers is already on it ([`crate::strings::nothing_to_add_note`]), or the
+ * catalog has not arrived yet ([`crate::strings::screens_loading_note`]). Both
+ * platforms disable Add exactly when this is Some, and show the sentence.
+ */
+public func addScreenNote(screens: [UiScreenConfig], offModes: [UiOffMode]) -> String? {
+    return try! FfiConverterOptionString.lift(try! rustCall {
+        uniffi_app_core_fn_func_add_screen_note(
+            FfiConverterSequenceTypeUiScreenConfig.lower(screens),
+            FfiConverterSequenceTypeUiOffMode.lower(offModes), $0
+        )
+    })
+}
+
+/**
+ * [`addable_screens`], grouped for the chooser: one group per kind in
+ * catalog order, each headed by its descriptor's label. Both platforms draw
+ * these sections — the same headings, the same description per kind.
+ */
+public func addableScreenGroups(screens: [UiScreenConfig], offModes: [UiOffMode]) -> [UiAddableGroup] {
+    return try! FfiConverterSequenceTypeUiAddableGroup.lift(try! rustCall {
+        uniffi_app_core_fn_func_addable_screen_groups(
+            FfiConverterSequenceTypeUiScreenConfig.lower(screens),
+            FfiConverterSequenceTypeUiOffMode.lower(offModes), $0
+        )
+    })
+}
+
+/**
+ * What can be added, grouped by kind in catalog order: one preset per
+ * layout or style for a kind that has them (Big weather, Forecast, Word
+ * clock ...), else one per kind. A preset already on the list — a screen of
+ * its kind whose resolved layout matches, defaults included — is left out,
+ * since two identical screens are only confusing.
+ */
+public func addableScreens(screens: [UiScreenConfig], offModes: [UiOffMode]) -> [UiAddableScreen] {
+    return try! FfiConverterSequenceTypeUiAddableScreen.lift(try! rustCall {
+        uniffi_app_core_fn_func_addable_screens(
+            FfiConverterSequenceTypeUiScreenConfig.lower(screens),
+            FfiConverterSequenceTypeUiOffMode.lower(offModes), $0
+        )
+    })
+}
+
 public func bleContract() -> UiBleContract {
     return try! FfiConverterTypeUiBleContract.lift(try! rustCall {
         uniffi_app_core_fn_func_ble_contract($0
+        )
+    })
+}
+
+/**
+ * May another screen be added? (The server keeps at most `MAX_SCREENS`
+ * rows, Sports and Off included.) When false, show [`crate::strings::screen_cap_note`].
+ * The Add control itself is gated by [`add_screen_note`], which also knows
+ * when the chooser would be empty.
+ */
+public func canAddScreen(screens: [UiScreenConfig]) -> Bool {
+    return try! FfiConverterBool.lift(try! rustCall {
+        uniffi_app_core_fn_func_can_add_screen(
+            FfiConverterSequenceTypeUiScreenConfig.lower(screens), $0
+        )
+    })
+}
+
+/**
+ * May screen `id` be checked or unchecked? Not Sports or Off, and not an id
+ * the list does not have.
+ */
+public func canSetIdle(screens: [UiScreenConfig], id: String) -> Bool {
+    return try! FfiConverterBool.lift(try! rustCall {
+        uniffi_app_core_fn_func_can_set_idle(
+            FfiConverterSequenceTypeUiScreenConfig.lower(screens),
+            FfiConverterString.lower(id), $0
         )
     })
 }
@@ -5636,16 +7043,18 @@ public func cardHighlight(game: UiGame, focusedGameId: String?, nowShowing: [UiG
 }
 
 /**
- * The optimistic mirror of the server's `apply_mode` timer rule: hours from
- * the mode's own setting, falling back to `sleep_hours`; "scores" and 0 run
- * on no timer; everything else expires `min(hours, 72)` from now. The 72 is
- * the server's clamp — if these disagreed, the app's countdown would lie
- * until the next push.
+ * The optimistic mirror of the server's `apply_mode` timer rule, for picking
+ * screen `id` (an instance of `kind`; "off" for Off): hours from the
+ * protocol's `hold_hours` chain — the instance's own timer, else its kind's,
+ * else `sleep_hours` — where Sports and 0 run on no timer and everything
+ * else expires `min(hours, 72)` from now. The 72 is the server's clamp — if
+ * these disagreed, the app's countdown would lie until the next push.
  */
-public func computeWakeAt(mode: String, modeHours: [String: UInt32], sleepHours: UInt32, nowUnix: UInt64) -> UInt64? {
+public func computeWakeAt(id: String, kind: String, modeHours: [String: UInt32], sleepHours: UInt32, nowUnix: UInt64) -> UInt64? {
     return try! FfiConverterOptionUInt64.lift(try! rustCall {
         uniffi_app_core_fn_func_compute_wake_at(
-            FfiConverterString.lower(mode),
+            FfiConverterString.lower(id),
+            FfiConverterString.lower(kind),
             FfiConverterDictionaryStringUInt32.lower(modeHours),
             FfiConverterUInt32.lower(sleepHours),
             FfiConverterUInt64.lower(nowUnix), $0
@@ -5654,10 +7063,17 @@ public func computeWakeAt(mode: String, modeHours: [String: UInt32], sleepHours:
 }
 
 /**
- * A mode preview showing THIS board's configuration: the stored params ride
- * along as a sorted, percent-encoded query. Each mode reads only its own
- * keys, so passing the whole map to every preview is harmless; sorted so the
- * URL is stable and the platform image cache can hit.
+ * A preview path carrying a configuration: `params` ride along as a sorted,
+ * percent-encoded query, sorted so the URL is stable and the platform image
+ * cache can hit.
+ *
+ * The CALLER chooses the params, and passing a whole map is no longer
+ * harmless: two screens of one kind must not share a URL (or a cached
+ * image), a key must never appear twice (`path` from a choice already
+ * carries `?variant=`), and a typed location must not ride into an on-disk
+ * URL cache. [`screen_list`] builds every screen's preview correctly — the
+ * descriptor's own path, its declared non-text keys, the screen's per-screen
+ * values over the board-wide ones. Use it rather than calling this.
  */
 public func configuredPreview(path: String?, params: [String: String]) -> String? {
     return try! FfiConverterOptionString.lift(try! rustCall {
@@ -5769,27 +7185,45 @@ public func dwellTitle() -> String {
 }
 
 /**
- * The ring follows the GLASS: what the panel is actually showing, as a
- * picker id. `now_showing_empty` is [`panel_shows_nothing`], not the list's
- * length. Quiet hours force Off (the window darkens the panel whatever
- * the mode says); scores mode with nothing on is showing the idle screen,
- * with the blank descriptor reading as Off.
+ * The Transfer settings section's footer while connected.
  */
-public func effectiveMode(mode: String, quietActive: Bool, nowShowingEmpty: Bool, offMode: String) -> String {
+public func exportFooter() -> String {
     return try! FfiConverterString.lift(try! rustCall {
-        uniffi_app_core_fn_func_effective_mode(
-            FfiConverterString.lower(mode),
-            FfiConverterBool.lower(quietActive),
-            FfiConverterBool.lower(nowShowingEmpty),
-            FfiConverterString.lower(offMode), $0
+        uniffi_app_core_fn_func_export_footer($0
         )
     })
 }
 
 /**
- * What a board shows before the server's catalog arrives: enough descriptors
- * to render the idle-screen setting sanely offline. Labels must match the
- * server's ("Off", not "Nothing" — one darkness, one name).
+ * The export sheet's summary of what travels.
+ */
+public func exportSheetSummary() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_export_sheet_summary($0
+        )
+    })
+}
+
+/**
+ * The Transfer settings section's footer while disconnected.
+ */
+public func exportUnavailableNote() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_export_unavailable_note($0
+        )
+    })
+}
+
+/**
+ * What a board shows before the server's catalog arrives: the stock
+ * server's descriptors, in its order, so a list synthesized in that window
+ * already reads like the real one — with Weather present, a weather-idle
+ * board shows Weather checked rather than a Clock the fallback made up.
+ * Labels must match the server's ("Off", not "Nothing" — one darkness, one
+ * name). No fields: settings pages fill in when the catalog lands, and
+ * writes made before then keep every param they carry (see the mirrors,
+ * which read this list exactly like an empty one).
+ * Prefer `off_modes_or_fallback`, which applies this only when needed.
  */
 public func fallbackOffModes() -> [UiOffMode] {
     return try! FfiConverterSequenceTypeUiOffMode.lift(try! rustCall {
@@ -5876,6 +7310,101 @@ public func groupLeagues(sports: [UiSport]) -> [UiLeagueGroup] {
 }
 
 /**
+ * The held screen once the list is `screens`: `held_id` while it is still
+ * listed — Sports and Off always are — else "scores", the server's release.
+ * EXACT id match (the protocol's `held_screen_listed`): removing a held
+ * first instance releases the board even while a sibling of its kind stays.
+ * [`screens_removed`] already applies it (with the wake timer and power a
+ * release changes); this is the rule on its own, for checking a held id
+ * against a list pushed from elsewhere.
+ */
+public func heldAfter(heldId: String, screens: [UiScreenConfig]) -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_held_after(
+            FfiConverterString.lower(heldId),
+            FfiConverterSequenceTypeUiScreenConfig.lower(screens), $0
+        )
+    })
+}
+
+/**
+ * Screen `id`'s hold timer, in hours (0 = until changed): its own, else its
+ * kind's, else `sleep_hours` — the protocol's `hold_hours`, which the server
+ * runs. Write it back with `set_mode_hours(id, ...)`.
+ */
+public func holdTimerHours(id: String, kind: String, modeHours: [String: UInt32], sleepHours: UInt32) -> UInt32 {
+    return try! FfiConverterUInt32.lift(try! rustCall {
+        uniffi_app_core_fn_func_hold_timer_hours(
+            FfiConverterString.lower(id),
+            FfiConverterString.lower(kind),
+            FfiConverterDictionaryStringUInt32.lower(modeHours),
+            FfiConverterUInt32.lower(sleepHours), $0
+        )
+    })
+}
+
+/**
+ * A stored timer's name: "Until changed", "1 hour", "72 hours" — any
+ * value, preset or not (an import, an older app or the server's 72-hour
+ * clamp can store one the presets lack).
+ */
+public func holdTimerLabel(hours: UInt32) -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_hold_timer_label(
+            FfiConverterUInt32.lower(hours), $0
+        )
+    })
+}
+
+/**
+ * How long a picked screen holds the panel before the board goes back to
+ * Sports: "Until changed", "1 hour", "2 hours" ... "48 hours".
+ */
+public func holdTimerOptions() -> [UiHoldOption] {
+    return try! FfiConverterSequenceTypeUiHoldOption.lift(try! rustCall {
+        uniffi_app_core_fn_func_hold_timer_options($0
+        )
+    })
+}
+
+/**
+ * The picker's rows for a screen whose timer is `current`: the presets,
+ * plus the stored value in its place when it is not one — so the picker
+ * always has a row to select and never shows a blank. Select the row whose
+ * `hours` equals `hold_timer_selected(current)`.
+ */
+public func holdTimerOptionsFor(current: UInt32) -> [UiHoldOption] {
+    return try! FfiConverterSequenceTypeUiHoldOption.lift(try! rustCall {
+        uniffi_app_core_fn_func_hold_timer_options_for(
+            FfiConverterUInt32.lower(current), $0
+        )
+    })
+}
+
+/**
+ * The hold a stored timer actually runs: the server clamps every timer to
+ * 72 hours when it applies one. Compare `hold_timer_selected(stored) ==
+ * option.hours` to place the checkmark.
+ */
+public func holdTimerSelected(hours: UInt32) -> UInt32 {
+    return try! FfiConverterUInt32.lift(try! rustCall {
+        uniffi_app_core_fn_func_hold_timer_selected(
+            FfiConverterUInt32.lower(hours), $0
+        )
+    })
+}
+
+/**
+ * The hold timer's title on a screen's page.
+ */
+public func holdTimerTitle() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_hold_timer_title($0
+        )
+    })
+}
+
+/**
  * The `host:port` to write to a board's `server` characteristic, for the
  * websocket URL the phone is using. Empty means "keep the firmware default".
  */
@@ -5906,6 +7435,114 @@ public func httpBase(wsUrl: String) -> String {
 }
 
 /**
+ * Does the "Switch screens every" timer mean anything? Only while two or
+ * more screens are checked — show it exactly then.
+ */
+public func idleCycleApplies(screens: [UiScreenConfig]) -> Bool {
+    return try! FfiConverterBool.lift(try! rustCall {
+        uniffi_app_core_fn_func_idle_cycle_applies(
+            FfiConverterSequenceTypeUiScreenConfig.lower(screens), $0
+        )
+    })
+}
+
+/**
+ * A stored idle timer's name: "5 minutes".
+ */
+public func idleCycleLabel(secs: UInt32) -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_idle_cycle_label(
+            FfiConverterUInt32.lower(secs), $0
+        )
+    })
+}
+
+/**
+ * The idle timer's choices, shortest first: "2 minutes" ... "1 hour".
+ */
+public func idleCycleOptions() -> [UiIdleCycleOption] {
+    return try! FfiConverterSequenceTypeUiIdleCycleOption.lift(try! rustCall {
+        uniffi_app_core_fn_func_idle_cycle_options($0
+        )
+    })
+}
+
+/**
+ * The option a stored value selects: its snapped preset. Compare
+ * `idle_cycle_selected(secs) == option.secs` to place the checkmark.
+ */
+public func idleCycleSelected(secs: UInt32) -> UInt32 {
+    return try! FfiConverterUInt32.lift(try! rustCall {
+        uniffi_app_core_fn_func_idle_cycle_selected(
+            FfiConverterUInt32.lower(secs), $0
+        )
+    })
+}
+
+/**
+ * The idle timer's title.
+ */
+public func idleCycleTitle() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_idle_cycle_title($0
+        )
+    })
+}
+
+/**
+ * What the board does when nothing you follow is playing, for the screens
+ * `screen_list` returned and the board's idle timer: dark with none
+ * checked, the one screen with one, and the rotation with two or more.
+ */
+public func idleExplainer(screens: [UiScreen], idleCycleSecs: UInt32) -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_idle_explainer(
+            FfiConverterSequenceTypeUiScreen.lower(screens),
+            FfiConverterUInt32.lower(idleCycleSecs), $0
+        )
+    })
+}
+
+/**
+ * Do the checkmarks act as single-select ([`screens_with_sole_idle`])? On a
+ * server without lists, which stores exactly one idle screen.
+ */
+public func idleSingleSelect(screensSupported: Bool) -> Bool {
+    return try! FfiConverterBool.lift(try! rustCall {
+        uniffi_app_core_fn_func_idle_single_select(
+            FfiConverterBool.lower(screensSupported), $0
+        )
+    })
+}
+
+/**
+ * The per-screen checkmark: part of what shows when nothing is on.
+ */
+public func idleToggleLabel() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_idle_toggle_label($0
+        )
+    })
+}
+
+public func importEmptyMessage() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_import_empty_message($0
+        )
+    })
+}
+
+/**
+ * The alert when Import settings finds nothing on the clipboard.
+ */
+public func importEmptyTitle() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_import_empty_title($0
+        )
+    })
+}
+
+/**
  * Whether a game involves one of the board's favorited teams.
  */
 public func involvesFavorite(sportId: String, away: String, home: String, favoriteTeamIds: [String]) -> Bool {
@@ -5915,6 +7552,16 @@ public func involvesFavorite(sportId: String, away: String, home: String, favori
             FfiConverterString.lower(away),
             FfiConverterString.lower(home),
             FfiConverterSequenceString.lower(favoriteTeamIds), $0
+        )
+    })
+}
+
+/**
+ * The footer's button: hold the screen until changed (`clear_wake_timer`).
+ */
+public func keepLabel() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_keep_label($0
         )
     })
 }
@@ -5976,14 +7623,96 @@ public func leaguePrefs(config: UiBoardConfig, sports: [UiSport]) -> [UiLeaguePr
 }
 
 /**
- * A picker id's display label: Scores/Off for the two reserved ids, the
- * descriptor's label otherwise, capitalized id as the last resort.
+ * The start of the footer while a held screen runs on its timer: "Clock —
+ * back to Sports in ". The platform appends its own formatted duration
+ * (relative time is locale formatting), then [`mode_back_suffix`].
+ */
+public func modeBackPrefix(label: String) -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_mode_back_prefix(
+            FfiConverterString.lower(label), $0
+        )
+    })
+}
+
+/**
+ * The end of that footer, after the duration.
+ */
+public func modeBackSuffix() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_mode_back_suffix($0
+        )
+    })
+}
+
+/**
+ * Does the held-screen footer show for `mode`? Whenever something other
+ * than Sports holds the panel. Not for Sports, and not for "" (the board's
+ * config has not arrived). Its sentence is `mode_until_changed` or
+ * `mode_back_prefix` + duration + `mode_back_suffix`, labelled by
+ * [`screen_label_for`].
+ */
+public func modeFooterShown(mode: String) -> Bool {
+    return try! FfiConverterBool.lift(try! rustCall {
+        uniffi_app_core_fn_func_mode_footer_shown(
+            FfiConverterString.lower(mode), $0
+        )
+    })
+}
+
+/**
+ * The board's timers once screen `id`'s hold is set to `hours` — the
+ * server's `SetModeHours`, mirrored (protocol `set_hold_hours`): clamped to
+ * 72, and a kind's first instance pins each sibling still inheriting its
+ * key, so editing Weather's timer never moves Forecast's. `screens` is the
+ * resolved list.
+ */
+public func modeHoursAfterSet(id: String, hours: UInt32, screens: [UiScreenConfig], modeHours: [String: UInt32], sleepHours: UInt32) -> [String: UInt32] {
+    return try! FfiConverterDictionaryStringUInt32.lift(try! rustCall {
+        uniffi_app_core_fn_func_mode_hours_after_set(
+            FfiConverterString.lower(id),
+            FfiConverterUInt32.lower(hours),
+            FfiConverterSequenceTypeUiScreenConfig.lower(screens),
+            FfiConverterDictionaryStringUInt32.lower(modeHours),
+            FfiConverterUInt32.lower(sleepHours), $0
+        )
+    })
+}
+
+/**
+ * A DESCRIPTOR id's display label: Sports/Off for the reserved ids, the
+ * descriptor's label otherwise, capitalized id as the last resort. Knows
+ * nothing of instances — label a screen or a held mode with
+ * [`screen_label_for`].
  */
 public func modeLabel(id: String, offModes: [UiOffMode]) -> String {
     return try! FfiConverterString.lift(try! rustCall {
         uniffi_app_core_fn_func_mode_label(
             FfiConverterString.lower(id),
             FfiConverterSequenceTypeUiOffMode.lower(offModes), $0
+        )
+    })
+}
+
+/**
+ * The `power` twin of a mode: lit unless it is Off — the protocol's
+ * `set_mode` rule, for an optimistic mode change.
+ */
+public func modePower(mode: String) -> Bool {
+    return try! FfiConverterBool.lift(try! rustCall {
+        uniffi_app_core_fn_func_mode_power(
+            FfiConverterString.lower(mode), $0
+        )
+    })
+}
+
+/**
+ * The footer while a held screen runs with no timer: "Clock until changed."
+ */
+public func modeUntilChanged(label: String) -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_mode_until_changed(
+            FfiConverterString.lower(label), $0
         )
     })
 }
@@ -6024,6 +7753,17 @@ public func normalizedPin(raw: String) -> String? {
 }
 
 /**
+ * Shown in place of Add Screen when every screen the server offers is
+ * already on the list (`add_screen_note`).
+ */
+public func nothingToAddNote() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_nothing_to_add_note($0
+        )
+    })
+}
+
+/**
  * Stored value, else the field's declared default, else empty. MUST agree
  * with `OffModeDescriptor::value` in the protocol crate — the server renders
  * from that one; `the_app_and_the_server_resolve_off_mode_values_identically`
@@ -6035,6 +7775,20 @@ public func offModeValue(mode: UiOffMode, key: String, params: [String: String])
             FfiConverterTypeUiOffMode.lower(mode),
             FfiConverterString.lower(key),
             FfiConverterDictionaryStringString.lower(params), $0
+        )
+    })
+}
+
+/**
+ * The off modes to work from: the server's declared list, or
+ * [`fallback_off_modes`] while it has declared none (the catalog has not
+ * arrived). Both platforms read descriptors through this, so neither has a
+ * cold-start gap the other lacks.
+ */
+public func offModesOrFallback(declared: [UiOffMode]) -> [UiOffMode] {
+    return try! FfiConverterSequenceTypeUiOffMode.lift(try! rustCall {
+        uniffi_app_core_fn_func_off_modes_or_fallback(
+            FfiConverterSequenceTypeUiOffMode.lower(declared), $0
         )
     })
 }
@@ -6075,7 +7829,9 @@ public func parseNetworks(raw: Data) -> [String] {
 }
 
 /**
- * Every pickable mode, in display order: Scores first (the resting state),
+ * LEGACY picker tiles (one per descriptor kind). The rail is built from
+ * [`screen_list`] now, which knows instances; kept for older callers.
+ * Every pickable mode, in display order: Sports first (the resting state),
  * the server's lit screens, Off last. The dark idle descriptor is excluded —
  * the Off entry IS that darkness, and two dark tiles with different meanings
  * is a trap.
@@ -6148,6 +7904,66 @@ public func provisionSteps(ssid: String, password: String, wsUrl: String, pinRaw
 }
 
 /**
+ * The dashboard line while quiet hours darken the panel: "Quiet hours —
+ * the screen is off until 7:00 AM." `end_time` is the window's end in the
+ * reader's own clock format (locale formatting stays on the platform).
+ */
+public func quietFooter(endTime: String) -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_quiet_footer(
+            FfiConverterString.lower(endTime), $0
+        )
+    })
+}
+
+public func removeScreenLabel() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_remove_screen_label($0
+        )
+    })
+}
+
+/**
+ * The board's screen list to EDIT: `UiBoardConfig.screens` when the server
+ * sent one, else the list a server without lists is running, synthesized
+ * from `off_mode`/`off_mode_params`. Feed this — never the raw, possibly
+ * empty field — to the mirrors (`screens_with_idle`, ...), `ring` and
+ * `screen_label_for`.
+ */
+public func resolvedScreenConfigs(screens: [UiScreenConfig], offMode: String, offModeParams: [String: String], offModes: [UiOffMode]) -> [UiScreenConfig] {
+    return try! FfiConverterSequenceTypeUiScreenConfig.lift(try! rustCall {
+        uniffi_app_core_fn_func_resolved_screen_configs(
+            FfiConverterSequenceTypeUiScreenConfig.lower(screens),
+            FfiConverterString.lower(offMode),
+            FfiConverterDictionaryStringString.lower(offModeParams),
+            FfiConverterSequenceTypeUiOffMode.lower(offModes), $0
+        )
+    })
+}
+
+/**
+ * The ring follows the GLASS: what the panel is actually showing.
+ * `panel_shows_nothing` is [`panel_shows_nothing`], not the list's length;
+ * `screens` is [`resolved_screen_configs`]. Quiet hours ring Off (the
+ * window darkens the panel whatever the mode says); a held screen rings
+ * itself; Sports with nothing on rings every checked screen, or Off when
+ * none is checked; Sports otherwise rings Sports.
+ *
+ * An empty `mode` (no config yet) is Sports, the resting state — so a
+ * platform's default record can hold "" rather than spelling an id.
+ */
+public func ring(mode: String, quietActive: Bool, panelShowsNothing: Bool, screens: [UiScreenConfig]) -> UiRing {
+    return try! FfiConverterTypeUiRing.lift(try! rustCall {
+        uniffi_app_core_fn_func_ring(
+            FfiConverterString.lower(mode),
+            FfiConverterBool.lower(quietActive),
+            FfiConverterBool.lower(panelShowsNothing),
+            FfiConverterSequenceTypeUiScreenConfig.lower(screens), $0
+        )
+    })
+}
+
+/**
  * Add a game. Adding back a game the user had one-off REMOVED clears the
  * exclusion rather than creating an extra — that's what the server does,
  * and mirroring it exactly is what lets the card flip on the tap instead of
@@ -6211,6 +8027,233 @@ public func rotationRemove(gameId: String, extraGameIds: [String], excludedGameI
 }
 
 /**
+ * Shown in place of Add Screen when `can_add_screen` is false.
+ */
+public func screenCapNote() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_screen_cap_note($0
+        )
+    })
+}
+
+/**
+ * The label for a screen or held-mode id (footers, the held tile): its
+ * row's label in `screens` ([`resolved_screen_configs`]), a legacy kind id
+ * resolving to its first instance; else Sports/Off/the descriptor label.
+ */
+public func screenLabelFor(id: String, screens: [UiScreenConfig], offModes: [UiOffMode]) -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_screen_label_for(
+            FfiConverterString.lower(id),
+            FfiConverterSequenceTypeUiScreenConfig.lower(screens),
+            FfiConverterSequenceTypeUiOffMode.lower(offModes), $0
+        )
+    })
+}
+
+/**
+ * Every screen to draw, in the board's order: Sports, Off, then the user's
+ * screens, each with its label, preview and flags. Takes only the fields a
+ * platform keeps per board (never a whole `UiBoardConfig`) and works before
+ * the catalog arrives and against a server without lists, which it
+ * synthesizes for.
+ */
+public func screenList(screens: [UiScreenConfig], offMode: String, offModeParams: [String: String], offModes: [UiOffMode]) -> [UiScreen] {
+    return try! FfiConverterSequenceTypeUiScreen.lift(try! rustCall {
+        uniffi_app_core_fn_func_screen_list(
+            FfiConverterSequenceTypeUiScreenConfig.lower(screens),
+            FfiConverterString.lower(offMode),
+            FfiConverterDictionaryStringString.lower(offModeParams),
+            FfiConverterSequenceTypeUiOffMode.lower(offModes), $0
+        )
+    })
+}
+
+/**
+ * The params screen `id` RENDERS with — protocol's `layered_params`: the
+ * board-wide map minus every key the screen's descriptor marks
+ * `per_screen`, then the screen's own values. Pass this, never a hand-made
+ * overlay, to `visible_off_mode_fields` and `off_mode_value` on a screen's
+ * page. The naive overlay (board map, then the screen's) is wrong: the
+ * board map holds ONE instance's layout as a mirror for older apps, so a
+ * defaulted sibling would read — and tick — the other screen's layout.
+ *
+ * An id not in `screens` (Sports, Off, a list from a server without lists)
+ * gets the board map as it is: such a server declares no per-screen keys,
+ * so its map IS what it renders with.
+ */
+public func screenParams(id: String, screens: [UiScreenConfig], offModeParams: [String: String], offModes: [UiOffMode]) -> [String: String] {
+    return try! FfiConverterDictionaryStringString.lift(try! rustCall {
+        uniffi_app_core_fn_func_screen_params(
+            FfiConverterString.lower(id),
+            FfiConverterSequenceTypeUiScreenConfig.lower(screens),
+            FfiConverterDictionaryStringString.lower(offModeParams),
+            FfiConverterSequenceTypeUiOffMode.lower(offModes), $0
+        )
+    })
+}
+
+/**
+ * Add a screen of `kind` with a preset's `params` (from `addable_screens`)
+ * at the end of the list, unchecked. The id is minted by the protocol's
+ * `mint_screen_id`, the function the server mints with.
+ */
+public func screensAdded(screens: [UiScreenConfig], kind: String, params: [String: String], offModes: [UiOffMode]) -> UiScreensAdded {
+    return try! FfiConverterTypeUiScreensAdded.lift(try! rustCall {
+        uniffi_app_core_fn_func_screens_added(
+            FfiConverterSequenceTypeUiScreenConfig.lower(screens),
+            FfiConverterString.lower(kind),
+            FfiConverterDictionaryStringString.lower(params),
+            FfiConverterSequenceTypeUiOffMode.lower(offModes), $0
+        )
+    })
+}
+
+/**
+ * Can screens be added, removed and reordered, and the idle timer set? Only
+ * on a server that understands lists; otherwise hide those controls and
+ * show [`crate::strings::update_server_note`].
+ */
+public func screensEditable(screensSupported: Bool) -> Bool {
+    return try! FfiConverterBool.lift(try! rustCall {
+        uniffi_app_core_fn_func_screens_editable(
+            FfiConverterBool.lower(screensSupported), $0
+        )
+    })
+}
+
+/**
+ * The Screens list's footer, where screens can be edited
+ * (`screens_editable`); show `update_server_note` in its place where they
+ * cannot. Promises nothing about the knob — stable boards have no menu.
+ */
+public func screensExplainer() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_screens_explainer($0
+        )
+    })
+}
+
+/**
+ * Shown in place of Add Screen until the server's list of screens has
+ * arrived (`add_screen_note`) — until then there is nothing true to offer.
+ */
+public func screensLoadingNote() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_screens_loading_note($0
+        )
+    })
+}
+
+/**
+ * Remove screen `id` — the server's whole `SetScreens` remove, mirrored:
+ * the list normalized, the board released to Sports (and its wake timer
+ * cleared) when `mode` was the removed screen — `release_to_scores`, never
+ * a quiet override — and the removed screen's timer dropped (protocol
+ * `prune_screen_timers`). Sports and Off cannot be removed. Send
+ * `screens` with `set_screens`.
+ */
+public func screensRemoved(screens: [UiScreenConfig], id: String, mode: String, wakeAt: UInt64?, modeHours: [String: UInt32], offModes: [UiOffMode]) -> UiScreensRemoved {
+    return try! FfiConverterTypeUiScreensRemoved.lift(try! rustCall {
+        uniffi_app_core_fn_func_screens_removed(
+            FfiConverterSequenceTypeUiScreenConfig.lower(screens),
+            FfiConverterString.lower(id),
+            FfiConverterString.lower(mode),
+            FfiConverterOptionUInt64.lower(wakeAt),
+            FfiConverterDictionaryStringUInt32.lower(modeHours),
+            FfiConverterSequenceTypeUiOffMode.lower(offModes), $0
+        )
+    })
+}
+
+/**
+ * Check or uncheck screen `id` for showing when nothing is on (multi-select:
+ * the rest stay as they are). Sports and Off cannot be checked
+ * ([`can_set_idle`]).
+ */
+public func screensWithIdle(screens: [UiScreenConfig], id: String, on: Bool, offModes: [UiOffMode]) -> [UiScreenConfig] {
+    return try! FfiConverterSequenceTypeUiScreenConfig.lift(try! rustCall {
+        uniffi_app_core_fn_func_screens_with_idle(
+            FfiConverterSequenceTypeUiScreenConfig.lower(screens),
+            FfiConverterString.lower(id),
+            FfiConverterBool.lower(on),
+            FfiConverterSequenceTypeUiOffMode.lower(offModes), $0
+        )
+    })
+}
+
+/**
+ * Reorder by ID — the order the user left the movable rows in (Swift's
+ * `onMove` and a Kotlin drag count indices differently; ids do not). Ids it
+ * does not know are ignored, screens it omits keep their relative order
+ * after the named ones, and Sports and Off stay first and second wherever
+ * they were named.
+ */
+public func screensWithOrder(screens: [UiScreenConfig], ids: [String], offModes: [UiOffMode]) -> [UiScreenConfig] {
+    return try! FfiConverterSequenceTypeUiScreenConfig.lift(try! rustCall {
+        uniffi_app_core_fn_func_screens_with_order(
+            FfiConverterSequenceTypeUiScreenConfig.lower(screens),
+            FfiConverterSequenceString.lower(ids),
+            FfiConverterSequenceTypeUiOffMode.lower(offModes), $0
+        )
+    })
+}
+
+/**
+ * Set one PER-SCREEN value (`UiOffModeField.per_screen`) of screen `id`. An
+ * empty value removes the key — the field's default — as the server does; a
+ * value the descriptor would refuse is dropped by the normalize, as the
+ * server's is. Board-wide fields go through `set_off_mode_param` instead.
+ */
+public func screensWithParam(screens: [UiScreenConfig], id: String, key: String, value: String, offModes: [UiOffMode]) -> [UiScreenConfig] {
+    return try! FfiConverterSequenceTypeUiScreenConfig.lift(try! rustCall {
+        uniffi_app_core_fn_func_screens_with_param(
+            FfiConverterSequenceTypeUiScreenConfig.lower(screens),
+            FfiConverterString.lower(id),
+            FfiConverterString.lower(key),
+            FfiConverterString.lower(value),
+            FfiConverterSequenceTypeUiOffMode.lower(offModes), $0
+        )
+    })
+}
+
+/**
+ * The single-select form of [`screens_with_idle`], for a server without
+ * lists ([`idle_single_select`]): checking `id` makes it the ONLY checked
+ * screen; unchecking it leaves none (the board stays dark when idle). That
+ * is all such a server can store — `set_screens` routes it to `SetOffMode`.
+ */
+public func screensWithSoleIdle(screens: [UiScreenConfig], id: String, on: Bool, offModes: [UiOffMode]) -> [UiScreenConfig] {
+    return try! FfiConverterSequenceTypeUiScreenConfig.lift(try! rustCall {
+        uniffi_app_core_fn_func_screens_with_sole_idle(
+            FfiConverterSequenceTypeUiScreenConfig.lower(screens),
+            FfiConverterString.lower(id),
+            FfiConverterBool.lower(on),
+            FfiConverterSequenceTypeUiOffMode.lower(offModes), $0
+        )
+    })
+}
+
+/**
+ * Apply this, never `screens` directly, before `set_screens(screens)`.
+ *
+ * On a server that stores lists, the list itself. On one without lists the
+ * record's `screens` must STAY EMPTY — empty is how every rule here knows
+ * such a server (rows are not removable, the mirrors leave it alone) — and
+ * what changes is `off_mode`, the single idle screen that server stores.
+ * The resolved list then re-synthesizes from it, so the tick still shows.
+ * Nothing at all for an empty list (`set_screens` sends nothing then).
+ */
+public func screensWrite(screensSupported: Bool, screens: [UiScreenConfig]) -> UiScreensWrite {
+    return try! FfiConverterTypeUiScreensWrite.lift(try! rustCall {
+        uniffi_app_core_fn_func_screens_write(
+            FfiConverterBool.lower(screensSupported),
+            FfiConverterSequenceTypeUiScreenConfig.lower(screens), $0
+        )
+    })
+}
+
+/**
  * Which row of a scrolling frame the app's card shows at the top of its
  * window, `elapsed_ms` into the animation: the board's own scroll curve
  * (hold, glide down, hold, glide up, hold, one pass per `dwell_ms`), so the
@@ -6253,6 +8296,29 @@ public func snapBrightness(value: Double) -> UInt8 {
 public func spoilerExplainer() -> String {
     return try! FfiConverterString.lift(try! rustCall {
         uniffi_app_core_fn_func_spoiler_explainer($0
+        )
+    })
+}
+
+/**
+ * Sports' id — the resting mode — for a platform record's default and for
+ * `set_mode` when a control returns the board to Sports. Never compare a
+ * mode against it on the platform; ask [`mode_footer_shown`] or [`ring`].
+ */
+public func sportsId() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_sports_id($0
+        )
+    })
+}
+
+/**
+ * What Sports is called everywhere — the rail, the Screens list, footers.
+ * The protocol's name, which the board's knob also uses (uppercased).
+ */
+public func sportsLabel() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_sports_label($0
         )
     })
 }
@@ -6329,6 +8395,16 @@ public func troubleshootingIntro() -> String {
 }
 
 /**
+ * Shown when `screens_editable` is false: the server predates screen lists.
+ */
+public func updateServerNote() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_update_server_note($0
+        )
+    })
+}
+
+/**
  * The fields to draw, honouring one level of conditional visibility against
  * the RESOLVED value — a condition on a defaulted field works before the
  * user has touched anything.
@@ -6358,16 +8434,34 @@ private var initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if uniffi_app_core_checksum_func_add_screen_label() != 32399 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_add_screen_note() != 12427 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_addable_screen_groups() != 29979 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_addable_screens() != 39792 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_func_ble_contract() != 45310 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_can_add_screen() != 23054 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_can_set_idle() != 34972 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_card_highlight() != 5739 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_func_compute_wake_at() != 32537 {
+    if uniffi_app_core_checksum_func_compute_wake_at() != 31960 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_func_configured_preview() != 38572 {
+    if uniffi_app_core_checksum_func_configured_preview() != 40773 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_current_preview_path() != 7060 {
@@ -6394,10 +8488,16 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_func_dwell_title() != 56098 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_func_effective_mode() != 65057 {
+    if uniffi_app_core_checksum_func_export_footer() != 46710 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_func_fallback_off_modes() != 1849 {
+    if uniffi_app_core_checksum_func_export_sheet_summary() != 64575 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_export_unavailable_note() != 62935 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_fallback_off_modes() != 42889 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_favorite_abbrev() != 22469 {
@@ -6415,13 +8515,67 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_func_group_leagues() != 37891 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_app_core_checksum_func_held_after() != 9162 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_hold_timer_hours() != 55554 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_hold_timer_label() != 8688 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_hold_timer_options() != 58340 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_hold_timer_options_for() != 59911 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_hold_timer_selected() != 19908 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_hold_timer_title() != 61154 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_func_host_port_for_board() != 3292 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_http_base() != 21014 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_app_core_checksum_func_idle_cycle_applies() != 57229 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_idle_cycle_label() != 38869 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_idle_cycle_options() != 36224 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_idle_cycle_selected() != 42194 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_idle_cycle_title() != 13987 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_idle_explainer() != 34075 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_idle_single_select() != 49447 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_idle_toggle_label() != 46689 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_import_empty_message() != 20475 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_import_empty_title() != 46841 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_func_involves_favorite() != 62993 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_keep_label() != 40167 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_leaderboard_depth_options() != 20168 {
@@ -6436,7 +8590,25 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_func_league_prefs() != 47967 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_func_mode_label() != 48403 {
+    if uniffi_app_core_checksum_func_mode_back_prefix() != 37435 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_mode_back_suffix() != 31492 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_mode_footer_shown() != 27396 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_mode_hours_after_set() != 20426 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_mode_label() != 2918 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_mode_power() != 39171 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_mode_until_changed() != 28005 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_name_style_options() != 22961 {
@@ -6445,7 +8617,13 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_func_normalized_pin() != 26085 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_app_core_checksum_func_nothing_to_add_note() != 47465 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_func_off_mode_value() != 49163 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_off_modes_or_fallback() != 46816 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_panel_shows_nothing() != 52572 {
@@ -6454,7 +8632,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_func_parse_networks() != 61308 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_func_pickable_modes() != 3409 {
+    if uniffi_app_core_checksum_func_pickable_modes() != 47105 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_picked_rounds_label() != 32761 {
@@ -6469,6 +8647,18 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_func_provision_steps() != 61375 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_app_core_checksum_func_quiet_footer() != 48178 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_remove_screen_label() != 52806 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_resolved_screen_configs() != 12865 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_ring() != 14010 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_func_rotation_add() != 1110 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6481,6 +8671,48 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_func_rotation_remove() != 58838 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_app_core_checksum_func_screen_cap_note() != 45715 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_screen_label_for() != 12325 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_screen_list() != 23952 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_screen_params() != 7107 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_screens_added() != 44057 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_screens_editable() != 38186 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_screens_explainer() != 1502 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_screens_loading_note() != 61413 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_screens_removed() != 46153 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_screens_with_idle() != 53693 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_screens_with_order() != 8877 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_screens_with_param() != 40135 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_screens_with_sole_idle() != 32989 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_screens_write() != 56760 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_func_scroll_window_offset() != 6953 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6491,6 +8723,12 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_spoiler_explainer() != 7464 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_sports_id() != 45804 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_sports_label() != 28012 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_subscription_summary() != 16059 {
@@ -6509,6 +8747,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_troubleshooting_intro() != 34123 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_update_server_note() != 17079 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_visible_off_mode_fields() != 44653 {
@@ -6592,6 +8833,9 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_method_scoreboardclient_set_game_spoiler() != 7018 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_app_core_checksum_method_scoreboardclient_set_idle_cycle() != 1139 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_method_scoreboardclient_set_league_data_source() != 1965 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -6619,16 +8863,16 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_method_scoreboardclient_set_listener() != 33592 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_method_scoreboardclient_set_mode() != 28226 {
+    if uniffi_app_core_checksum_method_scoreboardclient_set_mode() != 37612 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_method_scoreboardclient_set_mode_hours() != 20109 {
+    if uniffi_app_core_checksum_method_scoreboardclient_set_mode_hours() != 49719 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_off_mode() != 43268 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_method_scoreboardclient_set_off_mode_param() != 36797 {
+    if uniffi_app_core_checksum_method_scoreboardclient_set_off_mode_param() != 5677 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_power() != 36256 {
@@ -6638,6 +8882,9 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_quiet_hours() != 15526 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_method_scoreboardclient_set_screens() != 16370 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_method_scoreboardclient_set_sleep_hours() != 40272 {

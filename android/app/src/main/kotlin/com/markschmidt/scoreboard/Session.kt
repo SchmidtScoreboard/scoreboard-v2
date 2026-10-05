@@ -8,6 +8,7 @@ import uniffi.app_core.ScoreboardClient
 import uniffi.app_core.UiBoardConfig
 import uniffi.app_core.UiGame
 import uniffi.app_core.UiOffMode
+import uniffi.app_core.UiScreenConfig
 import uniffi.app_core.UiSport
 
 /**
@@ -109,23 +110,35 @@ class Session(context: Context) : ClientListener {
         _state.value = _state.value.copy(selected = boardId)
     }
 
-    fun setMode(boardId: String, mode: String) {
+    /** Hold screen `id` (an instance of `kind`, both from its `UiScreen`).
+     *  The power twin and the wake timer are the CORE's rules for a pick. */
+    fun setMode(boardId: String, id: String, kind: String) {
         mutate(boardId) { cfg ->
             cfg.copy(
-                mode = mode,
-                power = mode != "off",
+                mode = id,
+                power = uniffi.app_core.modePower(id),
                 wakeAt = uniffi.app_core.computeWakeAt(
-                    mode, cfg.modeHours, cfg.sleepHours,
+                    id, kind, cfg.modeHours, cfg.sleepHours,
                     System.currentTimeMillis().toULong() / 1000u,
                 ),
             )
         }
-        client.setMode(boardId, mode)
+        client.setMode(boardId, id)
     }
 
-    fun setModeHours(boardId: String, mode: String, hours: UInt) {
-        mutate(boardId) { it.copy(modeHours = it.modeHours + (mode to hours)) }
-        client.setModeHours(boardId, mode, hours)
+    /** A screen's hold timer, keyed by its INSTANCE id. */
+    fun setModeHours(boardId: String, id: String, hours: UInt) {
+        // The core's mirror of the server: a first instance's timer pins
+        // the siblings still inheriting it.
+        val modes = _state.value.offModes
+        mutate(boardId) {
+            it.copy(
+                modeHours = uniffi.app_core.modeHoursAfterSet(
+                    id, hours, resolvedScreens(it, modes), it.modeHours, it.sleepHours,
+                ),
+            )
+        }
+        client.setModeHours(boardId, id, hours)
     }
 
     fun setBrightness(boardId: String, level: UByte) {
@@ -143,14 +156,95 @@ class Session(context: Context) : ClientListener {
         client.rename(boardId, name)
     }
 
-    fun setOffMode(boardId: String, id: String) {
-        mutate(boardId) { it.copy(offMode = id) }
-        client.setOffMode(boardId, id)
-    }
-
+    /** A BOARD-WIDE descriptor value (location, 24-hour). Per-screen values
+     *  go through [setScreenParam]. */
     fun setOffModeParam(boardId: String, key: String, value: String) {
         mutate(boardId) { it.copy(offModeParams = it.offModeParams + (key to value)) }
         client.setOffModeParam(boardId, key, value)
+    }
+
+    // ---- screens (MAR-117) ----
+    //
+    // Every edit starts from the board's RESOLVED list as it is right now
+    // (never the raw `config.screens`, which is empty on a server without
+    // lists), runs one core mirror, shows the result, and sends the whole
+    // list. The catalog passed is the server's as-is; before it arrives the
+    // core's mirrors read leniently (they treat the fallback the same way).
+
+    /** The list every core screens rule takes; null with no config yet. */
+    private fun currentScreens(boardId: String): List<UiScreenConfig>? {
+        val cfg = _state.value.boards[boardId]?.config ?: return null
+        return resolvedScreens(cfg, _state.value.offModes)
+    }
+
+    private fun editScreens(
+        boardId: String,
+        edit: (List<UiScreenConfig>, List<UiOffMode>) -> List<UiScreenConfig>,
+    ) {
+        val screens = currentScreens(boardId) ?: return
+        setScreens(boardId, edit(screens, _state.value.offModes))
+    }
+
+    private fun setScreens(boardId: String, screens: List<UiScreenConfig>) {
+        // What the server will store: the list, or — on a server without
+        // lists — its single idle screen, leaving `screens` empty.
+        mutate(boardId) {
+            val write = uniffi.app_core.screensWrite(it.screensSupported, screens)
+            it.copy(screens = write.screens ?: it.screens, offMode = write.offMode ?: it.offMode)
+        }
+        client.setScreens(boardId, screens)
+    }
+
+    /** One drag (or one Move up/down), committed once: the movable rows'
+     *  ids in their new order. */
+    fun setScreenOrder(boardId: String, ids: List<String>) =
+        editScreens(boardId) { screens, modes -> uniffi.app_core.screensWithOrder(screens, ids, modes) }
+
+    /** The "Show when nothing is on" check — multi-select, or the single
+     *  select a server without lists can store; the core says which. */
+    fun setScreenIdle(boardId: String, id: String, on: Boolean) {
+        val single = uniffi.app_core.idleSingleSelect(
+            _state.value.boards[boardId]?.config?.screensSupported ?: return,
+        )
+        editScreens(boardId) { screens, modes ->
+            if (single) uniffi.app_core.screensWithSoleIdle(screens, id, on, modes)
+            else uniffi.app_core.screensWithIdle(screens, id, on, modes)
+        }
+    }
+
+    /** A PER-SCREEN descriptor value (`UiOffModeField.perScreen`). */
+    fun setScreenParam(boardId: String, id: String, key: String, value: String) =
+        editScreens(boardId) { screens, modes -> uniffi.app_core.screensWithParam(screens, id, key, value, modes) }
+
+    /** Append a preset. An empty id means the new screen did not survive
+     *  (full, or a kind the server does not offer) — nothing to send. */
+    fun addScreen(boardId: String, kind: String, params: Map<String, String>) {
+        val screens = currentScreens(boardId) ?: return
+        val added = uniffi.app_core.screensAdded(screens, kind, params, _state.value.offModes)
+        if (added.id.isEmpty()) return
+        setScreens(boardId, added.screens)
+    }
+
+    /** Remove screen `id` — the core's whole mirror of the server's remove
+     *  (a release when it was held, its timer pruned), applied in one copy. */
+    fun removeScreen(boardId: String, id: String) {
+        val cfg = _state.value.boards[boardId]?.config ?: return
+        val screens = resolvedScreens(cfg, _state.value.offModes)
+        val r = uniffi.app_core.screensRemoved(
+            screens, id, cfg.mode, cfg.wakeAt, cfg.modeHours, _state.value.offModes,
+        )
+        mutate(boardId) {
+            it.copy(
+                screens = r.screens, mode = r.mode, power = r.power,
+                wakeAt = r.wakeAt, modeHours = r.modeHours,
+            )
+        }
+        client.setScreens(boardId, r.screens)
+    }
+
+    fun setIdleCycle(boardId: String, secs: UInt) {
+        mutate(boardId) { it.copy(idleCycleSecs = secs) }
+        client.setIdleCycle(boardId, secs)
     }
 
     fun setQuietHours(boardId: String, startMin: UShort?, endMin: UShort?) {
@@ -223,7 +317,9 @@ class Session(context: Context) : ClientListener {
 
     /** "Keep": hold the current mode until changed — clears the wake timer. */
     fun keepMode(boardId: String) {
-        mutate(boardId) { it.apply { wakeAt = null } }
+        // A COPY: the generated record's fields are `var`, and editing it in
+        // place leaves an equal state the StateFlow drops.
+        mutate(boardId) { it.copy(wakeAt = null) }
         client.clearWakeTimer(boardId)
     }
 
@@ -397,3 +493,9 @@ class Session(context: Context) : ClientListener {
         _state.value = _state.value.copy(firmware = images)
     }
 }
+
+/** The board's screen list as the server runs it — the input every core
+ *  screens rule takes (MAR-117 B0). Computed from the raw fields so it is
+ *  right against a server without lists too. */
+fun resolvedScreens(cfg: UiBoardConfig, offModes: List<UiOffMode>): List<UiScreenConfig> =
+    uniffi.app_core.resolvedScreenConfigs(cfg.screens, cfg.offMode, cfg.offModeParams, offModes)

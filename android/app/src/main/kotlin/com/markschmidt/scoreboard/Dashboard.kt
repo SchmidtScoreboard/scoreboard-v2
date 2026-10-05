@@ -1,5 +1,7 @@
 package com.markschmidt.scoreboard
 
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -187,7 +189,7 @@ private fun ControlsSection(
                         tint = MaterialTheme.colorScheme.outline)
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        "Quiet hours — the screen is off until ${clockText(cfg.quietEndMin ?: 0u)}.",
+                        quietFooter(clockText(cfg.quietEndMin ?: 0u)),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.outline,
                     )
@@ -197,11 +199,15 @@ private fun ControlsSection(
     }
 }
 
-/** "{Mode} — back to scores in {n}." with Keep, or "{Mode} until changed." */
+/** "{Screen} — back to Sports in {n}." with Keep, or "{Screen} until
+ *  changed." — the sentences, the label and whether it shows at all are the
+ *  core's; only the duration is formatted here. */
 @Composable
 private fun ModeFooter(session: Session, boardId: String, cfg: UiBoardConfig, state: Session.AppState) {
-    if (cfg.mode == "scores") return
-    val label = remember(cfg.mode, state.offModes) { modeLabel(cfg.mode, state.offModes) }
+    if (!modeFooterShown(cfg.mode)) return
+    val label = remember(cfg.mode, cfg.screens, cfg.offMode, cfg.offModeParams, state.offModes) {
+        screenLabelFor(cfg.mode, resolvedScreens(cfg, state.offModes), state.offModes)
+    }
     val wake = cfg.wakeAt?.toLong()
     // Re-evaluate each minute so the countdown text stays honest.
     var now by remember { mutableStateOf(System.currentTimeMillis() / 1000) }
@@ -217,15 +223,15 @@ private fun ModeFooter(session: Session, boardId: String, cfg: UiBoardConfig, st
             val span = if (mins >= 120) "${(mins + 30) / 60} hours"
             else if (mins >= 60) "1 hour" else "$mins min"
             Text(
-                "$label — back to scores in $span.",
+                modeBackPrefix(label) + span + modeBackSuffix(),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.outline,
                 modifier = Modifier.weight(1f),
             )
-            TextButton(onClick = { session.keepMode(boardId) }) { Text("Keep") }
+            TextButton(onClick = { session.keepMode(boardId) }) { Text(keepLabel()) }
         } else {
             Text(
-                "$label until changed.",
+                modeUntilChanged(label),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.outline,
             )
@@ -257,46 +263,59 @@ private fun BrightnessRow(session: Session, boardId: String, brightness: UByte) 
 @Composable
 private fun ModePicker(session: Session, state: Session.AppState, boardId: String, cfg: UiBoardConfig) {
     val board = state.boards[boardId] ?: return
-    val modes = remember(state.offModes) { pickableModes(state.offModes) }
-    if (modes.isEmpty()) return
+    // The board's own screens, in its order — Sports, Off, then the user's —
+    // remembered on the config fields they come from as well as the catalog,
+    // so an add, remove or reorder redraws the rail at once.
+    val tiles = remember(cfg.screens, cfg.offMode, cfg.offModeParams, state.offModes) {
+        screenList(cfg.screens, cfg.offMode, cfg.offModeParams, state.offModes)
+    }
+    val screens = remember(cfg.screens, cfg.offMode, cfg.offModeParams, state.offModes) {
+        resolvedScreens(cfg, state.offModes)
+    }
+    if (tiles.isEmpty()) return
     // Upcoming/bumped entries are not on the panel — the core decides.
     val nothingShowing = panelShowsNothing(if (board.stateReceived) board.nowShowing else null)
-    val selected = remember(cfg.mode, board.quietActive, nothingShowing, cfg.offMode) {
-        effectiveMode(cfg.mode, board.quietActive, nothingShowing, cfg.offMode)
+    // Several tiles wear the ring while the board idles through several
+    // screens: one of them is on the glass and the board never says which.
+    val ringed = remember(cfg.mode, board.quietActive, nothingShowing, screens) {
+        ring(cfg.mode, board.quietActive, nothingShowing, screens)
     }
     // Opens scrolled to the SELECTED tile — a rail whose selection sits
     // off-screen reads as "nothing is selected" (MAR-110). On entry and
     // whenever the selection moves (state arriving after first composition,
-    // or the timer returning the board to scores); between moves the user
+    // or the timer returning the board to Sports); between moves the user
     // owns the scroll position. Keyed on the TILES too: on a cold start the
-    // cached board state lands before the server's screen list, so the rail
-    // first composes as Scores/Off alone, the scroll to Weather finds no
-    // such tile, and when Clock/Weather arrive the selection is unchanged —
-    // nothing re-scrolled, and the ring sat off-screen.
+    // cached board state can land before the list it rings into, so the
+    // first scroll finds no such tile, and nothing would re-scroll when the
+    // tiles arrive with the selection unchanged.
     val listState = rememberLazyListState()
-    LaunchedEffect(selected, modes) {
-        val i = modes.indexOfFirst { it.id == selected }
-        // Every tile, the first included: a rail moved off Scores must come
-        // back when the selection does. (Skipping index 0 stranded the rail
-        // on the idle tile it was sent to before the board's state landed.)
+    val tileIds = tiles.map { it.id }
+    LaunchedEffect(ringed.scrollTarget, tileIds) {
+        val i = tileIds.indexOf(ringed.scrollTarget)
+        // Every tile, the first included: a rail moved off Sports must come
+        // back when the selection does.
         if (i >= 0) listState.scrollToItem(i)
     }
     LazyRow(state = listState, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        items(modes, key = { it.id }) { m ->
-            val path = remember(m.path, cfg.offModeParams) {
-                m.path?.let { configuredPreview(it, cfg.offModeParams) }
-            }
-            val bmp = rememberPreview(path?.let { "${session.httpBase}$it" })
+        // Keyed by INSTANCE id: two Weather screens share a kind, and a
+        // duplicate key crashes the list.
+        items(tiles, key = { it.id }) { t ->
+            val bmp = rememberPreview(t.preview?.let { "${session.httpBase}$it" })
+            val on = t.id in ringed.ids
             Column(
-                Modifier.width(128.dp).clickable { session.setMode(boardId, m.id) },
+                // Every ringed tile reads as selected, as on iOS: while the
+                // idle rotation runs, each checked screen is on the glass in turn.
+                Modifier.width(128.dp)
+                    .semantics { selected = on }
+                    .clickable { session.setMode(boardId, t.id, t.kind) },
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                LedFrame(bmp, selected = m.id == selected)
+                LedFrame(bmp, selected = on)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    m.label,
+                    t.label,
                     style = MaterialTheme.typography.labelMedium,
-                    color = if (m.id == selected) MaterialTheme.colorScheme.primary
+                    color = if (on) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.outline,
                 )
             }

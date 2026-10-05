@@ -48,4 +48,6 @@ dependencies {
     implementation(libs.compose.ui)
     implementation(libs.security.crypto)
     implementation(libs.coroutines.core)
+    // Settings › Screens: drag to reorder (owner decision, MAR-117 Q4).
+    implementation(libs.reorderable)
 }

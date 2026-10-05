@@ -128,6 +128,11 @@ struct BoardInfo {
     /// is unknown, not empty — and an empty panel would put the picker on
     /// the idle screen (the core's `panelShowsNothing` takes nil for this).
     var stateReceived = false
+    /// Whether this board's config has arrived. Until it has, every field
+    /// below is a placeholder and the core's list is its synthesized
+    /// default — an edit built on that would replace the board's real
+    /// screens, so the screens edits wait for it (as Android's do).
+    var configReceived = false
     var brightness: Double = 80
     var power = true
     var favorites: [String: [String]] = [:]      // sportId -> team ids, USER ORDER
@@ -135,12 +140,30 @@ struct BoardInfo {
     var extraGameIds: Set<String> = []
     var excludedGameIds: Set<String> = []
     var focusedGameId: String?
-    var offMode: String = "clock"
+    /// The legacy single idle screen and the board-wide off-mode values. An
+    /// old server's list is synthesized from these by the core
+    /// (`resolvedScreenConfigs`); empty until the config lands — the app never
+    /// spells a default mode id.
+    var offMode: String = ""
     var offModeParams: [String: String] = [:]
-    /// What the board is DOING: "scores", "off", or an off-mode id held
-    /// persistently. Open string, mirroring the server.
-    var mode: String = "scores"
-    /// Per-mode timer hours (0 = until changed; missing = sleepHours).
+    /// What the board is DOING: Sports, Off, or the id of the screen INSTANCE
+    /// held persistently. Open string, mirroring the server. "" until the
+    /// config arrives — the core reads that as Sports (`ring`,
+    /// `modeFooterShown`).
+    var mode: String = ""
+    /// The board's screen list, VERBATIM from the server (MAR-117). Empty
+    /// means a server without lists — never read it raw: every list rule
+    /// takes `BoardViewModel.resolvedScreens`.
+    var screens: [UiScreenConfig] = []
+    /// Does this board's server understand screen lists? Gates add, remove,
+    /// reorder and the idle timer through the core (`screensEditable`,
+    /// `idleSingleSelect`).
+    var screensSupported = false
+    /// Seconds each checked screen holds the panel while the board idles
+    /// through two or more (snapped by the core for display).
+    var idleCycleSecs: UInt32 = 0
+    /// Per-screen hold timer hours, keyed by instance id (0 = until changed;
+    /// missing = the kind's, then sleepHours — `holdTimerHours`).
     var modeHours: [String: UInt32] = [:]
     var quietStartMin: UInt16? = nil
     var quietEndMin: UInt16? = nil
@@ -219,16 +242,13 @@ final class BoardViewModel: ObservableObject {
     func applyCatalog(_ server: String, _ list: [UiSport]) { sportsByServer[server] = list }
     func applyOffModes(_ server: String, _ list: [UiOffMode]) { offModesByServer[server] = list }
 
-    /// The selected board's server's off modes. The fallback below is the ONLY
-    /// place this app names a built-in mode id, and it is a constant, not a
-    /// dispatch: it covers a server too old to declare any, and the moment
-    /// before the first catalog lands. Anything that branches on an id beyond
-    /// this point gives away the whole point of declaring them — a forked
-    /// server adding a mode with no app release.
+    /// The selected board's server's off modes, or the CORE's fallback for a
+    /// server too old to declare any and the moment before the first catalog
+    /// lands. This app names no mode id at all: anything that branched on one
+    /// would give away the whole point of declaring them — a forked server
+    /// adding a mode with no app release.
     var offModes: [UiOffMode] {
-        let declared = offModesByServer[serverURL(of: selectedBoardId)] ?? []
-        guard declared.isEmpty else { return declared }
-        return fallbackOffModes()
+        offModesOrFallback(declared: offModesByServer[serverURL(of: selectedBoardId)] ?? [])
     }
     func applyGames(_ server: String, _ games: [UiGame]) { liveGamesByServer[server] = games }
     /// The firmware menu the server hosts (reply to `listFirmware`) — global to
@@ -628,29 +648,39 @@ final class BoardViewModel: ObservableObject {
     }
 
     // ---- controls (operate on the selected board) ----
-    /// Put the board in a mode. The optimistic mirror runs the same timer rule
-    /// as the server (`apply_mode`): non-scores modes arm their configured
-    /// hours, scores clears the timer. The server's push confirms.
-    func setMode(_ mode: String) {
+    /// Put the board in a mode: Sports, Off, or a screen instance. The
+    /// optimistic mirror is the core's: `modePower` for the power twin and
+    /// `computeWakeAt` for the server's `apply_mode` timer rule (fallback
+    /// chain, zero, and the 72h clamp all machine-checked there). The server's
+    /// push confirms.
+    func setMode(_ screen: UiScreen) {
         guard let id = selectedBoardId else { return }
+        let mode = screen.id
+        // The instance's kind feeds the hold-timer chain (own → kind's →
+        // sleepHours).
+        let kind = screen.kind
         mutate(id) {
             $0.mode = mode
-            $0.power = mode != "off"
-            // The timer rule is the core's mirror of the server's apply_mode —
-            // fallback, zero, and the 72h clamp all machine-checked there.
+            $0.power = modePower(mode: mode)
             $0.wakeAt = computeWakeAt(
-                mode: mode, modeHours: $0.modeHours, sleepHours: $0.sleepHours,
+                id: mode, kind: kind, modeHours: $0.modeHours, sleepHours: $0.sleepHours,
                 nowUnix: UInt64(Date().timeIntervalSince1970)
             )
         }
         client?.setMode(boardId: id, mode: mode)
     }
 
-    /// Configure a mode's timer, in hours. 0 = until changed.
-    func setModeHours(_ mode: String, _ hours: UInt32) {
+    /// Configure a screen's hold timer, in hours, keyed by its INSTANCE id.
+    /// 0 = until changed.
+    func setModeHours(_ screenId: String, _ hours: UInt32) {
         guard let id = selectedBoardId else { return }
-        mutate(id) { $0.modeHours[mode] = hours }
-        client?.setModeHours(boardId: id, mode: mode, hours: hours)
+        // The core's mirror of the server: a first instance's timer pins
+        // the siblings still inheriting it.
+        let screens = resolvedScreens
+        mutate(id) {
+            $0.modeHours = modeHoursAfterSet(id: screenId, hours: hours, screens: screens, modeHours: $0.modeHours, sleepHours: $0.sleepHours)
+        }
+        client?.setModeHours(boardId: id, mode: screenId, hours: hours)
     }
 
     /// Drop the running timer: the current mode holds until changed.
@@ -660,29 +690,133 @@ final class BoardViewModel: ObservableObject {
         client?.clearWakeTimer(boardId: id)
     }
 
-    /// Tiles, configured previews, the follow-the-glass ring, and labels all
-    /// come from the CORE now — the same functions Android reads, so the two
-    /// pickers cannot drift.
-    var pickableModes: [UiPickableMode] {
-        ScoreboardApp.pickableModes(offModes: offModes).map {
-            UiPickableMode(
-                id: $0.id, label: $0.label,
-                path: configuredPreview(path: $0.path, params: current.offModeParams)
-            )
-        }
-    }
+    // ---- screens (MAR-117) ----
+    //
+    // Every list rule is the CORE's — the same functions Android calls — and
+    // every one of them takes `resolvedScreens`, never the raw
+    // `current.screens`, which is EMPTY on a server without lists.
 
-    var effectiveMode: String {
-        ScoreboardApp.effectiveMode(
-            mode: current.mode,
-            quietActive: current.quietActive,
-            nowShowingEmpty: ScoreboardApp.panelShowsNothing(nowShowing: current.stateReceived ? nowShowing : nil),
-            offMode: current.offMode
+    /// The board's screen list to edit and judge by: the server's, or the one
+    /// an old server is running, synthesized from its legacy fields.
+    var resolvedScreens: [UiScreenConfig] {
+        resolvedScreenConfigs(
+            screens: current.screens, offMode: current.offMode,
+            offModeParams: current.offModeParams, offModes: offModes
         )
     }
 
-    func modeLabel(_ id: String) -> String {
-        ScoreboardApp.modeLabel(id: id, offModes: offModes)
+    /// Every row to draw, in the board's order: Sports, Off, then the user's
+    /// screens, each with its label, preview and flags.
+    var screenRows: [UiScreen] {
+        screenList(
+            screens: current.screens, offMode: current.offMode,
+            offModeParams: current.offModeParams, offModes: offModes
+        )
+    }
+
+    /// Which rail tiles wear the ring (several while the idle rotation runs)
+    /// and the one MAR-110 scrolls to.
+    var screenRing: UiRing {
+        ring(
+            mode: current.mode,
+            quietActive: current.quietActive,
+            panelShowsNothing: panelShowsNothing(nowShowing: current.stateReceived ? nowShowing : nil),
+            screens: resolvedScreens
+        )
+    }
+
+    /// A screen or held mode's label — distinct across the list.
+    func screenLabel(_ id: String) -> String {
+        screenLabelFor(id: id, screens: resolvedScreens, offModes: offModes)
+    }
+
+    /// The params screen `id` RENDERS with (the server's layering of its own
+    /// values over the board-wide ones) — what its page reads.
+    func paramsFor(screen id: String) -> [String: String] {
+        screenParams(id: id, screens: resolvedScreens, offModeParams: current.offModeParams, offModes: offModes)
+    }
+
+    /// The hold timer screen `s` runs when picked, in hours.
+    func holdHours(_ s: UiScreen) -> UInt32 {
+        holdTimerHours(id: s.id, kind: s.kind, modeHours: current.modeHours, sleepHours: current.sleepHours)
+    }
+
+    var screensAreEditable: Bool { screensEditable(screensSupported: current.screensSupported) }
+
+    /// Save a whole list built by a core mirror: optimistic, then ONE
+    /// command. The client routes it to the legacy commands for a server
+    /// without lists, and sends nothing for a list that cannot be a board's.
+    private func commitScreens(_ list: [UiScreenConfig]) {
+        guard let id = selectedBoardId, current.configReceived else { return }
+        // What the server will store: the list, or — on a server without
+        // lists — its single idle screen, leaving `screens` empty.
+        let write = screensWrite(screensSupported: current.screensSupported, screens: list)
+        mutate(id) {
+            if let screens = write.screens { $0.screens = screens }
+            if let offMode = write.offMode { $0.offMode = offMode }
+        }
+        client?.setScreens(boardId: id, screens: list)
+    }
+
+    func addScreen(_ preset: UiAddableScreen) {
+        let added = screensAdded(screens: resolvedScreens, kind: preset.kind, params: preset.params, offModes: offModes)
+        // An empty id: the list was full or the server does not offer the
+        // kind — the server would refuse it too.
+        guard !added.id.isEmpty else { return }
+        commitScreens(added.screens)
+    }
+
+    /// Remove a screen — the server's whole remove, mirrored by the core: the
+    /// list, the release to Sports when it was the held screen, and the
+    /// pruned timer, applied in one copy.
+    func removeScreen(_ screenId: String) {
+        guard let id = selectedBoardId, current.configReceived else { return }
+        let r = screensRemoved(
+            screens: resolvedScreens, id: screenId, mode: current.mode,
+            wakeAt: current.wakeAt, modeHours: current.modeHours, offModes: offModes
+        )
+        mutate(id) {
+            $0.screens = r.screens
+            $0.mode = r.mode
+            $0.power = r.power
+            $0.wakeAt = r.wakeAt
+            $0.modeHours = r.modeHours
+        }
+        client?.setScreens(boardId: id, screens: r.screens)
+    }
+
+    /// One reorder gesture, committed once, by ID (the core's mirror; Swift's
+    /// `toOffset` is a pre-removal index that Kotlin does not share).
+    func orderScreens(_ ids: [String]) {
+        commitScreens(screensWithOrder(screens: resolvedScreens, ids: ids, offModes: offModes))
+    }
+
+    /// Check or uncheck a screen for showing when nothing is on —
+    /// single-select against a server that stores only one.
+    func setScreenIdle(_ screenId: String, _ on: Bool) {
+        let list = idleSingleSelect(screensSupported: current.screensSupported)
+            ? screensWithSoleIdle(screens: resolvedScreens, id: screenId, on: on, offModes: offModes)
+            : screensWithIdle(screens: resolvedScreens, id: screenId, on: on, offModes: offModes)
+        commitScreens(list)
+    }
+
+    /// Write one field on screen `screenId`'s page: a per-screen field (a
+    /// layout, a style) into that screen's own params; a board-wide one (a
+    /// location, 24-hour time) through the unchanged board command.
+    func setScreenField(_ screenId: String, _ field: UiOffModeField, _ value: String) {
+        if field.perScreen {
+            commitScreens(screensWithParam(
+                screens: resolvedScreens, id: screenId, key: field.key, value: value, offModes: offModes
+            ))
+        } else {
+            setOffModeParam(field.key, value)
+        }
+    }
+
+    func setIdleCycle(_ secs: UInt32) {
+        guard let id = selectedBoardId else { return }
+        mutate(id) { $0.idleCycleSecs = secs }
+        client?.setIdleCycle(boardId: id, secs: secs)
     }
 
     /// The knob's detents, from the core — the slider, the physical dial, and
@@ -1206,9 +1340,13 @@ final class BoardViewModel: ObservableObject {
             $0.name = c.name
             $0.favorites = fav
             $0.championship = champ
+            $0.configReceived = true
             $0.offMode = c.offMode
             $0.offModeParams = c.offModeParams
             $0.mode = c.mode
+            $0.screens = c.screens
+            $0.screensSupported = c.screensSupported
+            $0.idleCycleSecs = c.idleCycleSecs
             $0.modeHours = c.modeHours
             $0.quietStartMin = c.quietStartMin
             $0.quietEndMin = c.quietEndMin
@@ -1238,12 +1376,7 @@ final class BoardViewModel: ObservableObject {
         // travels must never re-zone the living-room clock.
     }
 
-    // ---- off behavior + sleep duration (selected board; optimistic) ----
-    func setOffMode(_ id: String) {
-        guard let bid = selectedBoardId else { return }
-        mutate(bid) { $0.offMode = id }
-        client?.setOffMode(boardId: bid, id: id)
-    }
+    // ---- quiet hours + board-wide off-mode values (selected board; optimistic) ----
     func applyQuietActive(_ boardId: String, _ active: Bool) {
         mutate(boardId) { $0.quietActive = active }
     }
@@ -1266,32 +1399,26 @@ final class BoardViewModel: ObservableObject {
         client?.setQuietAllowEvents(boardId: id, on: on)
     }
 
-    /// Stored value, else the field's declared default, else empty.
+    /// Stored value, else the field's declared default, else empty — read
+    /// against a screen's RENDER params (`paramsFor(screen:)`).
     ///
     /// MUST match `OffModeDescriptor::value` in the protocol crate — the server
     /// renders from that one. If these disagreed, the panel and the phone would
     /// show different things with nothing to point at.
-    func offModeValue(_ mode: UiOffMode, _ key: String) -> String {
-        ScoreboardApp.offModeValue(mode: mode, key: key, params: current.offModeParams)
+    func offModeValue(_ mode: UiOffMode, _ key: String, _ params: [String: String]) -> String {
+        ScoreboardApp.offModeValue(mode: mode, key: key, params: params)
     }
 
     /// The fields to draw, honouring one level of conditional visibility
     /// against the RESOLVED value — so a condition on a defaulted field works
     /// before the user has touched anything.
-    func visibleOffModeFields(_ mode: UiOffMode) -> [UiOffModeField] {
-        ScoreboardApp.visibleOffModeFields(mode: mode, params: current.offModeParams)
+    func visibleOffModeFields(_ mode: UiOffMode, _ params: [String: String]) -> [UiOffModeField] {
+        ScoreboardApp.visibleOffModeFields(mode: mode, params: params)
     }
 
-    /// The preview to show for a mode: the selected choice's, if any choice
-    /// field declares one, else the mode's own.
-    ///
-    /// Every path here comes from the DESCRIPTOR. The app never builds a
-    /// preview URL out of an id or a value, because the moment it does, a
-    /// forked server's mode stops previewing correctly.
-    func currentPreviewPath(_ mode: UiOffMode) -> String? {
-        ScoreboardApp.currentPreviewPath(mode: mode, params: current.offModeParams)
-    }
-
+    /// A BOARD-WIDE off-mode value (a field whose `perScreen` is false: a
+    /// location, 24-hour time), shared by every screen of its kind. Per-screen
+    /// values go through `setScreenField`.
     func setOffModeParam(_ key: String, _ value: String) {
         guard let bid = selectedBoardId else { return }
         mutate(bid) { $0.offModeParams[key] = value }
@@ -2573,32 +2700,37 @@ struct DashboardView: View {
             }
             // On entry AND whenever the selection moves. On entry alone it
             // aimed at a placeholder: the row appears before the board's
-            // state arrives, when `current` is still the default record
-            // (idle screen Clock, nothing showing), so the rail settled on
-            // Clock and the ring then moved to Weather off-screen with no
-            // second scroll. A mode change later (the timer returning the
-            // board to scores) deserves the same reveal. The TILE LIST is in
-            // the key too: the server's screen list can land after the mode
-            // settles on Weather, and a scroll to a tile that does not exist
-            // yet is dropped — Android hit exactly this on a cold start.
-            .onChange(of: [model.effectiveMode] + model.pickableModes.map(\.id), initial: true) { _, key in
-                // Every tile, the first included: a rail moved off Scores
+            // state arrives, when `current` is still the default record, so
+            // the rail settled on the placeholder's ring and the real one
+            // then moved off-screen with no second scroll. A mode change
+            // later (the timer returning the board to Sports) deserves the
+            // same reveal. The TILE LIST is in the key too: the server's
+            // screen list can land after the mode settles, and a scroll to a
+            // tile that does not exist yet is dropped — Android hit exactly
+            // this on a cold start. The ring may mark several tiles while the
+            // board idles through its checked screens; the core names the
+            // ONE to scroll to, so both platforms land on the same tile.
+            .onChange(of: [model.screenRing.scrollTarget] + model.screenRows.map(\.id), initial: true) { _, key in
+                // Every tile, the first included: a rail moved off Sports
                 // must come back when the selection does. (It used to skip
                 // the first tile, and stranded the rail wherever it last
-                // was — Scores cut off at the card's edge on every open.)
+                // was — Sports cut off at the card's edge on every open.)
                 proxy.scrollTo(key[0], anchor: .center)
             }
         }
     }
 
+    /// One tile per screen INSTANCE in the board's order — keyed by instance
+    /// id, which is unique even when a kind repeats (two Weather screens).
     private var modePickerTiles: some View {
-            HStack(alignment: .top, spacing: 10) {
-                ForEach(model.pickableModes, id: \.id) { m in
-                    let showing = model.effectiveMode == m.id
-                    Button { model.setMode(m.id) } label: {
+            let ringed = Set(model.screenRing.ids)
+            return HStack(alignment: .top, spacing: 10) {
+                ForEach(model.screenRows, id: \.id) { m in
+                    let showing = ringed.contains(m.id)
+                    Button { model.setMode(m) } label: {
                         VStack(spacing: 5) {
                             Group {
-                                if let path = m.path {
+                                if let path = m.preview {
                                     FetchedFrameImage(url: URL(string: "\(model.httpBase)\(path)"))
                                 } else {
                                     Color.black
@@ -2631,7 +2763,7 @@ struct DashboardView: View {
     @ViewBuilder private var quietFooter: some View {
         if model.current.quietActive {
             Label(
-                "Quiet hours — the screen is off until \(Self.clockText(model.current.quietEndMin ?? 0)).",
+                ScoreboardApp.quietFooter(endTime: Self.clockText(model.current.quietEndMin ?? 0)),
                 systemImage: "moon.zzz.fill"
             )
         }
@@ -2647,25 +2779,28 @@ struct DashboardView: View {
         return d.formatted(date: .omitted, time: .shortened)
     }
 
-    /// While a non-scores mode holds the panel: a live countdown to when it
-    /// returns to scores, with an escape hatch to hold the mode indefinitely —
-    /// or, timerless, a note that it stays until changed.
+    /// While a screen other than Sports holds the panel: a live countdown to
+    /// when it returns to Sports, with an escape hatch to hold it
+    /// indefinitely — or, timerless, a note that it stays until changed. The
+    /// sentences and the when-to-show rule are the core's; only the duration
+    /// is formatted here.
     @ViewBuilder private var modeFooter: some View {
-        if model.current.mode != "scores" {
+        if modeFooterShown(mode: model.current.mode) {
+            let label = model.screenLabel(model.current.mode)
             if let w = model.current.wakeAt, TimeInterval(w) > Date().timeIntervalSince1970 {
                 HStack(spacing: 12) {
                     // `.relative` keeps itself accurate ("1 hr, 53 min" … "45 sec").
-                    (Text("\(model.modeLabel(model.current.mode)) — back to scores in ")
+                    (Text(modeBackPrefix(label: label))
                         + Text(Date(timeIntervalSince1970: TimeInterval(w)), style: .relative)
-                        + Text("."))
+                        + Text(modeBackSuffix()))
                     Spacer(minLength: 8)
-                    Button("Keep") { model.keepMode() }
+                    Button(keepLabel()) { model.keepMode() }
                         .font(.footnote.weight(.semibold))
                         .buttonStyle(.plain)
                         .foregroundStyle(.tint)
                 }
             } else {
-                Text("\(model.modeLabel(model.current.mode)) until changed.")
+                Text(modeUntilChanged(label: label))
             }
         }
     }
@@ -2964,7 +3099,7 @@ struct SettingsExportSheet: View {
                     .font(.title3.weight(.semibold))
                 Spacer()
             }
-            Text("League preferences, spoiler rules, brightness, and timing. On the other scoreboard, tap Import settings with this on the clipboard.")
+            Text(exportSheetSummary())
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -5128,6 +5263,8 @@ struct SettingsView: View {
     @State private var showImportEmptyAlert = false
     /// The board-screens guide (also reachable from the offline card's ⓘ).
     @State private var showTroubleshooting = false
+    /// The Add Screen chooser (Screens page).
+    @State private var showAddScreen = false
     /// Which server this sheet's target uses. Corrected from the stored URL in
     /// `onAppear`; the initial value only has to be one the picker can show.
     @State private var preset: ServerPreset = .prod
@@ -5207,9 +5344,9 @@ struct SettingsView: View {
                         dwellRow
                     }
                     Section {
-                        NavigationLink { sleepPage } label: {
+                        NavigationLink { screensPage } label: {
                             HStack {
-                                Label("Screen", systemImage: "moon")
+                                Label("Screens", systemImage: "rectangle.stack")
                                 if model.current.quietActive {
                                     Spacer()
                                     rowBadge("Sleeping now")
@@ -5272,6 +5409,11 @@ struct SettingsView: View {
             // rebuilt on every model push and would take this with it.
             .sheet(isPresented: $showTroubleshooting) {
                 TroubleshootingSheet(httpBase: model.httpBase)
+            }
+            // Add Screen, opened from the Screens page one push deep — on the
+            // stack for the same rebuilt-Section reason.
+            .sheet(isPresented: $showAddScreen) {
+                AddScreenSheet(model: model)
             }
             .toolbar {
                 // ONE button, in every configuration. Every row on this sheet
@@ -5544,72 +5686,159 @@ struct SettingsView: View {
         return UInt16((c.hour ?? 0) * 60 + (c.minute ?? 0))
     }
 
-    /// What the panel shows while the scoreboard is AWAKE with nothing on.
-    ///
-    /// Named "Idle Screen", not "Sleep Screen". Asleep is dark — the server's
-    /// priority 4 returns `dark_manifest` and never reaches the off mode — so
-    /// this setting governs the other case entirely: powered on, nothing live,
-    /// nothing upcoming. It was called "Sleep Screen" for one release and that
-    /// name described the one state it has nothing to do with.
-    ///
-    /// Every row here comes from the SERVER (`model.offModes`) — label,
-    /// subtitle, preview path, and the optional text input all travel in the
-    /// descriptor. Nothing in this view knows what any mode id means, which is
-    /// what lets a forked server add "Stocks" and have this app list it, draw
-    /// its preview, and let someone pick it, with no rebuild.
-    private var offModeSection: some View {
+    // MARK: - Screens (MAR-117)
+    //
+    // The board's screen list: Sports and Off pinned first and second, then
+    // the user's screens in their order. Every row, label, preview, flag and
+    // sentence comes from the CORE over the server's descriptors — nothing
+    // here knows what any screen id or kind means, which is what lets a forked
+    // server add "Stocks" and have this app list it, draw it, and let someone
+    // add it, with no rebuild.
+    //
+    // Named for the AWAKE case: the checked screens are what the panel shows
+    // while powered on with nothing live or upcoming. Asleep is dark — the
+    // server's priority 4 returns `dark_manifest` and never reaches them.
+
+    /// Sports and Off: never moved, removed or checked, so they live in their
+    /// own Section — SwiftUI confines a move to its ForEach, and a row of
+    /// another ForEach can never be dropped above them.
+    private var pinnedScreensSection: some View {
         Section {
-            ForEach(model.offModes, id: \.id) { m in
-                idleScreenRow(m)
+            ForEach(model.screenRows.filter(\.fixed), id: \.id) { s in
+                screenRow(s)
             }
-        } header: {
-            Text("Idle Screen")
         }
     }
 
-    /// One idle screen. The ROW is a NavigationLink into the mode's settings
-    /// page — the fully supported List layout, after a hand-rolled trailing
-    /// link squeezed the label to a one-character column and drew a second
-    /// chevron. The tile-and-label is a plain Button INSIDE the link's label:
-    /// a Button in a link row wins the hit-test over its own frame, so the
-    /// picture selects while the rest of the row (glyph, chevron, whitespace)
-    /// pushes.
-    ///
-    /// Every row gets the page: even "Off" has one now, because its timer
-    /// lives there like every other mode's.
-    private func idleScreenRow(_ m: UiOffMode) -> some View {
-        let selected = model.current.offMode == m.id
-        return NavigationLink {
-            OffModeSettingsView(model: model, mode: m)
-        } label: {
-            HStack(spacing: 14) {
-                Button { model.setOffMode(m.id) } label: {
-                    HStack(spacing: 14) {
-                        Group {
-                            if let path = m.preview {
-                                FetchedFrameImage(url: URL(string: "\(model.httpBase)\(path)"))
-                            } else {
-                                // "Off" has no preview on purpose: an all-black
-                                // PNG cannot be told apart from a failed load.
-                                Color.black
-                            }
+    /// The user's screens, in the board's order. Native drag (long-press)
+    /// reorders and swipe removes, only where the server can store it; each
+    /// gesture commits ONCE, by id, through the core's mirror.
+    private var userScreensSection: some View {
+        let movable = model.screenRows.filter { !$0.fixed }
+        let pinned = model.screenRows.filter(\.fixed).map(\.id)
+        let editable = model.screensAreEditable
+        return Section {
+            ForEach(movable, id: \.id) { s in
+                screenRow(s)
+            }
+            .onMove(perform: editable ? { from, to in
+                var ids = movable.map(\.id)
+                ids.move(fromOffsets: from, toOffset: to)
+                model.orderScreens(pinned + ids)
+            } : nil)
+            .onDelete(perform: editable ? { offsets in
+                for i in offsets where movable[i].removable { model.removeScreen(movable[i].id) }
+            } : nil)
+        } footer: {
+            // On a server without lists only the checkmarks can land, and
+            // they act single-select — the footer says why the rest is gone.
+            Text(editable ? screensExplainer() : updateServerNote())
+        }
+    }
+
+    /// Add Screen, as the same full-width capsule as Add League. Disabled
+    /// with the core's note when the list is full or nothing is left to add.
+    private var addScreenSection: some View {
+        let note = addScreenNote(screens: model.resolvedScreens, offModes: model.offModes)
+        return Section {
+            Button { showAddScreen = true } label: {
+                // `.titleAndIcon` is load-bearing — see `addLeagueButton`.
+                Label(addScreenLabel(), systemImage: "plus")
+                    .labelStyle(.titleAndIcon)
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.capsule)
+            .controlSize(.large)
+            .listRowInsets(EdgeInsets())
+            .listRowBackground(Color.clear)
+            .disabled(note != nil)
+        } footer: {
+            if let note {
+                Text(note)
+            }
+        }
+    }
+
+    /// What the board does with nothing on: the core's sentence for the
+    /// current checkmarks, and the rotation timer while two or more are
+    /// checked (and the server can store it).
+    private var idleSection: some View {
+        Section {
+            Text(idleExplainer(screens: model.screenRows, idleCycleSecs: model.current.idleCycleSecs))
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            if model.screensAreEditable && idleCycleApplies(screens: model.resolvedScreens) {
+                HStack(spacing: 6) {
+                    Text(idleCycleTitle())
+                    Spacer()
+                    // A stored value that is not a preset selects the preset it
+                    // snaps to — the one the board times itself by.
+                    Picker(idleCycleTitle(), selection: Binding(
+                        get: { idleCycleSelected(secs: model.current.idleCycleSecs) },
+                        set: { model.setIdleCycle($0) }
+                    )) {
+                        ForEach(idleCycleOptions(), id: \.secs) { o in
+                            Text(o.label).tag(o.secs)
                         }
-                        .ledPanel(width: 128, height: 64)
-                        .padding(2)
-                        .overlay {
-                            Rectangle()
-                                .strokeBorder(selected ? Color.accentColor : .clear, lineWidth: 2)
-                        }
-                        Text(m.label)
-                            .foregroundStyle(selected ? Color.primary : Color.secondary)
                     }
-                    .contentShape(Rectangle())
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                }
+            }
+        } header: {
+            Text("When nothing is on")
+        }
+    }
+
+    /// One screen: its LED preview, its label, the "show when nothing is on"
+    /// checkmark (not on Sports or Off), and — for every screen with a page —
+    /// the push to it. The checkmark is a plain Button INSIDE the link's
+    /// label: a Button in a link row wins the hit-test over its own frame, so
+    /// the checkmark toggles while the rest of the row pushes.
+    @ViewBuilder
+    private func screenRow(_ s: UiScreen) -> some View {
+        let content = HStack(spacing: 14) {
+            Group {
+                if let path = s.preview {
+                    FetchedFrameImage(url: URL(string: "\(model.httpBase)\(path)"))
+                } else {
+                    // No preview on purpose (Off): an all-black PNG cannot be
+                    // told apart from a failed load.
+                    Color.black
+                }
+            }
+            .ledPanel(width: 96, height: 48)
+            .padding(2)
+            Text(s.label)
+                .foregroundStyle(Color.primary)
+            Spacer(minLength: 8)
+            if !s.fixed {
+                Button { model.setScreenIdle(s.id, !s.idle) } label: {
+                    Image(systemName: s.idle ? "checkmark.circle.fill" : "circle")
+                        .font(.title3)
+                        .foregroundStyle(s.idle ? Color.accentColor : Color.secondary)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                Spacer(minLength: 8)
-                Image(systemName: "slider.horizontal.3")
-                    .foregroundStyle(.secondary)
+                .accessibilityRepresentation {
+                    Toggle(idleToggleLabel(), isOn: Binding(
+                        get: { s.idle },
+                        set: { model.setScreenIdle(s.id, $0) }
+                    ))
+                }
             }
+        }
+        if s.hasSettings {
+            NavigationLink {
+                ScreenSettingsView(model: model, screenId: s.id)
+            } label: {
+                content
+            }
+        } else {
+            content
         }
     }
 
@@ -5710,14 +5939,12 @@ struct SettingsView: View {
         } header: {
             Text("Transfer settings")
         } footer: {
-            Text(model.connected
-                ? "Exports league preferences, spoiler rules, brightness, and timing for another scoreboard."
-                : "Unavailable while disconnected from this scoreboard's server.")
+            Text(model.connected ? exportFooter() : exportUnavailableNote())
         }
-        .alert("Nothing to import", isPresented: $showImportEmptyAlert) {
+        .alert(importEmptyTitle(), isPresented: $showImportEmptyAlert) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text("Copy an export from another scoreboard first (Export settings → Copy), then come back and tap Import settings.")
+            Text(importEmptyMessage())
         }
         .alert(
             model.importOutcome?.error == nil ? "Settings imported" : "Import failed",
@@ -5840,12 +6067,23 @@ struct SettingsView: View {
     // back as a badge on the row that hides it. Burying a live signal is a
     // regression, not a reorganisation.
 
-    @ViewBuilder private var sleepPage: some View {
+    @ViewBuilder private var screensPage: some View {
         Form {
-            offModeSection
+            // Not before the board's config: the list would be the core's
+            // synthesized default, not this board's (Android waits too).
+            if model.current.configReceived {
+                pinnedScreensSection
+                userScreensSection
+                if model.screensAreEditable {
+                    addScreenSection
+                }
+                idleSection
+            } else {
+                Section { ProgressView() }
+            }
             quietHoursSection
         }
-        .navigationTitle("Screen")
+        .navigationTitle("Screens")
         .navigationBarTitleDisplayMode(.inline)
     }
 
@@ -6302,71 +6540,106 @@ struct DebugLogView: View {
     }
 }
 
-/// An off mode's settings, built entirely from what the SERVER declared.
+/// One screen's page: its descriptor's fields, its hold timer, its "show when
+/// nothing is on" toggle, and Remove — built entirely from what the SERVER
+/// declared and the core resolved.
 ///
-/// Nothing in this view knows what any mode or field means. It renders the
-/// kinds it understands, SKIPS the ones it doesn't, and writes values straight
-/// back as strings — which is what lets a forked server ship a mode with its
-/// own settings and have the stock app configure it.
-struct OffModeSettingsView: View {
+/// Looked up LIVE by instance id on every render, never held as a snapshot:
+/// the list changes under it (its own Remove, another phone), and the page
+/// closes itself the moment its screen is gone. Nothing here knows what any
+/// screen, kind or field means; it renders the field kinds it understands,
+/// SKIPS the ones it doesn't, and writes values back as strings — which is
+/// what lets a forked server ship a screen with its own settings.
+struct ScreenSettingsView: View {
     @ObservedObject var model: BoardViewModel
-    let mode: UiOffMode
+    let screenId: String
+    @Environment(\.dismiss) private var dismiss
 
-    /// The timer's key. The idle descriptor for darkness is "blank" (a stable
-    /// id in stored configs and exports) while the PICKABLE dark mode is
-    /// "off" — one darkness, two ids for historical reasons. The timer belongs
-    /// to the pickable mode: writing mode_hours["blank"] would configure a
-    /// timer nothing can ever run.
-    private var timerKey: String {
-        mode.id == "blank" ? "off" : mode.id
+    private var screen: UiScreen? { model.screenRows.first { $0.id == screenId } }
+
+    /// The descriptor whose fields this screen draws, by its kind. Off has
+    /// none, so its page is only the hold timer.
+    private func descriptor(_ s: UiScreen) -> UiOffMode? {
+        model.offModes.first { $0.id == s.kind }
     }
+
+    /// What this screen RENDERS with — read fresh, so a write shows at once.
+    private var params: [String: String] { model.paramsFor(screen: screenId) }
 
     var body: some View {
         Form {
-            ForEach(model.visibleOffModeFields(mode), id: \.key) { field in
-                fieldSection(field)
-            }
-            // The mode's timer, after its look: how long the board holds this
-            // screen when it is PICKED (in Controls or on the knob) before
-            // returning to scores. Lives here because this page is everything
-            // the mode is — one place to answer "what does Clock do?".
-            Section {
-                HStack(spacing: 6) {
-                    Text("Timer")
-                    Spacer()
-                    Picker("Timer", selection: Binding(
-                        get: { model.current.modeHours[timerKey] ?? model.current.sleepHours },
-                        set: { model.setModeHours(timerKey, $0) }
-                    )) {
-                        Text("Until changed").tag(UInt32(0))
-                        ForEach([UInt32(1), 2, 4, 8, 12, 24, 48], id: \.self) { h in
-                            Text(h == 1 ? "1 hour" : "\(h) hours").tag(h)
+            if let s = screen {
+                if let d = descriptor(s) {
+                    ForEach(model.visibleOffModeFields(d, params), id: \.key) { field in
+                        fieldSection(s, d, field)
+                    }
+                }
+                holdTimerSection(s)
+                if canSetIdle(screens: model.resolvedScreens, id: s.id) {
+                    Section {
+                        Toggle(idleToggleLabel(), isOn: Binding(
+                            get: { model.screenRows.first { $0.id == screenId }?.idle ?? false },
+                            set: { model.setScreenIdle(screenId, $0) }
+                        ))
+                    }
+                }
+                if s.removable {
+                    Section {
+                        Button(removeScreenLabel(), role: .destructive) {
+                            model.removeScreen(screenId)
                         }
                     }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
                 }
             }
         }
-        .navigationTitle(mode.label)
+        .navigationTitle(screen?.label ?? "")
         .navigationBarTitleDisplayMode(.inline)
+        // Gone — removed here or from another phone: nothing left to edit.
+        .onChange(of: screen == nil, initial: true) { _, gone in
+            if gone { dismiss() }
+        }
+    }
+
+    /// How long this screen holds the panel when PICKED (in Controls or on
+    /// the knob) before the board goes back to Sports. The rows always
+    /// include the stored value, preset or not, so the menu never shows a
+    /// blank.
+    private func holdTimerSection(_ s: UiScreen) -> some View {
+        let current = model.holdHours(s)
+        return Section {
+            HStack(spacing: 6) {
+                Text(holdTimerTitle())
+                Spacer()
+                Picker(holdTimerTitle(), selection: Binding(
+                    get: { holdTimerSelected(hours: current) },
+                    set: { model.setModeHours(s.id, $0) }
+                )) {
+                    ForEach(holdTimerOptionsFor(current: current), id: \.hours) { o in
+                        Text(o.label).tag(o.hours)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .accessibilityValue(holdTimerLabel(hours: current))
+            }
+        }
     }
 
     @ViewBuilder
-    private func fieldSection(_ f: UiOffModeField) -> some View {
+    private func fieldSection(_ s: UiScreen, _ d: UiOffMode, _ f: UiOffModeField) -> some View {
         switch f.kind {
         case "toggle":
             Section {
                 Toggle(f.label, isOn: Binding(
-                    get: { model.offModeValue(mode, f.key) == "1" },
-                    set: { model.setOffModeParam(f.key, $0 ? "1" : "0") }
+                    get: { model.offModeValue(d, f.key, params) == "1" },
+                    set: { model.setScreenField(s.id, f, $0 ? "1" : "0") }
                 ))
             }
         case "text":
             Section {
                 TextField(f.placeholder, text: Binding(
-                    get: { model.offModeValue(mode, f.key) },
-                    set: { model.setOffModeParam(f.key, String($0.prefix(Int(f.maxLen)))) }
+                    get: { model.offModeValue(d, f.key, params) },
+                    set: { model.setScreenField(s.id, f, String($0.prefix(Int(f.maxLen)))) }
                 ))
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.characters)
@@ -6376,7 +6649,7 @@ struct OffModeSettingsView: View {
         case "choice":
             Section {
                 ForEach(f.options, id: \.value) { opt in
-                    choiceRow(f, opt)
+                    choiceRow(s, d, f, opt)
                 }
             } header: {
                 Text(f.label)
@@ -6384,15 +6657,15 @@ struct OffModeSettingsView: View {
         default:
             // A kind this build has never heard of — a newer or forked server's.
             // Skipped rather than guessed at, and the field's declared default
-            // keeps the mode working meanwhile.
+            // keeps the screen working meanwhile.
             EmptyView()
         }
     }
 
-    private func choiceRow(_ f: UiOffModeField, _ opt: UiOffModeChoice) -> some View {
-        let selected = model.offModeValue(mode, f.key) == opt.value
+    private func choiceRow(_ s: UiScreen, _ d: UiOffMode, _ f: UiOffModeField, _ opt: UiOffModeChoice) -> some View {
+        let selected = model.offModeValue(d, f.key, params) == opt.value
         return Button {
-            model.setOffModeParam(f.key, opt.value)
+            model.setScreenField(s.id, f, opt.value)
         } label: {
             HStack(spacing: 12) {
                 Image(systemName: selected ? "checkmark.circle.fill" : "circle")
@@ -6410,8 +6683,73 @@ struct OffModeSettingsView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+/// The Add Screen chooser: the core's sections (`addableScreenGroups`) — a
+/// heading and description per kind, in catalog order, one entry per layout
+/// or style for a kind that has them, each with its preview.
+/// Choosing one appends it — unchecked — and closes the sheet.
+struct AddScreenSheet: View {
+    @ObservedObject var model: BoardViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    /// The core's sections: heading, description and presets per kind.
+    private var groups: [UiAddableGroup] {
+        addableScreenGroups(screens: model.resolvedScreens, offModes: model.offModes)
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(groups, id: \.kind) { g in
+                    Section {
+                        ForEach(g.screens, id: \.self) { a in
+                            Button {
+                                model.addScreen(a)
+                                dismiss()
+                            } label: {
+                                HStack(spacing: 14) {
+                                    SwiftUI.Group {
+                                        if let path = a.preview {
+                                            FetchedFrameImage(url: URL(string: "\(model.httpBase)\(path)"))
+                                        } else {
+                                            Color.black
+                                        }
+                                    }
+                                    .ledPanel(width: 96, height: 48)
+                                    .padding(2)
+                                    Text(a.label)
+                                        .foregroundStyle(Color.primary)
+                                    Spacer(minLength: 0)
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    } header: {
+                        Text(g.label)
+                    } footer: {
+                        if !g.description.isEmpty {
+                            Text(g.description)
+                        }
+                    }
+                }
+            }
+            .navigationTitle(addScreenLabel())
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
     }
 }
 
 /// The mode id is the descriptor's stable contract, so it is the identity too.
 extension UiOffMode: Identifiable {}
+/// A screen's identity is its INSTANCE id — unique even when a kind repeats.
+extension UiScreen: Identifiable {}
+extension UiScreenConfig: Identifiable {}

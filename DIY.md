@@ -210,9 +210,12 @@ Done — live scores.
 ## Using the board
 
 - **Turn the knob** — brightness.
-- **Tap** — sleep / wake.
-- **Double-tap** — settings menu: version and updates, pairing code, diagnostics
-  (Wi-Fi signal, IP, uptime, free memory), and factory reset.
+- **Tap** — the menu. Your screens are at the top in the order the app lists
+  them: Sports, Off, then any you've added (pick one to show it). Below them
+  are version and updates, pairing code, diagnostics (Wi-Fi signal, IP,
+  uptime, free memory), and factory reset. Double-tap opens the same menu.
+  On firmware older than 2026.8.4, a tap is sleep / wake and a double-tap
+  opens the settings part only.
 - **Hold ~10 seconds** — factory reset from any state, including a board that
   can't connect. Wi-Fi, server, pin, and the board's identity are all erased and
   it returns to Bluetooth setup.
@@ -273,19 +276,23 @@ flags are there too. Most display work never needs a physical board.
 
 ---
 
-## Adding your own idle screen
+## Adding your own screen
 
-What the panel shows while the scoreboard is off — the clock, a blank panel —
-is **declared by your server**, not built into the app. Add one in
+The screens a board can show besides scores (the clock, weather) are
+**declared by your server**, not built into the app. Add one in
 [`crates/server/src/offmode.rs`](crates/server/src/offmode.rs): an entry in
 `off_modes()` describing it, and an arm in `render_off_mode()` that draws it.
 
-That's the whole change. The stock iOS app will list your mode, fetch its
-preview, and let you pick it, because it never learns what any mode id means —
-every string it draws travels in the descriptor. No protocol bump, no app
+That's the whole change. Because the apps never learn what any mode id means,
+they pick it up as is:
+- your screen appears under Settings › Screens › Add Screen, with its preview;
+- people can check it for the idle rotation;
+- it shows up in the board's knob menu.
+
+Every string the apps draw travels in the descriptor. No protocol bump, no app
 rebuild, no firmware release.
 
-Two rules keep that working:
+These rules keep that working:
 
 - **Put every string the row needs in the descriptor** (label, subtitle, the
   input's placeholder). The moment app code reads `if id == "weather"`, forks
@@ -294,14 +301,29 @@ Two rules keep that working:
   `text`, `toggle`, and `choice`, each with a default, and one level of
   `visible_when` so a field can depend on another. `kind` is a string, so an
   app that predates your field type skips it rather than breaking.
+- **Mark a field `per_screen` when it belongs to one copy of the screen**, such
+  as a layout or a style. A board can hold several copies of one screen, and
+  they differ only in their per-screen fields: big weather and a forecast are
+  two Weather screens with different layouts. Every other field (a location,
+  24-hour time) is board-wide, typed once and shared by every copy.
+- **Give each option of a per-screen choice a short `screen_label`** (15
+  characters or fewer: "Forecast", "Word clock"). It names the screen when a
+  board has more than one copy. Without it the app falls back to
+  "Weather · Forecast" and the knob to a shortened form of that.
+- **Render exactly one frame, with 16 colors or fewer.** A screen in the idle
+  rotation shares the board's 24 KB frame cache with every other screen in it.
+  The board keeps its place in the rotation only while the rotation's length
+  holds still, and a frame with more than 16 colors ships uncompressed at about
+  4 KB.
 - **(Superseded) A mode may declare at most one text input** — a ZIP, a list of tickers.
   Anything richer (two fields, a picker, live validation) needs an app change.
   That ceiling is deliberate: a field-type enum would be a closed enum in the
   app's generated bindings, which is the exact thing this design avoids.
 
-Boards never see your mode's id. They receive frames plus a "dark or lit" flag,
-so an old board on an old firmware renders your screen without knowing it
-exists.
+Boards never interpret your mode's id. The knob menu carries screen ids and
+labels as plain strings the board echoes back. Everything else reaches the
+board as frames plus a "dark or lit" flag, so an old board on an old firmware
+renders your screen without knowing it exists.
 
 ## Monitoring and email alerts
 

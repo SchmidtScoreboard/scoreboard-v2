@@ -57,8 +57,10 @@ All curl-able; the app uses the same ones.
   container gets restarted instead of staying up and useless.
 - `GET /offmode/{id}.png` — what an off mode looks like on the panel, rendered
   at a fixed time so the bytes are stable (`max-age=86400`, same rule as
-  `/guide`). Drives the app's "When off" rows. 404 on an id this server does
-  not offer — a wrong picture would misrepresent what the board will do.
+  `/guide`). Drives the screen previews in the apps (Settings › Screens, Add
+  Screen, the Controls rail); a screen's own layout rides as query params.
+  404 on an id this server does not offer — a wrong picture would
+  misrepresent what the board will do.
 - `GET /demo/games` — the synthetic slate as JSON. The whole demo set, on the
   same poll cadence as live data; this is how you learn the `demo-*` ids
   without pairing a board. Not board-scoped (synthetic games carry no spoiler

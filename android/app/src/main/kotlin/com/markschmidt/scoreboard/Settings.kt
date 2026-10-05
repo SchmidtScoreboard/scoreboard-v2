@@ -25,10 +25,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import uniffi.app_core.UiOffMode
-import uniffi.app_core.currentPreviewPath
-import uniffi.app_core.offModeValue
-import uniffi.app_core.visibleOffModeFields
 
 /** Every settings surface. Rules and copy come from the core; the shape of
  *  the screens is Android's own. */
@@ -38,7 +34,7 @@ fun SettingsScreen(session: Session, state: Session.AppState, boardId: String, o
     // System back walks the same path as the arrow: subpage -> root -> out.
     androidx.activity.compose.BackHandler(enabled = page != null) { page = null }
     when (page) {
-        "screen" -> ScreenPage(session, state, boardId) { page = null }
+        "screens" -> ScreensPage(session, state, boardId) { page = null }
         "spoilers" -> SpoilersPage(session, state, boardId) { page = null }
         "updates" -> UpdatesPage(session, state, boardId) { page = null }
         "help" -> TroubleshootingPage(session) { page = null }
@@ -49,7 +45,7 @@ fun SettingsScreen(session: Session, state: Session.AppState, boardId: String, o
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-private fun Bar(title: String, onBack: () -> Unit) {
+internal fun Bar(title: String, onBack: () -> Unit) {
     TopAppBar(
         title = { Text(title) },
         navigationIcon = {
@@ -115,9 +111,9 @@ private fun SettingsRoot(
             item {
                 Spacer(Modifier.height(16.dp))
                 SettingsGroup {
-                    NavRow(Icons.Outlined.DarkMode, "Screen",
+                    NavRow(Icons.Outlined.DarkMode, "Screens",
                         badge = if (board?.quietActive == true) "Sleeping now" to false else null,
-                    ) { onPage("screen") }
+                    ) { onPage("screens") }
                     NavRow(Icons.Outlined.VisibilityOff, "Spoilers") { onPage("spoilers") }
                     NavRow(
                         Icons.Outlined.Downloading, "Updates",
@@ -150,19 +146,19 @@ private fun SettingsRoot(
 
 /** One visual group of rows — Material's stand-in for an iOS Form section. */
 @Composable
-private fun SettingsGroup(content: @Composable ColumnScope.() -> Unit) {
+internal fun SettingsGroup(content: @Composable ColumnScope.() -> Unit) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
     ) { Column(content = content) }
 }
 
 @Composable
-private fun GroupIcon(icon: androidx.compose.ui.graphics.vector.ImageVector) {
+internal fun GroupIcon(icon: androidx.compose.ui.graphics.vector.ImageVector) {
     Icon(icon, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.primary)
 }
 
 @Composable
-private fun groupItemColors() =
+internal fun groupItemColors() =
     ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent)
 
 @Composable
@@ -198,127 +194,7 @@ private fun NavRow(
 }
 
 @Composable
-private fun ScreenPage(session: Session, state: Session.AppState, boardId: String, onBack: () -> Unit) {
-    val cfg = state.boards[boardId]?.config
-    var mode by remember { mutableStateOf<UiOffMode?>(null) }
-    val editing = mode
-    if (editing != null) {
-        OffModePage(session, state, boardId, editing) { mode = null }
-        return
-    }
-    Scaffold(topBar = { Bar("Screen", onBack) }) { pad ->
-        LazyColumn(Modifier.padding(pad).fillMaxSize(), contentPadding = PaddingValues(16.dp)) {
-            item { Header("Idle Screen") }
-            items(state.offModes, key = { it.id }) { m ->
-                val selected = cfg?.offMode == m.id
-                Row(
-                    Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    val path = currentPreviewPath(m, cfg?.offModeParams ?: emptyMap())
-                    Box(Modifier.width(128.dp).clickable { session.setOffMode(boardId, m.id) }) {
-                        LedFrame(rememberPreview(path?.let { session.httpBase + it }), selected = selected)
-                    }
-                    Spacer(Modifier.width(14.dp))
-                    Text(m.label, Modifier.weight(1f))
-                    IconButton(onClick = { mode = m }) { Text("⋯") }
-                }
-            }
-            item {
-                Spacer(Modifier.height(20.dp))
-                Header("Quiet hours")
-                QuietHours(session, state, boardId)
-            }
-        }
-    }
-}
-
-@Composable
-private fun OffModePage(
-    session: Session,
-    state: Session.AppState,
-    boardId: String,
-    mode: UiOffMode,
-    onBack: () -> Unit,
-) {
-    val cfg = state.boards[boardId]?.config
-    val params = cfg?.offModeParams ?: emptyMap()
-    Scaffold(topBar = { Bar(mode.label, onBack) }) { pad ->
-        LazyColumn(Modifier.padding(pad).fillMaxSize(), contentPadding = PaddingValues(16.dp)) {
-            // Only the fields this mode declares, honouring one level of
-            // conditional visibility — the CORE resolves both.
-            items(visibleOffModeFields(mode, params), key = { it.key }) { field ->
-                val value = offModeValue(mode, field.key, params)
-                when (field.kind) {
-                    "toggle" -> ListItem(
-                        headlineContent = { Text(field.label) },
-                        trailingContent = {
-                            Switch(
-                                checked = value == "1",
-                                onCheckedChange = {
-                                    session.setOffModeParam(boardId, field.key, if (it) "1" else "0")
-                                },
-                            )
-                        },
-                    )
-                    "text" -> {
-                        var text by remember(value) { mutableStateOf(value) }
-                        OutlinedTextField(
-                            value = text,
-                            onValueChange = { text = it.take(field.maxLen.toInt()) },
-                            label = { Text(field.label) },
-                            placeholder = { Text(field.placeholder) },
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                        )
-                        LaunchedEffect(text) {
-                            kotlinx.coroutines.delay(600)
-                            if (text != value) session.setOffModeParam(boardId, field.key, text)
-                        }
-                    }
-                    "choice" -> Column {
-                        Header(field.label)
-                        for (opt in field.options) {
-                            Row(
-                                Modifier.fillMaxWidth().clickable {
-                                    session.setOffModeParam(boardId, field.key, opt.value)
-                                }.padding(vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                RadioButton(selected = opt.value == value, onClick = null)
-                                Spacer(Modifier.width(10.dp))
-                                Text(opt.label, Modifier.weight(1f))
-                                opt.preview?.let {
-                                    Box(Modifier.width(110.dp)) {
-                                        LedFrame(rememberPreview(session.httpBase + it))
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            item {
-                Spacer(Modifier.height(16.dp))
-                Header("Timer")
-                // Off's timer is keyed to the PICKABLE mode id: a timer under
-                // "blank" would configure something nothing can run.
-                val key = if (mode.id == "blank") "off" else mode.id
-                val hours = cfg?.modeHours?.get(key) ?: cfg?.sleepHours ?: 24u
-                ChoiceRow(
-                    "Timer",
-                    listOf(0u to "Until changed") + listOf(1u, 2u, 4u, 8u, 12u, 24u, 48u).map {
-                        it to if (it == 1u) "1 hour" else "$it hours"
-                    },
-                    hours,
-                ) { session.setModeHours(boardId, key, it) }
-            }
-        }
-    }
-}
-
-@Composable
-private fun QuietHours(session: Session, state: Session.AppState, boardId: String) {
+internal fun QuietHours(session: Session, state: Session.AppState, boardId: String) {
     val cfg = state.boards[boardId]?.config ?: return
     val on = cfg.quietStartMin != null
     ListItem(
@@ -633,7 +509,7 @@ private fun AdvancedPage(session: Session, state: Session.AppState, boardId: Str
     importAlert?.let { msg ->
         AlertDialog(
             onDismissRequest = { importAlert = null },
-            title = { Text("Nothing to import") },
+            title = { Text(uniffi.app_core.importEmptyTitle()) },
             text = { Text(msg) },
             confirmButton = { TextButton(onClick = { importAlert = null }) { Text("OK") } },
         )
@@ -677,8 +553,7 @@ private fun AdvancedPage(session: Session, state: Session.AppState, boardId: Str
                         modifier = Modifier.clickable(enabled = state.connected) {
                             val clip = clipboard.getText()?.text?.trim() ?: ""
                             if (clip.isEmpty()) {
-                                importAlert = "Copy an export from another scoreboard first " +
-                                    "(Export settings → Copy), then come back and tap Import settings."
+                                importAlert = uniffi.app_core.importEmptyMessage()
                             } else {
                                 session.importSettings(boardId, clip)
                             }
@@ -686,12 +561,8 @@ private fun AdvancedPage(session: Session, state: Session.AppState, boardId: Str
                     )
                 }
                 Text(
-                    if (state.connected) {
-                        "Exports league preferences, spoiler rules, brightness, and timing " +
-                            "for another scoreboard."
-                    } else {
-                        "Unavailable while disconnected from this scoreboard's server."
-                    },
+                    if (state.connected) uniffi.app_core.exportFooter()
+                    else uniffi.app_core.exportUnavailableNote(),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline,
                     modifier = Modifier.padding(start = 16.dp, top = 4.dp),
@@ -773,8 +644,7 @@ private fun ExportSheet(json: String, onDismiss: () -> Unit) {
             Text("Export settings", style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold)
             Text(
-                "League preferences, spoiler rules, brightness, and timing. On the other " +
-                    "scoreboard, tap Import settings with this on the clipboard.",
+                uniffi.app_core.exportSheetSummary(),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.outline,
                 modifier = Modifier.padding(top = 6.dp),
@@ -811,7 +681,7 @@ private fun ExportSheet(json: String, onDismiss: () -> Unit) {
 }
 
 @Composable
-private fun Header(text: String) {
+internal fun Header(text: String) {
     Text(
         text,
         style = MaterialTheme.typography.titleSmall,
@@ -824,7 +694,7 @@ private fun Header(text: String) {
 /** A menu-style single choice row — the Android idiom for what iOS draws as
  *  a wheel-less Picker. */
 @Composable
-private fun <T> ChoiceRow(
+internal fun <T> ChoiceRow(
     label: String,
     options: List<Pair<T, String>>,
     selected: T,

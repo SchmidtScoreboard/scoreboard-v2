@@ -8,6 +8,10 @@ coreKtx = "1.16.0"
 jna = "5.14.0"
 securityCrypto = "1.1.0-alpha06"
 coroutines = "1.10.1"
+# Drag-to-reorder for Settings › Screens (MAR-117). 3.x declares Compose 1.7
+# as its floor and resolves onto the BOM's 1.8 line; 2.5.1+ carries the fix
+# for onMove firing after onDragStopped, which the commit-on-drop relies on.
+reorderable = "3.1.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -20,6 +24,7 @@ compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling
 jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
 security-crypto = { group = "androidx.security", name = "security-crypto", version.ref = "securityCrypto" }
 coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
+reorderable = { group = "sh.calvin.reorderable", name = "reorderable", version.ref = "reorderable" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

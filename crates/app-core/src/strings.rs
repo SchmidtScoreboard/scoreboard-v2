@@ -47,7 +47,7 @@ pub fn troubleshooting_guides() -> Vec<GuideCopy> {
             "black",
             "Completely dark",
             "The board is off, in quiet hours, or not getting power. Tap the knob and pick \
-             Scores to wake it. If it stays dark, check that it's plugged in and that the \
+             Sports to wake it. If it stays dark, check that it's plugged in and that the \
              power adapter supplies 5V\u{2009}\u{2393}\u{2009}3A — the one from the box. \
              Weaker adapters can't run the panel.",
         ),
@@ -113,6 +113,161 @@ pub fn demo_games_explainer() -> String {
      and settings are waiting when you switch back.\n\nThe setting lives on the server, \
      so you can turn it off from any paired phone even if the scoreboard is unplugged."
         .into()
+}
+
+// ---- screens (MAR-117) ----
+//
+// The Screens page's copy, the held-mode footer and the settings transfer.
+// Section headers ("Screens", "When nothing is on") stay on the platform per
+// the charter above; the sentences live here.
+
+/// What Sports is called everywhere — the rail, the Screens list, footers.
+/// The protocol's name, which the board's knob also uses (uppercased).
+#[uniffi::export]
+pub fn sports_label() -> String {
+    scoreboard_protocol::SCORES_LABEL.into()
+}
+
+/// The Screens list's footer, where screens can be edited
+/// (`screens_editable`); show `update_server_note` in its place where they
+/// cannot. Promises nothing about the knob — stable boards have no menu.
+#[uniffi::export]
+pub fn screens_explainer() -> String {
+    "Sports and Off are always available. Add, remove, and reorder the rest.".into()
+}
+
+#[uniffi::export]
+pub fn add_screen_label() -> String {
+    "Add Screen".into()
+}
+
+#[uniffi::export]
+pub fn remove_screen_label() -> String {
+    "Remove Screen".into()
+}
+
+/// The per-screen checkmark: part of what shows when nothing is on.
+#[uniffi::export]
+pub fn idle_toggle_label() -> String {
+    "Show when nothing is on".into()
+}
+
+/// What the board does when nothing you follow is playing, for the screens
+/// `screen_list` returned and the board's idle timer: dark with none
+/// checked, the one screen with one, and the rotation with two or more.
+#[uniffi::export]
+pub fn idle_explainer(screens: Vec<crate::rules::UiScreen>, idle_cycle_secs: u32) -> String {
+    let idle: Vec<&crate::rules::UiScreen> = screens.iter().filter(|s| s.idle && !s.fixed).collect();
+    match idle.as_slice() {
+        [] => "When nothing you follow is playing, the board stays dark.".into(),
+        [one] => format!("When nothing you follow is playing, the board shows {}.", one.label),
+        _ => {
+            let every = match crate::rules::idle_cycle_selected(idle_cycle_secs) {
+                3600 => "hour".to_string(),
+                secs => crate::rules::idle_cycle_label(secs),
+            };
+            format!(
+                "When nothing you follow is playing, the board switches between the checked \
+                 screens every {every}."
+            )
+        }
+    }
+}
+
+/// Shown in place of Add Screen when `can_add_screen` is false.
+#[uniffi::export]
+pub fn screen_cap_note() -> String {
+    // Sports and Off are rows too, but not "your" screens.
+    format!("You can have up to {} screens.", scoreboard_protocol::MAX_SCREENS - 2)
+}
+
+/// Shown in place of Add Screen when every screen the server offers is
+/// already on the list (`add_screen_note`).
+#[uniffi::export]
+pub fn nothing_to_add_note() -> String {
+    "Every screen this server offers is already on your list.".into()
+}
+
+/// Shown in place of Add Screen until the server's list of screens has
+/// arrived (`add_screen_note`) — until then there is nothing true to offer.
+#[uniffi::export]
+pub fn screens_loading_note() -> String {
+    "Loading this server's screens…".into()
+}
+
+/// Shown when `screens_editable` is false: the server predates screen lists.
+#[uniffi::export]
+pub fn update_server_note() -> String {
+    "Update your server to add, remove, or reorder screens.".into()
+}
+
+/// The footer while a held screen runs with no timer: "Clock until changed."
+#[uniffi::export]
+pub fn mode_until_changed(label: String) -> String {
+    format!("{label} until changed.")
+}
+
+/// The start of the footer while a held screen runs on its timer: "Clock —
+/// back to Sports in ". The platform appends its own formatted duration
+/// (relative time is locale formatting), then [`mode_back_suffix`].
+#[uniffi::export]
+pub fn mode_back_prefix(label: String) -> String {
+    format!("{label} — back to {} in ", scoreboard_protocol::SCORES_LABEL)
+}
+
+/// The end of that footer, after the duration.
+#[uniffi::export]
+pub fn mode_back_suffix() -> String {
+    ".".into()
+}
+
+/// The footer's button: hold the screen until changed (`clear_wake_timer`).
+#[uniffi::export]
+pub fn keep_label() -> String {
+    "Keep".into()
+}
+
+/// The dashboard line while quiet hours darken the panel: "Quiet hours —
+/// the screen is off until 7:00 AM." `end_time` is the window's end in the
+/// reader's own clock format (locale formatting stays on the platform).
+#[uniffi::export]
+pub fn quiet_footer(end_time: String) -> String {
+    format!("Quiet hours — the screen is off until {end_time}.")
+}
+
+/// The alert when Import settings finds nothing on the clipboard.
+#[uniffi::export]
+pub fn import_empty_title() -> String {
+    "Nothing to import".into()
+}
+
+#[uniffi::export]
+pub fn import_empty_message() -> String {
+    "Copy an export from another scoreboard first (Export settings → Copy), then come \
+     back and tap Import settings."
+        .into()
+}
+
+/// The export sheet's summary of what travels.
+#[uniffi::export]
+pub fn export_sheet_summary() -> String {
+    "League preferences, screens, spoiler rules, brightness, and timing. On the other \
+     scoreboard, tap Import settings with this on the clipboard."
+        .into()
+}
+
+/// The Transfer settings section's footer while connected.
+#[uniffi::export]
+pub fn export_footer() -> String {
+    "Exports league preferences, screens, spoiler rules, brightness, and timing for \
+     another scoreboard."
+        .into()
+}
+
+/// The Transfer settings section's footer while disconnected.
+#[uniffi::export]
+pub fn export_unavailable_note() -> String {
+    "Unavailable while disconnected from this scoreboard's server.".into()
 }
 
 // ---- derivation rules for text both platforms must build identically ----
@@ -274,6 +429,68 @@ mod tests {
         assert_eq!(
             picked_rounds_label(vec!["Conference Finals".into(), "a".into(), "b".into()]).as_deref(),
             Some("Conference Finals +2")
+        );
+    }
+
+    fn screen(id: &str, label: &str, idle: bool, fixed: bool) -> crate::rules::UiScreen {
+        crate::rules::UiScreen {
+            id: id.into(),
+            kind: id.into(),
+            label: label.into(),
+            preview: None,
+            idle,
+            fixed,
+            has_settings: true,
+            removable: !fixed,
+        }
+    }
+
+    /// 0, 1 and 2+ checked screens each say what the board will do.
+    #[test]
+    fn the_idle_explainer_counts_the_checked_screens() {
+        let mut rows = vec![screen("scores", "Sports", false, true), screen("off", "Off", false, true)];
+        assert_eq!(
+            idle_explainer(rows.clone(), 300),
+            "When nothing you follow is playing, the board stays dark."
+        );
+        rows.push(screen("weather.2", "Forecast", true, false));
+        assert_eq!(
+            idle_explainer(rows.clone(), 300),
+            "When nothing you follow is playing, the board shows Forecast."
+        );
+        rows.push(screen("clock", "Clock", true, false));
+        assert_eq!(
+            idle_explainer(rows.clone(), 300),
+            "When nothing you follow is playing, the board switches between the checked screens \
+             every 5 minutes."
+        );
+        assert!(idle_explainer(rows, 3600).ends_with("every hour."));
+    }
+
+    #[test]
+    fn screens_copy_names_sports_and_the_cap() {
+        assert_eq!(sports_label(), "Sports");
+        assert_eq!(screen_cap_note(), "You can have up to 8 screens.");
+        assert_eq!(nothing_to_add_note(), "Every screen this server offers is already on your list.");
+        assert_eq!(mode_until_changed("Clock".into()), "Clock until changed.");
+        assert_eq!(mode_back_prefix("Clock".into()), "Clock — back to Sports in ");
+        assert!(export_footer().contains("screens") && export_sheet_summary().contains("screens"));
+        let black = troubleshooting_guides().into_iter().find(|g| g.slug == "black").unwrap();
+        assert!(black.advice.contains("pick Sports") && !black.advice.contains("Scores"));
+        assert_eq!(screens_explainer(), "Sports and Off are always available. Add, remove, and reorder the rest.");
+        assert!(!screens_explainer().contains("knob"), "stable boards have no knob menu");
+    }
+
+    /// The Controls card and the Transfer section's remaining sentences,
+    /// moved down from both platforms word for word.
+    #[test]
+    fn quiet_and_import_copy_live_in_the_core() {
+        assert_eq!(quiet_footer("7:00 AM".into()), "Quiet hours — the screen is off until 7:00 AM.");
+        assert_eq!(import_empty_title(), "Nothing to import");
+        assert_eq!(
+            import_empty_message(),
+            "Copy an export from another scoreboard first (Export settings → Copy), then come back and \
+             tap Import settings."
         );
     }
 

@@ -16,7 +16,7 @@ pub mod rules;
 use futures_util::{SinkExt, StreamExt};
 use rand::RngCore;
 use scoreboard_protocol::{
-    OffModeDescriptor,
+    OffModeDescriptor, MODE_OFF, MODE_SCORES,
     decode_frame, default_name_style as p_default_name_style,
     name_style_options as p_name_style_options, pubkey_hex, rgb565_to_888, sign_hex, BoardConfig,
     Catalog, ClientMsg, Command, FwChannel, FwImage, GameSummary, NameStyle, Role,
@@ -85,6 +85,13 @@ pub struct UiOffModeField {
     /// Swift is markedly simpler and this is never more than one condition.
     pub visible_when_key: Option<String>,
     pub visible_when_value: Option<String>,
+    /// This field belongs to one SCREEN (a layout, a style), not the board:
+    /// its value lives in `UiScreenConfig::params` and is written through
+    /// `set_screens` (via `screens_with_param`). False = board-wide (a
+    /// location, 24-hour time), written with `set_off_mode_param` and shared
+    /// by every screen of the kind. Always false from a server that predates
+    /// screen lists — which is exactly how such a server stores it.
+    pub per_screen: bool,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -92,6 +99,10 @@ pub struct UiOffModeChoice {
     pub value: String,
     pub label: String,
     pub preview: Option<String>,
+    /// Server-declared short name for a SCREEN using this choice, used when
+    /// its kind appears more than once on a board. None = the core composes
+    /// "{mode} · {choice}" (see `screen_list`, `addable_screens`).
+    pub screen_label: Option<String>,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -194,6 +205,26 @@ pub struct UiFwImage {
     pub channel: String,
     pub version: String,
 }
+/// One row of a board's screen list, exactly as the wire carries it (protocol
+/// `ScreenConfig`): Sports, Off, or an INSTANCE of a server-declared off mode.
+/// Strings and a bool only — never an enum (see `UiBoardConfig::off_mode`).
+///
+/// This is the raw record the optimistic mirrors in `rules` transform and
+/// `ScoreboardClient::set_screens` sends. What a row DRAWS (label, preview,
+/// flags) comes from `screen_list`, never from reading these fields.
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct UiScreenConfig {
+    /// Stable instance id: "scores", "off", the kind for a kind's first
+    /// instance, "{kind}.{n}" after it. Never assume `id == kind`.
+    pub id: String,
+    /// "scores", "off", or an off-mode descriptor id.
+    pub kind: String,
+    /// This screen's own per-screen values (layout, style) only.
+    pub params: HashMap<String, String>,
+    /// Shown when nothing is on (part of the idle rotation).
+    pub idle: bool,
+}
+
 /// One board's full server-side config, pushed with every BoardState.
 #[derive(uniffi::Record, Clone)]
 pub struct UiBoardConfig {
@@ -210,13 +241,30 @@ pub struct UiBoardConfig {
     /// generated Swift and abort the whole config decode the first time a
     /// forked server named a mode this build had never heard of.
     pub off_mode: String,
-    /// What the board is DOING: "scores", "off", or an off-mode id held
-    /// persistently. A string for the same closed-enum reason as `off_mode`.
+    /// What the board is DOING: "scores", "off", or the id of the screen
+    /// INSTANCE held persistently ("clock", "weather.2"). A string for the
+    /// same closed-enum reason as `off_mode`. Label it with
+    /// `screen_label_for`, never by matching a descriptor id.
     pub mode: String,
+    /// The board's screen list in the user's order, verbatim from the
+    /// server — a current server always sends the resolved list. EMPTY means
+    /// the server predates screen lists; `resolved_screen_configs` then
+    /// synthesizes one from `off_mode`/`off_mode_params`.
+    pub screens: Vec<UiScreenConfig>,
+    /// Whether this board's server understands screen lists (`screens` is
+    /// non-empty). Gates add/remove/reorder/the idle timer, and selects
+    /// single- vs multi-select idle — see `screens_editable`,
+    /// `idle_single_select`.
+    pub screens_supported: bool,
+    /// Seconds each checked screen holds the panel while the board idles
+    /// through two or more, snapped to a preset (`idle_cycle_options`).
+    pub idle_cycle_secs: u32,
     /// Per-mode timer durations in hours (0 = until changed); a missing mode
     /// falls back to `sleep_hours`.
     pub mode_hours: HashMap<String, u32>,
-    /// Values the user typed for the selected mode's declared input.
+    /// The board-wide off-mode values (location, 24-hour), plus a MIRROR of
+    /// the per-screen values of each kind's first instance for older apps.
+    /// Per-screen values are read from `screens`, not from here.
     pub off_mode_params: HashMap<String, String>,
     pub sleep_hours: u32,
     /// Seconds each game holds the panel before the rotation advances.
@@ -359,6 +407,10 @@ pub struct ScoreboardClient {
     secret: [u8; 32],
     rt: Runtime,
     listener: Arc<Mutex<Option<Box<dyn ClientListener>>>>,
+    /// Per board: does its server understand screen lists? Recorded from
+    /// every BoardState (a non-empty `config.screens`), so `set_screens` can
+    /// route to the legacy commands for an older, self-hosted server.
+    screens_supported: Arc<Mutex<HashMap<String, bool>>>,
     tx: mpsc::UnboundedSender<Out>,
     rx: Mutex<Option<mpsc::UnboundedReceiver<Out>>>,
 }
@@ -390,6 +442,7 @@ impl ScoreboardClient {
             secret,
             rt,
             listener: Arc::new(Mutex::new(None)),
+            screens_supported: Arc::new(Mutex::new(HashMap::new())),
             tx,
             rx: Mutex::new(Some(rx)),
         })
@@ -406,6 +459,7 @@ impl ScoreboardClient {
         let url = self.server_url.clone();
         let boards = self.boards.clone();
         let listener = self.listener.clone();
+        let screens_supported = self.screens_supported.clone();
         let secret = self.secret;
 
         self.rt.spawn(async move {
@@ -528,6 +582,9 @@ impl ScoreboardClient {
                                             if let Some(l) = listener.lock().unwrap().as_ref() { l.on_games(to_ui_games(games)); }
                                         }
                                         ServerMsg::BoardState { board_id: bid, online, now_showing, config, firmware_version, firmware_update, quiet_active } => {
+                                            // Before the listener hears of it, so a
+                                            // set_screens made in response routes right.
+                                            screens_supported.lock().unwrap().insert(bid.clone(), !config.screens.is_empty());
                                             if let Some(l) = listener.lock().unwrap().as_ref() {
                                                 l.on_board_state(bid.clone(), to_ui_games(now_showing), online);
                                                 l.on_config(bid.clone(), to_ui_board_config(config));
@@ -654,8 +711,9 @@ impl ScoreboardClient {
         let _ = self.tx.send(Out::Command(board_id, Command::SetPower { on }));
     }
 
-    /// Put the board in a mode: "scores", "off", or an off-mode id. For the
-    /// two modes the LEGACY command can express, the equivalent SetPower is
+    /// Put the board in a mode: "scores", "off", or a screen INSTANCE id from
+    /// the board's list ("weather.2"). For the two modes the LEGACY command
+    /// can express, the equivalent SetPower is
     /// sent alongside — a not-yet-deployed (or rolled-back) server drops the
     /// unknown SetMode silently, and the alias keeps the picker working
     /// through the skew. On a current server both arrive and both write the
@@ -668,7 +726,8 @@ impl ScoreboardClient {
         let _ = self.tx.send(Out::Command(board_id, Command::SetMode { mode }));
     }
 
-    /// Configure a mode's timer, in hours. 0 = until changed.
+    /// Configure a screen's hold timer, in hours, keyed by its INSTANCE id
+    /// ("off", "weather.2"). 0 = until changed. See `hold_timer_options`.
     pub fn set_mode_hours(&self, board_id: String, mode: String, hours: u32) {
         let _ = self.tx.send(Out::Command(board_id, Command::SetModeHours { mode, hours }));
     }
@@ -739,9 +798,54 @@ impl ScoreboardClient {
         let _ = self.tx.send(Out::Command(board_id, Command::SetOffMode { id }));
     }
 
-    /// Set the selected mode's input value. An empty string clears it.
+    /// Set a BOARD-WIDE off-mode value (a field whose `per_screen` is false:
+    /// a location, 24-hour time) on old and new servers alike. An empty
+    /// string clears it. Per-screen fields go through `set_screens`.
     pub fn set_off_mode_param(&self, board_id: String, key: String, value: String) {
         let _ = self.tx.send(Out::Command(board_id, Command::SetOffModeParam { key, value }));
+    }
+
+    /// Save the board's whole screen list — every add, remove, reorder, idle
+    /// toggle and per-screen layout change. Build `screens` with the
+    /// optimistic mirrors in `rules` (`screens_added`, `screens_with_idle`,
+    /// ...) so the app shows exactly what the server will store, starting
+    /// from `resolved_screen_configs(config.screens, ...)` — never from the
+    /// raw `config.screens`, which is empty on a server without lists. A list
+    /// that cannot be a board's (empty; or, to such a server, nothing besides
+    /// Sports and Off) sends nothing.
+    ///
+    /// A server that predates screen lists drops `SetScreens` silently, so
+    /// for one of those (known from this board's last BoardState) the call is
+    /// ROUTED to the legacy commands it does understand: `SetOffMode` naming
+    /// the first idle member's kind ("blank" when none is checked), then one
+    /// `SetOffModeParam` per per-screen value of that member. The single
+    /// ordered writer guarantees the mode lands before its params, which the
+    /// old server validates against the selected mode. Add, remove, reorder
+    /// and a second idle screen cannot be expressed that way; the platforms
+    /// hide them (`screens_editable`, `idle_single_select`).
+    ///
+    /// A board whose state has not arrived yet is sent NOTHING. Any list a
+    /// platform could build then started from the core's synthesized
+    /// default (the board's real list is unknown), so sending it — as
+    /// `SetScreens`, which a queued command does the moment the socket
+    /// re-auths, before the BoardState — would replace the board's real
+    /// screens, layouts and checkmarks with that default.
+    ///
+    /// The route is chosen when the call is made. An edit queued across a
+    /// server swap (a rollback to a server without lists while the socket
+    /// was down) goes out as `SetScreens`, which that server drops; the next
+    /// BoardState then shows the board as it really is.
+    pub fn set_screens(&self, board_id: String, screens: Vec<UiScreenConfig>) {
+        let known = self.screens_supported.lock().unwrap().get(&board_id).copied();
+        for cmd in screens_route(known, screens) {
+            let _ = self.tx.send(Out::Command(board_id.clone(), cmd));
+        }
+    }
+
+    /// How long each checked screen holds the panel while the board idles
+    /// through two or more, in seconds (one of `idle_cycle_options`).
+    pub fn set_idle_cycle(&self, board_id: String, secs: u32) {
+        let _ = self.tx.send(Out::Command(board_id, Command::SetIdleCycle { secs }));
     }
 
 
@@ -953,6 +1057,50 @@ impl ScoreboardClient {
     }
 }
 
+/// The commands one `set_screens` sends: the list itself to a server that
+/// understands it, else the legacy pair an older server does (see
+/// `ScoreboardClient::set_screens`).
+///
+/// NOTHING for a list that cannot be a board's. An empty list is never one
+/// (every list a server sends, and every mirror's output, holds Sports and
+/// Off); `SetScreens{[]}` would wipe the board's screens. And on the legacy
+/// route a list with no screen besides Sports and Off is the raw, empty
+/// `UiBoardConfig.screens` of a server without lists run through a mirror —
+/// such a server's real list always has its lit screens — so routing it
+/// would send `SetOffMode{"blank"}` and turn the board's idle screen dark.
+/// `set_screens`'s whole decision: nothing for a board whose capability is
+/// still unknown (no BoardState yet), else [`screens_commands`].
+fn screens_route(known: Option<bool>, screens: Vec<UiScreenConfig>) -> Vec<Command> {
+    match known {
+        Some(supported) => screens_commands(supported, screens),
+        None => vec![],
+    }
+}
+
+fn screens_commands(supported: bool, screens: Vec<UiScreenConfig>) -> Vec<Command> {
+    if screens.is_empty() {
+        return vec![];
+    }
+    if supported {
+        return vec![Command::SetScreens { screens: screens.into_iter().map(rules::to_screen_config).collect() }];
+    }
+    if screens.iter().all(|s| s.kind == MODE_SCORES || s.kind == MODE_OFF) {
+        return vec![];
+    }
+    // The same choice the optimistic write makes (`rules::screens_write`).
+    let id = rules::legacy_off_mode(&screens);
+    let idle = screens.into_iter().find(|s| s.idle && s.kind != MODE_SCORES && s.kind != MODE_OFF);
+    let mut out = vec![Command::SetOffMode { id }];
+    if let Some(s) = idle {
+        // Sorted, so the wire order is deterministic.
+        let params: std::collections::BTreeMap<String, String> = s.params.into_iter().collect();
+        for (key, value) in params {
+            out.push(Command::SetOffModeParam { key, value });
+        }
+    }
+    out
+}
+
 fn to_ui_off_modes(modes: &[OffModeDescriptor]) -> Vec<UiOffMode> {
     modes
         .iter()
@@ -984,10 +1132,12 @@ fn to_ui_off_modes(modes: &[OffModeDescriptor]) -> Vec<UiOffMode> {
                             value: o.value.clone(),
                             label: o.label.clone(),
                             preview: o.preview.clone(),
+                            screen_label: o.screen_label.clone(),
                         })
                         .collect(),
                     visible_when_key: f.visible_when.as_ref().map(|c| c.key.clone()),
                     visible_when_value: f.visible_when.as_ref().map(|c| c.equals.clone()),
+                    per_screen: f.per_screen,
                 })
                 .collect(),
         })
@@ -1050,7 +1200,9 @@ mod wss_tests {
         fn on_catalog(&self, _: Vec<UiSport>) {}
         fn on_off_modes(&self, _: Vec<UiOffMode>) {}
         fn on_quiet_active(&self, _: String, _: bool) {}
-        fn on_config(&self, _: String, _: UiBoardConfig) {}
+        fn on_config(&self, board_id: String, _: UiBoardConfig) {
+            let _ = self.tx.lock().unwrap().send(format!("config={board_id}"));
+        }
         fn on_games(&self, games: Vec<UiGame>) {
             let _ = self.tx.lock().unwrap().send(format!("games={}", games.len()));
         }
@@ -1112,6 +1264,143 @@ mod wss_tests {
             }
         }
         assert!(connected, "client must retry and connect once the server appears");
+    }
+
+    /// The config mirror: the held INSTANCE as `mode`, the list verbatim, the
+    /// capability from it, the idle timer snapped — and an old server's
+    /// config reads as unsupported with today's fields.
+    #[test]
+    fn the_config_carries_the_list_and_the_held_instance() {
+        use scoreboard_protocol::ScreenConfig;
+        let mut c = BoardConfig::default();
+        c.set_held_screen("weather.2", "weather");
+        c.idle_cycle_secs = Some(400);
+        c.screens = vec![ScreenConfig {
+            id: "weather.2".into(),
+            kind: "weather".into(),
+            params: [("variant".to_string(), "forecast".to_string())].into_iter().collect(),
+            idle: true,
+        }];
+        let ui = to_ui_board_config(c);
+        assert_eq!(ui.mode, "weather.2");
+        assert!(ui.power);
+        assert!(ui.screens_supported);
+        assert_eq!(ui.screens.len(), 1);
+        assert_eq!(ui.screens[0].params.get("variant").map(String::as_str), Some("forecast"));
+        assert_eq!(ui.idle_cycle_secs, 300);
+
+        let old = to_ui_board_config(BoardConfig::default());
+        assert!(!old.screens_supported && old.screens.is_empty());
+        assert_eq!(old.mode, "scores");
+        assert_eq!(old.idle_cycle_secs, scoreboard_protocol::IDLE_CYCLE_DEFAULT_SECS);
+    }
+
+    /// The routing, as data: a list to a server that understands lists; the
+    /// legacy pair (mode first, then its params, sorted) to one that does
+    /// not; "blank" when nothing is checked.
+    #[test]
+    fn set_screens_routes_by_server_capability() {
+        let sc = |id: &str, kind: &str, params: &[(&str, &str)], idle: bool| UiScreenConfig {
+            id: id.into(),
+            kind: kind.into(),
+            params: params.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            idle,
+        };
+        let list = vec![
+            sc("scores", "scores", &[], false),
+            sc("off", "off", &[], false),
+            sc("clock", "clock", &[], false),
+            sc("weather.2", "weather", &[("variant", "forecast"), ("a", "b")], true),
+        ];
+        let json = |cmds: Vec<Command>| -> Vec<String> { cmds.iter().map(|c| serde_json::to_string(c).unwrap()).collect() };
+        let new = json(screens_commands(true, list.clone()));
+        assert_eq!(new.len(), 1);
+        assert!(new[0].starts_with(r#"{"type":"SetScreens""#), "{}", new[0]);
+        assert_eq!(
+            json(screens_commands(false, list.clone())),
+            [
+                r#"{"type":"SetOffMode","id":"weather"}"#,
+                r#"{"type":"SetOffModeParam","key":"a","value":"b"}"#,
+                r#"{"type":"SetOffModeParam","key":"variant","value":"forecast"}"#,
+            ]
+        );
+        let dark: Vec<UiScreenConfig> = list.clone().into_iter().map(|mut s| { s.idle = false; s }).collect();
+        assert_eq!(json(screens_commands(false, dark)), [r#"{"type":"SetOffMode","id":"blank"}"#]);
+        // No BoardState yet: the list was built on a made-up default.
+        assert!(screens_route(None, list.clone()).is_empty(), "never overwrite a board we have not seen");
+        assert_eq!(json(screens_route(Some(true), list)), new);
+    }
+
+    /// End to end over a socket: the client learns each board's capability
+    /// from its BoardState, and `set_screens` sends what that server reads —
+    /// SetOffMode then SetOffModeParam to an old one, SetScreens to a new one.
+    #[test]
+    fn set_screens_follows_the_board_state_it_last_saw() {
+        use scoreboard_protocol::ScreenConfig;
+        let old_cfg = BoardConfig::default();
+        let mut new_cfg = BoardConfig::default();
+        new_cfg.screens = vec![
+            ScreenConfig { id: "scores".into(), kind: "scores".into(), params: Default::default(), idle: false },
+            ScreenConfig { id: "off".into(), kind: "off".into(), params: Default::default(), idle: false },
+        ];
+        for (cfg, want) in [
+            (old_cfg, vec!["SetOffMode", "SetOffModeParam"]),
+            (new_cfg, vec!["SetScreens"]),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (cmd_tx, cmd_rx) = mpsc::channel::<String>();
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let state = serde_json::to_string(&ServerMsg::BoardState {
+                board_id: "b1".into(),
+                online: true,
+                now_showing: vec![],
+                config: cfg,
+                firmware_version: None,
+                firmware_update: None,
+                quiet_active: false,
+            })
+            .unwrap();
+            rt.spawn(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let Ok((stream, _)) = listener.accept().await else { return };
+                let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else { return };
+                let hello = serde_json::to_string(&ServerMsg::Hello { challenge: "c".into() }).unwrap();
+                let _ = ws.send(Message::Text(hello)).await;
+                let _ = ws.send(Message::Text(state)).await;
+                while let Some(Ok(m)) = ws.next().await {
+                    if let Message::Text(t) = m {
+                        if let Ok(ClientMsg::Command { cmd, .. }) = serde_json::from_str::<ClientMsg>(&t) {
+                            let _ = cmd_tx.send(serde_json::to_value(&cmd).unwrap()["type"].as_str().unwrap().to_string());
+                        }
+                    }
+                }
+            });
+            let (tx, rx) = mpsc::channel();
+            let client = ScoreboardClient::new(format!("ws://127.0.0.1:{port}/ws"), vec!["b1".into()], None);
+            client.set_listener(Box::new(Probe { tx: std::sync::Mutex::new(tx) }));
+            client.connect();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while std::time::Instant::now() < deadline {
+                if let Ok(m) = rx.recv_timeout(Duration::from_millis(200)) {
+                    if m == "config=b1" {
+                        break;
+                    }
+                }
+            }
+            client.set_screens(
+                "b1".into(),
+                vec![UiScreenConfig {
+                    id: "weather".into(),
+                    kind: "weather".into(),
+                    params: [("variant".to_string(), "simple".to_string())].into_iter().collect(),
+                    idle: true,
+                }],
+            );
+            let got: Vec<String> = (0..want.len()).filter_map(|_| cmd_rx.recv_timeout(Duration::from_secs(5)).ok()).collect();
+            assert_eq!(got, want);
+        }
     }
 
     /// Exercises the exact controller path the iOS app uses: connect to the
@@ -1206,6 +1495,9 @@ fn to_ui_board_config(c: BoardConfig) -> UiBoardConfig {
     let off_mode = c.off_mode_id().to_string();
     let off_mode_params: HashMap<String, String> =
         c.off_mode_params.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let mode = c.held_screen_id().to_string();
+    let idle_cycle_secs = c.idle_cycle_ms() / 1000;
+    let screens: Vec<UiScreenConfig> = c.screens.iter().cloned().map(rules::to_ui_screen_config).collect();
     UiBoardConfig {
         sports: to_ui_configs(c.sports),
         brightness: c.brightness,
@@ -1216,7 +1508,10 @@ fn to_ui_board_config(c: BoardConfig) -> UiBoardConfig {
         name: c.name,
         off_mode,
         off_mode_params,
-        mode: c.mode.clone(),
+        mode,
+        screens_supported: !screens.is_empty(),
+        screens,
+        idle_cycle_secs,
         mode_hours: c.mode_hours.clone().into_iter().collect(),
         sleep_hours: c.sleep_hours,
         dwell_secs: c.dwell_secs,
