@@ -7467,6 +7467,98 @@ mod tests {
         }
     }
 
+    /// Every stock idle screen must COMPRESS. An idle rotation keeps all of its
+    /// frames resident in the board's 24KB cache at once, and a frame that
+    /// ships raw costs ~4KB against ~200B-2KB compressed — a few of those and
+    /// the board evicts the next screen in the cycle and shows the previous one
+    /// in its place. Before the encoder stepped off row-multiple lengths, the
+    /// compact 24h clock shipped raw for 15% of the day (including 10:09).
+    ///
+    /// Clocks are swept over every minute; weather over a spread of
+    /// conditions, day/night and temperatures.
+    #[test]
+    fn no_stock_idle_screen_ships_raw() {
+        use scoreboard_protocol::{decode_frame_payload, encode_frame_payload, FRAME_CODEC_RAW};
+        let codecs = board_core::SUPPORTED_FRAME_CODECS;
+        let check = |label: &str, px: &[u8]| {
+            let payload = encode_frame_payload(px, codecs);
+            assert_ne!(payload[0], FRAME_CODEC_RAW, "{label} shipped raw ({} B)", payload.len());
+            assert_eq!(decode_frame_payload(&payload).as_deref(), Some(px), "{label} round trip");
+        };
+
+        for (style, _) in render::CLOCK_STYLES {
+            for h24 in [false, true] {
+                for h in 0..24 {
+                    for m in 0..60 {
+                        let px = render::render_clock_styled(h, m, style, h24).1;
+                        check(&format!("clock {style} h24={h24} {h:02}:{m:02}"), &px);
+                    }
+                }
+            }
+        }
+
+        let sample = crate::weather::Weather::sample();
+        let codes: [u16; 22] = [0, 1, 2, 3, 45, 51, 55, 56, 61, 63, 65, 66, 71, 73, 75, 77, 80, 82, 85, 95, 96, 99];
+        let temps: [(i32, i32, i32); 6] =
+            [(72, 78, 61), (-40, -31, -48), (-9, -2, -18), (7, 11, 1), (104, 112, 88), (118, 121, 101)];
+        for &code in &codes {
+            for is_day in [true, false] {
+                for &(t, hi, lo) in &temps {
+                    let mut w = sample.clone();
+                    w.code = code;
+                    w.is_day = is_day;
+                    w.temp = t;
+                    w.hi = hi;
+                    w.lo = lo;
+                    let at = format!("code={code} day={is_day} t={t}");
+                    check(&format!("weather simple {at}"), &render::render_weather_simple(&w).1);
+                    check(&format!("weather detailed {at}"), &render::render_weather_detailed(&w).1);
+                    for h24 in [false, true] {
+                        for (h, m) in [(10, 9), (11, 11), (12, 59), (0, 0), (23, 45)] {
+                            let px = render::render_weather_clock(&w, h, m, h24).1;
+                            check(&format!("weather clock {at} h24={h24} {h:02}:{m:02}"), &px);
+                        }
+                    }
+                }
+            }
+        }
+        for h24 in [false, true] {
+            for h in 0..24 {
+                for m in 0..60 {
+                    let px = render::render_weather_clock(&sample, h, m, h24).1;
+                    check(&format!("weather clock sample h24={h24} {h:02}:{m:02}"), &px);
+                }
+            }
+        }
+        let day_codes: [u16; 9] = [0, 2, 3, 45, 51, 56, 61, 71, 95];
+        for &a in &day_codes {
+            for &b in &day_codes {
+                for &c in &day_codes {
+                    for temps in [[(78, 61), (71, 58), (83, 64)], [(-2, -18), (-11, -27), (-8, -31)], [(104, 88), (112, 91), (109, 99)]] {
+                        let mut w = sample.clone();
+                        w.days = (0..3)
+                            .map(|i| crate::weather::Day {
+                                label: ["MON", "TUE", "WED"][i].into(),
+                                code: [a, b, c][i],
+                                hi: temps[i].0,
+                                lo: temps[i].1,
+                            })
+                            .collect();
+                        check(&format!("forecast {a},{b},{c} {temps:?}"), &render::render_weather_forecast(&w).1);
+                    }
+                }
+            }
+        }
+
+        let params = std::collections::BTreeMap::new();
+        for reading in [crate::weather::Reading::NoLocation, crate::weather::Reading::Unavailable] {
+            let ctx = offmode::OffCtx { tz: None, params: &params, preview: false, weather: reading };
+            for f in offmode::render_off_mode("weather", &ctx) {
+                check("weather notice", &f.px);
+            }
+        }
+    }
+
     /// A FINAL nobody watched end satisfies `game_queued` (not board_shows,
     /// still claimed), so without a pregame guard the "Live and Upcoming"
     /// section filled with COMPLETED games — sorted to the front, since their

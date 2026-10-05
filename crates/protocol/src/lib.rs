@@ -1654,8 +1654,8 @@ pub const FRAME_ROW_BYTES: usize = FRAME_WIDTH * 2;
 /// Servers that predate the codec send exactly `height * FRAME_ROW_BYTES`
 /// bytes, always a whole number of rows. `encode_frame_payload` guarantees it
 /// never emits that length (raw payloads are `1 + height * FRAME_ROW_BYTES`,
-/// and compressed candidates landing on a row multiple are skipped), so the
-/// length alone is a reliable discriminator.
+/// and a compressed candidate landing on a row multiple is stepped off it by
+/// one extra run pair), so the length alone is a reliable discriminator.
 ///
 /// This exists because a board can outlive the server that taught it the
 /// codec: firmware dists ship inside the server image and the downgrade guard
@@ -1718,17 +1718,21 @@ pub fn encode_frame_payload(rgb565_le: &[u8], accepted: &[u8]) -> Vec<u8> {
             // RAW is the fallback below; unknown codecs are simply not spoken.
             _ => None,
         };
-        let Some(candidate) = candidate else { continue };
+        let Some(mut candidate) = candidate else { continue };
         if candidate.len() >= raw_len {
             continue; // never ship an expansion (or a wash)
         }
         // A payload whose length is a whole number of pixel rows is
         // INDISTINGUISHABLE from what a pre-codec server sends (bare pixels,
-        // always height * FRAME_ROW_BYTES). Skip those lengths so the receiver
-        // can tell the two apart by length alone — see `frame_payload_is_legacy_raw`.
-        // Costs compression on ~1/128 of frames; buys rollback safety.
+        // always height * FRAME_ROW_BYTES) — see `frame_payload_is_legacy_raw`.
+        // Step off that length rather than giving up: PAL_RLE lengths are
+        // always even, so skipping cost 1 frame in 64, and a skipped frame
+        // ships as ~4KB of raw that the board must hold in its 24KB cache.
         if candidate.len() % FRAME_ROW_BYTES == 0 {
-            continue;
+            let padded = codec == FRAME_CODEC_PAL_RLE && split_one_run(&mut candidate);
+            if !padded || candidate.len() >= raw_len {
+                continue;
+            }
         }
         let better = match &best {
             Some(b) => candidate.len() < b.len(),
@@ -1818,6 +1822,27 @@ fn encode_pal_rle(rgb565_le: &[u8]) -> Option<Vec<u8>> {
     }
     out.extend_from_slice(&body);
     Some(out)
+}
+
+/// Lengthen a PAL_RLE payload by exactly one pair WITHOUT changing what it
+/// decodes to: the first run of 2+ pixels becomes two runs of the same color
+/// (`[n, i]` -> `[n-1, i][1, i]`). The decoder has never required runs to be
+/// maximal — every fielded firmware rejects only zero lengths and indices
+/// outside the palette — so this is a no-op on the board.
+///
+/// False when there is no run to split. That never happens for a payload
+/// that beat raw (all-single-pixel runs cost as much as raw before the
+/// palette header), but the caller falls back to raw rather than assume it.
+fn split_one_run(payload: &mut Vec<u8>) -> bool {
+    let Some(&count) = payload.get(1) else { return false };
+    let runs_at = 2 + 2 * count as usize;
+    let Some(runs) = payload.get(runs_at..) else { return false };
+    let Some(pair) = runs.chunks_exact(2).position(|p| p[0] >= 2) else { return false };
+    let at = runs_at + pair * 2;
+    let index = payload[at + 1];
+    payload[at] -= 1;
+    payload.splice(at + 2..at + 2, [1, index]);
+    true
 }
 
 /// Decode the bytes AFTER the [`FRAME_CODEC_PAL_RLE`] codec byte.
@@ -2665,6 +2690,42 @@ mod frame_codec_tests {
         let payload = assert_round_trip(&bytes(&px2), PAL);
         assert_eq!(payload[0], FRAME_CODEC_PAL_RLE);
         assert_eq!(payload.len(), 2 + 4 + (FRAME_PIXELS / 2) * 2);
+    }
+
+    /// A frame whose natural encoding is exactly one pixel row long (128 B)
+    /// used to ship RAW — ~4KB where 130 B would do — because that length is
+    /// what a pre-codec server's bare pixels look like. It now steps off the
+    /// row multiple by splitting one run, and decodes to the same pixels.
+    #[test]
+    fn a_row_multiple_encoding_steps_off_instead_of_falling_back_to_raw() {
+        // 2 colors (header 2 + 4) + 61 alternating runs (122) = 128 bytes.
+        let mut px: Vec<u16> = Vec::new();
+        for run in 0..61 {
+            let len = if run == 60 { FRAME_PIXELS - 60 * 33 } else { 33 };
+            px.resize(px.len() + len, if run % 2 == 0 { BLACK } else { WHITE });
+        }
+        assert_eq!(px.len(), FRAME_PIXELS);
+        assert_eq!(encode_pal_rle(&bytes(&px)).map(|p| p.len()), Some(FRAME_ROW_BYTES), "precondition");
+
+        let payload = assert_round_trip(&bytes(&px), PAL);
+        assert_eq!(payload[0], FRAME_CODEC_PAL_RLE, "must not fall back to raw");
+        assert_eq!(payload.len(), FRAME_ROW_BYTES + 2);
+        assert!(!frame_payload_is_legacy_raw(&payload));
+    }
+
+    /// The padding is one more pair of the same color: never a zero-length
+    /// run, never a new palette entry — the two things a decoder rejects.
+    #[test]
+    fn splitting_a_run_keeps_the_pixels_and_the_palette() {
+        let mut payload = vec![FRAME_CODEC_PAL_RLE, 2, 0, 0, 0xFF, 0xFF, 1, 0, 5, 1, 3, 0];
+        let before = decode_frame_payload(&payload);
+        assert!(split_one_run(&mut payload));
+        assert_eq!(payload, vec![FRAME_CODEC_PAL_RLE, 2, 0, 0, 0xFF, 0xFF, 1, 0, 4, 1, 1, 1, 3, 0]);
+        assert_eq!(decode_frame_payload(&payload), before);
+
+        // Nothing to split: every run is a single pixel.
+        let mut singles = vec![FRAME_CODEC_PAL_RLE, 2, 0, 0, 0xFF, 0xFF, 1, 0, 1, 1];
+        assert!(!split_one_run(&mut singles));
     }
 
     #[test]
