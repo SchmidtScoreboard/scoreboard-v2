@@ -747,6 +747,9 @@ fn sanitize_off_modes(configs: &mut HashMap<String, BoardConfig>) {
 ///   twins. A held kind a rolled-back server wrote as a bare mode is
 ///   canonicalized to the instance it resolves to; a held screen that no
 ///   longer exists releases the board to Sports.
+/// - Every board: timers no screen owns are dropped (`prune_screen_timers`) —
+///   instance keys a rollback left behind, which a screen added later under
+///   the same id would otherwise inherit.
 fn sanitize_screens(configs: &mut HashMap<String, BoardConfig>) {
     let catalog = offmode::off_modes();
     for (board, cfg) in configs.iter_mut() {
@@ -754,27 +757,24 @@ fn sanitize_screens(configs: &mut HashMap<String, BoardConfig>) {
             tracing::info!("board {board}: held mode \"blank\" -> \"off\"");
             cfg.set_mode(MODE_OFF);
         }
-        if cfg.screens.is_empty() {
-            continue;
-        }
-        if cfg.set_screens(cfg.screens.clone(), &catalog) {
-            continue;
-        }
-        let held = cfg.held_screen_id().to_string();
-        let canonical = match cfg.mode_screen {
-            None => resolve_screen(&cfg.screens, &held).map(|s| (s.id.clone(), s.kind.clone())),
-            Some(_) => None,
-        };
-        match canonical {
-            Some((id, kind)) => {
-                tracing::info!("board {board}: held {held:?} -> screen {id:?}");
-                cfg.set_held_screen(&id, &kind);
-            }
-            None => {
-                tracing::warn!("board {board}: held screen {held:?} is not on its list; back to Sports");
-                release_to_scores(cfg);
+        if !cfg.screens.is_empty() && !cfg.set_screens(cfg.screens.clone(), &catalog) {
+            let held = cfg.held_screen_id().to_string();
+            let canonical = match cfg.mode_screen {
+                None => resolve_screen(&cfg.screens, &held).map(|s| (s.id.clone(), s.kind.clone())),
+                Some(_) => None,
+            };
+            match canonical {
+                Some((id, kind)) => {
+                    tracing::info!("board {board}: held {held:?} -> screen {id:?}");
+                    cfg.set_held_screen(&id, &kind);
+                }
+                None => {
+                    tracing::warn!("board {board}: held screen {held:?} is not on its list; back to Sports");
+                    release_to_scores(cfg);
+                }
             }
         }
+        cfg.prune_screen_timers(&catalog);
     }
 }
 

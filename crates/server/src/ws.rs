@@ -608,6 +608,8 @@ pub(crate) fn apply_settings_import(state: &AppState, board_id: &str, json: &str
             crate::release_to_scores(cfg);
             released = true;
         }
+        // The blob's timers arrive wholesale; keep only those a screen owns.
+        cfg.prune_screen_timers(&catalog);
         cfg.idle_cycle_secs = cfg.idle_cycle_secs.map(snap_idle_cycle_secs);
         // The blob is user-portable text: re-apply the same bounds the
         // equivalent commands enforce, so a hand-edited export can't smuggle
@@ -666,17 +668,6 @@ fn legacy_set_idle(board_id: &str, cfg: &mut BoardConfig, kind: &str) {
     }
     // Idle ticks never touch the held screen, so it stays listed.
     let _ = cfg.set_screens(list, &catalog);
-}
-
-/// Drop the timers of screen INSTANCES that left the list. Only instance
-/// ids ("weather.2"): a kind's key is every old app's timer for that kind and
-/// the fallback for its instances, so it stays.
-fn prune_screen_timers(cfg: &mut BoardConfig) {
-    let catalog = crate::offmode::off_modes();
-    let listed: Vec<String> = cfg.screens.iter().map(|s| s.id.clone()).collect();
-    cfg.mode_hours.retain(|key, _| {
-        listed.contains(key) || !catalog.iter().any(|d| key != &d.id && screen_id_fits(key, &d.id))
-    });
 }
 
 /// Which descriptor judges `SetOffModeParam { key, value }`, and its verdict.
@@ -787,7 +778,9 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) -> O
                 let listed = crate::board_screens(cfg).iter().any(|s| s.id == mode && s.id != MODE_SCORES);
                 let lit_kind = crate::offmode::off_modes().iter().any(|d| d.id == mode && d.lit());
                 if listed || lit_kind || mode == MODE_OFF {
-                    cfg.mode_hours.insert(mode, hours.min(72));
+                    // Through the shared rule: a first instance's key is also
+                    // its siblings' fallback, so they get pinned first.
+                    cfg.set_hold_hours(&mode, hours);
                 } else {
                     tracing::warn!("board {board_id}: no screen {mode:?} to time, ignoring");
                 }
@@ -803,7 +796,7 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) -> O
                     crate::release_to_scores(cfg);
                     mode_changed = true;
                 }
-                prune_screen_timers(cfg);
+                cfg.prune_screen_timers(&crate::offmode::off_modes());
                 let after = crate::board_weather_location(cfg);
                 weather_dirty |= after.is_some() && after != before;
             }

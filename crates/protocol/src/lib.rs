@@ -1413,6 +1413,64 @@ impl BoardConfig {
         self.hold_hours(mode, mode)
     }
 
+    /// Store screen `id`'s hold timer (clamped to 72 hours, the longest hold).
+    ///
+    /// A kind's FIRST instance has the kind as its id, so its timer is stored
+    /// under the very key every sibling of that kind falls back to (and the
+    /// key an old app writes from its Weather page). Before that key changes,
+    /// each sibling still READING it gets its current value pinned as its
+    /// own, so editing Weather's timer never moves Forecast's.
+    pub fn set_hold_hours(&mut self, id: &str, hours: u32) {
+        let inheriting: Vec<String> = self
+            .screens
+            .iter()
+            .filter(|s| s.kind == id && s.id != id && !self.mode_hours.contains_key(&s.id))
+            .map(|s| s.id.clone())
+            .collect();
+        for sibling in inheriting {
+            let h = self.hold_hours(&sibling, id);
+            self.mode_hours.insert(sibling, h);
+        }
+        self.mode_hours.insert(id.to_string(), hours.min(72));
+    }
+
+    /// Drop timers no screen owns any more. Run after every list save, load
+    /// and import.
+    ///
+    /// - An instance key ("weather.2") that is not on the list goes: ids are
+    ///   reused, and a screen added later under the same id must start fresh.
+    ///   On a board that never saved a list there are no instances, so every
+    ///   such key is an orphan (a rollback's leftovers).
+    /// - On a saved list, a kind's own key goes with the kind's first
+    ///   instance (the screen whose id IS the kind) — after handing its value
+    ///   to each sibling still inheriting it, so they keep their hold. A
+    ///   board that never saved a list keeps its kind keys: they are the only
+    ///   timers it has, and every old app reads them.
+    pub fn prune_screen_timers(&mut self, catalog: &[OffModeDescriptor]) {
+        if !self.screens.is_empty() {
+            for d in catalog {
+                let Some(&h) = self.mode_hours.get(&d.id) else { continue };
+                if self.screens.iter().any(|s| s.id == d.id) {
+                    continue;
+                }
+                let inheriting: Vec<String> = self
+                    .screens
+                    .iter()
+                    .filter(|s| s.kind == d.id && !self.mode_hours.contains_key(&s.id))
+                    .map(|s| s.id.clone())
+                    .collect();
+                for sibling in inheriting {
+                    self.mode_hours.insert(sibling, h);
+                }
+                self.mode_hours.remove(&d.id);
+            }
+        }
+        let listed: Vec<String> = self.screens.iter().map(|s| s.id.clone()).collect();
+        self.mode_hours.retain(|key, _| {
+            listed.contains(key) || !catalog.iter().any(|d| key != &d.id && screen_id_fits(key, &d.id))
+        });
+    }
+
     /// The idle rotation's per-screen dwell, in ms: the stored timer snapped
     /// to a preset, or the default when none is stored.
     pub fn idle_cycle_ms(&self) -> u32 {
@@ -3557,6 +3615,74 @@ mod screens_tests {
         assert_eq!(cfg.hold_hours("clock.2", "clock"), 8, "else sleep_hours");
         assert_eq!(cfg.mode_duration_hours("weather"), 3);
         assert_eq!(cfg.mode_duration_hours(MODE_OFF), 8);
+    }
+
+    /// The first Weather's timer lives under "weather" — the key Forecast
+    /// falls back to. Editing it must not move Forecast's hold.
+    #[test]
+    fn a_first_instance_timer_never_moves_its_siblings() {
+        let cat = catalog();
+        let mut cfg = BoardConfig::default();
+        cfg.sleep_hours = 8;
+        let list = vec![
+            screen("weather", "weather", &[], false),
+            screen("weather.2", "weather", &[("variant", "forecast")], false),
+        ];
+        let _ = cfg.set_screens(list, &cat);
+        assert_eq!(cfg.hold_hours("weather.2", "weather"), 8, "inherits until either is set");
+
+        cfg.set_hold_hours("weather", 1);
+        assert_eq!(cfg.hold_hours("weather", "weather"), 1);
+        assert_eq!(cfg.hold_hours("weather.2", "weather"), 8, "Forecast keeps what it was running");
+
+        cfg.set_hold_hours("weather", 4);
+        assert_eq!(cfg.hold_hours("weather.2", "weather"), 8, "and stays its own after that");
+
+        cfg.set_hold_hours("weather.2", 200);
+        assert_eq!(cfg.hold_hours("weather.2", "weather"), 72, "clamped like every hold");
+    }
+
+    /// Removing a screen takes its timer with it, so a screen added later
+    /// under the same id starts fresh — including the first instance, whose
+    /// timer is the kind key. A sibling still reading that key keeps its
+    /// hold. Instance keys a rollback left behind are orphans.
+    #[test]
+    fn removing_a_screen_takes_its_timer_and_siblings_keep_theirs() {
+        let cat = catalog();
+        let mut cfg = BoardConfig::default();
+        cfg.sleep_hours = 8;
+        let both = vec![
+            screen("weather", "weather", &[], false),
+            screen("weather.2", "weather", &[("variant", "forecast")], false),
+        ];
+        let _ = cfg.set_screens(both.clone(), &cat);
+        cfg.mode_hours.insert("weather".into(), 2); // as an old app writes it: no pinning
+        cfg.mode_hours.insert("clock".into(), 5);
+
+        let _ = cfg.set_screens(vec![both[1].clone()], &cat);
+        cfg.prune_screen_timers(&cat);
+        assert_eq!(cfg.mode_hours.get("weather.2"), Some(&2), "Forecast keeps the hold it was inheriting");
+        assert_eq!(cfg.mode_hours.get("weather"), None, "the removed first instance's timer goes");
+        assert_eq!(cfg.mode_hours.get("clock"), None, "a kind with no screen left keeps no timer");
+
+        let _ = cfg.set_screens(both.clone(), &cat);
+        cfg.prune_screen_timers(&cat);
+        assert_eq!(cfg.hold_hours("weather", "weather"), 8, "a re-added first instance starts fresh");
+
+        let _ = cfg.set_screens(vec![both[0].clone()], &cat);
+        cfg.prune_screen_timers(&cat);
+        assert_eq!(cfg.mode_hours.get("weather.2"), None, "an unlisted instance's timer goes");
+
+        // A board that never saved a list keeps its kind timers (every old
+        // app reads them), and drops instance keys a rollback left behind.
+        let mut legacy = BoardConfig::default();
+        legacy.mode_hours.insert("weather".into(), 3);
+        legacy.mode_hours.insert("weather.2".into(), 2);
+        legacy.mode_hours.insert(MODE_OFF.into(), 1);
+        legacy.prune_screen_timers(&cat);
+        assert_eq!(legacy.mode_hours.get("weather"), Some(&3));
+        assert_eq!(legacy.mode_hours.get(MODE_OFF), Some(&1));
+        assert_eq!(legacy.mode_hours.get("weather.2"), None);
     }
 
     /// Removing the held screen must be detectable, so the server can

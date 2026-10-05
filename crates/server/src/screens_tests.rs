@@ -444,6 +444,38 @@ fn set_mode_hours_names_something_that_exists() {
     assert_eq!(keys, ["clock", "off", "weather", "weather.2"]);
 }
 
+/// Each screen holds for its OWN timer. The first Weather's timer is stored
+/// under "weather" — Forecast's fallback — so setting it from Weather's page
+/// must leave Forecast holding what it held, and a pick of Forecast proves it.
+#[test]
+fn a_first_instance_timer_does_not_move_its_sibling() {
+    let mut cfg = edited(vec![sc("weather", "weather", &[], true), sc("weather.2", "weather", &[("variant", "forecast")], false)]);
+    cfg.sleep_hours = 6;
+    let state = state_with(&cfg, false);
+    apply_command(&state, "b", Command::SetModeHours { mode: "weather".into(), hours: 1 });
+    let after = state.config_for("b");
+    assert_eq!(after.hold_hours("weather", "weather"), 1);
+    assert_eq!(after.hold_hours("weather.2", "weather"), 6, "Forecast keeps its hold");
+    apply_command(&state, "b", Command::SetMode { mode: "weather.2".into() });
+    let wake = state.config_for("b").wake_at.expect("a timed hold");
+    let hours = (wake.saturating_sub(crate::unix_now()) + 1800) / 3600;
+    assert_eq!(hours, 6, "picking Forecast arms ITS timer, not Weather's");
+}
+
+/// A rollback leaves an instance timer ("weather.2") on a board whose list it
+/// dropped. A screen added later under that id must not inherit it.
+#[test]
+fn a_rollbacks_orphaned_instance_timer_is_dropped_at_load() {
+    let mut cfg = BoardConfig::default();
+    cfg.mode_hours = BTreeMap::from([("weather".into(), 8), ("weather.2".into(), 2)]);
+    let state = state_with(&cfg, false);
+    assert_eq!(
+        state.config_for("b").mode_hours,
+        BTreeMap::from([("weather".into(), 8)]),
+        "the kind's timer stays (old apps read it); the orphan goes"
+    );
+}
+
 // ---- releases ----
 
 /// Removing the held screen is not a gesture: back to Sports, with no quiet
