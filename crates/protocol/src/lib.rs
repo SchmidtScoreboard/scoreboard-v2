@@ -9,7 +9,9 @@
 extern crate alloc;
 
 use alloc::collections::BTreeMap;
+use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -180,6 +182,20 @@ impl OffModeDescriptor {
             _ => Ok(()),
         }
     }
+
+    /// Does this mode light the panel? The same test the server's knob menu
+    /// has always used: a mode with no preview draws nothing. Only lit modes
+    /// can be screens — a dark one is what Off already is.
+    pub fn lit(&self) -> bool {
+        self.preview.is_some()
+    }
+
+    /// Does `key` belong to one screen rather than to the board? A key may be
+    /// declared more than once (the clock's 24-hour toggle is, once per style
+    /// that has one); any per-screen declaration makes it per-screen.
+    pub fn per_screen(&self, key: &str) -> bool {
+        self.fields.iter().any(|f| f.key == key && f.per_screen)
+    }
 }
 
 /// One control on a mode's settings screen.
@@ -212,6 +228,16 @@ pub struct OffModeField {
     /// Show this field only while another field holds a given value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_when: Option<FieldCondition>,
+    /// This field belongs to one SCREEN INSTANCE (a layout or a style), not to
+    /// the board. A board can hold two Weather screens with different layouts
+    /// (MAR-117), so a per-screen value is stored in `ScreenConfig::params`;
+    /// everything else (a location, 24-hour time) stays board-wide in
+    /// `off_mode_params` and is shared by every screen of the kind.
+    ///
+    /// A bool and omitted when false, so an app or server that predates it
+    /// reads every field as board-wide, which is exactly what it was.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub per_screen: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -222,6 +248,13 @@ pub struct OffModeChoice {
     /// build a URL out of an id it is not allowed to understand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
+    /// Short name for a SCREEN using this choice, for when its kind appears
+    /// more than once on a board ("Big weather" beside "Forecast"). Server-
+    /// declared so the app never composes a name out of ids, and at most 15
+    /// characters so it fits the board's knob menu. `None` falls back to
+    /// "{mode label} · {choice label}" — see [`screen_labels`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_label: Option<String>,
 }
 
 /// One level of conditional visibility — not a rule engine. Anything needing
@@ -469,7 +502,12 @@ pub struct Manifest {
     /// refreshes (content-addressed ids change every score tick) — but that
     /// heuristic can't tell a 4-game rotation from a notice. A changed epoch
     /// says "different program: start from the top". 0 = the games rotation;
-    /// notices mint a fresh nonzero value per showing.
+    /// notices mint a fresh nonzero value per showing (a counter from 1); an
+    /// idle rotation of two or more screens carries [`idle_epoch`], which has
+    /// the top bit set so it can never collide with either. That one is a
+    /// HASH of the program, not a counter: the same screens at the same timer
+    /// give the same epoch across minute re-pushes, restarts and deploys, so
+    /// the board keeps its slot and its timer instead of restarting the cycle.
     #[serde(default)]
     pub epoch: u64,
     /// Countdown-bar duration for a notice: the DEVICE fills the bar smoothly
@@ -726,8 +764,34 @@ pub struct BoardConfig {
     #[serde(default)]
     pub off_mode: Option<String>,
     /// Per-mode input values, keyed by `OffModeInput::key`.
+    ///
+    /// REAL storage for the board-wide fields (a location, 24-hour time),
+    /// which every screen of a kind shares. Per-screen fields (a layout, a
+    /// style) live in `ScreenConfig::params` once a list is saved, and are
+    /// MIRRORED here by `set_screens` so an old app's previews and settings
+    /// pages, and a rolled-back server's renders, still read the right one.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub off_mode_params: BTreeMap<String, String>,
+    /// The board's screen list, in the user's order: Sports, Off, then
+    /// instances of the server's off modes (MAR-117). One order drives the
+    /// app's rail and settings, the knob menu and the idle rotation; the
+    /// members marked `idle` are what the board cycles through when nothing
+    /// is on.
+    ///
+    /// EMPTY means "never saved", not "no screens": such a board runs from the
+    /// legacy fields exactly as before, and [`resolved_screens`] synthesizes
+    /// its list from them. That is what keeps an untouched board — every board
+    /// on deploy day — byte-identical on disk and on the wire. Only
+    /// `set_screens` writes it, and it re-derives `off_mode`/`off_state` and
+    /// the per-screen mirror in `off_mode_params` on every write, so an old
+    /// binary that ignores this field still sees one sane idle screen.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub screens: Vec<ScreenConfig>,
+    /// Seconds each checked screen holds the panel while the board idles
+    /// through two or more of them. None = the default; every reader snaps
+    /// through [`BoardConfig::idle_cycle_ms`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_cycle_secs: Option<u32>,
     /// What the panel is DOING, as one open string: "scores" (the resting
     /// state — game rotation, idle screen when nothing is on), "off" (dark),
     /// or any server-declared off-mode id ("clock", "weather", a fork's
@@ -739,6 +803,15 @@ pub struct BoardConfig {
     /// `set_mode`, and the invariant test beside the forked-off-mode one.
     #[serde(default = "default_mode")]
     pub mode: String,
+    /// The held screen INSTANCE, when it differs from its kind ("weather.2"
+    /// while `mode` says "weather"). A twin rather than an instance id in
+    /// `mode`, so `mode` keeps the vocabulary every old app and a rolled-back
+    /// server understand: they see "Weather", ring the Weather tile, and
+    /// render a weather screen rather than an unknown-id clock. Read through
+    /// [`BoardConfig::held_screen_id`]; `set_mode` always clears it, so every
+    /// legacy write path stays consistent without knowing it exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_screen: Option<String>,
     /// Per-mode timer durations in HOURS, keyed by mode id ("off", "clock",
     /// …). Picking a non-scores mode runs it for its configured duration and
     /// then the board returns to scores on its own — the auto-wake property
@@ -826,6 +899,21 @@ fn default_mode() -> String {
 pub const MODE_SCORES: &str = "scores";
 pub const MODE_OFF: &str = "off";
 
+/// What the two fixed rows are CALLED, everywhere: the app's rail, its
+/// settings list, footers, and the board's knob (uppercased). One source so
+/// the server and the app cannot drift. Labels only — the wire ids stay
+/// `MODE_SCORES`/`MODE_OFF` forever: stored modes, `mode_hours` keys, old
+/// apps' commands and the firmware's tap-tap all key on them.
+pub const SCORES_LABEL: &str = "Sports";
+pub const OFF_LABEL: &str = "Off";
+
+/// The reserved off-mode ids (see `OffModeDescriptor::id`). "blank" draws
+/// nothing and is never a screen — Off already is that darkness. "clock" is
+/// what an idle set falls back to, because a dark panel is indistinguishable
+/// from a broken one.
+pub const OFF_MODE_BLANK: &str = "blank";
+pub const OFF_MODE_CLOCK: &str = "clock";
+
 fn default_dwell_secs() -> u32 {
     DWELL_STANDARD_SECS
 }
@@ -857,6 +945,27 @@ pub fn screen_dwell_ms(secs: u32, frame_rows: usize) -> u32 {
 pub fn snap_dwell_secs(secs: u32) -> u32 {
     let mut best = DWELL_PRESETS_SECS[0];
     for p in DWELL_PRESETS_SECS {
+        if secs.abs_diff(p) <= secs.abs_diff(best) {
+            best = p;
+        }
+    }
+    best
+}
+
+/// How long each checked screen holds the panel while a board idles through
+/// two or more of them, in seconds: 2, 5, 10, 15, 30 and 60 minutes. Same
+/// shape as `DWELL_PRESETS_SECS`: seconds are the stored and wire unit, and
+/// every reader snaps through [`snap_idle_cycle_secs`], so a hand-edited or
+/// imported value behaves as the preset its label says it is.
+pub const IDLE_CYCLE_SECS: [u32; 6] = [120, 300, 600, 900, 1800, 3600];
+pub const IDLE_CYCLE_DEFAULT_SECS: u32 = 300;
+
+/// The preset nearest `secs`; an exact midpoint goes to the longer preset —
+/// an idle screen lingering is harmless, one flickering past is not. Never 0,
+/// whatever is stored: a zero dwell would spin the board through its frames.
+pub fn snap_idle_cycle_secs(secs: u32) -> u32 {
+    let mut best = IDLE_CYCLE_SECS[0];
+    for p in IDLE_CYCLE_SECS {
         if secs.abs_diff(p) <= secs.abs_diff(best) {
             best = p;
         }
@@ -1111,6 +1220,16 @@ pub struct PortableSettings {
     pub off_mode: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub off_mode_params: BTreeMap<String, String>,
+    /// The screen list — a durable preference, like `off_mode`, which still
+    /// travels beside it as the legacy twin an older binary reads. Absent from
+    /// blobs exported before it existed and from boards that never saved one;
+    /// either way the import clears the target's list, so the blob's legacy
+    /// fields drive it. NO version bump, for the reason given on `mode_hours`.
+    /// The HELD screen (`mode`/`mode_screen`) is live state and stays behind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub screens: Vec<ScreenConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_cycle_secs: Option<u32>,
     /// The nightly quiet window — a durable preference, like `sleep_hours`.
     /// `quiet_override` is live state and deliberately stays behind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1145,6 +1264,8 @@ impl From<&BoardConfig> for PortableSettings {
             off_state: cfg.off_state,
             off_mode: cfg.off_mode.clone(),
             off_mode_params: cfg.off_mode_params.clone(),
+            screens: cfg.screens.clone(),
+            idle_cycle_secs: cfg.idle_cycle_secs,
             quiet_hours: cfg.quiet_hours,
             quiet_allow_events: cfg.quiet_allow_events,
             spoiler_mode: cfg.spoiler_mode,
@@ -1170,6 +1291,18 @@ impl PortableSettings {
         // its own catalog — the same shape as the brightness/dwell re-clamp.
         cfg.off_mode = self.off_mode.clone();
         cfg.off_mode_params = self.off_mode_params.clone();
+        // VERBATIM and unconditionally, the same re-clamp contract as
+        // `off_mode`. After applying, the server runs a non-empty list through
+        // `BoardConfig::set_screens` — not bare `normalize_screens` — so the
+        // list is sanitized against ITS catalog and the legacy twins above
+        // are re-derived from what survived (a hand-edited or forked blob can
+        // disagree with itself), releasing to Sports if that returns false.
+        // An empty list here is meaningful — it clears a list
+        // the target saved, so the blob's legacy fields (an old export, or a
+        // board that never saved one) are what the target runs, rather than
+        // being silently shadowed by the target's stale list.
+        cfg.screens = self.screens.clone();
+        cfg.idle_cycle_secs = self.idle_cycle_secs;
         cfg.quiet_hours = self.quiet_hours;
         cfg.quiet_allow_events = self.quiet_allow_events;
         cfg.spoiler_mode = self.spoiler_mode;
@@ -1208,14 +1341,154 @@ impl BoardConfig {
     /// stored board and a fielded app fail its whole BoardState decode.
     ///
     /// Same twin pattern as `set_off_mode`/`off_state`, for the same reason.
+    ///
+    /// Also clears `mode_screen`: every legacy path (SetPower, the button, a
+    /// timer lapsing, SetMode with a kind id) writes through here, so none of
+    /// them can leave a stale instance id behind. Holding an instance is
+    /// `set_held_screen`.
     pub fn set_mode(&mut self, mode: &str) {
         self.mode = mode.to_string();
         self.power = mode != MODE_OFF;
+        self.mode_screen = None;
     }
 
-    /// A mode's timer, in hours. 0 = until changed.
+    /// The held screen's id: the instance when one is recorded, else `mode`
+    /// ("scores", "off", or the id of a kind's FIRST instance, which is the
+    /// kind). The new server always stores the exact instance it resolved, so
+    /// this names a listed id exactly; the knob draws its tick only on an
+    /// exact `ModeEntry::id` match. A bare kind that is NOT a listed id is a
+    /// legacy write (a rolled-back server) — see
+    /// [`BoardConfig::held_screen_listed`].
+    pub fn held_screen_id(&self) -> &str {
+        self.mode_screen.as_deref().unwrap_or(&self.mode)
+    }
+
+    /// Hold the screen `id`, an instance of `kind`. `mode` gets the KIND (and
+    /// `power` its twin), and the instance id is recorded only when it says
+    /// something the kind does not — so a first instance, whose id is its
+    /// kind, serializes exactly as a legacy mode write did.
+    pub fn set_held_screen(&mut self, id: &str, kind: &str) {
+        self.set_mode(kind);
+        if id != kind {
+            self.mode_screen = Some(id.to_string());
+        }
+    }
+
+    /// Does the held screen still exist in `screens`? Sports and Off always
+    /// do; a stored "blank" mode counts too, because it is dark like Off and
+    /// the server maps it there rather than lighting the board. False means
+    /// the caller should release the board to Sports.
+    ///
+    /// EXACT id match, never [`resolve_screen`]'s kind fallback: a held first
+    /// instance is stored as `mode = kind` with no `mode_screen`, so with the
+    /// fallback, removing it while a sibling ("weather.2") stays would quietly
+    /// hand the hold — and its timer — to a different layout instead of
+    /// releasing, and `Manifest.mode` would name an id the knob does not list.
+    /// The kind fallback belongs to resolving a PICK; the server stores what
+    /// it resolved with `set_held_screen(resolved.id, kind)`, so the held id
+    /// stays exact. A row whose mode a rolled-back server wrote as a bare kind
+    /// is canonicalized the same way at load, before this is asked.
+    pub fn held_screen_listed(&self, screens: &[ScreenConfig]) -> bool {
+        let held = self.held_screen_id();
+        held == MODE_SCORES
+            || held == MODE_OFF
+            || held == OFF_MODE_BLANK
+            || screens.iter().any(|s| s.id == held)
+    }
+
+    /// How long picking screen `id` (an instance of `kind`) holds it, in hours.
+    /// 0 = until changed. The instance's own entry, else its kind's — every
+    /// timer stored before instances existed is keyed by kind, and an old app
+    /// still writes them that way — else `sleep_hours`.
+    pub fn hold_hours(&self, id: &str, kind: &str) -> u32 {
+        self.mode_hours
+            .get(id)
+            .or_else(|| self.mode_hours.get(kind))
+            .copied()
+            .unwrap_or(self.sleep_hours)
+    }
+
+    /// A mode's timer, in hours. 0 = until changed. A mode id is its own kind.
     pub fn mode_duration_hours(&self, mode: &str) -> u32 {
-        self.mode_hours.get(mode).copied().unwrap_or(self.sleep_hours)
+        self.hold_hours(mode, mode)
+    }
+
+    /// The idle rotation's per-screen dwell, in ms: the stored timer snapped
+    /// to a preset, or the default when none is stored.
+    pub fn idle_cycle_ms(&self) -> u32 {
+        snap_idle_cycle_secs(self.idle_cycle_secs.unwrap_or(IDLE_CYCLE_DEFAULT_SECS)) * 1000
+    }
+
+    /// Save a screen list: normalize it against `catalog` (the same pass a
+    /// load and an import run), then re-derive every legacy twin from it so
+    /// an old app, an old server and the firmware keep seeing one coherent
+    /// idle screen:
+    ///
+    /// - `off_mode`/`off_state` name the first idle member's kind, else
+    ///   "blank" (nothing checked = dark). Left untouched when they already
+    ///   say that, so a legacy row with no `off_mode` keeps none — and, with
+    ///   nothing checked, when they already name a dark mode the catalog
+    ///   offers (a fork's own unlit mode), which is exactly what synthesis
+    ///   read as "nothing checked".
+    /// - Every per-screen key of a kind on the list is mirrored into
+    ///   `off_mode_params` from the first idle member that declares it, else
+    ///   the first instance in list order — the one screen an old reader can
+    ///   imagine. An instance with no stored value REMOVES the flat key
+    ///   (defaults are never stored). Keys of kinds not on the list, and the
+    ///   board-wide keys (location, 24-hour), are real storage and untouched —
+    ///   including a key some descriptor declares board-wide while a fork's
+    ///   kind declares it per-screen: the board-wide reader owns the flat
+    ///   value, and mirroring would overwrite or delete it.
+    ///
+    /// Does NOT change the mode. Returns [`BoardConfig::held_screen_listed`]
+    /// for the new list: false means the held screen was removed and the
+    /// caller must release the board to Sports.
+    #[must_use]
+    pub fn set_screens(&mut self, list: Vec<ScreenConfig>, catalog: &[OffModeDescriptor]) -> bool {
+        self.screens = normalize_screens(list, catalog);
+
+        let (kind, dark) = match self.screens.iter().find(|s| s.idle) {
+            Some(s) => (s.kind.clone(), false),
+            None => (OFF_MODE_BLANK.to_string(), true),
+        };
+        let state = if dark { OffState::Blank } else { OffState::Clock };
+        let already_dark = dark
+            && self.off_state == OffState::Blank
+            && catalog.iter().any(|d| d.id == self.off_mode_id() && !d.lit());
+        if !already_dark && (self.off_mode_id() != kind || self.off_state != state) {
+            self.set_off_mode(&kind, dark);
+        }
+
+        let declares = |s: &ScreenConfig, key: &str| catalog.iter().any(|d| d.id == s.kind && d.per_screen(key));
+        let board_wide =
+            |key: &str| catalog.iter().any(|d| d.fields.iter().any(|f| f.key == key) && !d.per_screen(key));
+        let mut keys: Vec<&str> = Vec::new();
+        for s in self.screens.iter().filter(|s| !s.is_fixed()) {
+            for d in catalog.iter().filter(|d| d.id == s.kind) {
+                for f in d.fields.iter().filter(|f| f.per_screen) {
+                    if !keys.contains(&f.key.as_str()) && !board_wide(&f.key) {
+                        keys.push(&f.key);
+                    }
+                }
+            }
+        }
+        for key in keys {
+            let source = self
+                .screens
+                .iter()
+                .find(|s| s.idle && declares(s, key))
+                .or_else(|| self.screens.iter().find(|s| declares(s, key)));
+            match source.and_then(|s| s.params.get(key)).cloned() {
+                Some(v) => {
+                    self.off_mode_params.insert(key.to_string(), v);
+                }
+                None => {
+                    self.off_mode_params.remove(key);
+                }
+            }
+        }
+
+        self.held_screen_listed(&self.screens)
     }
 }
 
@@ -1235,7 +1508,10 @@ impl Default for BoardConfig {
             quiet_hours: None,
             quiet_allow_events: false,
             quiet_override: false,
+            screens: Vec::new(),
+            idle_cycle_secs: None,
             mode: default_mode(),
+            mode_screen: None,
             mode_hours: BTreeMap::new(),
             sleep_hours: default_sleep_hours(),
             dwell_secs: default_dwell_secs(),
@@ -1249,6 +1525,399 @@ impl Default for BoardConfig {
             demo_data: false,
         }
     }
+}
+
+// ---- screens (MAR-117) ----
+
+/// One row of a board's screen list: Sports, Off, or an INSTANCE of a
+/// server-declared off mode. Two instances of one kind are how a board shows
+/// big weather AND a forecast.
+///
+/// Strings and a bool only, for the reason `OffModeField::kind` gives: a
+/// closed enum here would let one unknown value abort the fielded app's
+/// decode of the whole config.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ScreenConfig {
+    /// Stable instance id: "scores", "off", the kind id for a kind's first
+    /// instance, "{kind}.{n}" after it (see [`mint_screen_id`]). It is what
+    /// `mode_screen`, `mode_hours` keys, the knob's `ModeEntry::id` and the
+    /// app's commands name. NOTHING may assume `id == kind` — the first
+    /// instance can be removed and its successor kept; go through
+    /// [`resolve_screen`].
+    pub id: String,
+    /// "scores", "off", or an off-mode descriptor id. A string, never an enum.
+    pub kind: String,
+    /// This screen's own values — ONLY keys its descriptor marks
+    /// `per_screen` (a layout, a style). The board-wide ones (location,
+    /// 24-hour) stay in `BoardConfig::off_mode_params`, and a renderer reads
+    /// those overlaid by these.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, String>,
+    /// Part of the idle rotation: what the board shows when nothing is on.
+    /// Never set on Sports or Off.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub idle: bool,
+}
+
+impl ScreenConfig {
+    /// Sports or Off: id and kind exact, nothing else.
+    fn pinned(kind: &str) -> Self {
+        Self { id: kind.to_string(), kind: kind.to_string(), params: BTreeMap::new(), idle: false }
+    }
+
+    /// Sports or Off — the two rows that cannot be removed, reordered, or
+    /// made part of the idle rotation.
+    pub fn is_fixed(&self) -> bool {
+        self.kind == MODE_SCORES || self.kind == MODE_OFF
+    }
+}
+
+/// At most this many rows on one board: Sports + Off + 8 screens.
+///
+/// Measured, not picked. Every screen in an idle rotation must sit in the
+/// board's 24 KiB compressed frame cache at once, or LRU eviction drops the
+/// NEXT screen and nothing re-requests it until a different manifest arrives.
+/// The worst stock idle frame is the word clock at 2,130 B compressed, so 8
+/// idle frames plus the one `last_good` copy is (8 + 1) × 2,130 = 19,170 B —
+/// under 80% of the cache.
+pub const MAX_SCREENS: usize = 10;
+
+/// The knob menu draws FONT_4X6 from x=1 and its tick sits at x=61: 15
+/// characters fit.
+pub const BOARD_LABEL_MAX: usize = 15;
+
+/// Is `id` a legal id for a screen of `kind`? Sports and Off are exactly
+/// their kind. Anything else is its kind, or "{kind}.{n}" for a decimal n ≥ 2
+/// with no leading zero — so an id equal to some kind id always HAS that
+/// kind, and an old app's kind-addressed command cannot land on a screen of
+/// another kind. The "." is deliberate: a "weather-x" id would be rewritten
+/// by the server's legacy `offmode::migrate`.
+pub fn screen_id_fits(id: &str, kind: &str) -> bool {
+    if kind == MODE_SCORES || kind == MODE_OFF {
+        return id == kind;
+    }
+    !kind.is_empty() && (id == kind || screen_id_number(id, kind).is_some())
+}
+
+/// The n of a "{kind}.{n}" id, under the rules of [`screen_id_fits`].
+fn screen_id_number(id: &str, kind: &str) -> Option<u32> {
+    let n = id.strip_prefix(kind)?.strip_prefix('.')?;
+    if n.is_empty() || n.starts_with('0') || !n.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    n.parse::<u32>().ok().filter(|n| *n >= 2)
+}
+
+/// A fresh id for a new screen of `kind` (a real kind, never empty): the kind
+/// itself while no screen has it, else "{kind}.{highest n + 1}" — never a
+/// number an existing screen of the kind uses, so ids are not recycled while
+/// any of the kind remain. The server mints every stored id; the app mints
+/// with this same function so its optimistic list matches.
+pub fn mint_screen_id<'a>(kind: &str, existing: impl IntoIterator<Item = &'a str>) -> String {
+    let mut taken: Vec<u32> = Vec::new();
+    let mut bare = false;
+    for id in existing {
+        if id == kind {
+            bare = true;
+        } else if let Some(n) = screen_id_number(id, kind) {
+            taken.push(n);
+        }
+    }
+    if !bare {
+        return kind.to_string();
+    }
+    let n = match taken.iter().max() {
+        None => 2,
+        Some(&max) => match max.checked_add(1) {
+            Some(n) => n,
+            // A hand-edited u32::MAX: take the lowest free number instead.
+            None => (2..).find(|n| !taken.contains(n)).unwrap_or(2),
+        },
+    };
+    format!("{kind}.{n}")
+}
+
+/// The screen `id` names: the instance with that id, else the FIRST instance
+/// whose kind is `id` — a legacy kind id from an old app, a stored mode, a
+/// `mode_hours` key, a queued knob pick. The server layers its legacy
+/// "weather-x" migration on top; this is the part both sides share.
+pub fn resolve_screen<'a>(screens: &'a [ScreenConfig], id: &str) -> Option<&'a ScreenConfig> {
+    screens.iter().find(|s| s.id == id).or_else(|| screens.iter().find(|s| s.kind == id))
+}
+
+/// The lit descriptor for a screen kind a list may hold — never Sports, Off
+/// or the dark "blank".
+fn screen_descriptor<'a>(catalog: &'a [OffModeDescriptor], kind: &str) -> Option<&'a OffModeDescriptor> {
+    if kind == MODE_SCORES || kind == MODE_OFF || kind == OFF_MODE_BLANK {
+        return None;
+    }
+    catalog.iter().find(|d| d.id == kind && d.lit())
+}
+
+/// Make one screen idle, because a sanitize step must never turn a lit board
+/// dark: a dark panel is indistinguishable from a broken one (the rule
+/// `render_off_mode` follows for an unknown id). The first clock, else the
+/// first lit screen, else a clock added for the purpose.
+fn light_one(list: &mut Vec<ScreenConfig>, catalog: &[OffModeDescriptor]) {
+    let pick = list
+        .iter()
+        .position(|s| s.kind == OFF_MODE_CLOCK)
+        .or_else(|| list.iter().position(|s| !s.is_fixed()));
+    match pick {
+        Some(i) => list[i].idle = true,
+        None => {
+            if list.len() < MAX_SCREENS && screen_descriptor(catalog, OFF_MODE_CLOCK).is_some() {
+                let id = mint_screen_id(OFF_MODE_CLOCK, list.iter().map(|s| s.id.as_str()));
+                list.push(ScreenConfig { id, kind: OFF_MODE_CLOCK.to_string(), params: BTreeMap::new(), idle: true });
+            }
+        }
+    }
+}
+
+/// THE sanitize for a screen list — run on every save, load and import, so
+/// nothing a client sends can be stored in a shape a load would reject.
+///
+/// - The output always starts Sports, Off (exact ids, no params, never
+///   idle), whatever the input did with them.
+/// - Screens of a kind the catalog does not offer, does not light, or that
+///   is reserved ("scores", "off", "blank") are dropped — a fork that removed
+///   a mode, or a hand-edited import.
+/// - Params keep only keys the descriptor marks `per_screen` whose values it
+///   validates; everything else is dropped, never stored. An empty value is
+///   dropped too: it means "the default", which is never stored (the
+///   SetOffModeParam rule), and stored it would SHADOW the default.
+/// - An id that does not fit its kind, or repeats an earlier one, is
+///   re-minted. Valid ids elsewhere in the input are never minted over, so a
+///   re-mint cannot rename a screen that was fine.
+/// - At most [`MAX_SCREENS`]; the excess is dropped from the end.
+/// - If the input had an idle screen and none survived, one is lit
+///   ([`light_one`]): dark is never the fallback.
+///
+/// Idempotent: normalizing a normalized list returns it unchanged.
+pub fn normalize_screens(list: Vec<ScreenConfig>, catalog: &[OffModeDescriptor]) -> Vec<ScreenConfig> {
+    let wanted_idle = list.iter().any(|s| s.idle && !s.is_fixed());
+    let reserved: Vec<String> =
+        list.iter().filter(|s| screen_id_fits(&s.id, &s.kind)).map(|s| s.id.clone()).collect();
+    let mut out = vec![ScreenConfig::pinned(MODE_SCORES), ScreenConfig::pinned(MODE_OFF)];
+    for s in list {
+        let Some(d) = screen_descriptor(catalog, &s.kind) else { continue };
+        if out.len() >= MAX_SCREENS {
+            break;
+        }
+        let id = if screen_id_fits(&s.id, &s.kind) && !out.iter().any(|o| o.id == s.id) {
+            s.id
+        } else {
+            mint_screen_id(&s.kind, out.iter().map(|o| o.id.as_str()).chain(reserved.iter().map(String::as_str)))
+        };
+        let params = s
+            .params
+            .into_iter()
+            .filter(|(k, v)| !v.is_empty() && d.per_screen(k) && d.validate(k, v).is_ok())
+            .collect();
+        out.push(ScreenConfig { id, kind: s.kind, params, idle: s.idle });
+    }
+    if wanted_idle && !out.iter().any(|s| s.idle) {
+        light_one(&mut out, catalog);
+    }
+    out
+}
+
+/// The board's screen list as everything should see it: the stored list,
+/// normalized, or — for a board that never saved one — a list SYNTHESIZED
+/// from the legacy fields, which shows the board exactly as it already
+/// behaves:
+///
+/// - Sports, Off, then one instance per lit descriptor in catalog order,
+///   each id == kind, carrying its per-screen keys from `off_mode_params`.
+/// - Idle: the instance of `off_mode_id()`. None when that is "blank" (or a
+///   fork's other dark mode). When it names a kind this catalog does not
+///   light — a fork-removed mode — the clock, because dark is never the
+///   fallback. (The server migrates a legacy "weather-x" id before this.)
+/// - A fork lighting more than [`MAX_SCREENS`] − 2 modes keeps the first
+///   ones in catalog order PLUS the idle one, so the board's idle screen is
+///   never what the cap drops.
+///
+/// Pass the server's real catalog: an empty one leaves just Sports and Off.
+pub fn resolved_screens(cfg: &BoardConfig, catalog: &[OffModeDescriptor]) -> Vec<ScreenConfig> {
+    if !cfg.screens.is_empty() {
+        return normalize_screens(cfg.screens.clone(), catalog);
+    }
+    let idle_kind = cfg.off_mode_id();
+    let mut list = vec![ScreenConfig::pinned(MODE_SCORES), ScreenConfig::pinned(MODE_OFF)];
+    for d in catalog {
+        if screen_descriptor(catalog, &d.id).is_none() || list.iter().any(|s| s.id == d.id) {
+            continue;
+        }
+        let params = cfg
+            .off_mode_params
+            .iter()
+            .filter(|(k, _)| d.per_screen(k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        list.push(ScreenConfig { id: d.id.clone(), kind: d.id.clone(), params, idle: d.id == idle_kind });
+    }
+    let dark = idle_kind == OFF_MODE_BLANK || catalog.iter().any(|d| d.id == idle_kind && !d.lit());
+    if !dark && !list.iter().any(|s| s.idle) {
+        light_one(&mut list, catalog);
+    }
+    // A fork can light more modes than a board has rows. Trim BEFORE
+    // normalize's cap, from the end and never the idle screen: the cap alone
+    // would drop a late-catalog idle mode and move the board's idle screen
+    // to the clock on deploy day.
+    while list.len() > MAX_SCREENS {
+        match list.iter().rposition(|s| !s.is_fixed() && !s.idle) {
+            Some(i) => {
+                list.remove(i);
+            }
+            None => break,
+        }
+    }
+    normalize_screens(list, catalog)
+}
+
+/// A screen's name before any tie is broken. Sports and Off are fixed; a
+/// kind on the list once keeps its descriptor label, so nothing is renamed
+/// on the day lists ship; a kind on it more than once is named by its layout
+/// or style — the selected option of its first per-screen choice field.
+fn screen_base_label(screens: &[ScreenConfig], i: usize, catalog: &[OffModeDescriptor]) -> String {
+    let s = &screens[i];
+    if s.kind == MODE_SCORES {
+        return SCORES_LABEL.to_string();
+    }
+    if s.kind == MODE_OFF {
+        return OFF_LABEL.to_string();
+    }
+    let Some(d) = catalog.iter().find(|d| d.id == s.kind) else {
+        return s.id.clone();
+    };
+    if screens.iter().filter(|o| o.kind == s.kind).count() <= 1 {
+        return d.label.clone();
+    }
+    let Some(f) = d.fields.iter().find(|f| f.per_screen && f.kind == "choice") else {
+        return d.label.clone();
+    };
+    let value = d.value(&f.key, &s.params);
+    match f.options.iter().find(|o| o.value == value) {
+        Some(o) => match o.screen_label.as_deref().filter(|l| !l.is_empty()) {
+            Some(l) => l.to_string(),
+            None => format!("{} · {}", d.label, o.label),
+        },
+        None => d.label.clone(),
+    }
+}
+
+/// Every screen's app-facing name, in list order, all distinct: a name still
+/// shared after [`screen_base_label`] gets " 2", " 3" by list order. One
+/// function for the rail, the settings list and footers on both platforms.
+pub fn screen_labels(screens: &[ScreenConfig], catalog: &[OffModeDescriptor]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(screens.len());
+    for i in 0..screens.len() {
+        let base = screen_base_label(screens, i, catalog);
+        let mut label = base.clone();
+        let mut n = 2u32;
+        while out.contains(&label) {
+            label = format!("{base} {n}");
+            n += 1;
+        }
+        out.push(label);
+    }
+    out
+}
+
+/// The app-facing name of `screens[index]`, as [`screen_labels`] gives it.
+/// Empty for an index past the end.
+pub fn screen_label(screens: &[ScreenConfig], index: usize, catalog: &[OffModeDescriptor]) -> String {
+    screen_labels(screens, catalog).into_iter().nth(index).unwrap_or_default()
+}
+
+/// A label the knob can draw: printable ASCII uppercased, anything else
+/// (the "·" separator, accents, emoji) a word break, runs of space collapsed.
+fn fold_board_label(s: &str) -> String {
+    let mut out = String::new();
+    let mut gap = false;
+    for c in s.chars() {
+        if c.is_ascii_graphic() {
+            if gap && !out.is_empty() {
+                out.push(' ');
+            }
+            gap = false;
+            out.push(c.to_ascii_uppercase());
+        } else {
+            gap = true;
+        }
+    }
+    out
+}
+
+/// At most `max` characters of a folded (ASCII) label, cut at a word break
+/// when one falls in the back half — "STOCK TICKERS", not "STOCK TICKERS Y"
+/// — and without a dangling space.
+fn clip_board_label(s: &str, max: usize) -> String {
+    let mut out: String = s.chars().take(max).collect();
+    if s.len() > max && s.as_bytes()[max] != b' ' {
+        if let Some(cut) = out.rfind(' ').filter(|&i| i >= max / 2) {
+            out.truncate(cut);
+        }
+    }
+    while out.ends_with(' ') {
+        out.pop();
+    }
+    out
+}
+
+/// Every screen's knob-menu label, in list order: [`screen_labels`]' names
+/// folded to uppercase ASCII, at most [`BOARD_LABEL_MAX`] characters, and
+/// all distinct after folding — a tie gets " 2", " 3", with the BASE cut
+/// short so the number still fits.
+pub fn board_labels(screens: &[ScreenConfig], catalog: &[OffModeDescriptor]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(screens.len());
+    for i in 0..screens.len() {
+        let mut base = fold_board_label(&screen_base_label(screens, i, catalog));
+        if base.is_empty() {
+            base = fold_board_label(&screens[i].kind);
+        }
+        if base.is_empty() {
+            base = "SCREEN".to_string();
+        }
+        // Numbered from the CLIPPED base, so "X" and "X 2" read as a pair.
+        let base = clip_board_label(&base, BOARD_LABEL_MAX);
+        let mut label = base.clone();
+        let mut n = 2u32;
+        while out.contains(&label) {
+            let suffix = format!(" {n}");
+            label = clip_board_label(&base, BOARD_LABEL_MAX - suffix.len()) + &suffix;
+            n += 1;
+        }
+        out.push(label);
+    }
+    out
+}
+
+/// The knob-menu label of `screens[index]`, as [`board_labels`] gives it.
+/// Empty for an index past the end.
+pub fn board_label(screens: &[ScreenConfig], index: usize, catalog: &[OffModeDescriptor]) -> String {
+    board_labels(screens, catalog).into_iter().nth(index).unwrap_or_default()
+}
+
+/// `Manifest::epoch` for an idle rotation of `ids` at `dwell_ms` per screen:
+/// the first 8 bytes (big-endian) of sha256("idle|" + ids joined by "," +
+/// "|" + dwell_ms in decimal), with the top bit set.
+///
+/// A content hash, not a counter or `std`'s seeded hasher, so it is the same
+/// on every build and every restart: a minute re-push or a deploy keeps the
+/// board's slot and timer, while a change of membership, order or timer is a
+/// new program that starts from the first screen. The top bit keeps it clear
+/// of the games rotation (0) and of notices (a counter from 1).
+pub fn idle_epoch(ids: &[&str], dwell_ms: u32) -> u64 {
+    let mut h = Sha256::new();
+    h.update(b"idle|");
+    h.update(ids.join(",").as_bytes());
+    h.update(b"|");
+    h.update(dwell_ms.to_string().as_bytes());
+    let digest = h.finalize();
+    let mut top = [0u8; 8];
+    top.copy_from_slice(&digest[..8]);
+    u64::from_be_bytes(top) | (1 << 63)
 }
 
 // ---- controller commands ----
@@ -1334,6 +2003,16 @@ pub enum Command {
     SetOffMode { id: String },
     /// Set one off-mode input value (`OffModeInput::key`).
     SetOffModeParam { key: String, value: String },
+    /// Replace the board's WHOLE screen list: adding, removing, reordering,
+    /// idle checkmarks and per-screen layouts are all this one command, the
+    /// `SetSportConfig` precedent. The server runs it through the same
+    /// [`normalize_screens`] as a load and an import, so a client cannot store
+    /// a list a later load would reject (and ids it proposes are re-minted if
+    /// they do not fit). Last write wins — fine for a household's board.
+    SetScreens { screens: Vec<ScreenConfig> },
+    /// How long each checked screen holds the panel while the board idles
+    /// through two or more, in seconds. Snapped to [`IDLE_CYCLE_SECS`].
+    SetIdleCycle { secs: u32 },
     /// Spoiler-protect a whole league.
     SetLeagueSpoiler { sport_id: String, on: bool },
     /// Spoiler-protect one team's games.
@@ -2027,22 +2706,24 @@ mod fw_channel_tests {
                 OffModeField {
                     key: "location".into(), label: "Location".into(), kind: "text".into(),
                     placeholder: "ZIP".into(), max_len: 5, default: String::new(),
-                    options: vec![], visible_when: None,
+                    options: vec![], visible_when: None, per_screen: false,
                 },
                 OffModeField {
                     key: "variant".into(), label: "Layout".into(), kind: "choice".into(),
                     placeholder: String::new(), max_len: 0, default: "simple".into(),
                     options: vec![
-                        OffModeChoice { value: "simple".into(), label: "Simple".into(), preview: None },
-                        OffModeChoice { value: "clock".into(), label: "Clock".into(), preview: None },
+                        OffModeChoice { value: "simple".into(), label: "Simple".into(), preview: None, screen_label: None },
+                        OffModeChoice { value: "clock".into(), label: "Clock".into(), preview: None, screen_label: None },
                     ],
                     visible_when: None,
+                    per_screen: false,
                 },
                 OffModeField {
                     key: "hour24".into(), label: "24-hour".into(), kind: "toggle".into(),
                     placeholder: String::new(), max_len: 0, default: "0".into(),
                     options: vec![],
                     visible_when: Some(FieldCondition { key: "variant".into(), equals: "clock".into() }),
+                    per_screen: false,
                 },
             ],
         }
@@ -2371,6 +3052,923 @@ mod fw_channel_tests {
         let mut dev_board = BoardConfig { fw_channel: FwChannel::Dev, ..Default::default() };
         parsed.apply_to(&mut dev_board);
         assert_eq!(dev_board.fw_channel, FwChannel::Dev);
+    }
+}
+
+#[cfg(test)]
+mod screens_tests {
+    use super::*;
+
+    fn choice(value: &str, label: &str, screen_label: Option<&str>) -> OffModeChoice {
+        OffModeChoice {
+            value: value.into(),
+            label: label.into(),
+            preview: Some(format!("/p?{value}")),
+            screen_label: screen_label.map(Into::into),
+        }
+    }
+
+    fn field(key: &str, kind: &str, default: &str, per_screen: bool, options: Vec<OffModeChoice>) -> OffModeField {
+        OffModeField {
+            key: key.into(),
+            label: key.into(),
+            kind: kind.into(),
+            placeholder: String::new(),
+            max_len: if kind == "text" { 32 } else { 0 },
+            default: default.into(),
+            options,
+            visible_when: None,
+            per_screen,
+        }
+    }
+
+    fn only_when(mut f: OffModeField, key: &str, equals: &str) -> OffModeField {
+        f.visible_when = Some(FieldCondition { key: key.into(), equals: equals.into() });
+        f
+    }
+
+    fn descriptor(id: &str, label: &str, lit: bool, fields: Vec<OffModeField>) -> OffModeDescriptor {
+        OffModeDescriptor {
+            id: id.into(),
+            label: label.into(),
+            description: String::new(),
+            preview: lit.then(|| format!("/offmode/{id}.png")),
+            input: None,
+            fields,
+        }
+    }
+
+    /// Shaped like the stock catalog: a dark "blank", a clock whose STYLE is
+    /// per-screen (and whose 24-hour toggle, declared once per style that has
+    /// one, is board-wide), and a weather whose LAYOUT is per-screen beside a
+    /// board-wide location and 24-hour toggle.
+    fn catalog() -> Vec<OffModeDescriptor> {
+        vec![
+            descriptor("blank", "Off", false, vec![]),
+            descriptor(
+                "clock",
+                "Clock",
+                true,
+                vec![
+                    only_when(field("hour24", "toggle", "0", false, vec![]), "style", "classic"),
+                    only_when(field("hour24", "toggle", "0", false, vec![]), "style", "large"),
+                    only_when(field("hour24", "toggle", "0", false, vec![]), "style", "compact"),
+                    field(
+                        "style",
+                        "choice",
+                        "classic",
+                        true,
+                        vec![
+                            choice("classic", "Classic", Some("Clock")),
+                            choice("large", "Large", Some("Big clock")),
+                            choice("compact", "Compact", Some("Small clock")),
+                            choice("word", "Word", Some("Word clock")),
+                        ],
+                    ),
+                ],
+            ),
+            descriptor(
+                "weather",
+                "Weather",
+                true,
+                vec![
+                    field("location", "text", "", false, vec![]),
+                    field(
+                        "variant",
+                        "choice",
+                        "detailed",
+                        true,
+                        vec![
+                            choice("simple", "Simple", Some("Big weather")),
+                            choice("detailed", "Detailed", Some("Weather")),
+                            choice("forecast", "Forecast", Some("Forecast")),
+                            choice("clock", "Clock + Weather", Some("Clock+Weather")),
+                        ],
+                    ),
+                    only_when(field("hour24", "toggle", "0", false, vec![]), "variant", "clock"),
+                ],
+            ),
+        ]
+    }
+
+    fn screen(id: &str, kind: &str, params: &[(&str, &str)], idle: bool) -> ScreenConfig {
+        ScreenConfig {
+            id: id.into(),
+            kind: kind.into(),
+            params: params.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            idle,
+        }
+    }
+
+    fn ids(list: &[ScreenConfig]) -> Vec<&str> {
+        list.iter().map(|s| s.id.as_str()).collect()
+    }
+
+    fn idle_ids(list: &[ScreenConfig]) -> Vec<&str> {
+        list.iter().filter(|s| s.idle).map(|s| s.id.as_str()).collect()
+    }
+
+    fn params(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    fn json(cfg: &BoardConfig) -> serde_json::Value {
+        serde_json::from_str(&serde_json::to_string(cfg).unwrap()).unwrap()
+    }
+
+    /// The deploy-day invariant at the protocol level: a board that never
+    /// touches screens writes not one new key, and neither does a catalog.
+    #[test]
+    fn an_untouched_config_serializes_without_any_new_key() {
+        let s = serde_json::to_string(&BoardConfig::default()).unwrap();
+        for key in ["screens", "idle_cycle", "mode_screen"] {
+            assert!(!s.contains(key), "{key} leaked into a default config: {s}");
+        }
+        let mut stock = catalog();
+        for d in &mut stock {
+            for f in &mut d.fields {
+                f.per_screen = false;
+                for o in &mut f.options {
+                    o.screen_label = None;
+                }
+            }
+        }
+        let s = serde_json::to_string(&stock).unwrap();
+        assert!(!s.contains("per_screen") && !s.contains("screen_label"), "{s}");
+        // And a descriptor from a server that predates them parses as
+        // board-wide fields with no screen names.
+        let old: OffModeField =
+            serde_json::from_str(r#"{"key":"variant","label":"Layout","kind":"choice"}"#).unwrap();
+        assert!(!old.per_screen);
+        let old: OffModeChoice = serde_json::from_str(r#"{"value":"simple","label":"Simple"}"#).unwrap();
+        assert_eq!(old.screen_label, None);
+    }
+
+    /// A fresh board reads as it behaves today: Sports, Off, one screen per
+    /// lit mode in catalog order, and the clock it idles on checked.
+    #[test]
+    fn a_fresh_board_synthesizes_one_screen_per_lit_mode_with_the_clock_idle() {
+        let list = resolved_screens(&BoardConfig::default(), &catalog());
+        assert_eq!(ids(&list), ["scores", "off", "clock", "weather"]);
+        assert_eq!(idle_ids(&list), ["clock"]);
+        assert!(list.iter().all(|s| s.id == s.kind), "a synthesized id is its kind");
+        assert!(list.iter().all(|s| s.params.is_empty()));
+    }
+
+    #[test]
+    fn a_weather_board_synthesizes_weather_idle_with_its_layout() {
+        let mut cfg = BoardConfig::default();
+        cfg.set_off_mode("weather", false);
+        cfg.off_mode_params = params(&[("variant", "forecast"), ("location", "60601"), ("hour24", "1"), ("style", "word")]);
+        let list = resolved_screens(&cfg, &catalog());
+        assert_eq!(idle_ids(&list), ["weather"]);
+        let weather = resolve_screen(&list, "weather").unwrap();
+        assert_eq!(weather.params, params(&[("variant", "forecast")]), "only the per-screen key");
+        let clock = resolve_screen(&list, "clock").unwrap();
+        assert_eq!(clock.params, params(&[("style", "word")]));
+    }
+
+    /// Dark stays dark: "show nothing when idle" is an empty idle set.
+    #[test]
+    fn a_blank_board_synthesizes_nothing_idle() {
+        let legacy: BoardConfig =
+            serde_json::from_str(r#"{"brightness":80,"power":true,"sports":[],"off_state":"Blank"}"#).unwrap();
+        assert_eq!(idle_ids(&resolved_screens(&legacy, &catalog())), Vec::<&str>::new());
+        let mut cfg = BoardConfig::default();
+        cfg.set_off_mode("blank", true);
+        let list = resolved_screens(&cfg, &catalog());
+        assert_eq!(ids(&list), ["scores", "off", "clock", "weather"], "blank is never a screen");
+        assert!(idle_ids(&list).is_empty());
+    }
+
+    /// A mode a fork removed must not turn into a dark board.
+    #[test]
+    fn an_unknown_off_mode_synthesizes_the_clock_idle() {
+        let mut cfg = BoardConfig::default();
+        cfg.set_off_mode("stocks", false);
+        assert_eq!(idle_ids(&resolved_screens(&cfg, &catalog())), ["clock"]);
+
+        // A catalog with no clock lights the first screen it does have.
+        let no_clock: Vec<_> = catalog().into_iter().filter(|d| d.id != "clock").collect();
+        assert_eq!(idle_ids(&resolved_screens(&cfg, &no_clock)), ["weather"]);
+
+        // No catalog yet: just the fixed rows.
+        assert_eq!(ids(&resolved_screens(&cfg, &[])), ["scores", "off"]);
+    }
+
+    /// A stored list wins over the legacy fields, and is read normalized.
+    #[test]
+    fn a_stored_list_is_what_resolves() {
+        let mut cfg = BoardConfig::default();
+        cfg.screens = vec![screen("weather", "weather", &[], true), screen("stocks", "stocks", &[], false)];
+        let list = resolved_screens(&cfg, &catalog());
+        assert_eq!(ids(&list), ["scores", "off", "weather"]);
+        assert_eq!(idle_ids(&list), ["weather"]);
+    }
+
+    /// Saving the list a board already shows must change nothing an old
+    /// reader can see — the only new bytes are the list itself.
+    #[test]
+    fn materializing_a_synthesized_list_changes_no_legacy_field() {
+        let cat = catalog();
+        let mut legacy = Vec::new();
+        legacy.push(BoardConfig::default());
+        legacy.push(serde_json::from_str(r#"{"brightness":80,"power":true,"sports":[],"off_state":"Blank"}"#).unwrap());
+        let mut c = BoardConfig::default();
+        c.set_off_mode("clock", false);
+        c.off_mode_params = params(&[("style", "word"), ("location", "60601"), ("variant", "forecast"), ("hour24", "1")]);
+        legacy.push(c.clone());
+        c.set_off_mode("weather", false);
+        legacy.push(c.clone());
+        c.set_off_mode("blank", true);
+        c.set_mode(MODE_OFF);
+        legacy.push(c);
+
+        for before in legacy {
+            let mut after = before.clone();
+            let listed = after.set_screens(resolved_screens(&before, &cat), &cat);
+            assert!(listed);
+            assert_eq!(after.off_mode, before.off_mode);
+            assert_eq!(after.off_state, before.off_state);
+            assert_eq!(after.off_mode_params, before.off_mode_params);
+            let mut v = json(&after);
+            assert!(v.as_object_mut().unwrap().remove("screens").is_some());
+            assert_eq!(v, json(&before), "only the list is new");
+            assert_eq!(resolved_screens(&after, &cat), resolved_screens(&before, &cat));
+        }
+    }
+
+    /// A fork lighting more modes than a board has rows must not lose the
+    /// board's idle screen to the cap on deploy day.
+    #[test]
+    fn synthesis_past_the_cap_keeps_the_idle_mode() {
+        let mut cat = catalog();
+        for n in 0..9 {
+            let id = format!("fork{n}");
+            cat.push(descriptor(&id, &id, true, vec![]));
+        }
+        let mut cfg = BoardConfig::default();
+        cfg.set_off_mode("fork8", false);
+        let list = resolved_screens(&cfg, &cat);
+        assert_eq!(list.len(), MAX_SCREENS);
+        assert_eq!(idle_ids(&list), ["fork8"]);
+        assert_eq!(ids(&list), ["scores", "off", "clock", "weather", "fork0", "fork1", "fork2", "fork3", "fork4", "fork8"]);
+        assert_eq!(normalize_screens(list.clone(), &cat), list);
+        let mut after = cfg.clone();
+        assert!(after.set_screens(list, &cat));
+        assert_eq!(after.off_mode, cfg.off_mode);
+        assert_eq!(after.off_state, cfg.off_state);
+
+        // Without an idle mode the first ones in catalog order stay.
+        cfg.set_off_mode("blank", true);
+        let list = resolved_screens(&cfg, &cat);
+        assert_eq!(ids(&list)[MAX_SCREENS - 1], "fork5");
+        assert!(idle_ids(&list).is_empty());
+    }
+
+    /// A fork's own dark mode is what synthesis reads as "nothing checked";
+    /// saving that list must not rewrite it to "blank".
+    #[test]
+    fn materializing_keeps_a_forks_dark_mode() {
+        let mut cat = catalog();
+        cat.push(descriptor("dim", "Dim", false, vec![]));
+        let mut cfg = BoardConfig::default();
+        cfg.set_off_mode("dim", true);
+        let list = resolved_screens(&cfg, &cat);
+        assert!(idle_ids(&list).is_empty());
+        let mut after = cfg.clone();
+        assert!(after.set_screens(list, &cat));
+        assert_eq!(after.off_mode.as_deref(), Some("dim"));
+        assert_eq!(after.off_state, OffState::Blank);
+
+        // Checking a screen still takes over, and unchecking it lands on the
+        // stock dark mode.
+        assert!(after.set_screens(vec![screen("clock", "clock", &[], true)], &cat));
+        assert_eq!(after.off_mode_id(), "clock");
+        assert!(after.set_screens(vec![screen("clock", "clock", &[], false)], &cat));
+        assert_eq!(after.off_mode_id(), "blank");
+        assert_eq!(after.off_state, OffState::Blank);
+    }
+
+    /// A key some mode reads board-wide is the board's, even when a fork's
+    /// mode declares the same key per-screen: mirroring that screen must
+    /// neither overwrite nor delete it.
+    #[test]
+    fn a_board_wide_key_is_never_mirrored() {
+        let mut cat = catalog();
+        cat.push(descriptor(
+            "worldclock",
+            "World clock",
+            true,
+            vec![field("hour24", "toggle", "0", true, vec![]), field("zone", "text", "", true, vec![])],
+        ));
+        let mut cfg = BoardConfig::default();
+        cfg.off_mode_params = params(&[("hour24", "1"), ("location", "60601")]);
+        let list = vec![screen("worldclock", "worldclock", &[("zone", "UTC")], true), screen("weather", "weather", &[], true)];
+        assert!(cfg.set_screens(list.clone(), &cat));
+        assert_eq!(cfg.off_mode_params, params(&[("hour24", "1"), ("location", "60601"), ("zone", "UTC")]));
+        let mut list = list;
+        list[0].params.insert("hour24".into(), "0".into());
+        assert!(cfg.set_screens(list, &cat));
+        assert_eq!(cfg.off_mode_params.get("hour24").map(String::as_str), Some("1"));
+    }
+
+    /// Unchecking everything makes the board dark when idle — and must not
+    /// take the board's location with it.
+    #[test]
+    fn an_empty_idle_set_keeps_the_board_wide_location() {
+        let cat = catalog();
+        let mut cfg = BoardConfig::default();
+        cfg.set_off_mode("weather", false);
+        cfg.off_mode_params = params(&[("location", "60601"), ("hour24", "1"), ("variant", "forecast")]);
+        let list = vec![screen("weather", "weather", &[("variant", "simple")], false), screen("clock", "clock", &[], false)];
+        assert!(cfg.set_screens(list, &cat));
+        assert_eq!(cfg.off_mode_id(), "blank");
+        assert_eq!(cfg.off_state, OffState::Blank);
+        assert_eq!(cfg.off_mode_params, params(&[("location", "60601"), ("hour24", "1"), ("variant", "simple")]));
+    }
+
+    /// The flat map shows an old reader the one screen per kind it can
+    /// imagine: the first CHECKED one, else the first in the list.
+    #[test]
+    fn per_screen_keys_mirror_the_first_idle_member_then_list_order() {
+        let cat = catalog();
+        let mut cfg = BoardConfig::default();
+        cfg.off_mode_params = params(&[("location", "60601"), ("style", "large")]);
+        let list = vec![
+            screen("weather", "weather", &[("variant", "simple")], false),
+            screen("weather.2", "weather", &[("variant", "forecast")], true),
+            screen("clock", "clock", &[("style", "word")], true),
+        ];
+        assert!(cfg.set_screens(list.clone(), &cat));
+        assert_eq!(cfg.off_mode_id(), "weather", "the first checked screen's kind");
+        assert_eq!(cfg.off_mode_params, params(&[("location", "60601"), ("style", "word"), ("variant", "forecast")]));
+
+        // A style left at its default is not stored, so the mirror drops it.
+        let mut list = list;
+        list[2].params.clear();
+        assert!(cfg.set_screens(list, &cat));
+        assert_eq!(cfg.off_mode_params, params(&[("location", "60601"), ("variant", "forecast")]));
+
+        // A kind no longer on the list keeps its flat keys: real storage.
+        cfg.off_mode_params.insert("style".into(), "word".into());
+        assert!(cfg.set_screens(vec![screen("weather", "weather", &[], true)], &cat));
+        assert_eq!(cfg.off_mode_params.get("style").map(String::as_str), Some("word"));
+        assert_eq!(cfg.off_mode_params.get("variant"), None, "the listed weather has the default layout");
+    }
+
+    /// Rollback: an old server drops the new fields on its first rewrite.
+    /// What it keeps must still describe a sane board, and rolling forward
+    /// again must re-synthesize from it.
+    #[test]
+    fn a_rolled_back_server_still_sees_one_sane_idle_screen() {
+        let cat = catalog();
+        let mut cfg = BoardConfig::default();
+        cfg.off_mode_params = params(&[("location", "60601"), ("hour24", "1")]);
+        cfg.idle_cycle_secs = Some(600);
+        let list = vec![
+            screen("weather", "weather", &[("variant", "simple")], true),
+            screen("weather.2", "weather", &[("variant", "forecast")], true),
+            screen("clock", "clock", &[("style", "word")], false),
+        ];
+        assert!(cfg.set_screens(list, &cat));
+        cfg.set_held_screen("weather.2", "weather");
+
+        let mut v = json(&cfg);
+        let o = v.as_object_mut().unwrap();
+        for key in ["screens", "idle_cycle_secs", "mode_screen"] {
+            assert!(o.remove(key).is_some(), "{key} was written");
+        }
+        let old: BoardConfig = serde_json::from_value(v).unwrap();
+        assert_eq!(old.off_mode_id(), "weather");
+        assert_eq!(old.off_state, OffState::Clock);
+        assert_eq!(
+            old.off_mode_params,
+            params(&[("location", "60601"), ("hour24", "1"), ("variant", "simple"), ("style", "word")])
+        );
+        assert_eq!(old.mode, "weather", "the held kind, which an old binary renders");
+        assert!(old.power);
+        assert_eq!(old.held_screen_id(), "weather");
+
+        let again = resolved_screens(&old, &cat);
+        assert_eq!(ids(&again), ["scores", "off", "clock", "weather"]);
+        assert_eq!(idle_ids(&again), ["weather"]);
+        assert_eq!(resolve_screen(&again, "weather").unwrap().params, params(&[("variant", "simple")]));
+        assert_eq!(resolve_screen(&again, "clock").unwrap().params, params(&[("style", "word")]));
+    }
+
+    /// Like `every_mode_write_leaves_a_power_bool_old_parsers_accept`, for
+    /// the new writers: whatever they do, the row an old binary reads has a
+    /// truthful `power` and an `off_state` its closed enum accepts.
+    #[test]
+    fn every_screen_write_leaves_a_power_bool_and_off_state_old_parsers_accept() {
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldRow {
+            brightness: u8,
+            power: bool,
+            sports: Vec<serde_json::Value>,
+            #[serde(default)]
+            off_state: OffState,
+        }
+        let cat = catalog();
+        let mut cfg = BoardConfig::default();
+        let check = |cfg: &BoardConfig, what: &str| {
+            let text = serde_json::to_string(cfg).unwrap();
+            let old: OldRow = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{what}: {e}"));
+            assert_eq!(old.power, cfg.mode != MODE_OFF, "{what}");
+            assert_eq!(old.off_state == OffState::Blank, cfg.screens.iter().all(|s| !s.idle), "{what}");
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert!(v["power"].is_boolean(), "{what}: power must be IN the json");
+        };
+        let lists = [
+            vec![screen("weather.2", "weather", &[("variant", "forecast")], true)],
+            vec![],
+            vec![screen("clock", "clock", &[], false)],
+            vec![screen("stocks", "stocks", &[], true)],
+            vec![screen("clock", "clock", &[], true), screen("weather", "weather", &[], true)],
+        ];
+        for (i, list) in lists.into_iter().enumerate() {
+            let _ = cfg.set_screens(list, &cat);
+            check(&cfg, &format!("set_screens #{i}"));
+            for (id, kind) in [("weather.2", "weather"), ("clock", "clock"), (MODE_OFF, MODE_OFF), (MODE_SCORES, MODE_SCORES)] {
+                cfg.set_held_screen(id, kind);
+                check(&cfg, &format!("hold {id} after #{i}"));
+            }
+        }
+    }
+
+    #[test]
+    fn the_held_screen_is_a_twin_of_the_mode() {
+        let mut cfg = BoardConfig::default();
+        cfg.set_held_screen("weather.2", "weather");
+        assert_eq!(cfg.mode, "weather", "old readers see the kind");
+        assert_eq!(cfg.mode_screen.as_deref(), Some("weather.2"));
+        assert_eq!(cfg.held_screen_id(), "weather.2");
+        assert!(cfg.power);
+
+        cfg.set_held_screen("weather", "weather");
+        assert_eq!(cfg.mode_screen, None, "a first instance is just the legacy mode");
+        assert!(!serde_json::to_string(&cfg).unwrap().contains("mode_screen"));
+
+        // Every legacy path writes through set_mode, which clears the twin.
+        cfg.set_held_screen("clock.3", "clock");
+        cfg.set_mode(MODE_OFF);
+        assert_eq!(cfg.held_screen_id(), MODE_OFF);
+        assert!(!cfg.power);
+        cfg.set_held_screen(MODE_SCORES, MODE_SCORES);
+        assert_eq!(cfg.held_screen_id(), MODE_SCORES);
+        assert!(cfg.power);
+    }
+
+    #[test]
+    fn hold_hours_fall_back_from_instance_to_kind_to_sleep_hours() {
+        let mut cfg = BoardConfig::default();
+        cfg.sleep_hours = 8;
+        cfg.mode_hours.insert("weather".into(), 3);
+        cfg.mode_hours.insert("weather.2".into(), 0);
+        assert_eq!(cfg.hold_hours("weather.2", "weather"), 0, "the instance's own, even 0");
+        assert_eq!(cfg.hold_hours("weather.3", "weather"), 3, "else the kind's");
+        assert_eq!(cfg.hold_hours("clock.2", "clock"), 8, "else sleep_hours");
+        assert_eq!(cfg.mode_duration_hours("weather"), 3);
+        assert_eq!(cfg.mode_duration_hours(MODE_OFF), 8);
+    }
+
+    /// Removing the held screen must be detectable, so the server can
+    /// release the board to Sports; the fixed rows and a legacy dark "blank"
+    /// always resolve.
+    #[test]
+    fn set_screens_reports_whether_the_held_screen_survived() {
+        let cat = catalog();
+        let two = vec![screen("weather", "weather", &[], false), screen("weather.2", "weather", &[], false)];
+        let mut cfg = BoardConfig::default();
+        cfg.set_held_screen("weather.2", "weather");
+        assert!(cfg.set_screens(two.clone(), &cat));
+        assert!(!cfg.set_screens(vec![two[0].clone()], &cat), "weather.2 is gone");
+        assert_eq!(cfg.held_screen_id(), "weather.2", "set_screens never changes the mode");
+
+        // Holding a kind's FIRST instance (stored as the bare kind) and
+        // removing it while a sibling stays is a removal, not a hand-off: the
+        // sibling is another layout, and the knob lists no "weather" to tick.
+        cfg.set_held_screen("weather", "weather");
+        assert!(cfg.set_screens(two.clone(), &cat));
+        assert!(!cfg.set_screens(vec![two[1].clone()], &cat), "the held first instance is gone");
+        assert!(!cfg.set_screens(vec![screen("clock", "clock", &[], false)], &cat));
+        // A legacy board's synthesized list names each kind exactly, so a
+        // held kind still matches once that list is saved.
+        let mut legacy = BoardConfig::default();
+        legacy.set_mode("weather");
+        let synthesized = resolved_screens(&legacy, &cat);
+        assert!(legacy.set_screens(synthesized, &cat));
+        for held in [MODE_SCORES, MODE_OFF, OFF_MODE_BLANK] {
+            cfg.set_mode(held);
+            assert!(cfg.set_screens(vec![], &cat), "{held}");
+        }
+    }
+
+    #[test]
+    fn screen_ids_fit_their_kind() {
+        for (id, kind, fits) in [
+            ("scores", "scores", true),
+            ("off", "off", true),
+            ("scores.2", "scores", false),
+            ("weather", "off", false),
+            ("weather", "weather", true),
+            ("weather.2", "weather", true),
+            ("weather.10", "weather", true),
+            ("weather.1", "weather", false),
+            ("weather.0", "weather", false),
+            ("weather.02", "weather", false),
+            ("weather.", "weather", false),
+            ("weather.x", "weather", false),
+            ("weather.-2", "weather", false),
+            ("weather.+2", "weather", false),
+            ("weather-forecast", "weather", false),
+            ("weather.2.3", "weather", false),
+            ("clock", "weather", false),
+            ("weather2", "weather", false),
+            ("", "weather", false),
+            ("", "", false),
+            ("weather.99999999999", "weather", false),
+        ] {
+            assert_eq!(screen_id_fits(id, kind), fits, "{id:?} as a {kind:?}");
+        }
+    }
+
+    #[test]
+    fn minting_takes_the_kind_then_the_next_number() {
+        let mint = |existing: &[&str]| mint_screen_id("weather", existing.iter().copied());
+        assert_eq!(mint(&[]), "weather");
+        assert_eq!(mint(&["scores", "off", "clock"]), "weather");
+        assert_eq!(mint(&["weather"]), "weather.2");
+        assert_eq!(mint(&["weather", "weather.2", "weather.5"]), "weather.6", "never reuses a number below the top");
+        assert_eq!(mint(&["weather.2"]), "weather", "the bare id is free again");
+        assert_eq!(mint(&["weather", "clock.7", "weather.x"]), "weather.2", "other kinds and junk don't count");
+        assert_eq!(mint(&["weather", "weather.4294967295"]), "weather.2", "no overflow");
+        for existing in [&[][..], &["weather"], &["weather", "weather.9"]] {
+            let id = mint(existing);
+            assert!(screen_id_fits(&id, "weather") && !id.starts_with("weather-") && !existing.contains(&id.as_str()));
+        }
+    }
+
+    #[test]
+    fn resolving_prefers_the_exact_id_then_the_first_of_the_kind() {
+        let list = normalize_screens(
+            vec![
+                screen("weather.2", "weather", &[("variant", "forecast")], false),
+                screen("weather.3", "weather", &[], false),
+            ],
+            &catalog(),
+        );
+        assert_eq!(resolve_screen(&list, "weather.3").unwrap().id, "weather.3");
+        assert_eq!(resolve_screen(&list, "weather").unwrap().id, "weather.2", "a legacy kind id: the first instance");
+        assert_eq!(resolve_screen(&list, "off").unwrap().id, "off");
+        assert!(resolve_screen(&list, "clock").is_none());
+        assert!(resolve_screen(&list, "weather.4").is_none());
+    }
+
+    /// Sports first and Off second, whatever the input did with them.
+    #[test]
+    fn normalize_pins_sports_and_off_first() {
+        let list = normalize_screens(
+            vec![
+                screen("clock", "clock", &[], false),
+                screen("off", "off", &[("style", "word")], true),
+                screen("weather", "weather", &[], false),
+                screen("scores", "scores", &[], true),
+                screen("off", "off", &[], false),
+            ],
+            &catalog(),
+        );
+        assert_eq!(ids(&list), ["scores", "off", "clock", "weather"]);
+        assert_eq!(list[0], screen("scores", "scores", &[], false));
+        assert_eq!(list[1], screen("off", "off", &[], false));
+        assert_eq!(ids(&normalize_screens(vec![], &catalog())), ["scores", "off"]);
+    }
+
+    #[test]
+    fn normalize_drops_what_the_catalog_does_not_light() {
+        let list = normalize_screens(
+            vec![
+                screen("blank", "blank", &[], false),
+                screen("stocks", "stocks", &[], false),
+                screen("", "", &[], false),
+                screen(
+                    "weather",
+                    "weather",
+                    &[("variant", "forecast"), ("location", "60601"), ("hour24", "1"), ("tickers", "AAPL")],
+                    false,
+                ),
+                screen("clock", "clock", &[("style", "banana")], false),
+            ],
+            &catalog(),
+        );
+        assert_eq!(ids(&list), ["scores", "off", "weather", "clock"]);
+        assert_eq!(list[2].params, params(&[("variant", "forecast")]), "board-wide and undeclared keys never land here");
+        assert!(list[3].params.is_empty(), "an invalid choice is dropped, not stored");
+
+        // An empty value means "the default" and is never stored — a fork's
+        // per-screen TEXT field would otherwise validate it and shadow the
+        // default (the SetOffModeParam rule: empty removes the key).
+        let mut cat = catalog();
+        cat.push(descriptor("stocks", "Stocks", true, vec![field("tickers", "text", "SPY", true, vec![])]));
+        let list = normalize_screens(vec![screen("stocks", "stocks", &[("tickers", "")], true)], &cat);
+        assert!(list[2].params.is_empty());
+        let mut cfg = BoardConfig::default();
+        assert!(cfg.set_screens(list, &cat));
+        assert!(!cfg.off_mode_params.contains_key("tickers"));
+        assert_eq!(cat[3].value("tickers", &cfg.off_mode_params), "SPY");
+    }
+
+    #[test]
+    fn normalize_remints_ids_that_do_not_fit_or_repeat() {
+        let list = normalize_screens(
+            vec![
+                screen("weather", "weather", &[], false),
+                screen("weather-forecast", "weather", &[], false),
+                screen("weather.2", "weather", &[], false),
+                screen("weather.2", "weather", &[], false),
+                screen("clock", "weather", &[], false),
+                screen("scores", "clock", &[], false),
+            ],
+            &catalog(),
+        );
+        // A valid id later in the input is never minted over: weather.2
+        // keeps its name and the misfit after "weather" takes weather.3.
+        assert_eq!(ids(&list), ["scores", "off", "weather", "weather.3", "weather.2", "weather.4", "weather.5", "clock"]);
+        assert!(list.iter().all(|s| screen_id_fits(&s.id, &s.kind)));
+    }
+
+    #[test]
+    fn normalize_caps_the_list() {
+        let input: Vec<_> = (0..12)
+            .map(|i| screen(&if i == 0 { "weather".to_string() } else { format!("weather.{}", i + 1) }, "weather", &[], false))
+            .collect();
+        let list = normalize_screens(input, &catalog());
+        assert_eq!(list.len(), MAX_SCREENS);
+        assert_eq!(list.last().unwrap().id, "weather.8", "the excess drops from the end");
+
+        // Junk does not count against the cap.
+        let mut input = vec![screen("stocks", "stocks", &[], false); 20];
+        input.push(screen("clock", "clock", &[], false));
+        assert_eq!(ids(&normalize_screens(input, &catalog())), ["scores", "off", "clock"]);
+    }
+
+    /// A sanitize step must never turn a lit board dark.
+    #[test]
+    fn normalize_never_turns_a_lit_board_dark() {
+        let cat = catalog();
+        let n = |list| idle_ids(&normalize_screens(list, &cat)).iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            n(vec![screen("stocks", "stocks", &[], true), screen("weather", "weather", &[], false), screen("clock", "clock", &[], false)]),
+            ["clock"]
+        );
+        assert_eq!(n(vec![screen("stocks", "stocks", &[], true), screen("weather", "weather", &[], false)]), ["weather"]);
+        assert_eq!(n(vec![screen("stocks", "stocks", &[], true)]), ["clock"], "a clock is added when nothing else is lit");
+        assert_eq!(n(vec![screen("off", "off", &[], true)]), Vec::<String>::new(), "Off is never an idle member");
+        assert_eq!(n(vec![screen("stocks", "stocks", &[], false)]), Vec::<String>::new(), "dark in, dark out");
+        // An idle member past the cap counts as dropped too.
+        let mut input = vec![screen("weather", "weather", &[], false); 8];
+        input.push(screen("clock", "clock", &[], true));
+        let list = normalize_screens(input, &cat);
+        assert_eq!(list.len(), MAX_SCREENS);
+        assert_eq!(idle_ids(&list), ["weather"]);
+    }
+
+    #[test]
+    fn normalize_is_idempotent() {
+        let cat = catalog();
+        let mut cases = vec![
+            vec![],
+            vec![screen("weather", "weather", &[], true), screen("weather", "weather", &[("variant", "forecast")], true)],
+            vec![screen("weather.2", "weather", &[], false), screen("weather.2", "weather", &[], false), screen("x", "clock", &[], false)],
+            vec![screen("stocks", "stocks", &[], true)],
+            vec![screen("off", "off", &[("style", "word")], true), screen("scores", "scores", &[], true)],
+            vec![screen("weather", "weather", &[], false), screen("weather-x", "weather", &[], false), screen("weather.2", "weather", &[], false)],
+        ];
+        cases.push((0..15).map(|i| screen("weather", "weather", &[], i == 14)).collect());
+        cases.push((0..15).map(|i| screen(&format!("clock.{i}"), "clock", &[("style", "large")], i % 3 == 0)).collect());
+        for list in cases {
+            let once = normalize_screens(list.clone(), &cat);
+            assert_eq!(normalize_screens(once.clone(), &cat), once, "{list:?}");
+            let mut cfg = BoardConfig::default();
+            let _ = cfg.set_screens(list, &cat);
+            assert_eq!(resolved_screens(&cfg, &cat), cfg.screens, "a saved list resolves to itself");
+        }
+    }
+
+    /// A kind on the list once keeps the label it has today, so nothing is
+    /// renamed when lists ship; a repeated kind is named by its layout.
+    #[test]
+    fn labels_name_a_repeated_kind_by_its_layout() {
+        let cat = catalog();
+        let fresh = resolved_screens(&BoardConfig::default(), &cat);
+        assert_eq!(screen_labels(&fresh, &cat), ["Sports", "Off", "Clock", "Weather"]);
+        assert_eq!(board_labels(&fresh, &cat), ["SPORTS", "OFF", "CLOCK", "WEATHER"]);
+
+        let list = normalize_screens(
+            vec![
+                screen("weather", "weather", &[("variant", "simple")], false),
+                screen("weather.2", "weather", &[("variant", "forecast")], false),
+                screen("weather.3", "weather", &[], false),
+                screen("weather.4", "weather", &[("variant", "forecast")], false),
+                screen("clock", "clock", &[("style", "word")], false),
+            ],
+            &cat,
+        );
+        assert_eq!(
+            screen_labels(&list, &cat),
+            ["Sports", "Off", "Big weather", "Forecast", "Weather", "Forecast 2", "Clock"]
+        );
+        assert_eq!(screen_label(&list, 3, &cat), "Forecast");
+        assert_eq!(screen_label(&list, 99, &cat), "");
+        assert_eq!(
+            board_labels(&list, &cat),
+            ["SPORTS", "OFF", "BIG WEATHER", "FORECAST", "WEATHER", "FORECAST 2", "CLOCK"]
+        );
+        assert_eq!(board_label(&list, 6, &cat), "CLOCK");
+    }
+
+    /// A server that declares no screen label still names each screen, and
+    /// the knob gets plain ASCII.
+    #[test]
+    fn labels_without_a_screen_label_combine_mode_and_layout() {
+        let mut cat = catalog();
+        for d in &mut cat {
+            for f in &mut d.fields {
+                for o in &mut f.options {
+                    o.screen_label = None;
+                }
+            }
+        }
+        let list = normalize_screens(
+            vec![screen("weather", "weather", &[("variant", "simple")], false), screen("weather.2", "weather", &[("variant", "clock")], false)],
+            &cat,
+        );
+        assert_eq!(screen_labels(&list, &cat)[2..], ["Weather · Simple", "Weather · Clock + Weather"]);
+        assert_eq!(board_labels(&list, &cat)[2..], ["WEATHER SIMPLE", "WEATHER CLOCK +"]);
+    }
+
+    fn assert_knob_safe(list: &[ScreenConfig], cat: &[OffModeDescriptor]) {
+        let labels = board_labels(list, cat);
+        assert_eq!(labels.len(), list.len());
+        for (i, l) in labels.iter().enumerate() {
+            assert!(!l.is_empty() && l.len() <= BOARD_LABEL_MAX, "{l:?}");
+            assert!(l.bytes().all(|b| b == b' ' || b.is_ascii_graphic()) && !l.ends_with(' '), "{l:?}");
+            assert_eq!(*l, l.to_ascii_uppercase());
+            assert!(!labels[..i].contains(l), "{l:?} repeats in {labels:?}");
+        }
+        let app = screen_labels(list, cat);
+        for (i, l) in app.iter().enumerate() {
+            assert!(!app[..i].contains(l), "{l:?} repeats in {app:?}");
+        }
+    }
+
+    /// Every combination of stock layouts names each row once, in 15
+    /// uppercase ASCII characters or fewer.
+    #[test]
+    fn board_labels_fit_the_knob_and_never_repeat() {
+        let cat = catalog();
+        let presets: Vec<ScreenConfig> = ["simple", "detailed", "forecast", "clock"]
+            .iter()
+            .map(|v| screen("weather", "weather", &[("variant", v)], false))
+            .chain(["classic", "large", "compact", "word"].iter().map(|v| screen("clock", "clock", &[("style", v)], false)))
+            .collect();
+        for a in &presets {
+            for b in &presets {
+                for c in &presets {
+                    let list = normalize_screens(vec![a.clone(), b.clone(), c.clone()], &cat);
+                    assert_knob_safe(&list, &cat);
+                }
+            }
+        }
+        assert_knob_safe(&normalize_screens(presets.clone(), &cat), &cat);
+        let same = normalize_screens(vec![presets[6].clone(); 8], &cat);
+        assert_knob_safe(&same, &cat);
+        assert_eq!(board_labels(&same, &cat)[9], "SMALL CLOCK 8");
+    }
+
+    /// A fork's long or non-ASCII label is cut so its number still fits.
+    #[test]
+    fn a_long_fork_label_is_cut_so_its_number_still_fits() {
+        let mut cat = catalog();
+        cat.push(descriptor("stocks", "Stock tickers — your watchlist", true, vec![]));
+        cat.push(descriptor("fotos", "Фото", true, vec![]));
+        let list = normalize_screens(
+            vec![
+                screen("stocks", "stocks", &[], false),
+                screen("stocks.2", "stocks", &[], false),
+                screen("fotos", "fotos", &[], false),
+            ],
+            &cat,
+        );
+        assert_eq!(board_labels(&list, &cat)[2..], ["STOCK TICKERS", "STOCK TICKERS 2", "FOTOS"]);
+        assert_knob_safe(&list, &cat);
+    }
+
+    #[test]
+    fn idle_cycle_snaps_to_the_nearest_preset() {
+        for (secs, want) in [
+            (0, 120), (1, 120), (120, 120), (209, 120), (210, 300), (300, 300), (449, 300), (450, 600),
+            (750, 900), (1350, 1800), (2700, 3600), (3600, 3600), (u32::MAX, 3600),
+        ] {
+            assert_eq!(snap_idle_cycle_secs(secs), want, "{secs}s");
+        }
+        for p in IDLE_CYCLE_SECS {
+            assert_eq!(snap_idle_cycle_secs(p), p);
+        }
+        let mut cfg = BoardConfig::default();
+        assert_eq!(cfg.idle_cycle_ms(), 300_000, "five minutes by default");
+        cfg.idle_cycle_secs = Some(0);
+        assert_eq!(cfg.idle_cycle_ms(), 120_000, "never zero");
+        cfg.idle_cycle_secs = Some(1800);
+        assert_eq!(cfg.idle_cycle_ms(), 1_800_000);
+    }
+
+    /// Pinned so a hasher change cannot slip in: every board would restart
+    /// its idle cycle on the deploy that changed it.
+    #[test]
+    fn the_idle_epoch_is_a_stable_hash_of_the_program() {
+        let e = idle_epoch(&["clock", "weather.2"], 300_000);
+        assert_eq!(e, 13_386_448_970_321_234_855);
+        assert_eq!(e, idle_epoch(&["clock", "weather.2"], 300_000));
+        assert!(e >= 1 << 63, "clear of games (0) and the notice counter");
+        assert_ne!(e, idle_epoch(&["weather.2", "clock"], 300_000), "order");
+        assert_ne!(e, idle_epoch(&["clock"], 300_000), "membership");
+        assert_ne!(e, idle_epoch(&["clock", "weather.2", "weather"], 300_000), "membership");
+        assert_ne!(e, idle_epoch(&["clock", "weather.2"], 600_000), "timer");
+        assert!(idle_epoch(&[], 0) >= 1 << 63);
+    }
+
+    #[test]
+    fn portable_settings_carry_the_list_but_not_the_held_screen() {
+        let cat = catalog();
+        let mut source = BoardConfig::default();
+        let _ = source.set_screens(
+            vec![screen("weather", "weather", &[("variant", "simple")], true), screen("weather.2", "weather", &[("variant", "forecast")], true)],
+            &cat,
+        );
+        source.idle_cycle_secs = Some(900);
+        source.set_held_screen("weather.2", "weather");
+        let blob = PortableSettings::from(&source);
+        let text = serde_json::to_string(&blob).unwrap();
+        for word in ["override", "demo", "channel", "mode_screen"] {
+            assert!(!text.contains(word), "{word} leaked into the export: {text}");
+        }
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(v.get("mode").is_none());
+        assert_eq!(v["scoreboard_settings"], PORTABLE_SETTINGS_VERSION);
+
+        let mut target = BoardConfig::default();
+        serde_json::from_str::<PortableSettings>(&text).unwrap().apply_to(&mut target);
+        assert_eq!(target.screens, source.screens);
+        assert_eq!(target.idle_cycle_secs, Some(900));
+        assert_eq!(target.off_mode_params, source.off_mode_params);
+        assert_eq!(target.held_screen_id(), MODE_SCORES, "an import must not change what the board is doing");
+        assert_eq!(PortableSettings::from(&target), blob);
+    }
+
+    /// An old blob — or a new one from a board that never saved a list —
+    /// carries no list, and must CLEAR the target's so its legacy fields are
+    /// what the target runs, rather than being shadowed by a stale list.
+    #[test]
+    fn a_blob_without_a_list_clears_the_targets() {
+        let cat = catalog();
+        let mut target = BoardConfig::default();
+        let _ = target.set_screens(vec![screen("clock", "clock", &[], true), screen("weather", "weather", &[], true)], &cat);
+        target.idle_cycle_secs = Some(3600);
+
+        let old = r#"{"scoreboard_settings":1,"off_mode":"weather","off_mode_params":{"variant":"forecast","location":"60601"}}"#;
+        let blob: PortableSettings = serde_json::from_str(old).unwrap();
+        assert!(blob.screens.is_empty() && blob.idle_cycle_secs.is_none());
+        blob.apply_to(&mut target);
+        assert!(target.screens.is_empty());
+        assert_eq!(target.idle_cycle_secs, None);
+        let list = resolved_screens(&target, &cat);
+        assert_eq!(idle_ids(&list), ["weather"]);
+        assert_eq!(resolve_screen(&list, "weather").unwrap().params, params(&[("variant", "forecast")]));
+
+        let unsaved = serde_json::to_string(&PortableSettings::from(&BoardConfig::default())).unwrap();
+        assert!(!unsaved.contains("screens") && !unsaved.contains("idle_cycle"), "{unsaved}");
+    }
+
+    #[test]
+    fn screen_commands_round_trip() {
+        let cmd = Command::SetScreens {
+            screens: vec![screen("scores", "scores", &[], false), screen("weather.2", "weather", &[("variant", "forecast")], true)],
+        };
+        let text = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(
+            text,
+            r#"{"type":"SetScreens","screens":[{"id":"scores","kind":"scores"},{"id":"weather.2","kind":"weather","params":{"variant":"forecast"},"idle":true}]}"#
+        );
+        match serde_json::from_str::<Command>(&text).unwrap() {
+            Command::SetScreens { screens } => assert_eq!(screens.len(), 2),
+            other => panic!("{other:?}"),
+        }
+        let text = serde_json::to_string(&Command::SetIdleCycle { secs: 600 }).unwrap();
+        assert_eq!(text, r#"{"type":"SetIdleCycle","secs":600}"#);
+        assert!(matches!(serde_json::from_str::<Command>(&text).unwrap(), Command::SetIdleCycle { secs: 600 }));
     }
 }
 

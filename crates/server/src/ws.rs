@@ -625,6 +625,15 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) -> O
         crate::handle_install_firmware(state, board_id, *channel);
         return None;
     }
+    // MAR-117 screen lists: wire types only so far. Drop them BEFORE the
+    // fold, so a parsed-but-unimplemented command neither rewrites the row
+    // nor pushes a manifest. (The caller still acks it, unlike a server that
+    // predates them, which fails the parse; this arm must not ship without
+    // the real implementation.)
+    if matches!(cmd, Command::SetScreens { .. } | Command::SetIdleCycle { .. }) {
+        tracing::warn!("board {board_id}: screen lists not implemented yet; ignored");
+        return None;
+    }
     // Set when a command changed the board's MODE (the picker, or the legacy
     // SetPower alias), so the feedback half — notice cancel, the SLEEPING
     // splash for "off" — runs outside the config lock below.
@@ -805,6 +814,7 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) -> O
                     None => {}
                 }
             }
+            Command::SetScreens { .. } | Command::SetIdleCycle { .. } => unreachable!("handled before the config fold"),
             Command::SetSleepHours { hours } => cfg.sleep_hours = hours.clamp(1, 72),
             // Indefinite off: drop the auto-wake but leave the power state alone
             // (only meaningful while asleep; harmless no-op when awake).

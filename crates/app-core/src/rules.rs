@@ -1110,6 +1110,7 @@ mod tests {
                     default: "simple".into(),
                     options: vec![],
                     visible_when: None,
+                    per_screen: false,
                 },
                 OffModeField {
                     key: "hour24".into(),
@@ -1120,6 +1121,7 @@ mod tests {
                     default: "0".into(),
                     options: vec![],
                     visible_when: Some(FieldCondition { key: "variant".into(), equals: "clock".into() }),
+                    per_screen: false,
                 },
             ],
         };

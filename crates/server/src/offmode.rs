@@ -73,6 +73,7 @@ fn text_field(key: &str, label: &str, placeholder: &str, max_len: u32) -> OffMod
         default: String::new(),
         options: vec![],
         visible_when: None,
+        per_screen: false,
     }
 }
 
@@ -86,6 +87,7 @@ fn toggle_field(key: &str, label: &str, default_on: bool) -> OffModeField {
         default: if default_on { "1".into() } else { "0".into() },
         options: vec![],
         visible_when: None,
+        per_screen: false,
     }
 }
 
@@ -99,6 +101,7 @@ fn choice_field(key: &str, label: &str, default: &str, options: Vec<OffModeChoic
         default: default.into(),
         options,
         visible_when: None,
+        per_screen: false,
     }
 }
 
@@ -120,6 +123,7 @@ fn weather_variants() -> Vec<OffModeChoice> {
         value: (*v).into(),
         label: (*l).into(),
         preview: Some(format!("/offmode/weather.png?{VARIANT}={v}")),
+        screen_label: None,
     })
     .collect()
 }
@@ -172,6 +176,7 @@ pub fn off_modes() -> Vec<OffModeDescriptor> {
                             value: (*v).into(),
                             label: (*l).into(),
                             preview: Some(format!("/offmode/clock.png?{STYLE}={v}")),
+                            screen_label: None,
                         })
                         .collect(),
                 ),
