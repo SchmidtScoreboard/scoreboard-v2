@@ -9,7 +9,7 @@
 //! release: the stock iOS app will list your mode, show its preview, and let
 //! people pick it, because it never learns what any `id` means.
 //!
-//! Two rules keep that true, and both are easy to break:
+//! Three rules keep that true, and all are easy to break:
 //!
 //! 1. **The descriptor carries every string the app needs.** Label, subtitle,
 //!    the input's placeholder. The moment anything reads `if id == "weather"`,
@@ -22,6 +22,28 @@
 //!    silently, so a board that received a novel value would freeze on its last
 //!    manifest forever. Boards are sent frames and a Blank/Clock flag; the id
 //!    lives only between the app, the server, and the database.
+//!
+//! 3. **A screen in an idle rotation renders exactly one frame with ≤16
+//!    colors.** A board can hold several instances of your mode (MAR-117) and
+//!    cycle through them while nothing is on; every one of those frames must
+//!    sit in the board's 24 KiB compressed cache at once, and the rotation
+//!    keeps only the first frame you return. Sixteen colors is what keeps the
+//!    palette codec small; a photo-like frame ships raw at 4 KiB and starves
+//!    the cache.
+//!
+//! Two declarations make a mode work as a SCREEN on the board's list:
+//!
+//! - **`per_screen: true`** on a field that belongs to one instance — a layout
+//!   or a style — so "big weather" and "forecast" can sit side by side. Every
+//!   other field (a location, 24-hour time) is board-wide: typed once, shared
+//!   by every instance of the kind. Renders read the board-wide values overlaid
+//!   by the instance's own.
+//! - **`screen_label`** on each choice of a per-screen field: the short name
+//!   (at most 15 characters, it is also the knob label) a screen goes by when
+//!   its kind appears on the list more than once.
+//!
+//! Anything that needs a reading fetched (weather needs a location) declares
+//! the field rather than being recognised by id — see [`needs_location`].
 
 use scoreboard_protocol::{
     FieldCondition, FrameId, OffModeChoice, OffModeDescriptor, OffModeField, OffModeInput,
@@ -110,22 +132,43 @@ fn only_when(mut f: OffModeField, key: &str, equals: &str) -> OffModeField {
     f
 }
 
+/// A field that belongs to one screen instance rather than to the board.
+fn per_screen(mut f: OffModeField) -> OffModeField {
+    f.per_screen = true;
+    f
+}
+
 /// The four weather layouts, as choices rather than as four top-level modes.
+/// Each names the screen when Weather is on a board's list more than once.
 fn weather_variants() -> Vec<OffModeChoice> {
     [
-        ("simple", "Simple"),
-        ("detailed", "Detailed"),
-        ("forecast", "Forecast"),
-        ("clock", "Clock + Weather"),
+        ("simple", "Simple", "Big weather"),
+        ("detailed", "Detailed", "Weather"),
+        ("forecast", "Forecast", "Forecast"),
+        ("clock", "Clock + Weather", "Clock + Weather"),
     ]
     .iter()
-    .map(|(v, l)| OffModeChoice {
+    .map(|(v, l, s)| OffModeChoice {
         value: (*v).into(),
         label: (*l).into(),
         preview: Some(format!("/offmode/weather.png?{VARIANT}={v}")),
-        screen_label: None,
+        screen_label: Some((*s).into()),
     })
     .collect()
+}
+
+/// A clock style's name as a screen, for when Clock is on a board's list more
+/// than once. A style this table does not know falls back to the protocol's
+/// "{mode} · {choice}".
+fn clock_screen_label(style: &str) -> Option<String> {
+    match style {
+        "classic" => Some("Clock"),
+        "large" => Some("Big clock"),
+        "compact" => Some("Small clock"),
+        "word" => Some("Word clock"),
+        _ => None,
+    }
+    .map(String::from)
 }
 
 /// The off modes this server offers, in menu order.
@@ -166,7 +209,7 @@ pub fn off_modes() -> Vec<OffModeDescriptor> {
                 only_when(toggle_field(HOUR24, "24-hour time", false), STYLE, "classic"),
                 only_when(toggle_field(HOUR24, "24-hour time", false), STYLE, "large"),
                 only_when(toggle_field(HOUR24, "24-hour time", false), STYLE, "compact"),
-                choice_field(
+                per_screen(choice_field(
                     STYLE,
                     "Style",
                     "classic",
@@ -176,10 +219,10 @@ pub fn off_modes() -> Vec<OffModeDescriptor> {
                             value: (*v).into(),
                             label: (*l).into(),
                             preview: Some(format!("/offmode/clock.png?{STYLE}={v}")),
-                            screen_label: None,
+                            screen_label: clock_screen_label(v),
                         })
                         .collect(),
-                ),
+                )),
             ],
         },
         OffModeDescriptor {
@@ -197,7 +240,7 @@ pub fn off_modes() -> Vec<OffModeDescriptor> {
             }),
             fields: vec![
                 text_field(LOCATION, "Location", "ZIP or lat,lon", 32),
-                choice_field(VARIANT, "Layout", "detailed", weather_variants()),
+                per_screen(choice_field(VARIANT, "Layout", "detailed", weather_variants())),
                 // The conditional: a 24-hour option only matters on the layout
                 // that shows a clock.
                 only_when(toggle_field(HOUR24, "24-hour time", false), VARIANT, "clock"),
@@ -233,6 +276,14 @@ pub fn draws_nothing(id: &str) -> bool {
         },
     )
     .is_empty()
+}
+
+/// Does a screen of `kind` need a reading fetched for the board's location?
+/// True when its descriptor DECLARES a location field — never sniffed from the
+/// id, so a fork's own location-driven mode is fetched for too, and an id that
+/// merely starts with "weather" is not.
+pub fn needs_location(kind: &str) -> bool {
+    off_modes().iter().any(|m| m.id == kind && m.fields.iter().any(|f| f.key == LOCATION))
 }
 
 /// True when this server offers `id`. Commands are validated against it: with
@@ -303,10 +354,22 @@ fn notice(title: &str, detail: &str) -> OffFrame {
     OffFrame { id, px, dwell_ms: 60_000 }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A frozen wall time for tests that compare rendered clocks across two
+    /// renders (or against a pinned manifest): set it and every `now_hm` on
+    /// this thread reads it instead of the real clock.
+    pub static TEST_NOW_HM: std::cell::Cell<Option<(u32, u32)>> = const { std::cell::Cell::new(None) };
+}
+
 /// Board-local wall time: the configured zone, else the server's local zone
 /// (which on Railway is UTC — hence per-board timezones).
 fn now_hm(tz: Option<chrono_tz::Tz>) -> (u32, u32) {
     use chrono::Timelike;
+    #[cfg(test)]
+    if let Some(hm) = TEST_NOW_HM.with(|c| c.get()) {
+        return hm;
+    }
     match tz {
         Some(tz) => {
             let now = chrono::Utc::now().with_timezone(&tz);

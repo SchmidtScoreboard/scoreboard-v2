@@ -2585,6 +2585,74 @@ mod tests {
         assert_eq!(b.framebuffer()[0], 0x00FF00, "new-shape rotation restarts at slot 0");
     }
 
+    /// An idle rotation (MAR-117): long dwells, and the server re-pushing the
+    /// same program every minute with fresh clock frame ids — sometimes for a
+    /// screen off the panel, sometimes for the one on it. Same length + same
+    /// epoch must keep the slot AND the dwell timer, so the advance lands at
+    /// exactly one dwell after the program started; a new epoch is a new
+    /// program and starts from the first screen.
+    #[test]
+    fn a_long_idle_rotation_keeps_its_timer_across_minute_re_pushes() {
+        use scoreboard_protocol::RotationEntry;
+        const DWELL: u32 = 300_000;
+        let mk = |ids: &[&str], epoch: u64| Manifest {
+            mode: String::new(),
+            modes: Vec::new(),
+            countdown_ms: None,
+            rotation: ids
+                .iter()
+                .map(|i| RotationEntry { frame_id: (*i).into(), dwell_ms: DWELL, scroll: false, pin_rows: 0 })
+                .collect(),
+            display_on: true,
+            off_state: Default::default(),
+            local_clock: false,
+            clock_hour24: false,
+            epoch,
+            brightness: 100,
+        };
+        let solid = |r: u8, g: u8, b: u8| -> Vec<u8> {
+            let px = scoreboard_protocol::rgb888_to_565(r, g, b).to_le_bytes();
+            (0..FRAME_PIXELS).flat_map(|_| px).collect()
+        };
+        let epoch = (1u64 << 63) | 0x1234;
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_online(true);
+        b.tick(0);
+        b.on_manifest(mk(&["a", "b", "c"], epoch));
+        b.on_frame("a".into(), payload(&solid(255, 0, 0)));
+        b.on_frame("b".into(), payload(&solid(0, 255, 0)));
+        b.on_frame("c".into(), payload(&solid(0, 0, 255)));
+        b.tick(1);
+        assert_eq!(b.framebuffer()[0], 0xFF0000, "slot 0");
+
+        // +60s: an OFF-screen entry's frame changes.
+        b.tick(60_000);
+        b.on_manifest(mk(&["a", "b2", "c"], epoch));
+        b.on_frame("b2".into(), payload(&solid(0, 255, 255)));
+        b.tick(60_001);
+        assert_eq!(b.framebuffer()[0], 0xFF0000, "still slot 0");
+
+        // +120s: the ON-screen entry's frame changes; the panel shows the new
+        // content in the same slot, timer untouched.
+        b.tick(120_000);
+        b.on_manifest(mk(&["a2", "b2", "c"], epoch));
+        b.on_frame("a2".into(), payload(&solid(255, 255, 255)));
+        b.tick(120_001);
+        assert_eq!(b.framebuffer()[0], 0xFFFFFF, "slot 0, fresh content");
+
+        b.tick(DWELL as u64 - 1);
+        assert_eq!(b.framebuffer()[0], 0xFFFFFF, "no advance before one full dwell");
+        b.tick(DWELL as u64);
+        assert_eq!(b.framebuffer()[0], 0x00FFFF, "advanced at exactly one dwell, onto the re-pushed frame");
+
+        // A new epoch is a new program: back to the first screen.
+        b.tick(DWELL as u64 + 10_000);
+        b.on_manifest(mk(&["a2", "b2", "c"], epoch + 1));
+        b.tick(DWELL as u64 + 10_001);
+        assert_eq!(b.framebuffer()[0], 0xFFFFFF, "a new epoch restarts at slot 0");
+    }
+
     /// A pinned header holds still while the rows beneath it scroll: the
     /// leaderboard's title stays up, the field glides under it, and the scroll
     /// still reaches the frame's last row.

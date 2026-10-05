@@ -419,6 +419,7 @@ impl AppState {
         };
         sanitize_configs(&catalog, &mut configs);
         sanitize_off_modes(&mut configs);
+        sanitize_screens(&mut configs);
         migrate_champ_options(&mut configs);
         let state = AppState {
             demo: Arc::new(Mutex::new(espn::demo_games(0, 0))),
@@ -730,6 +731,48 @@ fn sanitize_off_modes(configs: &mut HashMap<String, BoardConfig>) {
             if !offmode::offers(&migrated) {
                 tracing::warn!("board {board}: off mode {migrated:?} is not offered here; reverting");
                 cfg.off_mode = None;
+            }
+        }
+    }
+}
+
+/// MAR-117 load pass, after `sanitize_off_modes`' legacy flat pass. In memory
+/// only, like every load sanitize; idempotent.
+///
+/// - Every board: a stored mode "blank" (a picked dark idle screen, which
+///   older servers accepted) becomes "off" — dark stays dark, the wake time is
+///   kept, and the board stops holding a "mode" nobody can see or edit.
+/// - A board that saved a list: normalize it against THIS binary's off modes
+///   (a fork or a rollback can have changed them) and re-derive its legacy
+///   twins. A held kind a rolled-back server wrote as a bare mode is
+///   canonicalized to the instance it resolves to; a held screen that no
+///   longer exists releases the board to Sports.
+fn sanitize_screens(configs: &mut HashMap<String, BoardConfig>) {
+    let catalog = offmode::off_modes();
+    for (board, cfg) in configs.iter_mut() {
+        if cfg.mode == OFF_MODE_BLANK {
+            tracing::info!("board {board}: held mode \"blank\" -> \"off\"");
+            cfg.set_mode(MODE_OFF);
+        }
+        if cfg.screens.is_empty() {
+            continue;
+        }
+        if cfg.set_screens(cfg.screens.clone(), &catalog) {
+            continue;
+        }
+        let held = cfg.held_screen_id().to_string();
+        let canonical = match cfg.mode_screen {
+            None => resolve_screen(&cfg.screens, &held).map(|s| (s.id.clone(), s.kind.clone())),
+            Some(_) => None,
+        };
+        match canonical {
+            Some((id, kind)) => {
+                tracing::info!("board {board}: held {held:?} -> screen {id:?}");
+                cfg.set_held_screen(&id, &kind);
+            }
+            None => {
+                tracing::warn!("board {board}: held screen {held:?} is not on its list; back to Sports");
+                release_to_scores(cfg);
             }
         }
     }
@@ -3046,30 +3089,35 @@ fn chosen_games(state: &AppState, cfg: &BoardConfig) -> Vec<Game> {
     candidate_games(state, cfg)
 }
 
-/// Every mode the board's single-press picker offers, in display order:
-/// scores first (the resting state), the server-declared lit screens, off
-/// last. The idle "Nothing" screen is excluded for the same reason the app
-/// excludes it — a picked dark screen IS off, and two dark rows with
-/// different meanings is a trap. The APP composes its own copy of this list
-/// (it also needs preview paths); the ids must agree, which
+/// The board's screen list as everything server-side should see it: the
+/// stored list normalized against THIS binary's off modes, or — for a board
+/// that never saved one — the list its legacy fields describe (MAR-117).
+pub fn board_screens(cfg: &BoardConfig) -> Vec<ScreenConfig> {
+    resolved_screens(cfg, &offmode::off_modes())
+}
+
+/// Every screen the board's knob picker offers, in the board's own order:
+/// Sports, Off, then the user's screens (MAR-117, §0 Q2), labelled for the
+/// knob (≤15 ASCII, unique). The idle "Nothing" screen is never a row — a
+/// picked dark screen IS off, and two dark rows with different meanings is a
+/// trap. The APP composes the same list from the same protocol functions; the
+/// ids must agree with what `handle_select_mode` accepts, which
 /// `the_picker_offers_what_select_mode_accepts` pins.
-pub fn pickable_modes() -> Vec<ModeEntry> {
-    let mut out = vec![ModeEntry { id: MODE_SCORES.into(), label: "SCORES".into() }];
-    for m in offmode::off_modes() {
-        if m.preview.is_some() {
-            out.push(ModeEntry { id: m.id.to_string(), label: m.label.to_uppercase() });
-        }
-    }
-    out.push(ModeEntry { id: MODE_OFF.into(), label: "OFF".into() });
-    out
+pub fn pickable_modes(cfg: &BoardConfig) -> Vec<ModeEntry> {
+    let screens = board_screens(cfg);
+    let labels = board_labels(&screens, &offmode::off_modes());
+    screens.into_iter().zip(labels).map(|(s, label)| ModeEntry { id: s.id, label }).collect()
 }
 
 pub fn manifest_for_board(state: &AppState, board_id: &str) -> Manifest {
     // The picker data rides EVERY manifest — most importantly the dark ones,
     // because a board showing "off" is exactly the board whose picker matters.
     let mut m = manifest_inner(state, board_id);
-    m.mode = state.config_for(board_id).mode.clone();
-    m.modes = pickable_modes();
+    let cfg = state.config_for(board_id);
+    // The held INSTANCE, so the knob's tick lands on the right row when a
+    // kind appears twice.
+    m.mode = cfg.held_screen_id().to_string();
+    m.modes = pickable_modes(&cfg);
     m
 }
 
@@ -3227,11 +3275,21 @@ fn manifest_inner(state: &AppState, board_id: &str) -> Manifest {
         return dark_manifest(&cfg);
     }
 
-    // Priority 5: a PICKED mode — clock, weather, a fork's screen — held
+    // Priority 5: a PICKED screen — clock, weather, a fork's screen — held
     // persistently until its timer returns the board to scores. The same
-    // renderer as the idle screen; the difference is only what chose the id.
+    // renderer as the idle screen; the difference is only what chose it.
+    //
+    // Resolved against the board's list, so a held "weather.2" renders ITS
+    // layout. A held id the list does not name (a legacy row, a fork-removed
+    // mode, a stored "blank") renders exactly as it always did: by id, with
+    // the flat params, an unknown id drawing the clock.
     if cfg.mode != MODE_SCORES {
-        return screen_manifest(state, &cfg, tz, &cfg.mode.clone());
+        let screens = board_screens(&cfg);
+        let frames = match resolve_screen(&screens, cfg.held_screen_id()) {
+            Some(screen) => render_screen(state, &cfg, screen, tz),
+            None => render_legacy_id(state, &cfg, tz, &cfg.mode),
+        };
+        return screen_manifest(state, &cfg, frames);
     }
 
     // Priority 6: scores mode with nothing to show — the configured idle
@@ -3265,35 +3323,111 @@ fn dark_manifest(cfg: &BoardConfig) -> Manifest {
     }
 }
 
-/// The idle panel: whatever the configured off mode draws, or darkness.
+/// The idle panel: the board's checked screens, or darkness.
+///
+/// - None checked: dark, exactly as a "blank" idle screen always was.
+/// - One: exactly the manifest a single idle screen always produced (epoch 0,
+///   the render's own dwell) — the deploy-day invariant rests on this, since
+///   every board that never saved a list has at most one.
+/// - Two or more: ONE rotation the board advances on its own clock, each
+///   screen's first frame held for the board's idle timer. Its epoch is a
+///   hash of the members and the timer, so a minute re-push (new clock frame
+///   ids, same shape) keeps the board's slot and timer, while a change of
+///   membership, order or timer — or arriving from games, a notice or a held
+///   screen — starts over at the first screen. Param edits keep the epoch.
 fn idle_manifest(state: &AppState, cfg: &BoardConfig, tz: Option<chrono_tz::Tz>) -> Manifest {
-    screen_manifest(state, cfg, tz, cfg.off_mode_id())
+    let screens = board_screens(cfg);
+    let members: Vec<&ScreenConfig> = screens.iter().filter(|s| s.idle).collect();
+    if members.len() < 2 {
+        let frames = match members.first() {
+            Some(screen) => render_screen(state, cfg, screen, tz),
+            None => Vec::new(),
+        };
+        return screen_manifest(state, cfg, frames);
+    }
+    let dwell_ms = cfg.idle_cycle_ms();
+    let ids: Vec<&str> = members.iter().map(|s| s.id.as_str()).collect();
+    let rotation: Vec<RotationEntry> = members
+        .iter()
+        .filter_map(|screen| {
+            // One frame per screen: a fork returning several would otherwise
+            // change the rotation's length (and reset the board) on a whim.
+            let f = render_screen(state, cfg, screen, tz).into_iter().next()?;
+            state.cache_frame(f.id.clone(), f.px);
+            Some(RotationEntry { frame_id: f.id, dwell_ms, scroll: false, pin_rows: 0 })
+        })
+        .collect();
+    Manifest {
+        mode: String::new(),
+        modes: Vec::new(),
+        local_clock: false,
+        clock_hour24: cfg.off_mode_params.get(offmode::HOUR24).map(String::as_str) == Some("1"),
+        display_on: !rotation.is_empty(),
+        off_state: if rotation.is_empty() { OffState::Blank } else { OffState::Clock },
+        rotation,
+        brightness: cfg.brightness,
+        epoch: idle_epoch(&ids, dwell_ms),
+        countdown_ms: None,
+    }
 }
 
-/// A named screen — the idle screen, or a mode held by the picker.
+/// What a screen instance renders with — protocol's `layered_params` against
+/// this server's catalog, the same rule the app's settings page reads with.
+fn layered_params(cfg: &BoardConfig, screen: &ScreenConfig) -> std::collections::BTreeMap<String, String> {
+    scoreboard_protocol::layered_params(&cfg.off_mode_params, screen, &offmode::off_modes())
+}
+
+/// THE render seam for a screen instance: its KIND, never its id. An instance
+/// id ("weather.2") passed to `offmode` would silently draw a clock — the
+/// unknown-id fallback — and ship looking fine. Weather comes from the
+/// board-wide location.
+fn render_screen(
+    state: &AppState,
+    cfg: &BoardConfig,
+    screen: &ScreenConfig,
+    tz: Option<chrono_tz::Tz>,
+) -> Vec<offmode::OffFrame> {
+    let params = layered_params(cfg, screen);
+    offmode::render_off_mode(
+        &screen.kind,
+        &offmode::OffCtx { tz, params: &params, preview: false, weather: board_weather(state, cfg) },
+    )
+}
+
+/// A held id the board's list does not name, rendered the way every held mode
+/// was before lists: by id, with the flat params. Only reachable for legacy
+/// and fork-removed ids, which is why it may pass an id to `offmode`.
+fn render_legacy_id(
+    state: &AppState,
+    cfg: &BoardConfig,
+    tz: Option<chrono_tz::Tz>,
+    id: &str,
+) -> Vec<offmode::OffFrame> {
+    offmode::render_off_mode(
+        id,
+        &offmode::OffCtx { tz, params: &cfg.off_mode_params, preview: false, weather: board_weather(state, cfg) },
+    )
+}
+
+/// The weather reading for the board's (board-wide) location.
+fn board_weather(state: &AppState, cfg: &BoardConfig) -> weather::Reading {
+    state.weather.get(cfg.off_mode_params.get(offmode::LOCATION).map(String::as_str).unwrap_or(""))
+}
+
+/// One screen's frames as a manifest — the idle screen, or a screen held by
+/// the picker.
 ///
 /// Extracted so the `display_on` / `off_state` derivation exists once — quiet
 /// hours, the idle path, and a picked mode must not be able to disagree
 /// about it.
-fn screen_manifest(state: &AppState, cfg: &BoardConfig, tz: Option<chrono_tz::Tz>, mode_id: &str) -> Manifest {
-    // The ONLY place a screen id is resolved into frames.
-    let rotation: Vec<RotationEntry> = offmode::render_off_mode(
-        mode_id,
-        &offmode::OffCtx {
-            tz,
-            params: &cfg.off_mode_params,
-            preview: false,
-            weather: state
-                .weather
-                .get(cfg.off_mode_params.get(offmode::LOCATION).map(String::as_str).unwrap_or("")),
-        },
-    )
-    .into_iter()
-    .map(|f| {
-        state.cache_frame(f.id.clone(), f.px);
-        RotationEntry { frame_id: f.id, dwell_ms: f.dwell_ms, scroll: false, pin_rows: 0 }
-    })
-    .collect();
+fn screen_manifest(state: &AppState, cfg: &BoardConfig, frames: Vec<offmode::OffFrame>) -> Manifest {
+    let rotation: Vec<RotationEntry> = frames
+        .into_iter()
+        .map(|f| {
+            state.cache_frame(f.id.clone(), f.px);
+            RotationEntry { frame_id: f.id, dwell_ms: f.dwell_ms, scroll: false, pin_rows: 0 }
+        })
+        .collect();
 
     Manifest {
         mode: String::new(),
@@ -3552,39 +3686,114 @@ pub(crate) fn finish_notice(state: &AppState, board_id: &str, epoch: u64) {
     }
 }
 
-/// A mode picked on the board's own panel. The board offered ids from
+/// What a pick (the knob's SelectMode, the app's SetMode) resolved to.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pick {
+    /// "scores" or "off".
+    Mode(&'static str),
+    /// Hold this screen instance (`id`) of `kind`.
+    Screen { id: String, kind: String },
+}
+
+/// Resolve a picked id against the board — ONE resolver for the knob and the
+/// app, so they cannot disagree about what a pick means. `None` = ignore it.
+///
+/// - "scores" and "off" are themselves; "blank" is "off" (a picked dark
+///   screen IS off, and holding "blank" left a dark panel with power=true
+///   and a timer keyed by nothing anyone can edit).
+/// - A board that never saved a list runs the pre-list path exactly: a
+///   legacy "weather-x" migrates INTO the flat params (that is where an
+///   unsaved board's layout lives) and any offered mode is held by kind.
+/// - A board with a list resolves against it: the exact instance; else a
+///   legacy "weather-x" names the instance of that kind showing layout x;
+///   else the kind's first instance. A kind the user removed — a queued
+///   offline knob pick, an old app's tile — is ignored, never guessed. A pick
+///   never changes any screen's params.
+pub fn resolve_pick(cfg: &mut BoardConfig, pick: &str) -> Option<Pick> {
+    if pick == MODE_SCORES {
+        return Some(Pick::Mode(MODE_SCORES));
+    }
+    if pick == MODE_OFF || pick == OFF_MODE_BLANK {
+        return Some(Pick::Mode(MODE_OFF));
+    }
+    if cfg.screens.is_empty() {
+        let kind = offmode::migrate(pick, &mut cfg.off_mode_params);
+        if kind == OFF_MODE_BLANK {
+            return Some(Pick::Mode(MODE_OFF));
+        }
+        return offmode::offers(&kind).then(|| Pick::Screen { id: kind.clone(), kind });
+    }
+    let screens = board_screens(cfg);
+    if let Some(s) = screens.iter().find(|s| s.id == pick) {
+        return Some(Pick::Screen { id: s.id.clone(), kind: s.kind.clone() });
+    }
+    let mut named = std::collections::BTreeMap::new();
+    let kind = offmode::migrate(pick, &mut named);
+    let catalog = offmode::off_modes();
+    let wants = |s: &ScreenConfig| {
+        named.iter().all(|(k, v)| {
+            catalog.iter().find(|d| d.id == s.kind).is_some_and(|d| d.value(k, &s.params) == v.as_str())
+        })
+    };
+    screens
+        .iter()
+        .filter(|s| s.kind == kind && !s.is_fixed())
+        .find(|s| !named.is_empty() && wants(s))
+        .or_else(|| screens.iter().find(|s| s.kind == kind && !s.is_fixed()))
+        .map(|s| Pick::Screen { id: s.id.clone(), kind: s.kind.clone() })
+}
+
+/// Apply a resolved pick through the one gesture transition.
+pub fn apply_pick(cfg: &mut BoardConfig, pick: &Pick) {
+    match pick {
+        Pick::Mode(mode) => apply_mode(cfg, mode),
+        Pick::Screen { id, kind } => apply_screen(cfg, id, kind),
+    }
+}
+
+/// Does this pick hold a screen whose reading must be fetched?
+pub fn pick_needs_weather(pick: &Pick) -> bool {
+    matches!(pick, Pick::Screen { kind, .. } if offmode::needs_location(kind))
+}
+
+/// Fetch weather now and re-push the board — a weather screen just chosen
+/// should not stare at UNAVAILABLE until the refresh loop comes round.
+/// No-op outside a tokio runtime (sync tests), the same rule as
+/// `set_notice`'s expiry task.
+pub fn refresh_weather_now(state: &AppState, board_id: &str) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let st = state.clone();
+        let board = board_id.to_string();
+        handle.spawn(async move {
+            weather::refresh_all(&st.weather, weather_locations(&st)).await;
+            push_board(&st, &board);
+        });
+    }
+}
+
+/// A screen picked on the board's own panel. The board offered ids from
 /// `Manifest.modes`, but the socket is not a trust boundary the picker can
-/// lean on — validate exactly like the app's SetMode.
+/// lean on — validate exactly like the app's SetMode (`resolve_pick`).
 pub fn handle_select_mode(state: &AppState, board_id: &str, mode: &str) {
     let mut cfg = state.config_for(board_id);
-    let mode = if mode == MODE_SCORES || mode == MODE_OFF {
-        mode.to_string()
-    } else {
-        offmode::migrate(mode, &mut cfg.off_mode_params)
-    };
-    if !(mode == MODE_SCORES || mode == MODE_OFF || offmode::offers(&mode)) {
-        tracing::warn!("board '{board_id}': picker sent unknown mode {mode:?}, ignoring");
+    let Some(pick) = resolve_pick(&mut cfg, mode) else {
+        tracing::warn!("board '{board_id}': picker sent unknown or removed screen {mode:?}, ignoring");
+        // The knob may be showing a list that no longer exists (an offline
+        // pick of a since-deleted screen): re-send the current one, even if
+        // it is identical to what the dedup last sent.
+        state.forget_last_manifest(board_id);
+        push_board(state, board_id);
         return;
-    }
-    apply_mode(&mut cfg, &mode);
+    };
+    apply_pick(&mut cfg, &pick);
     state.configs.lock().unwrap().insert(board_id.to_string(), cfg.clone());
     state.persist_config(board_id, &cfg);
     handle_mode_change(state, board_id, &cfg);
-    // Same immediate-fetch rule as the app's pick: a weather screen chosen on
-    // the knob should not stare at UNAVAILABLE until the hourly loop.
-    // (No-op outside a tokio runtime, i.e. in sync tests — same rule as
-    // `set_notice`'s expiry task.)
-    if cfg.mode.starts_with("weather") {
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let st = state.clone();
-            let board = board_id.to_string();
-            handle.spawn(async move {
-                weather::refresh_all(&st.weather, weather_locations(&st)).await;
-                push_board(&st, &board);
-            });
-        }
+    // Same immediate-fetch rule as the app's pick.
+    if pick_needs_weather(&pick) {
+        refresh_weather_now(state, board_id);
     }
-    tracing::info!("board '{board_id}': picker -> {}", cfg.mode);
+    tracing::info!("board '{board_id}': picker -> {}", cfg.held_screen_id());
     push_board(state, board_id);
     push_board_state(state, board_id);
 }
@@ -3951,18 +4160,59 @@ pub fn handle_install_firmware(state: &AppState, board_id: &str, channel: FwChan
 ///   sweep returns the board to scores when the timer lapses, so no board can
 ///   be forgotten on a mode.
 pub fn apply_mode(cfg: &mut BoardConfig, mode: &str) {
+    apply_screen(cfg, mode, mode);
+}
+
+/// `apply_mode` for a screen INSTANCE: hold `id` (of `kind`), timed by the
+/// instance's own hours, else its kind's, else `sleep_hours`. A mode id is
+/// its own kind, so `apply_mode` is exactly this.
+pub fn apply_screen(cfg: &mut BoardConfig, id: &str, kind: &str) {
     if quiet_now(cfg) {
         cfg.quiet_override = true;
     }
-    cfg.set_mode(mode);
-    cfg.wake_at = if mode == MODE_SCORES {
+    cfg.set_held_screen(id, kind);
+    cfg.wake_at = if kind == MODE_SCORES {
         None
     } else {
-        match cfg.mode_duration_hours(mode).min(72) {
+        match cfg.hold_hours(id, kind).min(72) {
             0 => None,
             h => Some(unix_now() + h as u64 * 3600),
         }
     };
+}
+
+/// Back to Sports because the held screen stopped existing — removed from
+/// the list, dropped by an import, or unreadable at load. NOT a gesture, so
+/// unlike `apply_mode` it never sets the quiet override: deleting a screen at
+/// 1am must leave a quiet board dark. The caller still runs
+/// `handle_mode_change` (outside the config lock) for the idle handoff.
+pub fn release_to_scores(cfg: &mut BoardConfig) {
+    cfg.set_mode(MODE_SCORES);
+    cfg.wake_at = None;
+}
+
+/// Does the board need its (board-wide) location fetched: is a checked idle
+/// screen, or the held screen, one that declares a location?
+pub fn board_needs_weather(cfg: &BoardConfig) -> bool {
+    let screens = board_screens(cfg);
+    if screens.iter().any(|s| s.idle && offmode::needs_location(&s.kind)) {
+        return true;
+    }
+    if cfg.mode == MODE_SCORES || cfg.mode == MODE_OFF {
+        return false;
+    }
+    match resolve_screen(&screens, cfg.held_screen_id()) {
+        Some(s) => offmode::needs_location(&s.kind),
+        None => offmode::needs_location(&cfg.mode),
+    }
+}
+
+/// The location this board needs fetched, if any.
+pub fn board_weather_location(cfg: &BoardConfig) -> Option<String> {
+    if !board_needs_weather(cfg) {
+        return None;
+    }
+    cfg.off_mode_params.get(offmode::LOCATION).filter(|l| !l.trim().is_empty()).cloned()
 }
 
 /// How long the idle-arrival announcement holds before the idle screen (or
@@ -4072,9 +4322,7 @@ pub fn weather_locations(state: &AppState) -> Vec<String> {
         .lock()
         .unwrap()
         .values()
-        .filter(|c| c.off_mode_id().starts_with("weather") || c.mode.starts_with("weather"))
-        .filter_map(|c| c.off_mode_params.get(offmode::LOCATION).cloned())
-        .filter(|l| !l.trim().is_empty())
+        .filter_map(board_weather_location)
         .collect();
     out.sort();
     out.dedup();
@@ -4438,13 +4686,20 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
         .as_deref()
         .and_then(|cur| offer_for(&state.firmware, cfg.fw_channel, cur))
         .map(|(_, fw)| fw.manifest.version.clone());
+    let quiet_active = quiet_now(&cfg);
+    // The RESOLVED screen list rides the copy sent to apps (never the stored
+    // row): a non-empty list is how a new app knows this server speaks
+    // screens, and an unsaved board's list is synthesized from its legacy
+    // fields so the app draws exactly what the board does.
+    let mut cfg = cfg;
+    cfg.screens = board_screens(&cfg);
     ServerMsg::BoardState {
         board_id: board_id.to_string(),
         online,
         now_showing,
         // Derived here, beside the firmware fields, for the same reason: it is
         // what the config MEANS right now, not part of the config.
-        quiet_active: quiet_now(&cfg),
+        quiet_active,
         config: cfg,
         firmware_version,
         firmware_update,
@@ -5693,22 +5948,41 @@ mod tests {
     }
 
     /// The board trusts `Manifest.modes` to know what it may offer; the
-    /// server validates `SelectMode` against scores/off/offers. These are two
-    /// separate code paths that must agree, or the picker shows a row the
-    /// server then rejects.
+    /// server validates `SelectMode` against the board's own list. These are
+    /// two separate code paths that must agree, or the picker shows a row the
+    /// server then rejects — on an unsaved board AND on one whose list holds
+    /// two screens of one kind.
     #[test]
     fn the_picker_offers_what_select_mode_accepts() {
         let state = AppState::new_ephemeral();
-        for entry in pickable_modes() {
-            handle_select_mode(&state, "b1", &entry.id);
-            assert_eq!(state.config_for("b1").mode, entry.id, "{} must be selectable", entry.id);
+        let mut edited = BoardConfig::default();
+        let list = vec![
+            ScreenConfig { id: "weather".into(), kind: "weather".into(), params: Default::default(), idle: true },
+            ScreenConfig {
+                id: "weather.2".into(),
+                kind: "weather".into(),
+                params: [("variant".to_string(), "forecast".to_string())].into(),
+                idle: false,
+            },
+            ScreenConfig { id: "clock".into(), kind: "clock".into(), params: Default::default(), idle: false },
+        ];
+        let _ = edited.set_screens(list, &offmode::off_modes());
+        state.configs.lock().unwrap().insert("b2".into(), edited);
+        for board in ["b1", "b2"] {
+            let modes = pickable_modes(&state.config_for(board));
+            for entry in &modes {
+                handle_select_mode(&state, board, &entry.id);
+                assert_eq!(state.config_for(board).held_screen_id(), entry.id, "{board}: {} must be selectable", entry.id);
+                assert_eq!(manifest_for_board(&state, board).mode, entry.id, "{board}: the knob's tick lands on the pick");
+            }
+            // Sports first, Off second (MAR-117 §0 Q2), and no dark idle
+            // screen masquerading as a second Off.
+            assert_eq!(modes[0], ModeEntry { id: MODE_SCORES.into(), label: "SPORTS".into() });
+            assert_eq!(modes[1], ModeEntry { id: MODE_OFF.into(), label: "OFF".into() });
+            assert!(!modes.iter().any(|m| m.id == "blank"), "Nothing is not a mode");
         }
-        // And the list is Scores-first, Off-last, with no dark idle screen
-        // masquerading as a second Off.
-        let modes = pickable_modes();
-        assert_eq!(modes.first().map(|m| m.id.as_str()), Some(MODE_SCORES));
-        assert_eq!(modes.last().map(|m| m.id.as_str()), Some(MODE_OFF));
-        assert!(!modes.iter().any(|m| m.id == "blank"), "Nothing is not a mode");
+        let ids: Vec<String> = pickable_modes(&state.config_for("b2")).into_iter().map(|m| m.id).collect();
+        assert_eq!(ids, ["scores", "off", "weather", "weather.2", "clock"], "the board's own order");
     }
 
     /// The picker data rides EVERY manifest — most importantly the dark ones,
@@ -5729,6 +6003,9 @@ mod tests {
         let lit = manifest_for_board(&state, "b1");
         assert_eq!(lit.mode, "clock");
         assert_eq!(lit.modes, dark.modes, "one list, whatever is showing");
+        assert_eq!(lit.modes, pickable_modes(&state.config_for("b1")), "and it is the board's own list");
+        let labels: Vec<&str> = lit.modes.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(labels, ["SPORTS", "OFF", "CLOCK", "WEATHER"]);
     }
 
     /// The device path validates like the app path: junk is ignored.
@@ -6357,7 +6634,7 @@ mod tests {
     /// its games for free. Nothing selected now means nothing selected, so a
     /// test that wants games has to say so — which is also more honest about
     /// what it is exercising.
-    fn watch_all() -> BoardConfig {
+    pub(crate) fn watch_all() -> BoardConfig {
         let leagues = [
             "nhl", "nba", "wnba", "mlb", "nfl", "cfb", "cbb", "wcbb", "mls", "epl", "wc", "wwc",
             "ucl", "cbase", "olyhm", "olyhw", "olybm", "olybw", "olysm", "olysw", "pga", "lpga",
@@ -9209,7 +9486,7 @@ mod tests {
         (now.hour() * 60 + now.minute()) as u16
     }
 
-    fn window_around_now(cfg: &BoardConfig) -> QuietHours {
+    pub(crate) fn window_around_now(cfg: &BoardConfig) -> QuietHours {
         let m = local_minute(cfg);
         QuietHours { start_min: (m + 1439) % 1440, end_min: (m + 60) % 1440 }
     }
@@ -9858,6 +10135,9 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod screens_tests;
 
 #[cfg(test)]
 mod sample_preview_tests {

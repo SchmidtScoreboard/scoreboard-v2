@@ -1645,6 +1645,31 @@ pub fn resolve_screen<'a>(screens: &'a [ScreenConfig], id: &str) -> Option<&'a S
     screens.iter().find(|s| s.id == id).or_else(|| screens.iter().find(|s| s.kind == id))
 }
 
+/// The params `screen` RENDERS with: the board-wide `off_mode_params` minus
+/// every key its descriptor marks `per_screen`, then the screen's own values.
+///
+/// ONE rule for the server's renderer and the app's settings page, which is
+/// why it lives here. The naive overlay (board map, then the screen's) is
+/// wrong: the board map holds ONE instance's layout, mirrored there for older
+/// apps by [`BoardConfig::set_screens`], so a sibling that never chose a
+/// layout would render — and tick — the other screen's. For a board that never
+/// saved a list the result is the board map itself: each synthesized screen
+/// carries exactly the per-screen keys it was read from.
+pub fn layered_params(
+    off_mode_params: &BTreeMap<String, String>,
+    screen: &ScreenConfig,
+    catalog: &[OffModeDescriptor],
+) -> BTreeMap<String, String> {
+    let descriptor = catalog.iter().find(|d| d.id == screen.kind);
+    let mut out: BTreeMap<String, String> = off_mode_params
+        .iter()
+        .filter(|(k, _)| !descriptor.is_some_and(|d| d.per_screen(k)))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    out.extend(screen.params.iter().map(|(k, v)| (k.clone(), v.clone())));
+    out
+}
+
 /// The lit descriptor for a screen kind a list may hold — never Sports, Off
 /// or the dark "blank".
 fn screen_descriptor<'a>(catalog: &'a [OffModeDescriptor], kind: &str) -> Option<&'a OffModeDescriptor> {

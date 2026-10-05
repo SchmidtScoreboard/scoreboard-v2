@@ -91,6 +91,12 @@ impl Cache {
         }
     }
 
+    /// Seed a reading as if it had just been fetched.
+    #[cfg(test)]
+    pub(crate) fn seed(&self, location: &str, w: Weather) {
+        self.put(location, w);
+    }
+
     fn put(&self, location: &str, w: Weather) {
         self.entries.lock().unwrap().insert(location.to_string(), (Instant::now(), w));
     }

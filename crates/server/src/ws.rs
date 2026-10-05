@@ -586,10 +586,29 @@ pub(crate) fn apply_settings_import(state: &AppState, board_id: &str, json: &str
     if settings.timezone.as_deref().is_some_and(|t| t.parse::<chrono_tz::Tz>().is_err()) {
         settings.timezone = None;
     }
+    let mut released = false;
     let updated = {
         let mut configs = state.configs.lock().unwrap();
         let cfg = configs.entry(board_id.to_string()).or_default();
         settings.apply_to(cfg);
+        // A list arrives verbatim: sanitize it against THIS server's modes and
+        // re-derive the legacy twins from what survived (a hand-edited or
+        // forked blob can disagree with itself). An empty list leaves the
+        // board unsaved, so the blob's legacy fields drive it.
+        let catalog = crate::offmode::off_modes();
+        let listed = if cfg.screens.is_empty() {
+            cfg.held_screen_listed(&resolved_screens(cfg, &catalog))
+        } else {
+            cfg.set_screens(cfg.screens.clone(), &catalog)
+        };
+        // The held screen must still exist. A board holding a plain kind
+        // (or Sports/Off) on an unsaved list always does; only an instance
+        // hold, or a list that dropped the held screen, can fail this.
+        if !listed && (!cfg.screens.is_empty() || cfg.mode_screen.is_some()) {
+            crate::release_to_scores(cfg);
+            released = true;
+        }
+        cfg.idle_cycle_secs = cfg.idle_cycle_secs.map(snap_idle_cycle_secs);
         // The blob is user-portable text: re-apply the same bounds the
         // equivalent commands enforce, so a hand-edited export can't smuggle
         // out-of-range values into the config.
@@ -602,10 +621,90 @@ pub(crate) fn apply_settings_import(state: &AppState, board_id: &str, json: &str
         }
         cfg.clone()
     };
+    if released {
+        crate::handle_mode_change(state, board_id, &updated);
+    }
+    // The import can have brought a location, or a weather screen.
+    if crate::board_weather_location(&updated).is_some() {
+        crate::refresh_weather_now(state, board_id);
+    }
     push_board(state, board_id);
     push_board_state(state, board_id);
     state.persist_config(board_id, &updated);
     Ok(())
+}
+
+/// An OLD app's single idle-screen choice (SetOffMode / SetOffState) on a
+/// board whose list a new app saved. Both shipped apps resend it on every
+/// tap, so re-picking what is already the first checked screen is a no-op —
+/// it must not wipe a rotation set up on the new app. Otherwise the checked
+/// set becomes that one screen (the first CHECKED instance of the kind, else
+/// its first instance); "blank" (or any dark mode) checks nothing; a kind the
+/// user removed is ignored. Never adds a screen, never changes params.
+fn legacy_set_idle(board_id: &str, cfg: &mut BoardConfig, kind: &str) {
+    let catalog = crate::offmode::off_modes();
+    let mut list = cfg.screens.clone();
+    if crate::offmode::draws_nothing(kind) {
+        for s in list.iter_mut() {
+            s.idle = false;
+        }
+    } else {
+        if list.iter().find(|s| s.idle).is_some_and(|s| s.kind == kind) {
+            return;
+        }
+        let Some(pick) = list
+            .iter()
+            .position(|s| s.idle && s.kind == kind)
+            .or_else(|| list.iter().position(|s| s.kind == kind))
+        else {
+            tracing::warn!("board {board_id}: idle screen {kind:?} is not on the list, ignoring");
+            return;
+        };
+        for (i, s) in list.iter_mut().enumerate() {
+            s.idle = i == pick;
+        }
+    }
+    // Idle ticks never touch the held screen, so it stays listed.
+    let _ = cfg.set_screens(list, &catalog);
+}
+
+/// Drop the timers of screen INSTANCES that left the list. Only instance
+/// ids ("weather.2"): a kind's key is every old app's timer for that kind and
+/// the fallback for its instances, so it stays.
+fn prune_screen_timers(cfg: &mut BoardConfig) {
+    let catalog = crate::offmode::off_modes();
+    let listed: Vec<String> = cfg.screens.iter().map(|s| s.id.clone()).collect();
+    cfg.mode_hours.retain(|key, _| {
+        listed.contains(key) || !catalog.iter().any(|d| key != &d.id && screen_id_fits(key, &d.id))
+    });
+}
+
+/// Which descriptor judges `SetOffModeParam { key, value }`, and its verdict.
+///
+/// The idle mode's own descriptor when it declares the key — exactly the old
+/// path, so an old app on a board that never saved a list runs today's code.
+/// Otherwise ANY offered mode that declares the key and accepts the value
+/// (the idle mode alone used to reject a Weather location typed while the
+/// Clock was idle). Not merely the FIRST declaring mode: a fork's mode that
+/// shares a key with different choices must not have its values judged by
+/// another mode's field. Rejected by all: the first declarer's reason.
+/// `None`: no offered mode declares the key.
+pub(crate) fn param_descriptor<'a>(
+    catalog: &'a [OffModeDescriptor],
+    idle_mode: &str,
+    key: &str,
+    value: &str,
+) -> Option<(&'a OffModeDescriptor, Result<(), &'static str>)> {
+    let declares_key = |m: &&OffModeDescriptor| m.fields.iter().any(|f| f.key == key);
+    if let Some(d) = catalog.iter().find(|m| m.id == idle_mode).filter(declares_key) {
+        return Some((d, d.validate(key, value)));
+    }
+    let mut declaring = catalog.iter().filter(declares_key);
+    let first = declaring.clone().next()?;
+    declaring
+        .find(|d| d.validate(key, value).is_ok())
+        .map(|d| (d, Ok(())))
+        .or_else(|| Some((first, first.validate(key, value))))
 }
 
 /// Apply one app command. Returns a capability URL when the command minted one
@@ -623,15 +722,6 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) -> O
     // move it) so the exhaustive fold below still compiles.
     if let Command::InstallFirmware { channel } = &cmd {
         crate::handle_install_firmware(state, board_id, *channel);
-        return None;
-    }
-    // MAR-117 screen lists: wire types only so far. Drop them BEFORE the
-    // fold, so a parsed-but-unimplemented command neither rewrites the row
-    // nor pushes a manifest. (The caller still acks it, unlike a server that
-    // predates them, which fails the parse; this arm must not ship without
-    // the real implementation.)
-    if matches!(cmd, Command::SetScreens { .. } | Command::SetIdleCycle { .. }) {
-        tracing::warn!("board {board_id}: screen lists not implemented yet; ignored");
         return None;
     }
     // Set when a command changed the board's MODE (the picker, or the legacy
@@ -671,29 +761,53 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) -> O
             // unchecked assignment would let a typo — or an export from a fork
             // offering modes this server doesn't — park a board on a mode
             // nothing can render.
-            Command::SetMode { mode } => {
-                let mode = if mode == MODE_SCORES || mode == MODE_OFF {
-                    mode
-                } else {
-                    crate::offmode::migrate(&mode, &mut cfg.off_mode_params)
-                };
-                if mode == MODE_SCORES || mode == MODE_OFF || crate::offmode::offers(&mode) {
+            //
+            // The SAME resolver as the knob's SelectMode (`resolve_pick`): an
+            // instance id, a legacy kind or "weather-x", "blank" as "off"; a
+            // removed screen is ignored rather than guessed.
+            Command::SetMode { mode } => match crate::resolve_pick(cfg, &mode) {
+                Some(pick) => {
                     // A freshly picked weather screen fetches NOW — staring at
                     // UNAVAILABLE for up to an hour is not a feature. Cadence
                     // is untouched: this reuses the SetOffMode spawn below.
-                    weather_dirty |= mode.starts_with("weather");
-                    crate::apply_mode(cfg, &mode);
+                    weather_dirty |= crate::pick_needs_weather(&pick);
+                    crate::apply_pick(cfg, &pick);
                     mode_changed = true;
-                } else {
-                    tracing::warn!("board {board_id}: unknown mode {mode:?}, ignoring");
                 }
-            }
+                None => tracing::warn!("board {board_id}: unknown or removed mode {mode:?}, ignoring"),
+            },
             // A mode's timer. 0 = until changed. Applies from the NEXT pick —
             // re-arming a running timer under someone's feet would turn a
             // settings edit into a surprise power event.
+            //
+            // Keyed by a listed screen id, a lit kind (every timer an old app
+            // writes, and the fallback for that kind's instances) or "off".
+            // Anything else would be a timer nothing reads, stored forever.
             Command::SetModeHours { mode, hours } => {
-                cfg.mode_hours.insert(mode, hours.min(72));
+                let listed = crate::board_screens(cfg).iter().any(|s| s.id == mode && s.id != MODE_SCORES);
+                let lit_kind = crate::offmode::off_modes().iter().any(|d| d.id == mode && d.lit());
+                if listed || lit_kind || mode == MODE_OFF {
+                    cfg.mode_hours.insert(mode, hours.min(72));
+                } else {
+                    tracing::warn!("board {board_id}: no screen {mode:?} to time, ignoring");
+                }
             }
+            // MAR-117: the whole list in one command — add, remove, reorder,
+            // idle ticks, a screen's own layout. Normalized exactly as a load
+            // and an import are, and every legacy twin re-derived from it.
+            Command::SetScreens { screens } => {
+                let before = crate::board_weather_location(cfg);
+                if !cfg.set_screens(screens, &crate::offmode::off_modes()) {
+                    // The held screen was removed. Not a gesture: no quiet
+                    // override, but the idle handoff still runs.
+                    crate::release_to_scores(cfg);
+                    mode_changed = true;
+                }
+                prune_screen_timers(cfg);
+                let after = crate::board_weather_location(cfg);
+                weather_dirty |= after.is_some() && after != before;
+            }
+            Command::SetIdleCycle { secs } => cfg.idle_cycle_secs = Some(snap_idle_cycle_secs(secs)),
             Command::SetSportConfig {
                 sport_id,
                 favorite_team_ids,
@@ -774,47 +888,107 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) -> O
                     OffState::Blank => "blank",
                     OffState::Clock => "clock",
                 };
-                cfg.set_off_mode(id, crate::offmode::draws_nothing(id));
+                if cfg.screens.is_empty() {
+                    cfg.set_off_mode(id, crate::offmode::draws_nothing(id));
+                } else {
+                    let before = crate::board_weather_location(cfg);
+                    legacy_set_idle(board_id, cfg, id);
+                    let after = crate::board_weather_location(cfg);
+                    weather_dirty |= after.is_some() && after != before;
+                }
             }
             // VALIDATED, unlike the legacy command above. With open string ids
             // an unchecked assignment would let a typo — or an export from a
             // fork offering modes this server doesn't — park a board on a mode
             // nothing can render.
             Command::SetOffMode { id } => {
-                // An old app (or an import) can still name one of the four
-                // former weather ids; migrate before deciding it is unknown.
-                let id = crate::offmode::migrate(&id, &mut cfg.off_mode_params);
-                if crate::offmode::offers(&id) {
-                    weather_dirty |= id.starts_with("weather");
-                    cfg.set_off_mode(&id, crate::offmode::draws_nothing(&id));
+                if cfg.screens.is_empty() {
+                    // An old app (or an import) can still name one of the four
+                    // former weather ids; migrate before deciding it is unknown.
+                    let id = crate::offmode::migrate(&id, &mut cfg.off_mode_params);
+                    if crate::offmode::offers(&id) {
+                        weather_dirty |= crate::offmode::needs_location(&id);
+                        cfg.set_off_mode(&id, crate::offmode::draws_nothing(&id));
+                    } else {
+                        tracing::warn!("board {board_id}: unknown off mode {id:?}, ignoring");
+                    }
                 } else {
-                    tracing::warn!("board {board_id}: unknown off mode {id:?}, ignoring");
+                    // A saved list belongs to a new app; this is an old one.
+                    // A layout named by a legacy id is NOT written anywhere:
+                    // the screens' own layouts are the new app's to edit.
+                    let id = crate::offmode::migrate(&id, &mut std::collections::BTreeMap::new());
+                    if crate::offmode::offers(&id) {
+                        let before = crate::board_weather_location(cfg);
+                        legacy_set_idle(board_id, cfg, &id);
+                        let after = crate::board_weather_location(cfg);
+                        weather_dirty |= after.is_some() && after != before;
+                    } else {
+                        tracing::warn!("board {board_id}: unknown off mode {id:?}, ignoring");
+                    }
                 }
             }
             Command::SetOffModeParam { key, value } => {
                 // Validated against the DECLARED field: an undeclared key never
                 // lands in the map, a choice must be one that was offered, and
                 // text is bounded in CHARACTERS to match the app's clamp.
-                let ok = crate::offmode::off_modes()
-                    .iter()
-                    .find(|m| m.id == cfg.off_mode_id())
-                    .map(|d| d.validate(&key, &value));
-                match ok {
-                    Some(Ok(())) => {
-                        weather_dirty |= key == crate::offmode::LOCATION;
-                        if value.is_empty() {
-                            cfg.off_mode_params.remove(&key);
+                //
+                // The idle mode's descriptor when it declares the key, else
+                // any offered mode that accepts the value — see
+                // `param_descriptor`. (The idle mode alone used to reject a
+                // Weather location typed while the Clock was idle; the app
+                // showed it set until the next push said otherwise.)
+                let catalog = crate::offmode::off_modes();
+                match param_descriptor(&catalog, cfg.off_mode_id(), &key, &value) {
+                    Some((d, Ok(()))) => {
+                        let target = if d.per_screen(&key) && !cfg.screens.is_empty() {
+                            // A screen whose kind has this layout AND accepts
+                            // this value — never another kind's screen.
+                            let declares = |s: &ScreenConfig| {
+                                catalog.iter().any(|m| {
+                                    m.id == s.kind && m.per_screen(&key) && m.validate(&key, &value).is_ok()
+                                })
+                            };
+                            cfg.screens
+                                .iter()
+                                .position(|s| s.idle && declares(s))
+                                .or_else(|| cfg.screens.iter().position(|s| declares(s)))
                         } else {
-                            cfg.off_mode_params.insert(key, value);
+                            None
+                        };
+                        match target {
+                            // A layout/style on a board with a list: it belongs
+                            // to ONE screen — the first checked one that has
+                            // it, the screen an old app's page is showing.
+                            Some(i) => {
+                                let mut list = cfg.screens.clone();
+                                if value.is_empty() {
+                                    list[i].params.remove(&key);
+                                } else {
+                                    list[i].params.insert(key.clone(), value);
+                                }
+                                if !cfg.set_screens(list, &catalog) {
+                                    crate::release_to_scores(cfg);
+                                    mode_changed = true;
+                                }
+                            }
+                            // Board-wide (a location, 24-hour time), or a board
+                            // that never saved a list: the flat map, as ever.
+                            None => {
+                                if value.is_empty() {
+                                    cfg.off_mode_params.remove(&key);
+                                } else {
+                                    cfg.off_mode_params.insert(key.clone(), value);
+                                }
+                            }
                         }
+                        weather_dirty |= key == crate::offmode::LOCATION && crate::board_needs_weather(cfg);
                     }
-                    Some(Err(why)) => {
+                    Some((_, Err(why))) => {
                         tracing::warn!("board {board_id}: rejected {key}={value:?} ({why})");
                     }
-                    None => {}
+                    None => tracing::warn!("board {board_id}: no screen declares {key:?}, ignoring"),
                 }
             }
-            Command::SetScreens { .. } | Command::SetIdleCycle { .. } => unreachable!("handled before the config fold"),
             Command::SetSleepHours { hours } => cfg.sleep_hours = hours.clamp(1, 72),
             // Indefinite off: drop the auto-wake but leave the power state alone
             // (only meaningful while asleep; harmless no-op when awake).
@@ -1029,12 +1203,9 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) -> O
         crate::push_time(state, board_id);
     }
     if weather_dirty {
-        let st = state.clone();
-        let board = board_id.to_string();
-        tokio::spawn(async move {
-            crate::weather::refresh_all(&st.weather, crate::weather_locations(&st)).await;
-            crate::push_board(&st, &board);
-        });
+        // Through `Handle::try_current`, not a bare spawn: a command applied
+        // outside a runtime (a sync test) must not panic.
+        crate::refresh_weather_now(state, board_id);
     }
     push_board(state, board_id);
     push_board_state(state, board_id);
