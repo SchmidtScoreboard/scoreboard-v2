@@ -259,14 +259,15 @@ pub struct UiBoardConfig {
     /// Seconds each checked screen holds the panel while the board idles
     /// through two or more, snapped to a preset (`idle_cycle_options`).
     pub idle_cycle_secs: u32,
-    /// Per-mode timer durations in hours (0 = until changed); a missing mode
-    /// falls back to `sleep_hours`.
-    pub mode_hours: HashMap<String, u32>,
+    /// Unix ms at which the board's current idle rotation put its FIRST
+    /// screen up (protocol `BoardState.idle_since_ms`, never stored in the
+    /// config): None when it is not idling through two or more screens, or
+    /// the server predates it. Pass to `ring` with the current time.
+    pub idle_since_ms: Option<u64>,
     /// The board-wide off-mode values (location, 24-hour), plus a MIRROR of
     /// the per-screen values of each kind's first instance for older apps.
     /// Per-screen values are read from `screens`, not from here.
     pub off_mode_params: HashMap<String, String>,
-    pub sleep_hours: u32,
     /// Seconds each game holds the panel before the rotation advances.
     pub dwell_secs: u32,
     /// Unix seconds when a button-sleep auto-wakes (None when not sleeping).
@@ -581,13 +582,13 @@ impl ScoreboardClient {
                                         ServerMsg::Games { games } => {
                                             if let Some(l) = listener.lock().unwrap().as_ref() { l.on_games(to_ui_games(games)); }
                                         }
-                                        ServerMsg::BoardState { board_id: bid, online, now_showing, config, firmware_version, firmware_update, quiet_active } => {
+                                        ServerMsg::BoardState { board_id: bid, online, now_showing, config, firmware_version, firmware_update, quiet_active, idle_since_ms } => {
                                             // Before the listener hears of it, so a
                                             // set_screens made in response routes right.
                                             screens_supported.lock().unwrap().insert(bid.clone(), !config.screens.is_empty());
                                             if let Some(l) = listener.lock().unwrap().as_ref() {
                                                 l.on_board_state(bid.clone(), to_ui_games(now_showing), online);
-                                                l.on_config(bid.clone(), to_ui_board_config(config));
+                                                l.on_config(bid.clone(), to_ui_board_config(config, idle_since_ms));
                                                 l.on_quiet_active(bid.clone(), quiet_active);
                                                 l.on_board_version(bid, firmware_version, firmware_update);
                                             }
@@ -726,12 +727,6 @@ impl ScoreboardClient {
         let _ = self.tx.send(Out::Command(board_id, Command::SetMode { mode }));
     }
 
-    /// Configure a screen's hold timer, in hours, keyed by its INSTANCE id
-    /// ("off", "weather.2"). 0 = until changed. See `hold_timer_options`.
-    pub fn set_mode_hours(&self, board_id: String, mode: String, hours: u32) {
-        let _ = self.tx.send(Out::Command(board_id, Command::SetModeHours { mode, hours }));
-    }
-
     /// Forget a board: drop it from the subscription set and tell the server,
     /// so its pushes stop. Without this, "Remove this scoreboard" was app-UI
     /// only — the still-subscribed connection kept receiving board state and
@@ -846,12 +841,6 @@ impl ScoreboardClient {
     /// through two or more, in seconds (one of `idle_cycle_options`).
     pub fn set_idle_cycle(&self, board_id: String, secs: u32) {
         let _ = self.tx.send(Out::Command(board_id, Command::SetIdleCycle { secs }));
-    }
-
-
-    /// How long a knob-press sleep lasts before the board wakes itself.
-    pub fn set_sleep_hours(&self, board_id: String, hours: u32) {
-        let _ = self.tx.send(Out::Command(board_id, Command::SetSleepHours { hours }));
     }
 
     /// Seconds each game holds the panel before the rotation advances.
@@ -1281,15 +1270,16 @@ mod wss_tests {
             params: [("variant".to_string(), "forecast".to_string())].into_iter().collect(),
             idle: true,
         }];
-        let ui = to_ui_board_config(c);
+        let ui = to_ui_board_config(c, Some(1_234));
         assert_eq!(ui.mode, "weather.2");
         assert!(ui.power);
         assert!(ui.screens_supported);
         assert_eq!(ui.screens.len(), 1);
         assert_eq!(ui.screens[0].params.get("variant").map(String::as_str), Some("forecast"));
         assert_eq!(ui.idle_cycle_secs, 300);
+        assert_eq!(ui.idle_since_ms, Some(1_234), "the anchor rides beside the config");
 
-        let old = to_ui_board_config(BoardConfig::default());
+        let old = to_ui_board_config(BoardConfig::default(), None);
         assert!(!old.screens_supported && old.screens.is_empty());
         assert_eq!(old.mode, "scores");
         assert_eq!(old.idle_cycle_secs, scoreboard_protocol::IDLE_CYCLE_DEFAULT_SECS);
@@ -1360,6 +1350,7 @@ mod wss_tests {
                 firmware_version: None,
                 firmware_update: None,
                 quiet_active: false,
+                idle_since_ms: None,
             })
             .unwrap();
             rt.spawn(async move {
@@ -1490,7 +1481,7 @@ pub fn default_name_style(sport_id: String) -> UiNameStyle {
     UiNameStyle::from(p_default_name_style(&sport_id))
 }
 
-fn to_ui_board_config(c: BoardConfig) -> UiBoardConfig {
+fn to_ui_board_config(c: BoardConfig, idle_since_ms: Option<u64>) -> UiBoardConfig {
     // Resolved before the literal below moves fields out of `c`.
     let off_mode = c.off_mode_id().to_string();
     let off_mode_params: HashMap<String, String> =
@@ -1512,8 +1503,7 @@ fn to_ui_board_config(c: BoardConfig) -> UiBoardConfig {
         screens_supported: !screens.is_empty(),
         screens,
         idle_cycle_secs,
-        mode_hours: c.mode_hours.clone().into_iter().collect(),
-        sleep_hours: c.sleep_hours,
+        idle_since_ms,
         dwell_secs: c.dwell_secs,
         wake_at: c.wake_at,
         strict_spoilers: c.spoiler_mode == SpoilerMode::Strict,

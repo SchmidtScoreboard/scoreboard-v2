@@ -162,15 +162,16 @@ struct BoardInfo {
     /// Seconds each checked screen holds the panel while the board idles
     /// through two or more (snapped by the core for display).
     var idleCycleSecs: UInt32 = 0
-    /// Per-screen hold timer hours, keyed by instance id (0 = until changed;
-    /// missing = the kind's, then sleepHours — `holdTimerHours`).
-    var modeHours: [String: UInt32] = [:]
+    /// Unix ms at which the board's current idle rotation put its FIRST
+    /// checked screen up (server-reported, never stored) — what lets the
+    /// core name the one screen on the glass (`ring`). nil = not rotating,
+    /// or an older server that never says.
+    var idleSinceMs: UInt64? = nil
     var quietStartMin: UInt16? = nil
     var quietEndMin: UInt16? = nil
     var quietAllowEvents = false
     /// Server-derived: inside the window right now. Not a setting.
     var quietActive = false
-    var sleepHours: UInt32 = 24
     var dwellSecs: UInt32 = 10
     var leagueDwell: [String: UInt32] = [:]     // sportId -> per-league override
     var leagueRows: [String: UInt32] = [:]      // sportId -> leaderboard depth (golf/F1)
@@ -650,37 +651,17 @@ final class BoardViewModel: ObservableObject {
     // ---- controls (operate on the selected board) ----
     /// Put the board in a mode: Sports, Off, or a screen instance. The
     /// optimistic mirror is the core's: `modePower` for the power twin and
-    /// `computeWakeAt` for the server's `apply_mode` timer rule (fallback
-    /// chain, zero, and the 72h clamp all machine-checked there). The server's
-    /// push confirms.
+    /// `computeWakeAt` for the server's one hold (every pick but Sports holds
+    /// 24 hours). The server's push confirms.
     func setMode(_ screen: UiScreen) {
         guard let id = selectedBoardId else { return }
         let mode = screen.id
-        // The instance's kind feeds the hold-timer chain (own → kind's →
-        // sleepHours).
-        let kind = screen.kind
         mutate(id) {
             $0.mode = mode
             $0.power = modePower(mode: mode)
-            $0.wakeAt = computeWakeAt(
-                id: mode, kind: kind, modeHours: $0.modeHours, sleepHours: $0.sleepHours,
-                nowUnix: UInt64(Date().timeIntervalSince1970)
-            )
+            $0.wakeAt = computeWakeAt(id: mode, nowUnix: UInt64(Date().timeIntervalSince1970))
         }
         client?.setMode(boardId: id, mode: mode)
-    }
-
-    /// Configure a screen's hold timer, in hours, keyed by its INSTANCE id.
-    /// 0 = until changed.
-    func setModeHours(_ screenId: String, _ hours: UInt32) {
-        guard let id = selectedBoardId else { return }
-        // The core's mirror of the server: a first instance's timer pins
-        // the siblings still inheriting it.
-        let screens = resolvedScreens
-        mutate(id) {
-            $0.modeHours = modeHoursAfterSet(id: screenId, hours: hours, screens: screens, modeHours: $0.modeHours, sleepHours: $0.sleepHours)
-        }
-        client?.setModeHours(boardId: id, mode: screenId, hours: hours)
     }
 
     /// Drop the running timer: the current mode holds until changed.
@@ -714,14 +695,18 @@ final class BoardViewModel: ObservableObject {
         )
     }
 
-    /// Which rail tiles wear the ring (several while the idle rotation runs)
-    /// and the one MAR-110 scrolls to.
-    var screenRing: UiRing {
+    /// The one rail tile on the glass at `now` (none while an idle rotation
+    /// has no known start), the tile MAR-110 scrolls to, and when that
+    /// changes on its own — the rail re-asks at `nextChangeMs`.
+    func screenRing(at now: Date) -> UiRing {
         ring(
             mode: current.mode,
             quietActive: current.quietActive,
             panelShowsNothing: panelShowsNothing(nowShowing: current.stateReceived ? nowShowing : nil),
-            screens: resolvedScreens
+            screens: resolvedScreens,
+            idleCycleSecs: current.idleCycleSecs,
+            idleSinceMs: current.idleSinceMs,
+            nowMs: UInt64(max(0, now.timeIntervalSince1970 * 1000))
         )
     }
 
@@ -734,11 +719,6 @@ final class BoardViewModel: ObservableObject {
     /// values over the board-wide ones) — what its page reads.
     func paramsFor(screen id: String) -> [String: String] {
         screenParams(id: id, screens: resolvedScreens, offModeParams: current.offModeParams, offModes: offModes)
-    }
-
-    /// The hold timer screen `s` runs when picked, in hours.
-    func holdHours(_ s: UiScreen) -> UInt32 {
-        holdTimerHours(id: s.id, kind: s.kind, modeHours: current.modeHours, sleepHours: current.sleepHours)
     }
 
     var screensAreEditable: Bool { screensEditable(screensSupported: current.screensSupported) }
@@ -767,20 +747,19 @@ final class BoardViewModel: ObservableObject {
     }
 
     /// Remove a screen — the server's whole remove, mirrored by the core: the
-    /// list, the release to Sports when it was the held screen, and the
-    /// pruned timer, applied in one copy.
+    /// list and the release to Sports when it was the held screen, applied
+    /// in one copy.
     func removeScreen(_ screenId: String) {
         guard let id = selectedBoardId, current.configReceived else { return }
         let r = screensRemoved(
             screens: resolvedScreens, id: screenId, mode: current.mode,
-            wakeAt: current.wakeAt, modeHours: current.modeHours, offModes: offModes
+            wakeAt: current.wakeAt, offModes: offModes
         )
         mutate(id) {
             $0.screens = r.screens
             $0.mode = r.mode
             $0.power = r.power
             $0.wakeAt = r.wakeAt
-            $0.modeHours = r.modeHours
         }
         client?.setScreens(boardId: id, screens: r.screens)
     }
@@ -1347,11 +1326,10 @@ final class BoardViewModel: ObservableObject {
             $0.screens = c.screens
             $0.screensSupported = c.screensSupported
             $0.idleCycleSecs = c.idleCycleSecs
-            $0.modeHours = c.modeHours
+            $0.idleSinceMs = c.idleSinceMs
             $0.quietStartMin = c.quietStartMin
             $0.quietEndMin = c.quietEndMin
             $0.quietAllowEvents = c.quietAllowEvents
-            $0.sleepHours = c.sleepHours
             $0.dwellSecs = c.dwellSecs
             $0.leagueDwell = dwell
             $0.leagueRows = rows
@@ -1423,12 +1401,6 @@ final class BoardViewModel: ObservableObject {
         guard let bid = selectedBoardId else { return }
         mutate(bid) { $0.offModeParams[key] = value }
         client?.setOffModeParam(boardId: bid, key: key, value: value)
-    }
-
-    func setSleepHours(_ h: UInt32) {
-        guard let id = selectedBoardId else { return }
-        mutate(id) { $0.sleepHours = h }
-        client?.setSleepHours(boardId: id, hours: h)
     }
 
     /// Per-league "time per event" override (nil = board default).
@@ -2411,6 +2383,11 @@ struct DashboardView: View {
     /// The card menu's Info/Share presentations, hoisted OUT of the cards —
     /// see `CardSheets`.
     @StateObject private var cardSheets = CardSheets()
+    /// Bumped when the board's idle rotation moves to its next screen, so the
+    /// rail re-asks the core which tile is on the glass. The board advances
+    /// on its OWN clock and never reports it; the core counts the slot from
+    /// the server's anchor, and this only says "ask again now".
+    @State private var ringTick = 0
 
     /// One clear status for the selected board (replaces the old "Connected /
     /// board offline" pair): server-down vs board-offline vs online.
@@ -2686,16 +2663,20 @@ struct DashboardView: View {
     /// because a picture of what the panel will do is the app's language for
     /// choices like this.
     private var modePicker: some View {
+        // Read here so a bump re-renders the rail; the ring itself is always
+        // asked at the real now.
+        let _ = ringTick
+        let ring = model.screenRing(at: Date())
         // Opens scrolled to the SELECTED tile: with four-plus modes the
         // current one can sit off-screen, and a rail with no visible
         // selection reads as "nothing is selected" (MAR-110).
-        ScrollViewReader { proxy in
+        return ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
                 // The 20pt inset is the tiles' own PADDING, not a content
                 // margin: `scrollTo` ignores content margins when it clamps,
                 // so centring the first tile slid it 20pt under the card's
                 // edge. As padding, the clamp lands on the leading line.
-                modePickerTiles
+                modePickerTiles(ringed: Set(ring.ids))
                     .padding(.horizontal, 20)
             }
             // On entry AND whenever the selection moves. On entry alone it
@@ -2707,24 +2688,41 @@ struct DashboardView: View {
             // same reveal. The TILE LIST is in the key too: the server's
             // screen list can land after the mode settles, and a scroll to a
             // tile that does not exist yet is dropped — Android hit exactly
-            // this on a cold start. The ring may mark several tiles while the
-            // board idles through its checked screens; the core names the
-            // ONE to scroll to, so both platforms land on the same tile.
-            .onChange(of: [model.screenRing.scrollTarget] + model.screenRows.map(\.id), initial: true) { _, key in
+            // this on a cold start. While the board idles through its checked
+            // screens the target moves with the board's rotation; when the
+            // ring is empty (rotation start unknown) the core still names
+            // one tile, so both platforms land on the same one.
+            .onChange(of: [ring.scrollTarget] + model.screenRows.map(\.id), initial: true) { _, key in
                 // Every tile, the first included: a rail moved off Sports
                 // must come back when the selection does. (It used to skip
                 // the first tile, and stranded the rail wherever it last
                 // was — Sports cut off at the card's edge on every open.)
                 proxy.scrollTo(key[0], anchor: .center)
             }
+            // The idle rotation moves on the board's clock: sleep to the
+            // core's next boundary, then bump so the ring is asked again.
+            // Restarts whenever the boundary changes (new anchor, new timer,
+            // new list); nothing runs while the ring cannot change.
+            .task(id: ring.nextChangeMs) {
+                guard let next = ring.nextChangeMs else { return }
+                let at = Double(next) / 1000
+                while !Task.isCancelled {
+                    let wait = at - Date().timeIntervalSince1970
+                    if wait <= 0 { break }
+                    // A hair past the boundary, so the re-ask lands in the
+                    // next slot rather than on its edge.
+                    try? await Task.sleep(for: .seconds(wait + 0.05))
+                }
+                if !Task.isCancelled { ringTick &+= 1 }
+            }
         }
     }
 
     /// One tile per screen INSTANCE in the board's order — keyed by instance
     /// id, which is unique even when a kind repeats (two Weather screens).
-    private var modePickerTiles: some View {
-            let ringed = Set(model.screenRing.ids)
-            return HStack(alignment: .top, spacing: 10) {
+    /// `ringed` holds at most the one tile on the glass.
+    private func modePickerTiles(ringed: Set<String>) -> some View {
+            HStack(alignment: .top, spacing: 10) {
                 ForEach(model.screenRows, id: \.id) { m in
                     let showing = ringed.contains(m.id)
                     Button { model.setMode(m) } label: {
@@ -5265,6 +5263,9 @@ struct SettingsView: View {
     @State private var showTroubleshooting = false
     /// The Add Screen chooser (Screens page).
     @State private var showAddScreen = false
+    /// The idle-timer picker, opened by the "every N minutes" link in the
+    /// Screens list's footer.
+    @State private var showIdleCycle = false
     /// Which server this sheet's target uses. Corrected from the stored URL in
     /// `onAppear`; the initial value only has to be one the picker can show.
     @State private var preset: ServerPreset = .prod
@@ -5730,11 +5731,61 @@ struct SettingsView: View {
                 for i in offsets where movable[i].removable { model.removeScreen(movable[i].id) }
             } : nil)
         } footer: {
-            // On a server without lists only the checkmarks can land, and
-            // they act single-select — the footer says why the rest is gone.
-            Text(editable ? screensExplainer() : updateServerNote())
+            idleFooter(editable: editable)
         }
     }
+
+    /// What the board does when nothing you follow is playing — the core's
+    /// sentence for the current checkmarks. With two or more checked (and a
+    /// server that can store it) its "every N minutes" is an inline link
+    /// that opens the idle-timer picker. On a server without lists only the
+    /// checkmarks can land, and they act single-select — the update note
+    /// follows the sentence to say why the rest is gone.
+    private func idleFooter(editable: Bool) -> some View {
+        let parts = idleExplainerParts(
+            screens: model.screenRows, idleCycleSecs: model.current.idleCycleSecs, editable: editable
+        )
+        var sentence = AttributedString(parts.before)
+        if let link = parts.link {
+            var run = AttributedString(link)
+            // Never leaves the app: the openURL handler below claims it.
+            run.link = Self.idleCycleLink
+            sentence += run
+        }
+        sentence += AttributedString(parts.after)
+        return VStack(alignment: .leading, spacing: 6) {
+            Text(sentence)
+                .environment(\.openURL, OpenURLAction { url in
+                    guard url == Self.idleCycleLink else { return .systemAction }
+                    showIdleCycle = true
+                    return .handled
+                })
+                // Anchored to the sentence, so on iPad it pops over from it.
+                .confirmationDialog(idleCycleTitle(), isPresented: $showIdleCycle, titleVisibility: .visible) {
+                    // A stored value that is not a preset selects the preset
+                    // it snaps to — the one the board times itself by.
+                    let selected = idleCycleSelected(secs: model.current.idleCycleSecs)
+                    ForEach(idleCycleOptions(), id: \.secs) { o in
+                        Button {
+                            model.setIdleCycle(o.secs)
+                        } label: {
+                            if o.secs == selected {
+                                Label(o.label, systemImage: "checkmark")
+                            } else {
+                                Text(o.label)
+                            }
+                        }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                }
+            if !editable {
+                Text(updateServerNote())
+            }
+        }
+    }
+
+    /// The footer link's target: an in-app action, not a place.
+    private static let idleCycleLink = URL(string: "openscoreboard-action:idle-cycle")!
 
     /// Add Screen, as the same full-width capsule as Add League. Disabled
     /// with the core's note when the list is full or nothing is left to add.
@@ -5758,37 +5809,6 @@ struct SettingsView: View {
             if let note {
                 Text(note)
             }
-        }
-    }
-
-    /// What the board does with nothing on: the core's sentence for the
-    /// current checkmarks, and the rotation timer while two or more are
-    /// checked (and the server can store it).
-    private var idleSection: some View {
-        Section {
-            Text(idleExplainer(screens: model.screenRows, idleCycleSecs: model.current.idleCycleSecs))
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            if model.screensAreEditable && idleCycleApplies(screens: model.resolvedScreens) {
-                HStack(spacing: 6) {
-                    Text(idleCycleTitle())
-                    Spacer()
-                    // A stored value that is not a preset selects the preset it
-                    // snaps to — the one the board times itself by.
-                    Picker(idleCycleTitle(), selection: Binding(
-                        get: { idleCycleSelected(secs: model.current.idleCycleSecs) },
-                        set: { model.setIdleCycle($0) }
-                    )) {
-                        ForEach(idleCycleOptions(), id: \.secs) { o in
-                            Text(o.label).tag(o.secs)
-                        }
-                    }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                }
-            }
-        } header: {
-            Text("When nothing is on")
         }
     }
 
@@ -6077,7 +6097,6 @@ struct SettingsView: View {
                 if model.screensAreEditable {
                     addScreenSection
                 }
-                idleSection
             } else {
                 Section { ProgressView() }
             }
@@ -6540,9 +6559,10 @@ struct DebugLogView: View {
     }
 }
 
-/// One screen's page: its descriptor's fields, its hold timer, its "show when
-/// nothing is on" toggle, and Remove — built entirely from what the SERVER
-/// declared and the core resolved.
+/// One screen's page: its descriptor's fields, its "show when nothing is on"
+/// toggle, and Remove — built entirely from what the SERVER declared and the
+/// core resolved. Sports and Off have no page (`hasSettings`): a pick of
+/// either needs no setting, and every picked screen holds 24 hours.
 ///
 /// Looked up LIVE by instance id on every render, never held as a snapshot:
 /// the list changes under it (its own Remove, another phone), and the page
@@ -6557,8 +6577,7 @@ struct ScreenSettingsView: View {
 
     private var screen: UiScreen? { model.screenRows.first { $0.id == screenId } }
 
-    /// The descriptor whose fields this screen draws, by its kind. Off has
-    /// none, so its page is only the hold timer.
+    /// The descriptor whose fields this screen draws, by its kind.
     private func descriptor(_ s: UiScreen) -> UiOffMode? {
         model.offModes.first { $0.id == s.kind }
     }
@@ -6574,7 +6593,6 @@ struct ScreenSettingsView: View {
                         fieldSection(s, d, field)
                     }
                 }
-                holdTimerSection(s)
                 if canSetIdle(screens: model.resolvedScreens, id: s.id) {
                     Section {
                         Toggle(idleToggleLabel(), isOn: Binding(
@@ -6597,31 +6615,6 @@ struct ScreenSettingsView: View {
         // Gone — removed here or from another phone: nothing left to edit.
         .onChange(of: screen == nil, initial: true) { _, gone in
             if gone { dismiss() }
-        }
-    }
-
-    /// How long this screen holds the panel when PICKED (in Controls or on
-    /// the knob) before the board goes back to Sports. The rows always
-    /// include the stored value, preset or not, so the menu never shows a
-    /// blank.
-    private func holdTimerSection(_ s: UiScreen) -> some View {
-        let current = model.holdHours(s)
-        return Section {
-            HStack(spacing: 6) {
-                Text(holdTimerTitle())
-                Spacer()
-                Picker(holdTimerTitle(), selection: Binding(
-                    get: { holdTimerSelected(hours: current) },
-                    set: { model.setModeHours(s.id, $0) }
-                )) {
-                    ForEach(holdTimerOptionsFor(current: current), id: \.hours) { o in
-                        Text(o.label).tag(o.hours)
-                    }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .accessibilityValue(holdTimerLabel(hours: current))
-            }
         }
     }
 

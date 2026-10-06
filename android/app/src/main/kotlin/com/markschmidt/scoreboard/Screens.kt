@@ -1,6 +1,8 @@
 package com.markschmidt.scoreboard
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -14,12 +16,20 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.dp
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
@@ -30,15 +40,10 @@ import uniffi.app_core.addScreenLabel
 import uniffi.app_core.addScreenNote
 import uniffi.app_core.addableScreenGroups
 import uniffi.app_core.canSetIdle
-import uniffi.app_core.holdTimerHours
-import uniffi.app_core.holdTimerOptionsFor
-import uniffi.app_core.holdTimerSelected
-import uniffi.app_core.holdTimerTitle
-import uniffi.app_core.idleCycleApplies
 import uniffi.app_core.idleCycleOptions
 import uniffi.app_core.idleCycleSelected
 import uniffi.app_core.idleCycleTitle
-import uniffi.app_core.idleExplainer
+import uniffi.app_core.idleExplainerParts
 import uniffi.app_core.idleToggleLabel
 import uniffi.app_core.offModeValue
 import uniffi.app_core.offModesOrFallback
@@ -46,14 +51,16 @@ import uniffi.app_core.removeScreenLabel
 import uniffi.app_core.screenList
 import uniffi.app_core.screenParams
 import uniffi.app_core.screensEditable
-import uniffi.app_core.screensExplainer
 import uniffi.app_core.updateServerNote
 import uniffi.app_core.visibleOffModeFields
 
 /*
  * Settings › Screens (MAR-117): the board's screen list. Sports and Off are
  * pinned; the user's screens follow in the board's order, each with its
- * preview, a "show when nothing is on" check and a page of its own. Every
+ * preview, a "show when nothing is on" check and a page of its own (Sports
+ * and Off have none — the core's `hasSettings`); the list's footer says
+ * what the board does when nothing is on, its idle timer a link to the
+ * picker. Every
  * rule — which rows are fixed, what a drag or a check makes of the list,
  * labels, previews, the copy — is the core's; this file lays it out the
  * Android way (drag handles, an overflow menu, a bottom sheet).
@@ -196,28 +203,7 @@ private fun ScreensList(
             }
         }
         item(key = "#footer") {
-            Text(
-                if (editable) screensExplainer() else updateServerNote(),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.outline,
-                modifier = Modifier.padding(top = 4.dp),
-            )
-        }
-        item(key = "#idle") {
-            Spacer(Modifier.height(20.dp))
-            Header("When nothing is on")
-            Text(
-                idleExplainer(rows, cfg.idleCycleSecs),
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier.padding(vertical = 4.dp),
-            )
-            if (editable && idleCycleApplies(screens)) {
-                ChoiceRow(
-                    idleCycleTitle(),
-                    idleCycleOptions().map { it.secs to it.label },
-                    idleCycleSelected(cfg.idleCycleSecs),
-                ) { session.setIdleCycle(boardId, it) }
-            }
+            IdleFooter(rows, cfg.idleCycleSecs, editable) { session.setIdleCycle(boardId, it) }
         }
         item(key = "#quiet") {
             Spacer(Modifier.height(20.dp))
@@ -227,8 +213,85 @@ private fun ScreensList(
     }
 }
 
+/**
+ * The list's footer: what the board does when nothing you follow is playing,
+ * one sentence from the core. With two or more screens checked on a server
+ * that stores lists, its "every 5 minutes" is a link opening the idle-timer
+ * picker; elsewhere the sentence is plain, and an old server's update note
+ * follows it.
+ */
+@Composable
+private fun IdleFooter(rows: List<UiScreen>, idleCycleSecs: UInt, editable: Boolean, onPick: (UInt) -> Unit) {
+    val parts = remember(rows, idleCycleSecs, editable) { idleExplainerParts(rows, idleCycleSecs, editable) }
+    var picking by remember { mutableStateOf(false) }
+    val linkStyle = TextLinkStyles(
+        SpanStyle(color = MaterialTheme.colorScheme.primary, textDecoration = TextDecoration.Underline),
+    )
+    val sentence = buildAnnotatedString {
+        append(parts.before)
+        parts.link?.let { link ->
+            withLink(LinkAnnotation.Clickable("idle-cycle", linkStyle) { picking = true }) { append(link) }
+        }
+        append(parts.after)
+    }
+    Column(Modifier.padding(top = 4.dp)) {
+        Text(
+            sentence,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.outline,
+        )
+        if (!editable) {
+            Text(
+                updateServerNote(),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+        }
+    }
+    if (picking) {
+        IdleCycleDialog(idleCycleSelected(idleCycleSecs), onDismiss = { picking = false }) {
+            picking = false
+            onPick(it)
+        }
+    }
+}
+
+/** The idle timer's choices as a radio list, the current one selected;
+ *  a choice commits at once, Cancel leaves it as it was. */
+@Composable
+private fun IdleCycleDialog(current: UInt, onDismiss: () -> Unit, onPick: (UInt) -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(idleCycleTitle()) },
+        text = {
+            Column(Modifier.selectableGroup()) {
+                for (o in idleCycleOptions()) {
+                    val on = o.secs == current
+                    Row(
+                        Modifier.fillMaxWidth()
+                            .selectable(selected = on, role = Role.RadioButton) {
+                                if (on) onDismiss() else onPick(o.secs)
+                            }
+                            .padding(vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = on, onClick = null)
+                        Spacer(Modifier.width(12.dp))
+                        Text(o.label)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(android.R.string.cancel)) }
+        },
+    )
+}
+
 /** One screen: its panel, its name, and — for the user's screens — the
- *  idle check and a menu. Sports has no page; everything else opens one. */
+ *  idle check and a menu. Every user screen opens a page; the pinned Sports
+ *  and Off have none (the core's `hasSettings`). */
 @Composable
 private fun ScreenRow(
     session: Session,
@@ -334,8 +397,8 @@ private fun AddScreenSheet(
 
 /**
  * One screen's page: the descriptor's fields read with the params the
- * SERVER renders that screen with, its hold timer, the idle switch, and
- * Remove. Looked up by id on every render; closes itself when the screen is
+ * SERVER renders that screen with, the idle switch, and Remove. (No hold
+ * timer: every picked screen holds 24 hours.) Looked up by id on every render; closes itself when the screen is
  * gone (its own Remove, or another phone's).
  */
 @Composable
@@ -353,7 +416,9 @@ private fun ScreenSettingsPage(
         cfg?.let { screenList(it.screens, it.offMode, it.offModeParams, state.offModes) }
     }
     val screen = rows?.firstOrNull { it.id == id }
-    if (cfg == null || screen == null) {
+    // A screen with no page (Sports, Off) — e.g. an id restored from saved
+    // state — walks straight back to the list.
+    if (cfg == null || screen == null || !screen.hasSettings) {
         LaunchedEffect(Unit) { onBack() }
         return
     }
@@ -428,17 +493,9 @@ private fun ScreenSettingsPage(
                     }
                 }
             }
-            item(key = "#hold") {
-                Spacer(Modifier.height(16.dp))
-                val current = holdTimerHours(id, screen.kind, cfg.modeHours, cfg.sleepHours)
-                ChoiceRow(
-                    holdTimerTitle(),
-                    holdTimerOptionsFor(current).map { it.hours to it.label },
-                    holdTimerSelected(current),
-                ) { session.setModeHours(boardId, id, it) }
-            }
             if (canSetIdle(screens, id)) {
                 item(key = "#idle") {
+                    Spacer(Modifier.height(16.dp))
                     ListItem(
                         headlineContent = { Text(idleToggleLabel()) },
                         trailingContent = {

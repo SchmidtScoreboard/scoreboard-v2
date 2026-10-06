@@ -1131,28 +1131,6 @@ internal open class UniffiVTableCallbackInterfaceClientListener(
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -1253,8 +1231,6 @@ internal interface UniffiLib : Library {
     ): Unit
     fun uniffi_app_core_fn_method_scoreboardclient_set_mode(`ptr`: Pointer,`boardId`: RustBuffer.ByValue,`mode`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
-    fun uniffi_app_core_fn_method_scoreboardclient_set_mode_hours(`ptr`: Pointer,`boardId`: RustBuffer.ByValue,`mode`: RustBuffer.ByValue,`hours`: Int,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
     fun uniffi_app_core_fn_method_scoreboardclient_set_off_mode(`ptr`: Pointer,`boardId`: RustBuffer.ByValue,`id`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_app_core_fn_method_scoreboardclient_set_off_mode_param(`ptr`: Pointer,`boardId`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,`value`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1266,8 +1242,6 @@ internal interface UniffiLib : Library {
     fun uniffi_app_core_fn_method_scoreboardclient_set_quiet_hours(`ptr`: Pointer,`boardId`: RustBuffer.ByValue,`startMin`: Short,`endMin`: Short,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_app_core_fn_method_scoreboardclient_set_screens(`ptr`: Pointer,`boardId`: RustBuffer.ByValue,`screens`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Unit
-    fun uniffi_app_core_fn_method_scoreboardclient_set_sleep_hours(`ptr`: Pointer,`boardId`: RustBuffer.ByValue,`hours`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     fun uniffi_app_core_fn_method_scoreboardclient_set_spoiler_all(`ptr`: Pointer,`boardId`: RustBuffer.ByValue,`on`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -1301,7 +1275,7 @@ internal interface UniffiLib : Library {
     ): Byte
     fun uniffi_app_core_fn_func_card_highlight(`game`: RustBuffer.ByValue,`focusedGameId`: RustBuffer.ByValue,`nowShowing`: RustBuffer.ByValue,`extraGameIds`: RustBuffer.ByValue,`excludedGameIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_app_core_fn_func_compute_wake_at(`id`: RustBuffer.ByValue,`kind`: RustBuffer.ByValue,`modeHours`: RustBuffer.ByValue,`sleepHours`: Int,`nowUnix`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_app_core_fn_func_compute_wake_at(`id`: RustBuffer.ByValue,`nowUnix`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_configured_preview(`path`: RustBuffer.ByValue,`params`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1341,24 +1315,10 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_held_after(`heldId`: RustBuffer.ByValue,`screens`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_app_core_fn_func_hold_timer_hours(`id`: RustBuffer.ByValue,`kind`: RustBuffer.ByValue,`modeHours`: RustBuffer.ByValue,`sleepHours`: Int,uniffi_out_err: UniffiRustCallStatus, 
-    ): Int
-    fun uniffi_app_core_fn_func_hold_timer_label(`hours`: Int,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun uniffi_app_core_fn_func_hold_timer_options(uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun uniffi_app_core_fn_func_hold_timer_options_for(`current`: Int,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun uniffi_app_core_fn_func_hold_timer_selected(`hours`: Int,uniffi_out_err: UniffiRustCallStatus, 
-    ): Int
-    fun uniffi_app_core_fn_func_hold_timer_title(uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_host_port_for_board(`wsUrl`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_http_base(`wsUrl`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_app_core_fn_func_idle_cycle_applies(`screens`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): Byte
     fun uniffi_app_core_fn_func_idle_cycle_label(`secs`: Int,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_idle_cycle_options(uniffi_out_err: UniffiRustCallStatus, 
@@ -1367,7 +1327,7 @@ internal interface UniffiLib : Library {
     ): Int
     fun uniffi_app_core_fn_func_idle_cycle_title(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_app_core_fn_func_idle_explainer(`screens`: RustBuffer.ByValue,`idleCycleSecs`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_app_core_fn_func_idle_explainer_parts(`screens`: RustBuffer.ByValue,`idleCycleSecs`: Int,`editable`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_idle_single_select(`screensSupported`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
@@ -1395,8 +1355,6 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_mode_footer_shown(`mode`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
-    fun uniffi_app_core_fn_func_mode_hours_after_set(`id`: RustBuffer.ByValue,`hours`: Int,`screens`: RustBuffer.ByValue,`modeHours`: RustBuffer.ByValue,`sleepHours`: Int,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_mode_label(`id`: RustBuffer.ByValue,`offModes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_mode_power(`mode`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1433,7 +1391,7 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_resolved_screen_configs(`screens`: RustBuffer.ByValue,`offMode`: RustBuffer.ByValue,`offModeParams`: RustBuffer.ByValue,`offModes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_app_core_fn_func_ring(`mode`: RustBuffer.ByValue,`quietActive`: Byte,`panelShowsNothing`: Byte,`screens`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_app_core_fn_func_ring(`mode`: RustBuffer.ByValue,`quietActive`: Byte,`panelShowsNothing`: Byte,`screens`: RustBuffer.ByValue,`idleCycleSecs`: Int,`idleSinceMs`: RustBuffer.ByValue,`nowMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_rotation_add(`gameId`: RustBuffer.ByValue,`extraGameIds`: RustBuffer.ByValue,`excludedGameIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1455,11 +1413,9 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_screens_editable(`screensSupported`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
-    fun uniffi_app_core_fn_func_screens_explainer(uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_screens_loading_note(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_app_core_fn_func_screens_removed(`screens`: RustBuffer.ByValue,`id`: RustBuffer.ByValue,`mode`: RustBuffer.ByValue,`wakeAt`: RustBuffer.ByValue,`modeHours`: RustBuffer.ByValue,`offModes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    fun uniffi_app_core_fn_func_screens_removed(`screens`: RustBuffer.ByValue,`id`: RustBuffer.ByValue,`mode`: RustBuffer.ByValue,`wakeAt`: RustBuffer.ByValue,`offModes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_screens_with_idle(`screens`: RustBuffer.ByValue,`id`: RustBuffer.ByValue,`on`: Byte,`offModes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -1667,23 +1623,9 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_app_core_checksum_func_held_after(
     ): Short
-    fun uniffi_app_core_checksum_func_hold_timer_hours(
-    ): Short
-    fun uniffi_app_core_checksum_func_hold_timer_label(
-    ): Short
-    fun uniffi_app_core_checksum_func_hold_timer_options(
-    ): Short
-    fun uniffi_app_core_checksum_func_hold_timer_options_for(
-    ): Short
-    fun uniffi_app_core_checksum_func_hold_timer_selected(
-    ): Short
-    fun uniffi_app_core_checksum_func_hold_timer_title(
-    ): Short
     fun uniffi_app_core_checksum_func_host_port_for_board(
     ): Short
     fun uniffi_app_core_checksum_func_http_base(
-    ): Short
-    fun uniffi_app_core_checksum_func_idle_cycle_applies(
     ): Short
     fun uniffi_app_core_checksum_func_idle_cycle_label(
     ): Short
@@ -1693,7 +1635,7 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_app_core_checksum_func_idle_cycle_title(
     ): Short
-    fun uniffi_app_core_checksum_func_idle_explainer(
+    fun uniffi_app_core_checksum_func_idle_explainer_parts(
     ): Short
     fun uniffi_app_core_checksum_func_idle_single_select(
     ): Short
@@ -1720,8 +1662,6 @@ internal interface UniffiLib : Library {
     fun uniffi_app_core_checksum_func_mode_back_suffix(
     ): Short
     fun uniffi_app_core_checksum_func_mode_footer_shown(
-    ): Short
-    fun uniffi_app_core_checksum_func_mode_hours_after_set(
     ): Short
     fun uniffi_app_core_checksum_func_mode_label(
     ): Short
@@ -1780,8 +1720,6 @@ internal interface UniffiLib : Library {
     fun uniffi_app_core_checksum_func_screens_added(
     ): Short
     fun uniffi_app_core_checksum_func_screens_editable(
-    ): Short
-    fun uniffi_app_core_checksum_func_screens_explainer(
     ): Short
     fun uniffi_app_core_checksum_func_screens_loading_note(
     ): Short
@@ -1899,8 +1837,6 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_app_core_checksum_method_scoreboardclient_set_mode(
     ): Short
-    fun uniffi_app_core_checksum_method_scoreboardclient_set_mode_hours(
-    ): Short
     fun uniffi_app_core_checksum_method_scoreboardclient_set_off_mode(
     ): Short
     fun uniffi_app_core_checksum_method_scoreboardclient_set_off_mode_param(
@@ -1912,8 +1848,6 @@ internal interface UniffiLib : Library {
     fun uniffi_app_core_checksum_method_scoreboardclient_set_quiet_hours(
     ): Short
     fun uniffi_app_core_checksum_method_scoreboardclient_set_screens(
-    ): Short
-    fun uniffi_app_core_checksum_method_scoreboardclient_set_sleep_hours(
     ): Short
     fun uniffi_app_core_checksum_method_scoreboardclient_set_spoiler_all(
     ): Short
@@ -2002,7 +1936,7 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_app_core_checksum_func_card_highlight() != 5739.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_app_core_checksum_func_compute_wake_at() != 31960.toShort()) {
+    if (lib.uniffi_app_core_checksum_func_compute_wake_at() != 21827.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_configured_preview() != 40773.toShort()) {
@@ -2062,31 +1996,10 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_app_core_checksum_func_held_after() != 9162.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_app_core_checksum_func_hold_timer_hours() != 55554.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_app_core_checksum_func_hold_timer_label() != 8688.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_app_core_checksum_func_hold_timer_options() != 58340.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_app_core_checksum_func_hold_timer_options_for() != 59911.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_app_core_checksum_func_hold_timer_selected() != 19908.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_app_core_checksum_func_hold_timer_title() != 61154.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if (lib.uniffi_app_core_checksum_func_host_port_for_board() != 3292.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_http_base() != 21014.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_app_core_checksum_func_idle_cycle_applies() != 57229.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_idle_cycle_label() != 38869.toShort()) {
@@ -2101,7 +2014,7 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_app_core_checksum_func_idle_cycle_title() != 13987.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_app_core_checksum_func_idle_explainer() != 34075.toShort()) {
+    if (lib.uniffi_app_core_checksum_func_idle_explainer_parts() != 35940.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_idle_single_select() != 49447.toShort()) {
@@ -2141,9 +2054,6 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_mode_footer_shown() != 27396.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_app_core_checksum_func_mode_hours_after_set() != 20426.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_mode_label() != 2918.toShort()) {
@@ -2200,7 +2110,7 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_app_core_checksum_func_resolved_screen_configs() != 12865.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_app_core_checksum_func_ring() != 14010.toShort()) {
+    if (lib.uniffi_app_core_checksum_func_ring() != 44048.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_rotation_add() != 1110.toShort()) {
@@ -2233,13 +2143,10 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_app_core_checksum_func_screens_editable() != 38186.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_app_core_checksum_func_screens_explainer() != 1502.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if (lib.uniffi_app_core_checksum_func_screens_loading_note() != 61413.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_app_core_checksum_func_screens_removed() != 46153.toShort()) {
+    if (lib.uniffi_app_core_checksum_func_screens_removed() != 367.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_screens_with_idle() != 53693.toShort()) {
@@ -2410,9 +2317,6 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_app_core_checksum_method_scoreboardclient_set_mode() != 37612.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_app_core_checksum_method_scoreboardclient_set_mode_hours() != 49719.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if (lib.uniffi_app_core_checksum_method_scoreboardclient_set_off_mode() != 43268.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2429,9 +2333,6 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_method_scoreboardclient_set_screens() != 16370.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_app_core_checksum_method_scoreboardclient_set_sleep_hours() != 40272.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_method_scoreboardclient_set_spoiler_all() != 41727.toShort()) {
@@ -3128,12 +3029,6 @@ public interface ScoreboardClientInterface {
     fun `setMode`(`boardId`: kotlin.String, `mode`: kotlin.String)
     
     /**
-     * Configure a screen's hold timer, in hours, keyed by its INSTANCE id
-     * ("off", "weather.2"). 0 = until changed. See `hold_timer_options`.
-     */
-    fun `setModeHours`(`boardId`: kotlin.String, `mode`: kotlin.String, `hours`: kotlin.UInt)
-    
-    /**
      * What the panel shows while off / idle (blank or a server-rendered clock).
      * Pick a server-declared off mode. The id comes from `on_off_modes`; the
      * server validates it and ignores one it does not offer.
@@ -3193,11 +3088,6 @@ public interface ScoreboardClientInterface {
      * BoardState then shows the board as it really is.
      */
     fun `setScreens`(`boardId`: kotlin.String, `screens`: List<UiScreenConfig>)
-    
-    /**
-     * How long a knob-press sleep lasts before the board wakes itself.
-     */
-    fun `setSleepHours`(`boardId`: kotlin.String, `hours`: kotlin.UInt)
     
     /**
      * Spoiler-protect every game on the board.
@@ -3880,21 +3770,6 @@ open class ScoreboardClient: Disposable, AutoCloseable, ScoreboardClientInterfac
 
     
     /**
-     * Configure a screen's hold timer, in hours, keyed by its INSTANCE id
-     * ("off", "weather.2"). 0 = until changed. See `hold_timer_options`.
-     */override fun `setModeHours`(`boardId`: kotlin.String, `mode`: kotlin.String, `hours`: kotlin.UInt)
-        = 
-    callWithPointer {
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_app_core_fn_method_scoreboardclient_set_mode_hours(
-        it, FfiConverterString.lower(`boardId`),FfiConverterString.lower(`mode`),FfiConverterUInt.lower(`hours`),_status)
-}
-    }
-    
-    
-
-    
-    /**
      * What the panel shows while off / idle (blank or a server-rendered clock).
      * Pick a server-declared off mode. The id comes from `on_off_modes`; the
      * server validates it and ignores one it does not offer.
@@ -4003,20 +3878,6 @@ open class ScoreboardClient: Disposable, AutoCloseable, ScoreboardClientInterfac
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_app_core_fn_method_scoreboardclient_set_screens(
         it, FfiConverterString.lower(`boardId`),FfiConverterSequenceTypeUiScreenConfig.lower(`screens`),_status)
-}
-    }
-    
-    
-
-    
-    /**
-     * How long a knob-press sleep lasts before the board wakes itself.
-     */override fun `setSleepHours`(`boardId`: kotlin.String, `hours`: kotlin.UInt)
-        = 
-    callWithPointer {
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_app_core_fn_method_scoreboardclient_set_sleep_hours(
-        it, FfiConverterString.lower(`boardId`),FfiConverterUInt.lower(`hours`),_status)
 }
     }
     
@@ -4414,17 +4275,18 @@ data class UiBoardConfig (
      */
     var `idleCycleSecs`: kotlin.UInt, 
     /**
-     * Per-mode timer durations in hours (0 = until changed); a missing mode
-     * falls back to `sleep_hours`.
+     * Unix ms at which the board's current idle rotation put its FIRST
+     * screen up (protocol `BoardState.idle_since_ms`, never stored in the
+     * config): None when it is not idling through two or more screens, or
+     * the server predates it. Pass to `ring` with the current time.
      */
-    var `modeHours`: Map<kotlin.String, kotlin.UInt>, 
+    var `idleSinceMs`: kotlin.ULong?, 
     /**
      * The board-wide off-mode values (location, 24-hour), plus a MIRROR of
      * the per-screen values of each kind's first instance for older apps.
      * Per-screen values are read from `screens`, not from here.
      */
     var `offModeParams`: Map<kotlin.String, kotlin.String>, 
-    var `sleepHours`: kotlin.UInt, 
     /**
      * Seconds each game holds the panel before the rotation advances.
      */
@@ -4496,9 +4358,8 @@ public object FfiConverterTypeUiBoardConfig: FfiConverterRustBuffer<UiBoardConfi
             FfiConverterSequenceTypeUiScreenConfig.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterUInt.read(buf),
-            FfiConverterMapStringUInt.read(buf),
+            FfiConverterOptionalULong.read(buf),
             FfiConverterMapStringString.read(buf),
-            FfiConverterUInt.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterOptionalULong.read(buf),
             FfiConverterBoolean.read(buf),
@@ -4527,9 +4388,8 @@ public object FfiConverterTypeUiBoardConfig: FfiConverterRustBuffer<UiBoardConfi
             FfiConverterSequenceTypeUiScreenConfig.allocationSize(value.`screens`) +
             FfiConverterBoolean.allocationSize(value.`screensSupported`) +
             FfiConverterUInt.allocationSize(value.`idleCycleSecs`) +
-            FfiConverterMapStringUInt.allocationSize(value.`modeHours`) +
+            FfiConverterOptionalULong.allocationSize(value.`idleSinceMs`) +
             FfiConverterMapStringString.allocationSize(value.`offModeParams`) +
-            FfiConverterUInt.allocationSize(value.`sleepHours`) +
             FfiConverterUInt.allocationSize(value.`dwellSecs`) +
             FfiConverterOptionalULong.allocationSize(value.`wakeAt`) +
             FfiConverterBoolean.allocationSize(value.`strictSpoilers`) +
@@ -4557,9 +4417,8 @@ public object FfiConverterTypeUiBoardConfig: FfiConverterRustBuffer<UiBoardConfi
             FfiConverterSequenceTypeUiScreenConfig.write(value.`screens`, buf)
             FfiConverterBoolean.write(value.`screensSupported`, buf)
             FfiConverterUInt.write(value.`idleCycleSecs`, buf)
-            FfiConverterMapStringUInt.write(value.`modeHours`, buf)
+            FfiConverterOptionalULong.write(value.`idleSinceMs`, buf)
             FfiConverterMapStringString.write(value.`offModeParams`, buf)
-            FfiConverterUInt.write(value.`sleepHours`, buf)
             FfiConverterUInt.write(value.`dwellSecs`, buf)
             FfiConverterOptionalULong.write(value.`wakeAt`, buf)
             FfiConverterBoolean.write(value.`strictSpoilers`, buf)
@@ -4888,41 +4747,6 @@ public object FfiConverterTypeUiGame: FfiConverterRustBuffer<UiGame> {
 
 
 /**
- * One choice of a screen's hold timer.
- */
-data class UiHoldOption (
-    var `hours`: kotlin.UInt, 
-    var `label`: kotlin.String
-) {
-    
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeUiHoldOption: FfiConverterRustBuffer<UiHoldOption> {
-    override fun read(buf: ByteBuffer): UiHoldOption {
-        return UiHoldOption(
-            FfiConverterUInt.read(buf),
-            FfiConverterString.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: UiHoldOption) = (
-            FfiConverterUInt.allocationSize(value.`hours`) +
-            FfiConverterString.allocationSize(value.`label`)
-    )
-
-    override fun write(value: UiHoldOption, buf: ByteBuffer) {
-            FfiConverterUInt.write(value.`hours`, buf)
-            FfiConverterString.write(value.`label`, buf)
-    }
-}
-
-
-
-/**
  * One choice of the idle timer.
  */
 data class UiIdleCycleOption (
@@ -4952,6 +4776,54 @@ public object FfiConverterTypeUiIdleCycleOption: FfiConverterRustBuffer<UiIdleCy
     override fun write(value: UiIdleCycleOption, buf: ByteBuffer) {
             FfiConverterUInt.write(value.`secs`, buf)
             FfiConverterString.write(value.`label`, buf)
+    }
+}
+
+
+
+/**
+ * The Screens list's footer, in three runs so the idle timer can sit
+ * inline as a tappable link: `before`, then `link` (when present), then
+ * `after`. Concatenated, it is one sentence.
+ */
+data class UiIdleExplainer (
+    var `before`: kotlin.String, 
+    /**
+     * "every 5 minutes": tapping it opens the idle-timer picker
+     * (`idle_cycle_title`, `idle_cycle_options`, committed with
+     * `set_idle_cycle`). None when there is nothing to pick — fewer than two
+     * checked screens, or a server that cannot store the timer — and the
+     * whole sentence is then plain text.
+     */
+    var `link`: kotlin.String?, 
+    var `after`: kotlin.String
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeUiIdleExplainer: FfiConverterRustBuffer<UiIdleExplainer> {
+    override fun read(buf: ByteBuffer): UiIdleExplainer {
+        return UiIdleExplainer(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: UiIdleExplainer) = (
+            FfiConverterString.allocationSize(value.`before`) +
+            FfiConverterOptionalString.allocationSize(value.`link`) +
+            FfiConverterString.allocationSize(value.`after`)
+    )
+
+    override fun write(value: UiIdleExplainer, buf: ByteBuffer) {
+            FfiConverterString.write(value.`before`, buf)
+            FfiConverterOptionalString.write(value.`link`, buf)
+            FfiConverterString.write(value.`after`, buf)
     }
 }
 
@@ -5404,19 +5276,27 @@ public object FfiConverterTypeUiProvisionStep: FfiConverterRustBuffer<UiProvisio
 
 
 /**
- * Which rail tiles wear the ring, and the one to scroll to.
+ * Which rail tile wears the ring, the one to scroll to, and when to ask
+ * again.
  */
 data class UiRing (
     /**
-     * Every ringed screen id, in list order. Several while the board idles
-     * through several screens: one of them is on the glass and the board
-     * never says which.
+     * The ringed screen id — at most one: exactly the screen on the glass.
+     * EMPTY when the board idles through two or more screens and the
+     * server has not said when that rotation began (an older server, or the
+     * moment before its push arrives): ring nothing rather than guess.
      */
     var `ids`: List<kotlin.String>, 
     /**
-     * The single tile to scroll into view — `ids[0]`.
+     * The single tile to scroll into view: `ids[0]`, else the first
+     * checked screen.
      */
-    var `scrollTarget`: kotlin.String
+    var `scrollTarget`: kotlin.String, 
+    /**
+     * Unix ms at which the board moves to its next idle screen: call `ring`
+     * again then. None when the ring cannot change on its own.
+     */
+    var `nextChangeMs`: kotlin.ULong?
 ) {
     
     companion object
@@ -5430,17 +5310,20 @@ public object FfiConverterTypeUiRing: FfiConverterRustBuffer<UiRing> {
         return UiRing(
             FfiConverterSequenceString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterOptionalULong.read(buf),
         )
     }
 
     override fun allocationSize(value: UiRing) = (
             FfiConverterSequenceString.allocationSize(value.`ids`) +
-            FfiConverterString.allocationSize(value.`scrollTarget`)
+            FfiConverterString.allocationSize(value.`scrollTarget`) +
+            FfiConverterOptionalULong.allocationSize(value.`nextChangeMs`)
     )
 
     override fun write(value: UiRing, buf: ByteBuffer) {
             FfiConverterSequenceString.write(value.`ids`, buf)
             FfiConverterString.write(value.`scrollTarget`, buf)
+            FfiConverterOptionalULong.write(value.`nextChangeMs`, buf)
     }
 }
 
@@ -5488,7 +5371,7 @@ public object FfiConverterTypeUiRotationSets: FfiConverterRustBuffer<UiRotationS
 data class UiScreen (
     /**
      * The instance id — key rows and tiles by it, and pass it to
-     * `set_mode`, `set_mode_hours` and the mirrors.
+     * `set_mode` and the mirrors.
      */
     var `id`: kotlin.String, 
     /**
@@ -5515,8 +5398,9 @@ data class UiScreen (
      */
     var `fixed`: kotlin.Boolean, 
     /**
-     * Has a page: Off (its hold timer) and every screen (fields, hold
-     * timer, Remove). False only for Sports.
+     * Has a page (fields, the idle checkmark, Remove): every user screen.
+     * False for Sports and Off, which have nothing to set — draw them with
+     * no chevron and no navigation.
      */
     var `hasSettings`: kotlin.Boolean, 
     /**
@@ -5690,14 +5574,7 @@ data class UiScreensRemoved (
     /**
      * Cleared by a release; otherwise as it was.
      */
-    var `wakeAt`: kotlin.ULong?, 
-    /**
-     * The timers without the removed screen's — ids are reused, and a
-     * screen added later under the same id must start fresh. Removing a
-     * kind's first instance hands its timer to each sibling still
-     * inheriting it first (protocol `prune_screen_timers`).
-     */
-    var `modeHours`: Map<kotlin.String, kotlin.UInt>
+    var `wakeAt`: kotlin.ULong?
 ) {
     
     companion object
@@ -5713,7 +5590,6 @@ public object FfiConverterTypeUiScreensRemoved: FfiConverterRustBuffer<UiScreens
             FfiConverterString.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalULong.read(buf),
-            FfiConverterMapStringUInt.read(buf),
         )
     }
 
@@ -5721,8 +5597,7 @@ public object FfiConverterTypeUiScreensRemoved: FfiConverterRustBuffer<UiScreens
             FfiConverterSequenceTypeUiScreenConfig.allocationSize(value.`screens`) +
             FfiConverterString.allocationSize(value.`mode`) +
             FfiConverterBoolean.allocationSize(value.`power`) +
-            FfiConverterOptionalULong.allocationSize(value.`wakeAt`) +
-            FfiConverterMapStringUInt.allocationSize(value.`modeHours`)
+            FfiConverterOptionalULong.allocationSize(value.`wakeAt`)
     )
 
     override fun write(value: UiScreensRemoved, buf: ByteBuffer) {
@@ -5730,7 +5605,6 @@ public object FfiConverterTypeUiScreensRemoved: FfiConverterRustBuffer<UiScreens
             FfiConverterString.write(value.`mode`, buf)
             FfiConverterBoolean.write(value.`power`, buf)
             FfiConverterOptionalULong.write(value.`wakeAt`, buf)
-            FfiConverterMapStringUInt.write(value.`modeHours`, buf)
     }
 }
 
@@ -7238,34 +7112,6 @@ public object FfiConverterSequenceTypeUiGame: FfiConverterRustBuffer<List<UiGame
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeUiHoldOption: FfiConverterRustBuffer<List<UiHoldOption>> {
-    override fun read(buf: ByteBuffer): List<UiHoldOption> {
-        val len = buf.getInt()
-        return List<UiHoldOption>(len) {
-            FfiConverterTypeUiHoldOption.read(buf)
-        }
-    }
-
-    override fun allocationSize(value: List<UiHoldOption>): ULong {
-        val sizeForLength = 4UL
-        val sizeForItems = value.map { FfiConverterTypeUiHoldOption.allocationSize(it) }.sum()
-        return sizeForLength + sizeForItems
-    }
-
-    override fun write(value: List<UiHoldOption>, buf: ByteBuffer) {
-        buf.putInt(value.size)
-        value.iterator().forEach {
-            FfiConverterTypeUiHoldOption.write(it, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
 public object FfiConverterSequenceTypeUiIdleCycleOption: FfiConverterRustBuffer<List<UiIdleCycleOption>> {
     override fun read(buf: ByteBuffer): List<UiIdleCycleOption> {
         val len = buf.getInt()
@@ -7686,45 +7532,6 @@ public object FfiConverterSequenceTypeUiTeam: FfiConverterRustBuffer<List<UiTeam
 /**
  * @suppress
  */
-public object FfiConverterMapStringUInt: FfiConverterRustBuffer<Map<kotlin.String, kotlin.UInt>> {
-    override fun read(buf: ByteBuffer): Map<kotlin.String, kotlin.UInt> {
-        val len = buf.getInt()
-        return buildMap<kotlin.String, kotlin.UInt>(len) {
-            repeat(len) {
-                val k = FfiConverterString.read(buf)
-                val v = FfiConverterUInt.read(buf)
-                this[k] = v
-            }
-        }
-    }
-
-    override fun allocationSize(value: Map<kotlin.String, kotlin.UInt>): ULong {
-        val spaceForMapSize = 4UL
-        val spaceForChildren = value.map { (k, v) ->
-            FfiConverterString.allocationSize(k) +
-            FfiConverterUInt.allocationSize(v)
-        }.sum()
-        return spaceForMapSize + spaceForChildren
-    }
-
-    override fun write(value: Map<kotlin.String, kotlin.UInt>, buf: ByteBuffer) {
-        buf.putInt(value.size)
-        // The parens on `(k, v)` here ensure we're calling the right method,
-        // which is important for compatibility with older android devices.
-        // Ref https://blog.danlew.net/2017/03/16/kotlin-puzzler-whose-line-is-it-anyways/
-        value.forEach { (k, v) ->
-            FfiConverterString.write(k, buf)
-            FfiConverterUInt.write(v, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
 public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.String, kotlin.String>> {
     override fun read(buf: ByteBuffer): Map<kotlin.String, kotlin.String> {
         val len = buf.getInt()
@@ -7859,17 +7666,16 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     
 
         /**
-         * The optimistic mirror of the server's `apply_mode` timer rule, for picking
-         * screen `id` (an instance of `kind`; "off" for Off): hours from the
-         * protocol's `hold_hours` chain — the instance's own timer, else its kind's,
-         * else `sleep_hours` — where Sports and 0 run on no timer and everything
-         * else expires `min(hours, 72)` from now. The 72 is the server's clamp — if
-         * these disagreed, the app's countdown would lie until the next push.
-         */ fun `computeWakeAt`(`id`: kotlin.String, `kind`: kotlin.String, `modeHours`: Map<kotlin.String, kotlin.UInt>, `sleepHours`: kotlin.UInt, `nowUnix`: kotlin.ULong): kotlin.ULong? {
+         * The optimistic mirror of the server's `apply_mode` hold, for picking
+         * screen `id` (an instance id, or "off" for Off): Sports runs on no timer;
+         * every other pick, Off included, holds for the protocol's `HOLD_HOURS`
+         * (24) from `now_unix`. There is no per-screen timer — if these disagreed,
+         * the app's countdown would lie until the next push.
+         */ fun `computeWakeAt`(`id`: kotlin.String, `nowUnix`: kotlin.ULong): kotlin.ULong? {
             return FfiConverterOptionalULong.lift(
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_app_core_fn_func_compute_wake_at(
-        FfiConverterString.lower(`id`),FfiConverterString.lower(`kind`),FfiConverterMapStringUInt.lower(`modeHours`),FfiConverterUInt.lower(`sleepHours`),FfiConverterULong.lower(`nowUnix`),_status)
+        FfiConverterString.lower(`id`),FfiConverterULong.lower(`nowUnix`),_status)
 }
     )
     }
@@ -8153,88 +7959,6 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     
 
         /**
-         * Screen `id`'s hold timer, in hours (0 = until changed): its own, else its
-         * kind's, else `sleep_hours` — the protocol's `hold_hours`, which the server
-         * runs. Write it back with `set_mode_hours(id, ...)`.
-         */ fun `holdTimerHours`(`id`: kotlin.String, `kind`: kotlin.String, `modeHours`: Map<kotlin.String, kotlin.UInt>, `sleepHours`: kotlin.UInt): kotlin.UInt {
-            return FfiConverterUInt.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_app_core_fn_func_hold_timer_hours(
-        FfiConverterString.lower(`id`),FfiConverterString.lower(`kind`),FfiConverterMapStringUInt.lower(`modeHours`),FfiConverterUInt.lower(`sleepHours`),_status)
-}
-    )
-    }
-    
-
-        /**
-         * A stored timer's name: "Until changed", "1 hour", "72 hours" — any
-         * value, preset or not (an import, an older app or the server's 72-hour
-         * clamp can store one the presets lack).
-         */ fun `holdTimerLabel`(`hours`: kotlin.UInt): kotlin.String {
-            return FfiConverterString.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_app_core_fn_func_hold_timer_label(
-        FfiConverterUInt.lower(`hours`),_status)
-}
-    )
-    }
-    
-
-        /**
-         * How long a picked screen holds the panel before the board goes back to
-         * Sports: "Until changed", "1 hour", "2 hours" ... "48 hours".
-         */ fun `holdTimerOptions`(): List<UiHoldOption> {
-            return FfiConverterSequenceTypeUiHoldOption.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_app_core_fn_func_hold_timer_options(
-        _status)
-}
-    )
-    }
-    
-
-        /**
-         * The picker's rows for a screen whose timer is `current`: the presets,
-         * plus the stored value in its place when it is not one — so the picker
-         * always has a row to select and never shows a blank. Select the row whose
-         * `hours` equals `hold_timer_selected(current)`.
-         */ fun `holdTimerOptionsFor`(`current`: kotlin.UInt): List<UiHoldOption> {
-            return FfiConverterSequenceTypeUiHoldOption.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_app_core_fn_func_hold_timer_options_for(
-        FfiConverterUInt.lower(`current`),_status)
-}
-    )
-    }
-    
-
-        /**
-         * The hold a stored timer actually runs: the server clamps every timer to
-         * 72 hours when it applies one. Compare `hold_timer_selected(stored) ==
-         * option.hours` to place the checkmark.
-         */ fun `holdTimerSelected`(`hours`: kotlin.UInt): kotlin.UInt {
-            return FfiConverterUInt.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_app_core_fn_func_hold_timer_selected(
-        FfiConverterUInt.lower(`hours`),_status)
-}
-    )
-    }
-    
-
-        /**
-         * The hold timer's title on a screen's page.
-         */ fun `holdTimerTitle`(): kotlin.String {
-            return FfiConverterString.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_app_core_fn_func_hold_timer_title(
-        _status)
-}
-    )
-    }
-    
-
-        /**
          * The `host:port` to write to a board's `server` characteristic, for the
          * websocket URL the phone is using. Empty means "keep the firmware default".
          */ fun `hostPortForBoard`(`wsUrl`: kotlin.String): kotlin.String {
@@ -8261,19 +7985,6 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_app_core_fn_func_http_base(
         FfiConverterString.lower(`wsUrl`),_status)
-}
-    )
-    }
-    
-
-        /**
-         * Does the "Switch screens every" timer mean anything? Only while two or
-         * more screens are checked — show it exactly then.
-         */ fun `idleCycleApplies`(`screens`: List<UiScreenConfig>): kotlin.Boolean {
-            return FfiConverterBoolean.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_app_core_fn_func_idle_cycle_applies(
-        FfiConverterSequenceTypeUiScreenConfig.lower(`screens`),_status)
 }
     )
     }
@@ -8329,14 +8040,17 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     
 
         /**
-         * What the board does when nothing you follow is playing, for the screens
-         * `screen_list` returned and the board's idle timer: dark with none
-         * checked, the one screen with one, and the rotation with two or more.
-         */ fun `idleExplainer`(`screens`: List<UiScreen>, `idleCycleSecs`: kotlin.UInt): kotlin.String {
-            return FfiConverterString.lift(
+         * What the board does when nothing you follow is playing — the Screens
+         * list's footer — for the rows `screen_list` returned and the board's idle
+         * timer: dark with none checked, the one screen with one, and the rotation
+         * with two or more, whose timer is the link when `editable`
+         * (`screens_editable`). Where screens are not editable, show
+         * `update_server_note` after it.
+         */ fun `idleExplainerParts`(`screens`: List<UiScreen>, `idleCycleSecs`: kotlin.UInt, `editable`: kotlin.Boolean): UiIdleExplainer {
+            return FfiConverterTypeUiIdleExplainer.lift(
     uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_app_core_fn_func_idle_explainer(
-        FfiConverterSequenceTypeUiScreen.lower(`screens`),FfiConverterUInt.lower(`idleCycleSecs`),_status)
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_idle_explainer_parts(
+        FfiConverterSequenceTypeUiScreen.lower(`screens`),FfiConverterUInt.lower(`idleCycleSecs`),FfiConverterBoolean.lower(`editable`),_status)
 }
     )
     }
@@ -8508,22 +8222,6 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_app_core_fn_func_mode_footer_shown(
         FfiConverterString.lower(`mode`),_status)
-}
-    )
-    }
-    
-
-        /**
-         * The board's timers once screen `id`'s hold is set to `hours` — the
-         * server's `SetModeHours`, mirrored (protocol `set_hold_hours`): clamped to
-         * 72, and a kind's first instance pins each sibling still inheriting its
-         * key, so editing Weather's timer never moves Forecast's. `screens` is the
-         * resolved list.
-         */ fun `modeHoursAfterSet`(`id`: kotlin.String, `hours`: kotlin.UInt, `screens`: List<UiScreenConfig>, `modeHours`: Map<kotlin.String, kotlin.UInt>, `sleepHours`: kotlin.UInt): Map<kotlin.String, kotlin.UInt> {
-            return FfiConverterMapStringUInt.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_app_core_fn_func_mode_hours_after_set(
-        FfiConverterString.lower(`id`),FfiConverterUInt.lower(`hours`),FfiConverterSequenceTypeUiScreenConfig.lower(`screens`),FfiConverterMapStringUInt.lower(`modeHours`),FfiConverterUInt.lower(`sleepHours`),_status)
 }
     )
     }
@@ -8802,20 +8500,29 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     
 
         /**
-         * The ring follows the GLASS: what the panel is actually showing.
+         * The ring follows the GLASS: exactly the screen the panel is showing.
          * `panel_shows_nothing` is [`panel_shows_nothing`], not the list's length;
-         * `screens` is [`resolved_screen_configs`]. Quiet hours ring Off (the
-         * window darkens the panel whatever the mode says); a held screen rings
-         * itself; Sports with nothing on rings every checked screen, or Off when
-         * none is checked; Sports otherwise rings Sports.
+         * `screens` is [`resolved_screen_configs`]; `idle_cycle_secs` and
+         * `idle_since_ms` are the board's (`UiBoardConfig`); `now_ms` is unix ms.
+         *
+         * - Quiet hours ring Off (the window darkens the panel whatever the mode
+         * says); Off rings Off; a held screen rings itself.
+         * - Sports with something on rings Sports.
+         * - Sports with nothing on rings Off when no screen is checked, the one
+         * screen when one is, and with two or more the one the board's own clock
+         * has up: member `floor((now - since) / dwell) % n` of the checked
+         * screens in list order — the board restarts its rotation at the first
+         * screen at `idle_since_ms` and holds each for the snapped idle timer.
+         * `next_change_ms` is the next boundary; re-evaluate then. Without
+         * `idle_since_ms` it rings nothing (see [`UiRing::ids`]).
          *
          * An empty `mode` (no config yet) is Sports, the resting state — so a
          * platform's default record can hold "" rather than spelling an id.
-         */ fun `ring`(`mode`: kotlin.String, `quietActive`: kotlin.Boolean, `panelShowsNothing`: kotlin.Boolean, `screens`: List<UiScreenConfig>): UiRing {
+         */ fun `ring`(`mode`: kotlin.String, `quietActive`: kotlin.Boolean, `panelShowsNothing`: kotlin.Boolean, `screens`: List<UiScreenConfig>, `idleCycleSecs`: kotlin.UInt, `idleSinceMs`: kotlin.ULong?, `nowMs`: kotlin.ULong): UiRing {
             return FfiConverterTypeUiRing.lift(
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_app_core_fn_func_ring(
-        FfiConverterString.lower(`mode`),FfiConverterBoolean.lower(`quietActive`),FfiConverterBoolean.lower(`panelShowsNothing`),FfiConverterSequenceTypeUiScreenConfig.lower(`screens`),_status)
+        FfiConverterString.lower(`mode`),FfiConverterBoolean.lower(`quietActive`),FfiConverterBoolean.lower(`panelShowsNothing`),FfiConverterSequenceTypeUiScreenConfig.lower(`screens`),FfiConverterUInt.lower(`idleCycleSecs`),FfiConverterOptionalULong.lower(`idleSinceMs`),FfiConverterULong.lower(`nowMs`),_status)
 }
     )
     }
@@ -8970,20 +8677,6 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     
 
         /**
-         * The Screens list's footer, where screens can be edited
-         * (`screens_editable`); show `update_server_note` in its place where they
-         * cannot. Promises nothing about the knob — stable boards have no menu.
-         */ fun `screensExplainer`(): kotlin.String {
-            return FfiConverterString.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_app_core_fn_func_screens_explainer(
-        _status)
-}
-    )
-    }
-    
-
-        /**
          * Shown in place of Add Screen until the server's list of screens has
          * arrived (`add_screen_note`) — until then there is nothing true to offer.
          */ fun `screensLoadingNote`(): kotlin.String {
@@ -8998,16 +8691,15 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
 
         /**
          * Remove screen `id` — the server's whole `SetScreens` remove, mirrored:
-         * the list normalized, the board released to Sports (and its wake timer
-         * cleared) when `mode` was the removed screen — `release_to_scores`, never
-         * a quiet override — and the removed screen's timer dropped (protocol
-         * `prune_screen_timers`). Sports and Off cannot be removed. Send
-         * `screens` with `set_screens`.
-         */ fun `screensRemoved`(`screens`: List<UiScreenConfig>, `id`: kotlin.String, `mode`: kotlin.String, `wakeAt`: kotlin.ULong?, `modeHours`: Map<kotlin.String, kotlin.UInt>, `offModes`: List<UiOffMode>): UiScreensRemoved {
+         * the list normalized, and the board released to Sports (and its wake
+         * timer cleared) when `mode` was the removed screen — `release_to_scores`,
+         * never a quiet override. Sports and Off cannot be removed. Send `screens`
+         * with `set_screens`.
+         */ fun `screensRemoved`(`screens`: List<UiScreenConfig>, `id`: kotlin.String, `mode`: kotlin.String, `wakeAt`: kotlin.ULong?, `offModes`: List<UiOffMode>): UiScreensRemoved {
             return FfiConverterTypeUiScreensRemoved.lift(
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_app_core_fn_func_screens_removed(
-        FfiConverterSequenceTypeUiScreenConfig.lower(`screens`),FfiConverterString.lower(`id`),FfiConverterString.lower(`mode`),FfiConverterOptionalULong.lower(`wakeAt`),FfiConverterMapStringUInt.lower(`modeHours`),FfiConverterSequenceTypeUiOffMode.lower(`offModes`),_status)
+        FfiConverterSequenceTypeUiScreenConfig.lower(`screens`),FfiConverterString.lower(`id`),FfiConverterString.lower(`mode`),FfiConverterOptionalULong.lower(`wakeAt`),FfiConverterSequenceTypeUiOffMode.lower(`offModes`),_status)
 }
     )
     }

@@ -505,9 +505,12 @@ pub struct Manifest {
     /// notices mint a fresh nonzero value per showing (a counter from 1); an
     /// idle rotation of two or more screens carries [`idle_epoch`], which has
     /// the top bit set so it can never collide with either. That one is a
-    /// HASH of the program, not a counter: the same screens at the same timer
-    /// give the same epoch across minute re-pushes, restarts and deploys, so
-    /// the board keeps its slot and its timer instead of restarting the cycle.
+    /// HASH of the program and the device's CONNECTION: the same screens at
+    /// the same timer give the same epoch across minute re-pushes, so the
+    /// board keeps its slot and its timer, while a reconnect (reboot, network
+    /// blip, deploy) is a new epoch that starts the cycle at its first screen.
+    /// That restart is what lets the server know exactly when the board's
+    /// cycle began (`ServerMsg::BoardState::idle_since_ms`).
     #[serde(default)]
     pub epoch: u64,
     /// Countdown-bar duration for a notice: the DEVICE fills the bar smoothly
@@ -812,17 +815,17 @@ pub struct BoardConfig {
     /// legacy write path stays consistent without knowing it exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode_screen: Option<String>,
-    /// Per-mode timer durations in HOURS, keyed by mode id ("off", "clock",
-    /// …). Picking a non-scores mode runs it for its configured duration and
-    /// then the board returns to scores on its own — the auto-wake property
-    /// the old sleep timer had, generalized. 0 = until changed (no timer).
-    /// A mode with no entry falls back to `sleep_hours`, which keeps an old
-    /// app's SetSleepHours meaningful.
+    /// LEGACY: per-mode timer durations in HOURS, keyed by mode id. No
+    /// longer read for timing — every pick holds for [`HOLD_HOURS`] — and no
+    /// longer written by any command (`SetModeHours` is ignored); only a
+    /// settings import still carries it through, unchanged, for older apps.
+    /// Kept, type and serde behavior unchanged, because older apps read it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mode_hours: BTreeMap<String, u32>,
-    /// How long a button-press sleep lasts before the board wakes itself.
-    /// LEGACY as a concept (superseded by `mode_hours`) but load-bearing as
-    /// the fallback duration and as the field old apps still write.
+    /// LEGACY: the old button-sleep duration. No longer read for timing
+    /// (every pick holds for [`HOLD_HOURS`]); `SetSleepHours` is ignored and
+    /// only a settings import still writes it. Kept, with its serde default,
+    /// because older apps read it.
     #[serde(default = "default_sleep_hours")]
     pub sleep_hours: u32,
     /// Seconds each game holds the panel before the rotation advances.
@@ -959,6 +962,12 @@ pub fn snap_dwell_secs(secs: u32) -> u32 {
 /// imported value behaves as the preset its label says it is.
 pub const IDLE_CYCLE_SECS: [u32; 6] = [120, 300, 600, 900, 1800, 3600];
 pub const IDLE_CYCLE_DEFAULT_SECS: u32 = 300;
+
+/// How long a PICKED screen holds the panel before the board goes back to
+/// Sports, in hours — every screen, Off included. The one hold: there is no
+/// per-screen timer. `BoardConfig::mode_hours` and `sleep_hours` stay on the
+/// wire for older apps, but nothing reads them for timing.
+pub const HOLD_HOURS: u32 = 24;
 
 /// The preset nearest `secs`; an exact midpoint goes to the longer preset —
 /// an idle screen lingering is harmless, one flickering past is not. Never 0,
@@ -1200,10 +1209,15 @@ pub struct PortableSettings {
     /// Seconds each game holds the panel before the rotation advances.
     #[serde(default = "default_dwell_secs")]
     pub dwell_secs: u32,
-    /// How long a button-press sleep lasts before the board wakes itself.
+    /// LEGACY, like [`BoardConfig::sleep_hours`]: not read for timing —
+    /// every pick holds for [`HOLD_HOURS`] — and kept so older apps and
+    /// older exports round-trip.
     #[serde(default = "default_sleep_hours")]
     pub sleep_hours: u32,
-    /// Per-mode timer durations — durable preferences, like `sleep_hours`.
+    /// LEGACY, like [`BoardConfig::mode_hours`]: not read for timing —
+    /// every pick holds for [`HOLD_HOURS`] — and kept so older apps and
+    /// older exports round-trip.
+    ///
     /// The current MODE stays out of the blob for the same reason power and
     /// wake_at do: it is live state, and an import that yanked a board into
     /// "off" would be the demo_data-shaped failure those exclusions prevent.
@@ -1396,81 +1410,6 @@ impl BoardConfig {
             || screens.iter().any(|s| s.id == held)
     }
 
-    /// How long picking screen `id` (an instance of `kind`) holds it, in hours.
-    /// 0 = until changed. The instance's own entry, else its kind's — every
-    /// timer stored before instances existed is keyed by kind, and an old app
-    /// still writes them that way — else `sleep_hours`.
-    pub fn hold_hours(&self, id: &str, kind: &str) -> u32 {
-        self.mode_hours
-            .get(id)
-            .or_else(|| self.mode_hours.get(kind))
-            .copied()
-            .unwrap_or(self.sleep_hours)
-    }
-
-    /// A mode's timer, in hours. 0 = until changed. A mode id is its own kind.
-    pub fn mode_duration_hours(&self, mode: &str) -> u32 {
-        self.hold_hours(mode, mode)
-    }
-
-    /// Store screen `id`'s hold timer (clamped to 72 hours, the longest hold).
-    ///
-    /// A kind's FIRST instance has the kind as its id, so its timer is stored
-    /// under the very key every sibling of that kind falls back to (and the
-    /// key an old app writes from its Weather page). Before that key changes,
-    /// each sibling still READING it gets its current value pinned as its
-    /// own, so editing Weather's timer never moves Forecast's.
-    pub fn set_hold_hours(&mut self, id: &str, hours: u32) {
-        let inheriting: Vec<String> = self
-            .screens
-            .iter()
-            .filter(|s| s.kind == id && s.id != id && !self.mode_hours.contains_key(&s.id))
-            .map(|s| s.id.clone())
-            .collect();
-        for sibling in inheriting {
-            let h = self.hold_hours(&sibling, id);
-            self.mode_hours.insert(sibling, h);
-        }
-        self.mode_hours.insert(id.to_string(), hours.min(72));
-    }
-
-    /// Drop timers no screen owns any more. Run after every list save, load
-    /// and import.
-    ///
-    /// - An instance key ("weather.2") that is not on the list goes: ids are
-    ///   reused, and a screen added later under the same id must start fresh.
-    ///   On a board that never saved a list there are no instances, so every
-    ///   such key is an orphan (a rollback's leftovers).
-    /// - On a saved list, a kind's own key goes with the kind's first
-    ///   instance (the screen whose id IS the kind) — after handing its value
-    ///   to each sibling still inheriting it, so they keep their hold. A
-    ///   board that never saved a list keeps its kind keys: they are the only
-    ///   timers it has, and every old app reads them.
-    pub fn prune_screen_timers(&mut self, catalog: &[OffModeDescriptor]) {
-        if !self.screens.is_empty() {
-            for d in catalog {
-                let Some(&h) = self.mode_hours.get(&d.id) else { continue };
-                if self.screens.iter().any(|s| s.id == d.id) {
-                    continue;
-                }
-                let inheriting: Vec<String> = self
-                    .screens
-                    .iter()
-                    .filter(|s| s.kind == d.id && !self.mode_hours.contains_key(&s.id))
-                    .map(|s| s.id.clone())
-                    .collect();
-                for sibling in inheriting {
-                    self.mode_hours.insert(sibling, h);
-                }
-                self.mode_hours.remove(&d.id);
-            }
-        }
-        let listed: Vec<String> = self.screens.iter().map(|s| s.id.clone()).collect();
-        self.mode_hours.retain(|key, _| {
-            listed.contains(key) || !catalog.iter().any(|d| key != &d.id && screen_id_fits(key, &d.id))
-        });
-    }
-
     /// The idle rotation's per-screen dwell, in ms: the stored timer snapped
     /// to a preset, or the default when none is stored.
     pub fn idle_cycle_ms(&self) -> u32 {
@@ -1598,8 +1537,8 @@ impl Default for BoardConfig {
 pub struct ScreenConfig {
     /// Stable instance id: "scores", "off", the kind id for a kind's first
     /// instance, "{kind}.{n}" after it (see [`mint_screen_id`]). It is what
-    /// `mode_screen`, `mode_hours` keys, the knob's `ModeEntry::id` and the
-    /// app's commands name. NOTHING may assume `id == kind` — the first
+    /// `mode_screen`, the knob's `ModeEntry::id` and the app's commands
+    /// name. NOTHING may assume `id == kind` — the first
     /// instance can be removed and its successor kept; go through
     /// [`resolve_screen`].
     pub id: String,
@@ -1697,7 +1636,7 @@ pub fn mint_screen_id<'a>(kind: &str, existing: impl IntoIterator<Item = &'a str
 
 /// The screen `id` names: the instance with that id, else the FIRST instance
 /// whose kind is `id` — a legacy kind id from an old app, a stored mode, a
-/// `mode_hours` key, a queued knob pick. The server layers its legacy
+/// queued knob pick. The server layers its legacy
 /// "weather-x" migration on top; this is the part both sides share.
 pub fn resolve_screen<'a>(screens: &'a [ScreenConfig], id: &str) -> Option<&'a ScreenConfig> {
     screens.iter().find(|s| s.id == id).or_else(|| screens.iter().find(|s| s.kind == id))
@@ -1982,21 +1921,28 @@ pub fn board_label(screens: &[ScreenConfig], index: usize, catalog: &[OffModeDes
     board_labels(screens, catalog).into_iter().nth(index).unwrap_or_default()
 }
 
-/// `Manifest::epoch` for an idle rotation of `ids` at `dwell_ms` per screen:
-/// the first 8 bytes (big-endian) of sha256("idle|" + ids joined by "," +
-/// "|" + dwell_ms in decimal), with the top bit set.
+/// `Manifest::epoch` for an idle rotation of `ids` at `dwell_ms` per screen,
+/// sent on device connection `session`: the first 8 bytes (big-endian) of
+/// sha256("idle|" + ids joined by "," + "|" + dwell_ms in decimal + "|" +
+/// session in decimal), with the top bit set.
 ///
 /// A content hash, not a counter or `std`'s seeded hasher, so it is the same
-/// on every build and every restart: a minute re-push or a deploy keeps the
-/// board's slot and timer, while a change of membership, order or timer is a
-/// new program that starts from the first screen. The top bit keeps it clear
-/// of the games rotation (0) and of notices (a counter from 1).
-pub fn idle_epoch(ids: &[&str], dwell_ms: u32) -> u64 {
+/// on every build: a minute re-push keeps the board's slot and timer, while a
+/// change of membership, order or timer is a new program that starts from
+/// the first screen. `session` is the server's per-connection nonce, bumped
+/// on every device connect: any reconnect, reboot or deploy starts the cycle
+/// over at its first screen, which is exactly what makes the moment the
+/// cycle began knowable to the server (and so to the app's ring). The top
+/// bit keeps it clear of the games rotation (0) and of notices (a counter
+/// from 1).
+pub fn idle_epoch(ids: &[&str], dwell_ms: u32, session: u64) -> u64 {
     let mut h = Sha256::new();
     h.update(b"idle|");
     h.update(ids.join(",").as_bytes());
     h.update(b"|");
     h.update(dwell_ms.to_string().as_bytes());
+    h.update(b"|");
+    h.update(session.to_string().as_bytes());
     let digest = h.finalize();
     let mut top = [0u8; 8];
     top.copy_from_slice(&digest[..8]);
@@ -2034,14 +1980,15 @@ pub enum Command {
     /// What the panel shows while off / idle (blank or a server-rendered clock).
     SetOffState { off_state: OffState },
     /// Put the board in a MODE: "scores", "off", or an off-mode id held
-    /// persistently. Non-scores modes run for their configured duration
-    /// (`SetModeHours`) and then return to scores. Replaces SetPower, which
-    /// stays as an accepted alias for already-installed apps.
+    /// persistently. Non-scores modes hold for [`HOLD_HOURS`] and then return
+    /// to scores. Replaces SetPower, which stays as an accepted alias for
+    /// already-installed apps.
     SetMode { mode: String },
-    /// Configure a mode's timer, in hours. 0 = until changed.
+    /// LEGACY: a mode's timer, in hours. Accepted from older apps and
+    /// ignored — every pick holds for [`HOLD_HOURS`].
     SetModeHours { mode: String, hours: u32 },
-    /// How long a button-press sleep lasts (hours) before auto-wake.
-    /// LEGACY alias: the fallback duration for modes `mode_hours` misses.
+    /// LEGACY: the old button-sleep duration. Accepted and ignored, like
+    /// `SetModeHours`.
     SetSleepHours { hours: u32 },
     /// Stay asleep with no auto-wake: cancels a running sleep timer without
     /// turning the display back on ("off until I say so").
@@ -2265,6 +2212,15 @@ pub enum ServerMsg {
         /// what it means right now.
         #[serde(default, skip_serializing_if = "is_false")]
         quiet_active: bool,
+        /// Unix ms at which the board's current idle rotation (two or more
+        /// checked screens) put its FIRST screen up; None when the board is
+        /// not idling through a rotation. The board advances on its own clock
+        /// and never reports its slot, but its cycle restarts at a knowable
+        /// moment (see [`idle_epoch`]), so the screen on the glass is
+        /// `floor((now - since) / dwell) % n`. DERIVED per connection, never
+        /// stored in `BoardConfig`. Older apps ignore it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        idle_since_ms: Option<u64>,
     },
     CommandAck {
         req_id: u64,
@@ -3604,87 +3560,6 @@ mod screens_tests {
         assert!(cfg.power);
     }
 
-    #[test]
-    fn hold_hours_fall_back_from_instance_to_kind_to_sleep_hours() {
-        let mut cfg = BoardConfig::default();
-        cfg.sleep_hours = 8;
-        cfg.mode_hours.insert("weather".into(), 3);
-        cfg.mode_hours.insert("weather.2".into(), 0);
-        assert_eq!(cfg.hold_hours("weather.2", "weather"), 0, "the instance's own, even 0");
-        assert_eq!(cfg.hold_hours("weather.3", "weather"), 3, "else the kind's");
-        assert_eq!(cfg.hold_hours("clock.2", "clock"), 8, "else sleep_hours");
-        assert_eq!(cfg.mode_duration_hours("weather"), 3);
-        assert_eq!(cfg.mode_duration_hours(MODE_OFF), 8);
-    }
-
-    /// The first Weather's timer lives under "weather" — the key Forecast
-    /// falls back to. Editing it must not move Forecast's hold.
-    #[test]
-    fn a_first_instance_timer_never_moves_its_siblings() {
-        let cat = catalog();
-        let mut cfg = BoardConfig::default();
-        cfg.sleep_hours = 8;
-        let list = vec![
-            screen("weather", "weather", &[], false),
-            screen("weather.2", "weather", &[("variant", "forecast")], false),
-        ];
-        let _ = cfg.set_screens(list, &cat);
-        assert_eq!(cfg.hold_hours("weather.2", "weather"), 8, "inherits until either is set");
-
-        cfg.set_hold_hours("weather", 1);
-        assert_eq!(cfg.hold_hours("weather", "weather"), 1);
-        assert_eq!(cfg.hold_hours("weather.2", "weather"), 8, "Forecast keeps what it was running");
-
-        cfg.set_hold_hours("weather", 4);
-        assert_eq!(cfg.hold_hours("weather.2", "weather"), 8, "and stays its own after that");
-
-        cfg.set_hold_hours("weather.2", 200);
-        assert_eq!(cfg.hold_hours("weather.2", "weather"), 72, "clamped like every hold");
-    }
-
-    /// Removing a screen takes its timer with it, so a screen added later
-    /// under the same id starts fresh — including the first instance, whose
-    /// timer is the kind key. A sibling still reading that key keeps its
-    /// hold. Instance keys a rollback left behind are orphans.
-    #[test]
-    fn removing_a_screen_takes_its_timer_and_siblings_keep_theirs() {
-        let cat = catalog();
-        let mut cfg = BoardConfig::default();
-        cfg.sleep_hours = 8;
-        let both = vec![
-            screen("weather", "weather", &[], false),
-            screen("weather.2", "weather", &[("variant", "forecast")], false),
-        ];
-        let _ = cfg.set_screens(both.clone(), &cat);
-        cfg.mode_hours.insert("weather".into(), 2); // as an old app writes it: no pinning
-        cfg.mode_hours.insert("clock".into(), 5);
-
-        let _ = cfg.set_screens(vec![both[1].clone()], &cat);
-        cfg.prune_screen_timers(&cat);
-        assert_eq!(cfg.mode_hours.get("weather.2"), Some(&2), "Forecast keeps the hold it was inheriting");
-        assert_eq!(cfg.mode_hours.get("weather"), None, "the removed first instance's timer goes");
-        assert_eq!(cfg.mode_hours.get("clock"), None, "a kind with no screen left keeps no timer");
-
-        let _ = cfg.set_screens(both.clone(), &cat);
-        cfg.prune_screen_timers(&cat);
-        assert_eq!(cfg.hold_hours("weather", "weather"), 8, "a re-added first instance starts fresh");
-
-        let _ = cfg.set_screens(vec![both[0].clone()], &cat);
-        cfg.prune_screen_timers(&cat);
-        assert_eq!(cfg.mode_hours.get("weather.2"), None, "an unlisted instance's timer goes");
-
-        // A board that never saved a list keeps its kind timers (every old
-        // app reads them), and drops instance keys a rollback left behind.
-        let mut legacy = BoardConfig::default();
-        legacy.mode_hours.insert("weather".into(), 3);
-        legacy.mode_hours.insert("weather.2".into(), 2);
-        legacy.mode_hours.insert(MODE_OFF.into(), 1);
-        legacy.prune_screen_timers(&cat);
-        assert_eq!(legacy.mode_hours.get("weather"), Some(&3));
-        assert_eq!(legacy.mode_hours.get(MODE_OFF), Some(&1));
-        assert_eq!(legacy.mode_hours.get("weather.2"), None);
-    }
-
     /// Removing the held screen must be detectable, so the server can
     /// release the board to Sports; the fixed rows and a legacy dark "blank"
     /// always resolve.
@@ -4037,18 +3912,20 @@ mod screens_tests {
     }
 
     /// Pinned so a hasher change cannot slip in: every board would restart
-    /// its idle cycle on the deploy that changed it.
+    /// its idle cycle on the deploy that changed it — and the app's ring,
+    /// which counts from the restart the server observed, would drift.
     #[test]
     fn the_idle_epoch_is_a_stable_hash_of_the_program() {
-        let e = idle_epoch(&["clock", "weather.2"], 300_000);
-        assert_eq!(e, 13_386_448_970_321_234_855);
-        assert_eq!(e, idle_epoch(&["clock", "weather.2"], 300_000));
+        let e = idle_epoch(&["clock", "weather.2"], 300_000, 7);
+        assert_eq!(e, 14_822_738_917_417_434_755);
+        assert_eq!(e, idle_epoch(&["clock", "weather.2"], 300_000, 7));
         assert!(e >= 1 << 63, "clear of games (0) and the notice counter");
-        assert_ne!(e, idle_epoch(&["weather.2", "clock"], 300_000), "order");
-        assert_ne!(e, idle_epoch(&["clock"], 300_000), "membership");
-        assert_ne!(e, idle_epoch(&["clock", "weather.2", "weather"], 300_000), "membership");
-        assert_ne!(e, idle_epoch(&["clock", "weather.2"], 600_000), "timer");
-        assert!(idle_epoch(&[], 0) >= 1 << 63);
+        assert_ne!(e, idle_epoch(&["weather.2", "clock"], 300_000, 7), "order");
+        assert_ne!(e, idle_epoch(&["clock"], 300_000, 7), "membership");
+        assert_ne!(e, idle_epoch(&["clock", "weather.2", "weather"], 300_000, 7), "membership");
+        assert_ne!(e, idle_epoch(&["clock", "weather.2"], 600_000, 7), "timer");
+        assert_ne!(e, idle_epoch(&["clock", "weather.2"], 300_000, 8), "a new device connection");
+        assert!(idle_epoch(&[], 0, 0) >= 1 << 63);
     }
 
     #[test]

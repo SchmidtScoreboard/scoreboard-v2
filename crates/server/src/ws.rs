@@ -90,6 +90,9 @@ async fn device_loop(
     peer: Option<std::net::SocketAddr>,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+    // A fresh connection nonce BEFORE the device is reachable, so no manifest
+    // can go out under the previous connection's idle epoch.
+    state.begin_device_session(&board_id);
     state.devices.lock().unwrap().insert(board_id.clone(), tx.clone());
     // A board nobody is paired with shows its pair code unprompted — on a
     // first startup the code is the entire onboarding path, and making a new
@@ -317,11 +320,7 @@ async fn controller_loop(
                         Ok(board_id) => {
                             tracing::info!("controller '{pubkey}' paired with '{board_id}'");
                             // tell the device it's paired so it leaves setup, then refresh it
-                            if let Some(dtx) = state.devices.lock().unwrap().get(&board_id) {
-                                let _ = dtx.send(Message::Text(
-                                    serde_json::to_string(&ServerMsg::SetupDone).unwrap(),
-                                ));
-                            }
+                            crate::send_setup_done(&state, &board_id);
                             push_board(&state, &board_id);
                             ServerMsg::Paired { board_id }
                         }
@@ -608,8 +607,6 @@ pub(crate) fn apply_settings_import(state: &AppState, board_id: &str, json: &str
             crate::release_to_scores(cfg);
             released = true;
         }
-        // The blob's timers arrive wholesale; keep only those a screen owns.
-        cfg.prune_screen_timers(&catalog);
         cfg.idle_cycle_secs = cfg.idle_cycle_secs.map(snap_idle_cycle_secs);
         // The blob is user-portable text: re-apply the same bounds the
         // equivalent commands enforce, so a hand-edited export can't smuggle
@@ -767,23 +764,12 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) -> O
                 }
                 None => tracing::warn!("board {board_id}: unknown or removed mode {mode:?}, ignoring"),
             },
-            // A mode's timer. 0 = until changed. Applies from the NEXT pick —
-            // re-arming a running timer under someone's feet would turn a
-            // settings edit into a surprise power event.
-            //
-            // Keyed by a listed screen id, a lit kind (every timer an old app
-            // writes, and the fallback for that kind's instances) or "off".
-            // Anything else would be a timer nothing reads, stored forever.
+            // LEGACY: there are no per-screen timers any more — every pick
+            // holds for HOLD_HOURS. Older apps still send these from their
+            // timer pickers; accept them (an error would read as a broken
+            // board) and change nothing.
             Command::SetModeHours { mode, hours } => {
-                let listed = crate::board_screens(cfg).iter().any(|s| s.id == mode && s.id != MODE_SCORES);
-                let lit_kind = crate::offmode::off_modes().iter().any(|d| d.id == mode && d.lit());
-                if listed || lit_kind || mode == MODE_OFF {
-                    // Through the shared rule: a first instance's key is also
-                    // its siblings' fallback, so they get pinned first.
-                    cfg.set_hold_hours(&mode, hours);
-                } else {
-                    tracing::warn!("board {board_id}: no screen {mode:?} to time, ignoring");
-                }
+                tracing::info!("board {board_id}: ignoring SetModeHours {mode:?}={hours} (every hold is {HOLD_HOURS}h)");
             }
             // MAR-117: the whole list in one command — add, remove, reorder,
             // idle ticks, a screen's own layout. Normalized exactly as a load
@@ -796,7 +782,6 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) -> O
                     crate::release_to_scores(cfg);
                     mode_changed = true;
                 }
-                cfg.prune_screen_timers(&crate::offmode::off_modes());
                 let after = crate::board_weather_location(cfg);
                 weather_dirty |= after.is_some() && after != before;
             }
@@ -982,7 +967,10 @@ pub(crate) fn apply_command(state: &AppState, board_id: &str, cmd: Command) -> O
                     None => tracing::warn!("board {board_id}: no screen declares {key:?}, ignoring"),
                 }
             }
-            Command::SetSleepHours { hours } => cfg.sleep_hours = hours.clamp(1, 72),
+            // LEGACY, like SetModeHours: accepted and ignored.
+            Command::SetSleepHours { hours } => {
+                tracing::info!("board {board_id}: ignoring SetSleepHours {hours} (every hold is {HOLD_HOURS}h)");
+            }
             // Indefinite off: drop the auto-wake but leave the power state alone
             // (only meaningful while asleep; harmless no-op when awake).
             Command::ClearWakeTimer => cfg.wake_at = None,
@@ -1355,20 +1343,24 @@ mod tests {
     /// SetLeagueNameStyle upserts the league's SportConfig.name_style like the
     /// other per-league settings: Some sets it (creating the entry if needed),
     /// None reverts to the league default, and None on an unconfigured league is
-    /// The picker's wire path, end to end: a valid mode sticks (with its
-    /// timer), an unknown one is ignored, and the legacy SetPower alias
+    /// The picker's wire path, end to end: a valid mode sticks (with the
+    /// one hold), an unknown one is ignored, and the legacy SetPower alias
     /// writes the same fields — so the app's dual-send is idempotent.
     #[tokio::test]
     async fn set_mode_round_trips_and_rejects_unknowns() {
         let state = AppState::new_ephemeral();
         let board = "board-mode";
 
+        // An old app's timer write is accepted and changes nothing.
+        let before = serde_json::to_string(&state.config_for(board)).unwrap();
         apply_command(&state, board, Command::SetModeHours { mode: "clock".into(), hours: 3 });
+        assert_eq!(serde_json::to_string(&state.config_for(board)).unwrap(), before, "SetModeHours is ignored");
         apply_command(&state, board, Command::SetMode { mode: "clock".into() });
         let cfg = state.config_for(board);
         assert_eq!(cfg.mode, "clock");
         assert!(cfg.power, "legacy twin stays truthful for a lit mode");
-        assert!(cfg.wake_at.is_some(), "the configured 3h timer is armed");
+        let hours = (cfg.wake_at.expect("a timed hold").saturating_sub(crate::unix_now()) + 1800) / 3600;
+        assert_eq!(hours, u64::from(HOLD_HOURS), "every hold is 24 hours, whatever an old app asked for");
 
         // Unknown ids are ignored, not stored — a fork's export cannot park a
         // board on a mode nothing can render.

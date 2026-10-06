@@ -327,31 +327,17 @@ pub fn current_preview_path(mode: &UiOffMode, params: HashMap<String, String>) -
     mode.preview.clone()
 }
 
-/// The longest hold the server runs, in hours — its clamp on every stored
-/// timer (`SetModeHours`, `apply_mode`).
-const MAX_HOLD_HOURS: u32 = 72;
-
-/// The optimistic mirror of the server's `apply_mode` timer rule, for picking
-/// screen `id` (an instance of `kind`; "off" for Off): hours from the
-/// protocol's `hold_hours` chain — the instance's own timer, else its kind's,
-/// else `sleep_hours` — where Sports and 0 run on no timer and everything
-/// else expires `min(hours, 72)` from now. The 72 is the server's clamp — if
-/// these disagreed, the app's countdown would lie until the next push.
+/// The optimistic mirror of the server's `apply_mode` hold, for picking
+/// screen `id` (an instance id, or "off" for Off): Sports runs on no timer;
+/// every other pick, Off included, holds for the protocol's `HOLD_HOURS`
+/// (24) from `now_unix`. There is no per-screen timer — if these disagreed,
+/// the app's countdown would lie until the next push.
 #[uniffi::export]
-pub fn compute_wake_at(
-    id: String,
-    kind: String,
-    mode_hours: HashMap<String, u32>,
-    sleep_hours: u32,
-    now_unix: u64,
-) -> Option<u64> {
-    if id == MODE_SCORES {
+pub fn compute_wake_at(id: String, now_unix: u64) -> Option<u64> {
+    if id.is_empty() || id == MODE_SCORES {
         return None;
     }
-    match hold_timer_hours(id, kind, mode_hours, sleep_hours).min(MAX_HOLD_HOURS) {
-        0 => None,
-        h => Some(now_unix + u64::from(h) * 3600),
-    }
+    Some(now_unix + u64::from(scoreboard_protocol::HOLD_HOURS) * 3600)
 }
 
 // ---- league preferences ----
@@ -982,9 +968,6 @@ pub fn snap_brightness(value: f64) -> u8 {
 /// is not an off mode.
 const SPORTS_PREVIEW: &str = "/sample/plain.png?live=1";
 
-/// The hold timer's choices, in hours. 0 = until changed.
-const HOLD_TIMER_HOURS: [u32; 8] = [0, 1, 2, 4, 8, 12, 24, 48];
-
 pub(crate) fn to_screen_config(s: UiScreenConfig) -> ScreenConfig {
     ScreenConfig { id: s.id, kind: s.kind, params: s.params.into_iter().collect(), idle: s.idle }
 }
@@ -1153,7 +1136,7 @@ pub fn resolved_screen_configs(
 #[derive(uniffi::Record, Clone, Debug, PartialEq)]
 pub struct UiScreen {
     /// The instance id — key rows and tiles by it, and pass it to
-    /// `set_mode`, `set_mode_hours` and the mirrors.
+    /// `set_mode` and the mirrors.
     pub id: String,
     /// The descriptor id (or "scores"/"off"). For looking up the descriptor
     /// whose fields the screen's page draws; never for branching.
@@ -1168,8 +1151,9 @@ pub struct UiScreen {
     /// Sports or Off: pinned first and second, never removed, reordered or
     /// checked. Render them apart from the movable rows.
     pub fixed: bool,
-    /// Has a page: Off (its hold timer) and every screen (fields, hold
-    /// timer, Remove). False only for Sports.
+    /// Has a page (fields, the idle checkmark, Remove): every user screen.
+    /// False for Sports and Off, which have nothing to set — draw them with
+    /// no chevron and no navigation.
     pub has_settings: bool,
     /// Offer Remove (a swipe, a menu item, the page's button): a user's
     /// screen on a server that stores lists. False for Sports and Off, and
@@ -1233,7 +1217,7 @@ pub fn screen_list(
             UiScreen {
                 fixed: s.is_fixed(),
                 removable: listed && !s.is_fixed(),
-                has_settings: s.kind != MODE_SCORES,
+                has_settings: !s.is_fixed(),
                 idle: s.idle,
                 id: s.id,
                 kind: s.kind,
@@ -1330,44 +1314,30 @@ pub struct UiScreensRemoved {
     pub power: bool,
     /// Cleared by a release; otherwise as it was.
     pub wake_at: Option<u64>,
-    /// The timers without the removed screen's — ids are reused, and a
-    /// screen added later under the same id must start fresh. Removing a
-    /// kind's first instance hands its timer to each sibling still
-    /// inheriting it first (protocol `prune_screen_timers`).
-    pub mode_hours: HashMap<String, u32>,
 }
 
 /// Remove screen `id` — the server's whole `SetScreens` remove, mirrored:
-/// the list normalized, the board released to Sports (and its wake timer
-/// cleared) when `mode` was the removed screen — `release_to_scores`, never
-/// a quiet override — and the removed screen's timer dropped (protocol
-/// `prune_screen_timers`). Sports and Off cannot be removed. Send
-/// `screens` with `set_screens`.
+/// the list normalized, and the board released to Sports (and its wake
+/// timer cleared) when `mode` was the removed screen — `release_to_scores`,
+/// never a quiet override. Sports and Off cannot be removed. Send `screens`
+/// with `set_screens`.
 #[uniffi::export]
 pub fn screens_removed(
     screens: Vec<UiScreenConfig>,
     id: String,
     mode: String,
     wake_at: Option<u64>,
-    mode_hours: HashMap<String, u32>,
     off_modes: Vec<UiOffMode>,
 ) -> UiScreensRemoved {
     if screens.is_empty() {
         // Not a list (see `mirror`): change nothing.
-        return UiScreensRemoved { screens, power: mode_power(mode.clone()), mode, wake_at, mode_hours };
+        return UiScreensRemoved { screens, power: mode_power(mode.clone()), mode, wake_at };
     }
-    let cat = catalog(off_modes.clone());
     let list = mirror(screens, off_modes, |list| list.retain(|s| s.is_fixed() || s.id != id));
-    // The server's prune (protocol `prune_screen_timers`), on the same list.
-    let mut timers = BoardConfig::default();
-    timers.screens = list.clone();
-    timers.mode_hours = mode_hours.into_iter().collect();
-    timers.prune_screen_timers(&cat);
     let screens = to_ui_configs(list);
     let held = held_after(mode.clone(), screens.clone());
     let wake_at = if held == mode { wake_at } else { None };
-    let mode_hours = timers.mode_hours.into_iter().collect();
-    UiScreensRemoved { power: mode_power(held.clone()), mode: held, wake_at, mode_hours, screens }
+    UiScreensRemoved { power: mode_power(held.clone()), mode: held, wake_at, screens }
 }
 
 /// Reorder by ID — the order the user left the movable rows in (Swift's
@@ -1506,13 +1476,6 @@ pub fn can_set_idle(screens: Vec<UiScreenConfig>, id: String) -> bool {
     screens.into_iter().map(to_screen_config).any(|s| s.id == id && !s.is_fixed())
 }
 
-/// Does the "Switch screens every" timer mean anything? Only while two or
-/// more screens are checked — show it exactly then.
-#[uniffi::export]
-pub fn idle_cycle_applies(screens: Vec<UiScreenConfig>) -> bool {
-    screens.into_iter().map(to_screen_config).filter(|s| s.idle && !s.is_fixed()).count() >= 2
-}
-
 /// Can screens be added, removed and reordered, and the idle timer set? Only
 /// on a server that understands lists; otherwise hide those controls and
 /// show [`crate::strings::update_server_note`].
@@ -1568,27 +1531,6 @@ pub fn screens_write(screens_supported: bool, screens: Vec<UiScreenConfig>) -> U
         return nothing;
     }
     UiScreensWrite { screens: None, off_mode: Some(legacy_off_mode(&screens)) }
-}
-
-/// The board's timers once screen `id`'s hold is set to `hours` — the
-/// server's `SetModeHours`, mirrored (protocol `set_hold_hours`): clamped to
-/// 72, and a kind's first instance pins each sibling still inheriting its
-/// key, so editing Weather's timer never moves Forecast's. `screens` is the
-/// resolved list.
-#[uniffi::export]
-pub fn mode_hours_after_set(
-    id: String,
-    hours: u32,
-    screens: Vec<UiScreenConfig>,
-    mode_hours: HashMap<String, u32>,
-    sleep_hours: u32,
-) -> HashMap<String, u32> {
-    let mut cfg = BoardConfig::default();
-    cfg.screens = to_configs(screens);
-    cfg.mode_hours = mode_hours.into_iter().collect();
-    cfg.sleep_hours = sleep_hours;
-    cfg.set_hold_hours(&id, hours);
-    cfg.mode_hours.into_iter().collect()
 }
 
 /// One entry of the Add Screen sheet.
@@ -1694,39 +1636,73 @@ pub fn addable_screen_groups(screens: Vec<UiScreenConfig>, off_modes: Vec<UiOffM
     out
 }
 
-/// Which rail tiles wear the ring, and the one to scroll to.
+/// Which rail tile wears the ring, the one to scroll to, and when to ask
+/// again.
 #[derive(uniffi::Record, Clone, Debug, PartialEq)]
 pub struct UiRing {
-    /// Every ringed screen id, in list order. Several while the board idles
-    /// through several screens: one of them is on the glass and the board
-    /// never says which.
+    /// The ringed screen id — at most one: exactly the screen on the glass.
+    /// EMPTY when the board idles through two or more screens and the
+    /// server has not said when that rotation began (an older server, or the
+    /// moment before its push arrives): ring nothing rather than guess.
     pub ids: Vec<String>,
-    /// The single tile to scroll into view — `ids[0]`.
+    /// The single tile to scroll into view: `ids[0]`, else the first
+    /// checked screen.
     pub scroll_target: String,
+    /// Unix ms at which the board moves to its next idle screen: call `ring`
+    /// again then. None when the ring cannot change on its own.
+    pub next_change_ms: Option<u64>,
 }
 
-/// The ring follows the GLASS: what the panel is actually showing.
+/// The ring follows the GLASS: exactly the screen the panel is showing.
 /// `panel_shows_nothing` is [`panel_shows_nothing`], not the list's length;
-/// `screens` is [`resolved_screen_configs`]. Quiet hours ring Off (the
-/// window darkens the panel whatever the mode says); a held screen rings
-/// itself; Sports with nothing on rings every checked screen, or Off when
-/// none is checked; Sports otherwise rings Sports.
+/// `screens` is [`resolved_screen_configs`]; `idle_cycle_secs` and
+/// `idle_since_ms` are the board's (`UiBoardConfig`); `now_ms` is unix ms.
+///
+/// - Quiet hours ring Off (the window darkens the panel whatever the mode
+///   says); Off rings Off; a held screen rings itself.
+/// - Sports with something on rings Sports.
+/// - Sports with nothing on rings Off when no screen is checked, the one
+///   screen when one is, and with two or more the one the board's own clock
+///   has up: member `floor((now - since) / dwell) % n` of the checked
+///   screens in list order — the board restarts its rotation at the first
+///   screen at `idle_since_ms` and holds each for the snapped idle timer.
+///   `next_change_ms` is the next boundary; re-evaluate then. Without
+///   `idle_since_ms` it rings nothing (see [`UiRing::ids`]).
 ///
 /// An empty `mode` (no config yet) is Sports, the resting state — so a
 /// platform's default record can hold "" rather than spelling an id.
 #[uniffi::export]
-pub fn ring(mode: String, quiet_active: bool, panel_shows_nothing: bool, screens: Vec<UiScreenConfig>) -> UiRing {
-    let ids: Vec<String> = if quiet_active || mode == MODE_OFF || mode == OFF_MODE_BLANK {
-        vec![MODE_OFF.into()]
-    } else if !mode.is_empty() && mode != MODE_SCORES {
-        vec![mode]
-    } else if panel_shows_nothing {
-        let idle: Vec<String> = screens.into_iter().filter(|s| s.idle && s.kind != MODE_SCORES && s.kind != MODE_OFF).map(|s| s.id).collect();
-        if idle.is_empty() { vec![MODE_OFF.into()] } else { idle }
-    } else {
-        vec![MODE_SCORES.into()]
-    };
-    UiRing { scroll_target: ids[0].clone(), ids }
+pub fn ring(
+    mode: String,
+    quiet_active: bool,
+    panel_shows_nothing: bool,
+    screens: Vec<UiScreenConfig>,
+    idle_cycle_secs: u32,
+    idle_since_ms: Option<u64>,
+    now_ms: u64,
+) -> UiRing {
+    let one = |id: String| UiRing { ids: vec![id.clone()], scroll_target: id, next_change_ms: None };
+    if quiet_active || mode == MODE_OFF || mode == OFF_MODE_BLANK {
+        return one(MODE_OFF.into());
+    }
+    if !mode.is_empty() && mode != MODE_SCORES {
+        return one(mode);
+    }
+    if !panel_shows_nothing {
+        return one(MODE_SCORES.into());
+    }
+    let idle: Vec<String> = screens.into_iter().filter(|s| s.idle && s.kind != MODE_SCORES && s.kind != MODE_OFF).map(|s| s.id).collect();
+    match (idle.as_slice(), idle_since_ms) {
+        ([], _) => one(MODE_OFF.into()),
+        ([only], _) => one(only.clone()),
+        (_, None) => UiRing { ids: vec![], scroll_target: idle[0].clone(), next_change_ms: None },
+        (_, Some(since)) => {
+            let dwell = u64::from(scoreboard_protocol::snap_idle_cycle_secs(idle_cycle_secs)) * 1000;
+            let steps = now_ms.saturating_sub(since) / dwell;
+            let id = idle[(steps % idle.len() as u64) as usize].clone();
+            UiRing { ids: vec![id.clone()], scroll_target: id, next_change_ms: Some(since + (steps + 1) * dwell) }
+        }
+    }
 }
 
 /// The `power` twin of a mode: lit unless it is Off — the protocol's
@@ -1771,76 +1747,6 @@ pub fn screen_label_for(id: String, screens: Vec<UiScreenConfig>, off_modes: Vec
         Some(i) => scoreboard_protocol::screen_label(&list, i, &cat),
         None => mode_label(id, off_modes_or_fallback(off_modes)),
     }
-}
-
-/// One choice of a screen's hold timer.
-#[derive(uniffi::Record, Clone, Debug, PartialEq)]
-pub struct UiHoldOption {
-    pub hours: u32,
-    pub label: String,
-}
-
-/// How long a picked screen holds the panel before the board goes back to
-/// Sports: "Until changed", "1 hour", "2 hours" ... "48 hours".
-#[uniffi::export]
-pub fn hold_timer_options() -> Vec<UiHoldOption> {
-    HOLD_TIMER_HOURS.iter().map(|&hours| UiHoldOption { hours, label: hold_timer_name(hours) }).collect()
-}
-
-fn hold_timer_name(hours: u32) -> String {
-    match hours {
-        0 => "Until changed".into(),
-        1 => "1 hour".into(),
-        h => format!("{h} hours"),
-    }
-}
-
-/// The hold a stored timer actually runs: the server clamps every timer to
-/// 72 hours when it applies one. Compare `hold_timer_selected(stored) ==
-/// option.hours` to place the checkmark.
-#[uniffi::export]
-pub fn hold_timer_selected(hours: u32) -> u32 {
-    hours.min(MAX_HOLD_HOURS)
-}
-
-/// A stored timer's name: "Until changed", "1 hour", "72 hours" — any
-/// value, preset or not (an import, an older app or the server's 72-hour
-/// clamp can store one the presets lack).
-#[uniffi::export]
-pub fn hold_timer_label(hours: u32) -> String {
-    hold_timer_name(hold_timer_selected(hours))
-}
-
-/// The picker's rows for a screen whose timer is `current`: the presets,
-/// plus the stored value in its place when it is not one — so the picker
-/// always has a row to select and never shows a blank. Select the row whose
-/// `hours` equals `hold_timer_selected(current)`.
-#[uniffi::export]
-pub fn hold_timer_options_for(current: u32) -> Vec<UiHoldOption> {
-    let mut out = hold_timer_options();
-    let h = hold_timer_selected(current);
-    if !out.iter().any(|o| o.hours == h) {
-        let at = out.iter().position(|o| o.hours > h).unwrap_or(out.len());
-        out.insert(at, UiHoldOption { hours: h, label: hold_timer_name(h) });
-    }
-    out
-}
-
-/// Screen `id`'s hold timer, in hours (0 = until changed): its own, else its
-/// kind's, else `sleep_hours` — the protocol's `hold_hours`, which the server
-/// runs. Write it back with `set_mode_hours(id, ...)`.
-#[uniffi::export]
-pub fn hold_timer_hours(id: String, kind: String, mode_hours: HashMap<String, u32>, sleep_hours: u32) -> u32 {
-    let mut cfg = BoardConfig::default();
-    cfg.mode_hours = mode_hours.into_iter().collect();
-    cfg.sleep_hours = sleep_hours;
-    cfg.hold_hours(&id, &kind)
-}
-
-/// The hold timer's title on a screen's page.
-#[uniffi::export]
-pub fn hold_timer_title() -> String {
-    "When picked, show for".into()
 }
 
 // ---- the idle timer ----
@@ -2109,20 +2015,16 @@ mod tests {
         }
     }
 
-    /// The optimistic timer mirror: same fallback chain (instance, kind,
-    /// sleep_hours), same zero rule, same 72h clamp the server applies.
+    /// The optimistic hold mirror: the server's one 24-hour hold for every
+    /// pick but Sports, Off and instances included.
     #[test]
     fn wake_at_mirrors_the_server_rule() {
-        let hours: HashMap<String, u32> = [("clock".to_string(), 3u32)].into_iter().collect();
-        let w = |id: &str, kind: &str, h: &HashMap<String, u32>| compute_wake_at(id.into(), kind.into(), h.clone(), 24, 1000);
-        assert_eq!(w("scores", "scores", &hours), None);
-        assert_eq!(w("clock", "clock", &hours), Some(1000 + 3 * 3600));
-        assert_eq!(w("clock.2", "clock", &hours), Some(1000 + 3 * 3600), "an instance falls back to its kind's timer");
-        assert_eq!(w("off", "off", &hours), Some(1000 + 24 * 3600));
-        let zero: HashMap<String, u32> = [("off".to_string(), 0u32)].into_iter().collect();
-        assert_eq!(w("off", "off", &zero), None, "0 = until changed");
-        let big: HashMap<String, u32> = [("off".to_string(), 99u32)].into_iter().collect();
-        assert_eq!(w("off", "off", &big), Some(1000 + 72 * 3600), "clamped like the server");
+        assert_eq!(compute_wake_at("scores".into(), 1000), None);
+        assert_eq!(compute_wake_at(String::new(), 1000), None, "no mode yet is Sports");
+        for id in ["clock", "clock.2", "weather.3", "off", "blank"] {
+            assert_eq!(compute_wake_at(id.into(), 1000), Some(1000 + 24 * 3600), "{id}");
+        }
+        assert_eq!(scoreboard_protocol::HOLD_HOURS, 24);
     }
 
     /// "BMW CHAMPIONSHIP" must not become "Bmw Championship" — a word with
@@ -2152,8 +2054,9 @@ mod tests {
 
     /// The ring follows the glass: quiet rings Off; a held screen rings
     /// itself; Sports with nothing on rings 0 → Off, 1 → that screen, 2+ →
-    /// every checked screen (scrolling to the first); Sports otherwise rings
-    /// Sports.
+    /// the one the board's clock has up (nothing, scrolling to the first,
+    /// until the server says when the rotation began); Sports otherwise
+    /// rings Sports. Never more than one tile.
     #[test]
     fn the_ring_follows_the_glass() {
         let sc = |id: &str, kind: &str, idle: bool| UiScreenConfig { id: id.into(), kind: kind.into(), params: HashMap::new(), idle };
@@ -2161,19 +2064,67 @@ mod tests {
         let one = vec![sc("scores", "scores", false), sc("off", "off", false), sc("clock", "clock", false), sc("weather", "weather", true)];
         let two = vec![sc("scores", "scores", false), sc("off", "off", false), sc("clock", "clock", true), sc("weather.2", "weather", true)];
         let r = |mode: &str, quiet: bool, nothing: bool, l: &Vec<UiScreenConfig>| {
-            let r = ring(mode.into(), quiet, nothing, l.clone());
-            assert_eq!(r.scroll_target, r.ids[0], "the scroll target is the first ringed tile");
+            let r = ring(mode.into(), quiet, nothing, l.clone(), 300, Some(1_000), 1_000);
+            assert_eq!(r.scroll_target, r.ids[0], "the scroll target is the ringed tile");
+            assert!(r.ids.len() == 1, "one tile, never several");
+            if l.iter().filter(|s| s.idle).count() < 2 || !nothing || quiet || mode != "scores" {
+                assert_eq!(r.next_change_ms, None, "nothing changes on its own");
+            }
             r.ids
         };
         assert_eq!(r("scores", true, true, &two), ["off"], "quiet wins");
         assert_eq!(r("weather.2", true, false, &two), ["off"], "quiet wins over a held screen too");
         assert_eq!(r("scores", false, true, &none), ["off"], "nothing checked: the panel is dark");
         assert_eq!(r("scores", false, true, &one), ["weather"]);
-        assert_eq!(r("scores", false, true, &two), ["clock", "weather.2"], "every checked screen, list order");
+        assert_eq!(r("scores", false, true, &two), ["clock"], "the rotation's first screen at its start");
         assert_eq!(r("scores", false, false, &two), ["scores"]);
         assert_eq!(r("weather.2", false, true, &two), ["weather.2"], "a held screen rings itself");
         assert_eq!(r("off", false, false, &two), ["off"]);
         assert_eq!(r("blank", false, false, &two), ["off"], "a stored blank is dark like Off");
+
+        // Two or more checked and no anchor (an older server, or before its
+        // push): ring nothing rather than guess, but still scroll somewhere.
+        let unknown = ring("scores".into(), false, true, two.clone(), 300, None, 5_000);
+        assert_eq!(unknown, UiRing { ids: vec![], scroll_target: "clock".into(), next_change_ms: None });
+        // One checked needs no anchor.
+        assert_eq!(ring("scores".into(), false, true, one, 300, None, 5_000).ids, ["weather"]);
+    }
+
+    /// The idle ring's arithmetic is the board's: the rotation restarts at
+    /// its first checked screen at `idle_since_ms`, each screen holds for the
+    /// SNAPPED idle timer, and member floor((now - since) / dwell) % n is up —
+    /// the same formula the server's test proves a real board follows. Each
+    /// answer says when to ask again: the next boundary.
+    #[test]
+    fn the_idle_ring_counts_slots_from_the_anchor() {
+        let sc = |id: &str, kind: &str, idle: bool| UiScreenConfig { id: id.into(), kind: kind.into(), params: HashMap::new(), idle };
+        let list = vec![
+            sc("scores", "scores", false),
+            sc("off", "off", false),
+            sc("clock", "clock", true),
+            sc("weather", "weather", false),
+            sc("weather.2", "weather", true),
+            sc("clock.2", "clock", true),
+        ];
+        let checked = ["clock", "weather.2", "clock.2"];
+        let since = 1_790_000_000_000u64;
+        // 400 s is stored; the board times by the 300 s preset it snaps to.
+        let dwell = 300_000u64;
+        let at = |now: u64| ring("scores".into(), false, true, list.clone(), 400, Some(since), now);
+        for now in (since..since + 2 * 3 * dwell + dwell).step_by(17_000) {
+            let r = at(now);
+            let k = ((now - since) / dwell % 3) as usize;
+            assert_eq!(r.ids, [checked[k]], "t+{}ms", now - since);
+            assert_eq!(r.scroll_target, checked[k]);
+            assert_eq!(r.next_change_ms, Some(since + ((now - since) / dwell + 1) * dwell));
+        }
+        // Exactly at a boundary the next screen is up; one ms before, not.
+        assert_eq!(at(since + dwell - 1).ids, ["clock"]);
+        assert_eq!(at(since + dwell).ids, ["weather.2"]);
+        assert_eq!(at(since + 3 * dwell).ids, ["clock"], "and round again");
+        // A phone clock behind the server's: the first screen, until the anchor.
+        let early = at(since - 5_000);
+        assert_eq!((early.ids, early.next_change_ms), (vec!["clock".to_string()], Some(since + dwell)));
     }
 
     /// Upcoming and bumped entries ride along in "Live and Upcoming" but are
@@ -2526,7 +2477,7 @@ mod screens_tests {
 
         // Remove: gone; Sports and Off are not removable.
         let rm = |list: Vec<UiScreenConfig>, id: &str| {
-            screens_removed(list, id.into(), "scores".into(), None, HashMap::new(), cat.clone()).screens
+            screens_removed(list, id.into(), "scores".into(), None, cat.clone()).screens
         };
         let removed = rm(base(), "weather");
         let want: Vec<UiScreenConfig> = base().into_iter().filter(|s| s.id != "weather").collect();
@@ -2625,7 +2576,7 @@ mod screens_tests {
                 screens_with_order(list.clone(), vec!["weather.2".into(), "clock".into()], m.clone()),
                 screens_with_param(list.clone(), "weather".into(), "variant".into(), "simple".into(), m.clone()),
                 screens_added(list.clone(), "clock".into(), HashMap::new(), m.clone()).screens,
-                screens_removed(list.clone(), "stocks".into(), "scores".into(), None, HashMap::new(), m).screens,
+                screens_removed(list.clone(), "stocks".into(), "scores".into(), None, m).screens,
             ]
         };
         let with_fallback = pairs(fb);
@@ -2699,7 +2650,7 @@ mod screens_tests {
     #[test]
     fn held_after_mirrors_the_servers_release() {
         let cat = ui_catalog();
-        let removed = screens_removed(base(), "weather".into(), "scores".into(), None, HashMap::new(), cat).screens;
+        let removed = screens_removed(base(), "weather".into(), "scores".into(), None, cat).screens;
         for (held, kind) in [("weather", "weather"), ("weather.2", "weather"), ("clock", "clock"), ("scores", "scores"), ("off", "off")] {
             let mut cfg = BoardConfig::default();
             cfg.set_held_screen(held, kind);
@@ -2754,7 +2705,8 @@ mod screens_tests {
         assert_eq!(list[0].preview.as_deref(), Some("/sample/plain.png?live=1"));
         assert_eq!(list[1].preview, None, "Off draws black on the platform");
         assert!(list[0].fixed && list[1].fixed && !list[2].fixed);
-        assert!(!list[0].has_settings && list[1].has_settings && list[5].has_settings);
+        assert!(!list[0].has_settings && !list[1].has_settings, "Sports and Off have no page");
+        assert!(list[2..].iter().all(|s| s.has_settings), "every user screen has one");
         assert_eq!(list[2].preview.as_deref(), Some("/offmode/clock.png?hour24=1"), "board-wide 24-hour rides along");
         assert_eq!(list[5].preview.as_deref(), Some("/offmode/stocks.png"), "a text field never rides");
     }
@@ -2824,9 +2776,6 @@ mod screens_tests {
         assert!(!can_set_idle(base(), "off".into()));
         assert!(!can_set_idle(base(), "nope".into()));
         assert!(can_set_idle(base(), "weather.2".into()));
-        assert!(!idle_cycle_applies(base()), "one checked screen has no timer");
-        let two = screens_with_idle(base(), "clock".into(), true, ui_catalog());
-        assert!(idle_cycle_applies(two));
         assert!(screens_editable(true) && !screens_editable(false));
         assert!(idle_single_select(false) && !idle_single_select(true));
         assert!(mode_power("weather.2".into()) && mode_power("scores".into()) && !mode_power("off".into()));
@@ -2846,27 +2795,6 @@ mod screens_tests {
         assert_eq!(screen_label_for("weather".into(), legacy, ui_catalog()), "Weather", "a kind id resolves to its first instance");
         assert_eq!(l("mystery"), "Mystery");
         assert_eq!(mode_label("scores".into(), vec![]), "Sports");
-    }
-
-    /// The hold timer: the choices both platforms used to spell, and the
-    /// stored value read through the protocol's own chain.
-    #[test]
-    fn hold_timer_reads_the_protocol_chain() {
-        let o: Vec<(u32, String)> = hold_timer_options().into_iter().map(|o| (o.hours, o.label)).collect();
-        assert_eq!(o[0], (0, "Until changed".to_string()));
-        assert_eq!(o[1], (1, "1 hour".to_string()));
-        assert_eq!(o[2], (2, "2 hours".to_string()));
-        assert_eq!(o.last().unwrap(), &(48, "48 hours".to_string()));
-        assert_eq!(o.len(), 8);
-        let hours: HashMap<String, u32> = [("weather".to_string(), 4u32), ("weather.2".to_string(), 0)].into_iter().collect();
-        let mut cfg = BoardConfig::default();
-        cfg.mode_hours = hours.clone().into_iter().collect();
-        cfg.sleep_hours = 12;
-        for (id, kind) in [("weather", "weather"), ("weather.2", "weather"), ("weather.3", "weather"), ("off", "off"), ("clock", "clock")] {
-            assert_eq!(hold_timer_hours(id.into(), kind.into(), hours.clone(), 12), cfg.hold_hours(id, kind), "{id}");
-        }
-        assert_eq!(hold_timer_hours("weather.3".into(), "weather".into(), hours, 12), 4, "falls back to the kind");
-        assert_eq!(hold_timer_title(), "When picked, show for");
     }
 
     /// Six named timers, and every stored value reads as one of them.
@@ -2933,41 +2861,23 @@ mod screens_tests {
     }
 
     /// Removing a screen is the server's whole remove in one record: the
-    /// list, the release when it was held (mode, power, wake timer — never
-    /// more), and its timer pruned so a recycled id starts fresh.
+    /// list, and the release when it was held (mode, power, wake timer —
+    /// never more).
     #[test]
-    fn removing_a_screen_mirrors_the_servers_release_and_prune() {
+    fn removing_a_screen_mirrors_the_servers_release() {
         let cat = ui_catalog();
-        let hours: HashMap<String, u32> = [("weather.2", 4u32), ("weather", 2), ("clock", 1), ("off", 8), ("stocks.3", 5)]
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect();
-        let kept = |keys: &[&str]| -> HashMap<String, u32> {
-            hours.iter().filter(|(k, _)| keys.contains(&k.as_str())).map(|(k, v)| (k.clone(), *v)).collect()
-        };
-
-        let r = screens_removed(base(), "weather.2".into(), "weather.2".into(), Some(1000), hours.clone(), cat.clone());
+        let r = screens_removed(base(), "weather.2".into(), "weather.2".into(), Some(1000), cat.clone());
         let mut cfg = BoardConfig::default();
         cfg.set_held_screen("weather.2", "weather");
         assert!(!cfg.set_screens(to_configs(r.screens.clone()), &proto_catalog()), "the protocol releases too");
         assert_eq!((r.mode.as_str(), r.power, r.wake_at), ("scores", true, None), "released to Sports");
-        assert_eq!(r.mode_hours, kept(&["weather", "clock", "off"]), "instance timers of unlisted ids go; kind keys stay");
+        assert!(!r.screens.iter().any(|s| s.id == "weather.2"));
 
-        let r = screens_removed(base(), "clock".into(), "weather.2".into(), Some(1000), hours.clone(), cat.clone());
+        let r = screens_removed(base(), "clock".into(), "weather.2".into(), Some(1000), cat.clone());
         assert_eq!((r.mode.as_str(), r.power, r.wake_at), ("weather.2", true, Some(1000)), "not held: untouched");
-        assert_eq!(r.mode_hours, kept(&["weather.2", "weather", "off"]), "the clock's timer goes with the clock");
 
-        let r = screens_removed(base(), "weather".into(), "off".into(), Some(1000), hours.clone(), cat.clone());
+        let r = screens_removed(base(), "weather".into(), "off".into(), Some(1000), cat);
         assert_eq!((r.mode.as_str(), r.power, r.wake_at), ("off", false, Some(1000)), "Off stays dark");
-        assert_eq!(r.mode_hours, kept(&["weather.2", "clock", "off"]), "Forecast keeps its own; Weather's goes");
-
-        // A sibling still INHERITING the first instance's timer keeps the
-        // hold it was running when that instance goes.
-        let mut inheriting = hours.clone();
-        inheriting.remove("weather.2");
-        let r = screens_removed(base(), "weather".into(), "off".into(), None, inheriting, cat);
-        assert_eq!(r.mode_hours.get("weather.2"), Some(&2));
-        assert_eq!(r.mode_hours.get("weather"), None);
     }
 
     /// The optimistic write is exactly what `set_screens` changes on the
@@ -2990,21 +2900,6 @@ mod screens_tests {
         let w = screens_write(true, checked.clone());
         assert_eq!((w.screens, w.off_mode), (Some(checked), None));
         assert_eq!(screens_write(true, vec![]), UiScreensWrite { screens: None, off_mode: None });
-    }
-
-    /// The optimistic timer write equals the server's `SetModeHours`.
-    #[test]
-    fn a_timer_write_mirrors_the_server() {
-        let hours: HashMap<String, u32> = HashMap::new();
-        let after = mode_hours_after_set("weather".into(), 1, base(), hours.clone(), 6);
-        let mut cfg = BoardConfig::default();
-        cfg.screens = to_configs(base());
-        cfg.sleep_hours = 6;
-        cfg.set_hold_hours("weather", 1);
-        assert_eq!(after, cfg.mode_hours.clone().into_iter().collect::<HashMap<_, _>>());
-        assert_eq!(hold_timer_hours("weather.2".into(), "weather".into(), after.clone(), 6), 6, "Forecast keeps its hold");
-        assert_eq!(hold_timer_hours("weather".into(), "weather".into(), after, 6), 1);
-        assert_eq!(mode_hours_after_set("clock".into(), 500, base(), hours, 6).get("clock"), Some(&72));
     }
 
     /// Before the catalog lands, Add says so instead of "nothing to add".
@@ -3032,7 +2927,7 @@ mod screens_tests {
             screens_with_order(vec![], vec!["clock".into()], cat.clone()),
             screens_with_param(vec![], "clock".into(), "style".into(), "word".into(), cat.clone()),
             screens_added(vec![], "clock".into(), HashMap::new(), cat.clone()).screens,
-            screens_removed(vec![], "clock".into(), "scores".into(), None, HashMap::new(), cat.clone()).screens,
+            screens_removed(vec![], "clock".into(), "scores".into(), None, cat.clone()).screens,
         ] {
             assert!(out.is_empty(), "{out:?}");
             assert!(crate::screens_commands(false, out.clone()).is_empty());
@@ -3042,8 +2937,8 @@ mod screens_tests {
         assert!(json(crate::screens_commands(false, pinned.clone())).is_empty(), "no lit screen: not an old server's list");
         assert_eq!(json(crate::screens_commands(true, pinned)).len(), 1, "a new server may hold only Sports and Off");
         assert_eq!(held_after("weather".into(), vec![]), "weather", "no list, no release");
-        let r = screens_removed(vec![], "weather".into(), "weather".into(), Some(9), [("weather.2".to_string(), 1u32)].into_iter().collect(), cat);
-        assert_eq!((r.mode.as_str(), r.wake_at, r.mode_hours.len()), ("weather", Some(9), 1));
+        let r = screens_removed(vec![], "weather".into(), "weather".into(), Some(9), cat);
+        assert_eq!((r.mode.as_str(), r.wake_at), ("weather", Some(9)));
     }
 
     /// A REAL server without lists: its descriptors declare no `per_screen`,
@@ -3096,27 +2991,7 @@ mod screens_tests {
         for m in ["off", "clock", "weather.2", "blank"] {
             assert!(mode_footer_shown(m.into()), "{m}");
         }
-        assert_eq!(ring(String::new(), false, false, base()).ids, ["scores"], "unknown mode rings Sports");
-        assert_eq!(ring(String::new(), false, true, base()).ids, ["weather"], "and idles like Sports");
-    }
-
-    /// Any stored timer has a row and a name: the server's 72-hour clamp,
-    /// an imported 3, a preset.
-    #[test]
-    fn every_stored_hold_timer_has_a_row() {
-        assert_eq!(hold_timer_label(0), "Until changed");
-        assert_eq!(hold_timer_label(1), "1 hour");
-        assert_eq!(hold_timer_label(3), "3 hours");
-        assert_eq!(hold_timer_label(72), "72 hours");
-        assert_eq!(hold_timer_label(500), "72 hours", "the server holds at most 72");
-        assert_eq!(hold_timer_selected(500), 72);
-        assert_eq!(hold_timer_options_for(4), hold_timer_options(), "a preset adds nothing");
-        let hours = |c: u32| -> Vec<u32> { hold_timer_options_for(c).into_iter().map(|o| o.hours).collect() };
-        assert_eq!(hours(3), [0, 1, 2, 3, 4, 8, 12, 24, 48]);
-        assert_eq!(hours(500), [0, 1, 2, 4, 8, 12, 24, 48, 72]);
-        for c in [0, 3, 13, 72, 500] {
-            let sel = hold_timer_selected(c);
-            assert_eq!(hold_timer_options_for(c).iter().filter(|o| o.hours == sel).count(), 1, "{c}");
-        }
+        assert_eq!(ring(String::new(), false, false, base(), 300, None, 0).ids, ["scores"], "unknown mode rings Sports");
+        assert_eq!(ring(String::new(), false, true, base(), 300, None, 0).ids, ["weather"], "and idles like Sports");
     }
 }

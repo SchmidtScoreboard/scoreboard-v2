@@ -184,6 +184,14 @@ pub struct AppState {
     /// Last manifest JSON sent to each device; identical re-pushes are skipped so a
     /// refresh doesn't needlessly reset the board's rotation position.
     last_manifest: Arc<Mutex<HashMap<String, String>>>,
+    /// Per board, its current device connection and where its idle rotation
+    /// started on it (`IdleAnchor`). Memory only: a restart is a reconnect,
+    /// which starts the rotation over anyway.
+    idle_anchors: Arc<Mutex<HashMap<String, IdleAnchor>>>,
+    /// The next device-connection nonce (`IdleAnchor::session`). Seeded from
+    /// the wall clock at boot, so a restarted server never reissues a nonce
+    /// a board that rode out the restart still holds an epoch for.
+    device_session_seq: Arc<std::sync::atomic::AtomicU64>,
     /// Frame ids kept by the previous eviction pass — one grace generation so a
     /// device still fetching the manifest we just replaced can't miss its frames.
     frame_grace: Arc<Mutex<HashSet<FrameId>>>,
@@ -383,6 +391,42 @@ pub struct Notice {
     pub epoch: u64,
 }
 
+/// The top bit every idle-rotation epoch carries (`idle_epoch`), and no
+/// games rotation (0) or notice (a counter from 1) ever does.
+const IDLE_EPOCH_BIT: u64 = 1 << 63;
+
+/// One board's device connection, as the idle ring needs it.
+///
+/// The board advances its idle rotation on its own clock and never reports
+/// its slot. But it restarts the rotation at slot 0 at knowable moments —
+/// on receiving a manifest that does not keep its slot — and every idle
+/// epoch folds in `session`, so a reconnect is always such a moment. Tracking
+/// what this connection was sent therefore pins the restart exactly, and the
+/// app computes the screen on the glass from `since_ms` and the dwell.
+#[derive(Clone, Copy, Debug, Default)]
+struct IdleAnchor {
+    /// This connection's nonce (`idle_epoch`'s `session`).
+    session: u64,
+    /// (epoch, rotation length) of the last manifest actually SENT to the
+    /// device on this connection — what its slot rule compares against.
+    sent: Option<(u64, usize)>,
+    /// Each screen's dwell in the last idle rotation sent (one timer for the
+    /// whole rotation) — what `reanchor_idle_rotation` counts slots with.
+    dwell_ms: u64,
+    /// Unix ms the current idle rotation's first screen went up.
+    since_ms: Option<u64>,
+}
+
+/// How long an idle rotation runs before the server restarts it in step
+/// (`reanchor_idle_rotation`). The board advances on the first tick at or
+/// after each slot's end and restarts the slot's timer THERE, so every slot
+/// runs long by the tick overshoot (up to ~44ms at the firmware's ~30fps),
+/// plus its crystal's error; nothing in a same-shape re-push corrects it.
+/// Left alone, an off-season board with a steady socket would drift a full
+/// slot from `since_ms` within days, and the app would ring the wrong
+/// screen. An hour of 2-minute slots is ~1s at worst.
+const IDLE_REANCHOR_AFTER_MS: u64 = 3600 * 1000;
+
 impl AppState {
     #[cfg(test)]
     fn new_ephemeral() -> Self {
@@ -450,6 +494,8 @@ impl AppState {
             ))),
             notices: Arc::new(Mutex::new(HashMap::new())),
             last_manifest: Arc::new(Mutex::new(HashMap::new())),
+            idle_anchors: Arc::new(Mutex::new(HashMap::new())),
+            device_session_seq: Arc::new(std::sync::atomic::AtomicU64::new(unix_now_ms())),
             frame_grace: Arc::new(Mutex::new(HashSet::new())),
             frame_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             finished: Arc::new(Mutex::new(HashMap::new())),
@@ -477,6 +523,87 @@ impl AppState {
     /// fresh connection always receives an initial manifest).
     pub fn forget_last_manifest(&self, board_id: &str) {
         self.last_manifest.lock().unwrap().remove(board_id);
+    }
+
+    /// A device just authenticated: give its connection a fresh nonce (folded
+    /// into every idle epoch sent on it, so the board's rotation starts over
+    /// at its first screen) and forget what the previous connection was sent.
+    pub fn begin_device_session(&self, board_id: &str) {
+        let session = self.device_session_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.idle_anchors
+            .lock()
+            .unwrap()
+            .insert(board_id.to_string(), IdleAnchor { session, sent: None, dwell_ms: 0, since_ms: None });
+    }
+
+    /// Give the board's CURRENT connection a fresh nonce: its next idle
+    /// manifest carries a new epoch, so the board restarts the rotation at
+    /// its first screen on receipt and `note_manifest_sent` anchors there.
+    /// What the device was sent stays — it still holds that manifest.
+    pub fn renew_device_session(&self, board_id: &str) {
+        let session = self.device_session_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.idle_anchors.lock().unwrap().entry(board_id.to_string()).or_default().session = session;
+    }
+
+    /// Restart the board's idle rotation in step with the server, once it
+    /// has run `IDLE_REANCHOR_AFTER_MS` (see there for the drift this bounds),
+    /// and only while the server's count says the FIRST screen is up — the
+    /// restart then lands where the board is, or about to be, anyway: slot 0
+    /// just runs a little long, or slot n-1 ends the drift early. Never
+    /// visible as a jump. Returns whether the session was renewed; the next
+    /// `push_board` carries the new epoch. The tick runs every 30s and the
+    /// shortest slot is 2 minutes, so no cycle wrap is missed.
+    pub fn reanchor_idle_rotation(&self, board_id: &str, now_ms: u64) -> bool {
+        let due = {
+            let anchors = self.idle_anchors.lock().unwrap();
+            match anchors.get(board_id) {
+                Some(IdleAnchor { sent: Some((epoch, len)), dwell_ms, since_ms: Some(since), .. })
+                    if epoch & IDLE_EPOCH_BIT != 0 && *len >= 2 && *dwell_ms > 0 && now_ms >= *since =>
+                {
+                    let elapsed = now_ms - since;
+                    elapsed >= IDLE_REANCHOR_AFTER_MS && (elapsed / dwell_ms) % *len as u64 == 0
+                }
+                _ => false,
+            }
+        };
+        if due {
+            self.renew_device_session(board_id);
+        }
+        due
+    }
+
+    /// The board's current device-connection nonce; 0 for a board that has
+    /// not connected since boot (its manifest reaches no device anyway).
+    pub fn device_session(&self, board_id: &str) -> u64 {
+        self.idle_anchors.lock().unwrap().get(board_id).map_or(0, |a| a.session)
+    }
+
+    /// Unix ms at which the board's current idle rotation put its first
+    /// screen up (`ServerMsg::BoardState::idle_since_ms`).
+    pub fn idle_since_ms(&self, board_id: &str) -> Option<u64> {
+        self.idle_anchors.lock().unwrap().get(board_id).and_then(|a| a.since_ms)
+    }
+
+    /// Record a manifest the device was actually sent, at `now_ms`, and say
+    /// whether the board's idle anchor moved. Mirrors board-core's
+    /// `on_manifest` slot rule exactly: the board KEEPS its slot when it had a
+    /// manifest, the new rotation is non-empty, and length and epoch are both
+    /// unchanged; anything else restarts it at slot 0 on receipt. An idle
+    /// rotation (top-bit epoch) that restarts anchors at `now_ms`; one that
+    /// keeps its slot keeps its anchor; anything else clears it.
+    fn note_manifest_sent(&self, board_id: &str, epoch: u64, len: usize, dwell_ms: u64, now_ms: u64) -> bool {
+        let mut anchors = self.idle_anchors.lock().unwrap();
+        let a = anchors.entry(board_id.to_string()).or_default();
+        let keeps_slot = len > 0 && a.sent == Some((epoch, len));
+        a.sent = Some((epoch, len));
+        a.dwell_ms = dwell_ms;
+        let before = a.since_ms;
+        if epoch & IDLE_EPOCH_BIT == 0 || len == 0 {
+            a.since_ms = None;
+        } else if !keeps_slot || a.since_ms.is_none() {
+            a.since_ms = Some(now_ms);
+        }
+        a.since_ms != before
     }
 
     pub fn config_for(&self, board_id: &str) -> BoardConfig {
@@ -747,9 +874,6 @@ fn sanitize_off_modes(configs: &mut HashMap<String, BoardConfig>) {
 ///   twins. A held kind a rolled-back server wrote as a bare mode is
 ///   canonicalized to the instance it resolves to; a held screen that no
 ///   longer exists releases the board to Sports.
-/// - Every board: timers no screen owns are dropped (`prune_screen_timers`) —
-///   instance keys a rollback left behind, which a screen added later under
-///   the same id would otherwise inherit.
 fn sanitize_screens(configs: &mut HashMap<String, BoardConfig>) {
     let catalog = offmode::off_modes();
     for (board, cfg) in configs.iter_mut() {
@@ -774,7 +898,6 @@ fn sanitize_screens(configs: &mut HashMap<String, BoardConfig>) {
                 }
             }
         }
-        cfg.prune_screen_timers(&catalog);
     }
 }
 
@@ -3294,7 +3417,7 @@ fn manifest_inner(state: &AppState, board_id: &str) -> Manifest {
 
     // Priority 6: scores mode with nothing to show — the configured idle
     // screen.
-    idle_manifest(state, &cfg, tz)
+    idle_manifest(state, &cfg, tz, state.device_session(board_id))
 }
 
 /// What a board with no preferences shows. Kept beside the notice colours it
@@ -3331,11 +3454,12 @@ fn dark_manifest(cfg: &BoardConfig) -> Manifest {
 ///   every board that never saved a list has at most one.
 /// - Two or more: ONE rotation the board advances on its own clock, each
 ///   screen's first frame held for the board's idle timer. Its epoch is a
-///   hash of the members and the timer, so a minute re-push (new clock frame
-///   ids, same shape) keeps the board's slot and timer, while a change of
-///   membership, order or timer — or arriving from games, a notice or a held
+///   hash of the members, the timer and the device connection (`session`,
+///   see `IdleAnchor`), so a minute re-push (new clock frame ids, same shape)
+///   keeps the board's slot and timer, while a change of membership, order
+///   or timer, a reconnect — or arriving from games, a notice or a held
 ///   screen — starts over at the first screen. Param edits keep the epoch.
-fn idle_manifest(state: &AppState, cfg: &BoardConfig, tz: Option<chrono_tz::Tz>) -> Manifest {
+fn idle_manifest(state: &AppState, cfg: &BoardConfig, tz: Option<chrono_tz::Tz>, session: u64) -> Manifest {
     let screens = board_screens(cfg);
     let members: Vec<&ScreenConfig> = screens.iter().filter(|s| s.idle).collect();
     if members.len() < 2 {
@@ -3366,7 +3490,7 @@ fn idle_manifest(state: &AppState, cfg: &BoardConfig, tz: Option<chrono_tz::Tz>)
         off_state: if rotation.is_empty() { OffState::Blank } else { OffState::Clock },
         rotation,
         brightness: cfg.brightness,
-        epoch: idle_epoch(&ids, dwell_ms),
+        epoch: idle_epoch(&ids, dwell_ms, session),
         countdown_ms: None,
     }
 }
@@ -3591,7 +3715,34 @@ pub fn push_all_connected(state: &AppState) {
     }
 }
 
+/// Tell a connected device it is paired, so it leaves the pair-code screen.
+/// The caller pushes its manifest next.
+///
+/// Also restarts its idle rotation (`renew_device_session`): a board whose
+/// code was up unprompted (`NeedsPairing`) holds its rotation still the whole
+/// time — it only advances while running — and resumes one slot along at an
+/// instant the server never learns, so the anchor taken when the rotation
+/// was sent would ring the wrong screen for the newly paired app. The new
+/// epoch puts board and anchor back at the first screen together. Returns
+/// whether a device was there to tell.
+pub fn send_setup_done(state: &AppState, board_id: &str) -> bool {
+    let sent = match state.devices.lock().unwrap().get(board_id) {
+        Some(dtx) => dtx.send(Message::Text(serde_json::to_string(&ServerMsg::SetupDone).unwrap())).is_ok(),
+        None => false,
+    };
+    if sent {
+        state.renew_device_session(board_id);
+    }
+    sent
+}
+
 pub fn push_board(state: &AppState, board_id: &str) {
+    push_board_at(state, board_id, unix_now_ms());
+}
+
+/// `push_board` with the wall clock supplied: `now_ms` is when the device is
+/// taken to receive what is sent (its idle anchor, `IdleAnchor::since_ms`).
+pub(crate) fn push_board_at(state: &AppState, board_id: &str, now_ms: u64) {
     // Boot hold: before the first sweep, a scores-mode board would be told
     // "idle" purely because the process is young. Send nothing instead — the
     // board keeps whatever it was showing through the restart (its offline
@@ -3611,6 +3762,7 @@ pub fn push_board(state: &AppState, board_id: &str) {
         }
     }
     let manifest = manifest_for_board(state, board_id);
+    let shape = (manifest.epoch, manifest.rotation.len(), manifest.rotation.first().map_or(0, |e| u64::from(e.dwell_ms)));
     let json = serde_json::to_string(&ServerMsg::Manifest(manifest)).unwrap();
     {
         let mut last = state.last_manifest.lock().unwrap();
@@ -3619,8 +3771,22 @@ pub fn push_board(state: &AppState, board_id: &str) {
         }
         last.insert(board_id.to_string(), json.clone());
     }
-    if let Some(tx) = state.devices.lock().unwrap().get(board_id) {
-        let _ = tx.send(Message::Text(json));
+    // What the device was actually sent is what its slot rule saw: mirror
+    // it, and tell the apps promptly when the idle anchor moved. Recorded
+    // UNDER the devices lock, so two racing pushes are mirrored in the order
+    // they entered the device's channel — the order the board applies them.
+    // (Lock order devices -> idle_anchors; nothing takes them the other way.)
+    let moved = {
+        let devices = state.devices.lock().unwrap();
+        match devices.get(board_id) {
+            Some(tx) if tx.send(Message::Text(json)).is_ok() => {
+                state.note_manifest_sent(board_id, shape.0, shape.1, shape.2, now_ms)
+            }
+            _ => false,
+        }
+    };
+    if moved {
+        push_board_state(state, board_id);
     }
 }
 
@@ -3806,7 +3972,7 @@ pub fn handle_select_mode(state: &AppState, board_id: &str, mode: &str) {
 /// - inside the quiet window -> override for the rest of tonight. This arm is
 ///   FIRST and load-bearing: without it a night-time press falls through and
 ///   arms "off" against an already-dark panel, and the user presses twice.
-/// - any lit mode -> "off", with off's configured timer — the old button's
+/// - any lit mode -> "off", held for `HOLD_HOURS` (24h) — the old button's
 ///   sleep, minus the no-games countdown.
 /// - "off" -> "scores". Waking to scores rather than the prior mode matches
 ///   what the legacy button always meant.
@@ -4155,30 +4321,23 @@ pub fn handle_install_firmware(state: &AppState, board_id: &str, channel: FwChan
 /// - Any pick during the quiet window sets the override — INCLUDING re-picking
 ///   the current mode. The 2am gesture is "answer me now", and a pick that
 ///   changed nothing visible would read as a dead button.
-/// - A non-scores mode arms its configured timer (`mode_hours`, falling back
-///   to `sleep_hours`; 0 = until changed). Scores clears it. The tick_once
-///   sweep returns the board to scores when the timer lapses, so no board can
-///   be forgotten on a mode.
+/// - A non-scores mode, Off included, holds for `HOLD_HOURS` — the one hold;
+///   there is no per-screen timer (the legacy `mode_hours`/`sleep_hours` are
+///   not read). Scores clears it. The tick_once sweep returns the board to
+///   scores when the hold lapses, so no board can be forgotten on a mode;
+///   `ClearWakeTimer` ("Keep") is the only way to hold until changed.
 pub fn apply_mode(cfg: &mut BoardConfig, mode: &str) {
     apply_screen(cfg, mode, mode);
 }
 
-/// `apply_mode` for a screen INSTANCE: hold `id` (of `kind`), timed by the
-/// instance's own hours, else its kind's, else `sleep_hours`. A mode id is
-/// its own kind, so `apply_mode` is exactly this.
+/// `apply_mode` for a screen INSTANCE: hold `id` (of `kind`) for
+/// `HOLD_HOURS`. A mode id is its own kind, so `apply_mode` is exactly this.
 pub fn apply_screen(cfg: &mut BoardConfig, id: &str, kind: &str) {
     if quiet_now(cfg) {
         cfg.quiet_override = true;
     }
     cfg.set_held_screen(id, kind);
-    cfg.wake_at = if kind == MODE_SCORES {
-        None
-    } else {
-        match cfg.hold_hours(id, kind).min(72) {
-            0 => None,
-            h => Some(unix_now() + h as u64 * 3600),
-        }
-    };
+    cfg.wake_at = if kind == MODE_SCORES { None } else { Some(unix_now() + u64::from(HOLD_HOURS) * 3600) };
 }
 
 /// Back to Sports because the held screen stopped existing — removed from
@@ -4229,11 +4388,8 @@ const IDLE_NOTICE_SECS: u64 = 120;
 pub fn handle_mode_change(state: &AppState, board_id: &str, cfg: &BoardConfig) {
     state.notices.lock().unwrap().remove(board_id);
     if cfg.mode == MODE_OFF {
-        let caption = match cfg.mode_duration_hours(MODE_OFF).min(72) {
-            0 => "UNTIL TURNED ON".to_string(),
-            1 => "FOR 1 HOUR".to_string(),
-            h => format!("FOR {h} HOURS"),
-        };
+        // Every hold is HOLD_HOURS; the splash says so.
+        let caption = format!("FOR {HOLD_HOURS} HOURS");
         set_notice(state, board_id, &[("SLEEPING", true, NOTICE_WHITE), (&caption, false, NOTICE_GREY)], SPLASH_SECS);
     } else if cfg.mode == MODE_SCORES && chosen_games(state, cfg).is_empty() {
         idle_arrival_notice(state, board_id, cfg);
@@ -4274,6 +4430,13 @@ pub(crate) fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+pub(crate) fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
 
@@ -4404,8 +4567,14 @@ pub fn tick_once(state: &AppState) {
         tracing::info!("board '{bid}': mode timer lapsed -> scores");
     }
     let board_ids: Vec<String> = state.devices.lock().unwrap().keys().cloned().collect();
+    let now_ms = unix_now_ms();
     for bid in board_ids {
-        push_board(state, &bid);
+        // An idle rotation that has run its hour restarts in step here; the
+        // push right after carries the new epoch.
+        if state.reanchor_idle_rotation(&bid, now_ms) {
+            tracing::debug!("board '{bid}': idle rotation re-anchored");
+        }
+        push_board_at(state, &bid, now_ms);
     }
     evict_stale_frames(state);
     prune_spoiler_lists(state);
@@ -4703,6 +4872,7 @@ pub fn board_state_msg(state: &AppState, board_id: &str) -> ServerMsg {
         config: cfg,
         firmware_version,
         firmware_update,
+        idle_since_ms: state.idle_since_ms(board_id),
     }
 }
 
@@ -5496,19 +5666,25 @@ mod tests {
         assert!(!state.notices.lock().unwrap().contains_key("b1"), "games clear the notice");
     }
 
-    /// App power-off arms the SAME timed sleep the button does (wake_at from
-    /// sleep_hours + the "SLEEPING FOR N HOURS" splash); power-on cancels it.
+    /// App power-off arms the SAME timed sleep the button does (the one
+    /// 24-hour hold + the "SLEEPING FOR 24 HOURS" splash); power-on cancels
+    /// it. An old app's SetSleepHours is accepted and changes nothing.
     #[test]
     fn app_power_off_arms_the_sleep_timer() {
         let state = AppState::new_ephemeral();
         crate::ws::apply_command(&state, "b1", Command::SetSleepHours { hours: 2 });
+        assert_eq!(state.config_for("b1").sleep_hours, BoardConfig::default().sleep_hours, "SetSleepHours is ignored");
         crate::ws::apply_command(&state, "b1", Command::SetPower { on: false });
         let cfg = state.config_for("b1");
         assert!(!cfg.power);
         let wake = cfg.wake_at.expect("app sleep sets a wake timer like the button");
-        let expect = unix_now() + 2 * 3600;
-        assert!((wake as i64 - expect as i64).abs() <= 5, "timer = sleep_hours");
-        assert!(state.notices.lock().unwrap().contains_key("b1"), "sleep splash shows");
+        let expect = unix_now() + u64::from(HOLD_HOURS) * 3600;
+        assert!((wake as i64 - expect as i64).abs() <= 5, "timer = HOLD_HOURS, not the old sleep_hours");
+        assert_eq!(
+            state.notices.lock().unwrap().get("b1").unwrap().lines.iter().map(|(t, ..)| t.as_str()).collect::<Vec<_>>(),
+            ["SLEEPING", "FOR 24 HOURS"],
+            "sleep splash shows the one hold"
+        );
 
         crate::ws::apply_command(&state, "b1", Command::SetPower { on: true });
         let cfg = state.config_for("b1");
@@ -6203,7 +6379,7 @@ mod tests {
         let cfg = state.config_for("b1");
         assert_eq!(cfg.mode, MODE_OFF, "press from scores means off, games or not");
         assert!(!cfg.power, "the legacy twin agrees");
-        assert!(cfg.wake_at.is_some(), "off arms its configured timer");
+        assert!(cfg.wake_at.is_some(), "off arms the 24-hour hold");
         assert!(state.notices.lock().unwrap().contains_key("b1"), "and says so");
 
         handle_button(&state, "b1");
@@ -6255,27 +6431,27 @@ mod tests {
         assert_eq!(state.config_for("b1").mode, MODE_OFF, "superseded expiry changes nothing");
     }
 
-    /// The one place mode transitions happen, exercised directly.
+    /// The one place mode transitions happen, exercised directly: every
+    /// hold is 24 hours. Stored legacy timers (an old app's `mode_hours`, a
+    /// short `sleep_hours`, a 0 that once meant "until changed") are not read.
     #[test]
-    fn apply_mode_arms_the_configured_timer() {
+    fn every_hold_is_24_hours() {
         let mut cfg = BoardConfig::default();
-        // A pick uses the mode's own configured hours...
         cfg.mode_hours.insert("clock".into(), 3);
-        apply_mode(&mut cfg, "clock");
-        assert_eq!(cfg.mode, "clock");
-        assert!(cfg.power, "a lit mode keeps the legacy twin true");
-        let until = cfg.wake_at.expect("clock runs on its timer");
-        let expect = unix_now() + 3 * 3600;
-        assert!(until.abs_diff(expect) <= 2, "3 hours from now");
-        // ...an unconfigured mode falls back to sleep_hours...
-        apply_mode(&mut cfg, MODE_OFF);
-        let until = cfg.wake_at.expect("off falls back to sleep_hours");
-        assert!(until.abs_diff(unix_now() + 24 * 3600) <= 2, "the 24h default");
-        assert!(!cfg.power);
-        // ...zero means until changed...
         cfg.mode_hours.insert("weather".into(), 0);
-        apply_mode(&mut cfg, "weather");
-        assert_eq!(cfg.wake_at, None, "0 = no timer");
+        cfg.mode_hours.insert(MODE_OFF.into(), 1);
+        cfg.sleep_hours = 2;
+        let day = unix_now() + 24 * 3600;
+        for mode in ["clock", "weather", MODE_OFF] {
+            apply_mode(&mut cfg, mode);
+            assert_eq!(cfg.mode, mode);
+            let until = cfg.wake_at.unwrap_or_else(|| panic!("{mode} runs on the hold"));
+            assert!(until.abs_diff(day) <= 2, "{mode}: 24 hours from now");
+        }
+        assert!(!cfg.power, "off keeps the legacy twin false");
+        apply_screen(&mut cfg, "weather.2", "weather");
+        assert!(cfg.wake_at.unwrap().abs_diff(day) <= 2, "an instance holds the same 24 hours");
+        assert!(cfg.power, "a lit mode keeps the legacy twin true");
         // ...and scores never has one.
         apply_mode(&mut cfg, MODE_SCORES);
         assert_eq!(cfg.wake_at, None);

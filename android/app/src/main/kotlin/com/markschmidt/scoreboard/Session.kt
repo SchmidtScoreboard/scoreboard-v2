@@ -110,35 +110,20 @@ class Session(context: Context) : ClientListener {
         _state.value = _state.value.copy(selected = boardId)
     }
 
-    /** Hold screen `id` (an instance of `kind`, both from its `UiScreen`).
+    /** Hold screen `id` (an instance id from its `UiScreen`).
      *  The power twin and the wake timer are the CORE's rules for a pick. */
-    fun setMode(boardId: String, id: String, kind: String) {
+    fun setMode(boardId: String, id: String) {
         mutate(boardId) { cfg ->
             cfg.copy(
                 mode = id,
                 power = uniffi.app_core.modePower(id),
+                // Every pick but Sports holds 24 hours (the core's mirror).
                 wakeAt = uniffi.app_core.computeWakeAt(
-                    id, kind, cfg.modeHours, cfg.sleepHours,
-                    System.currentTimeMillis().toULong() / 1000u,
+                    id, System.currentTimeMillis().toULong() / 1000u,
                 ),
             )
         }
         client.setMode(boardId, id)
-    }
-
-    /** A screen's hold timer, keyed by its INSTANCE id. */
-    fun setModeHours(boardId: String, id: String, hours: UInt) {
-        // The core's mirror of the server: a first instance's timer pins
-        // the siblings still inheriting it.
-        val modes = _state.value.offModes
-        mutate(boardId) {
-            it.copy(
-                modeHours = uniffi.app_core.modeHoursAfterSet(
-                    id, hours, resolvedScreens(it, modes), it.modeHours, it.sleepHours,
-                ),
-            )
-        }
-        client.setModeHours(boardId, id, hours)
     }
 
     fun setBrightness(boardId: String, level: UByte) {
@@ -226,18 +211,15 @@ class Session(context: Context) : ClientListener {
     }
 
     /** Remove screen `id` — the core's whole mirror of the server's remove
-     *  (a release when it was held, its timer pruned), applied in one copy. */
+     *  (a release when it was held), applied in one copy. */
     fun removeScreen(boardId: String, id: String) {
         val cfg = _state.value.boards[boardId]?.config ?: return
         val screens = resolvedScreens(cfg, _state.value.offModes)
         val r = uniffi.app_core.screensRemoved(
-            screens, id, cfg.mode, cfg.wakeAt, cfg.modeHours, _state.value.offModes,
+            screens, id, cfg.mode, cfg.wakeAt, _state.value.offModes,
         )
         mutate(boardId) {
-            it.copy(
-                screens = r.screens, mode = r.mode, power = r.power,
-                wakeAt = r.wakeAt, modeHours = r.modeHours,
-            )
+            it.copy(screens = r.screens, mode = r.mode, power = r.power, wakeAt = r.wakeAt)
         }
         client.setScreens(boardId, r.screens)
     }

@@ -578,11 +578,6 @@ void uniffi_app_core_fn_method_scoreboardclient_set_listener(void*_Nonnull ptr, 
 void uniffi_app_core_fn_method_scoreboardclient_set_mode(void*_Nonnull ptr, RustBuffer board_id, RustBuffer mode, RustCallStatus *_Nonnull out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_MODE_HOURS
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_MODE_HOURS
-void uniffi_app_core_fn_method_scoreboardclient_set_mode_hours(void*_Nonnull ptr, RustBuffer board_id, RustBuffer mode, uint32_t hours, RustCallStatus *_Nonnull out_status
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_OFF_MODE
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_OFF_MODE
 void uniffi_app_core_fn_method_scoreboardclient_set_off_mode(void*_Nonnull ptr, RustBuffer board_id, RustBuffer id, RustCallStatus *_Nonnull out_status
@@ -611,11 +606,6 @@ void uniffi_app_core_fn_method_scoreboardclient_set_quiet_hours(void*_Nonnull pt
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_SCREENS
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_SCREENS
 void uniffi_app_core_fn_method_scoreboardclient_set_screens(void*_Nonnull ptr, RustBuffer board_id, RustBuffer screens, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_SLEEP_HOURS
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_SLEEP_HOURS
-void uniffi_app_core_fn_method_scoreboardclient_set_sleep_hours(void*_Nonnull ptr, RustBuffer board_id, uint32_t hours, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_METHOD_SCOREBOARDCLIENT_SET_SPOILER_ALL
@@ -702,7 +692,7 @@ RustBuffer uniffi_app_core_fn_func_card_highlight(RustBuffer game, RustBuffer fo
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_COMPUTE_WAKE_AT
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_COMPUTE_WAKE_AT
-RustBuffer uniffi_app_core_fn_func_compute_wake_at(RustBuffer id, RustBuffer kind, RustBuffer mode_hours, uint32_t sleep_hours, uint64_t now_unix, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_app_core_fn_func_compute_wake_at(RustBuffer id, uint64_t now_unix, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_CONFIGURED_PREVIEW
@@ -807,38 +797,6 @@ RustBuffer uniffi_app_core_fn_func_group_leagues(RustBuffer sports, RustCallStat
 RustBuffer uniffi_app_core_fn_func_held_after(RustBuffer held_id, RustBuffer screens, RustCallStatus *_Nonnull out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HOLD_TIMER_HOURS
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HOLD_TIMER_HOURS
-uint32_t uniffi_app_core_fn_func_hold_timer_hours(RustBuffer id, RustBuffer kind, RustBuffer mode_hours, uint32_t sleep_hours, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HOLD_TIMER_LABEL
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HOLD_TIMER_LABEL
-RustBuffer uniffi_app_core_fn_func_hold_timer_label(uint32_t hours, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HOLD_TIMER_OPTIONS
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HOLD_TIMER_OPTIONS
-RustBuffer uniffi_app_core_fn_func_hold_timer_options(RustCallStatus *_Nonnull out_status
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HOLD_TIMER_OPTIONS_FOR
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HOLD_TIMER_OPTIONS_FOR
-RustBuffer uniffi_app_core_fn_func_hold_timer_options_for(uint32_t current, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HOLD_TIMER_SELECTED
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HOLD_TIMER_SELECTED
-uint32_t uniffi_app_core_fn_func_hold_timer_selected(uint32_t hours, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HOLD_TIMER_TITLE
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HOLD_TIMER_TITLE
-RustBuffer uniffi_app_core_fn_func_hold_timer_title(RustCallStatus *_Nonnull out_status
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HOST_PORT_FOR_BOARD
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HOST_PORT_FOR_BOARD
 RustBuffer uniffi_app_core_fn_func_host_port_for_board(RustBuffer ws_url, RustCallStatus *_Nonnull out_status
@@ -847,11 +805,6 @@ RustBuffer uniffi_app_core_fn_func_host_port_for_board(RustBuffer ws_url, RustCa
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HTTP_BASE
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HTTP_BASE
 RustBuffer uniffi_app_core_fn_func_http_base(RustBuffer ws_url, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_IDLE_CYCLE_APPLIES
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_IDLE_CYCLE_APPLIES
-int8_t uniffi_app_core_fn_func_idle_cycle_applies(RustBuffer screens, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_IDLE_CYCLE_LABEL
@@ -876,9 +829,9 @@ RustBuffer uniffi_app_core_fn_func_idle_cycle_title(RustCallStatus *_Nonnull out
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_IDLE_EXPLAINER
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_IDLE_EXPLAINER
-RustBuffer uniffi_app_core_fn_func_idle_explainer(RustBuffer screens, uint32_t idle_cycle_secs, RustCallStatus *_Nonnull out_status
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_IDLE_EXPLAINER_PARTS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_IDLE_EXPLAINER_PARTS
+RustBuffer uniffi_app_core_fn_func_idle_explainer_parts(RustBuffer screens, uint32_t idle_cycle_secs, int8_t editable, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_IDLE_SINGLE_SELECT
@@ -949,11 +902,6 @@ RustBuffer uniffi_app_core_fn_func_mode_back_suffix(RustCallStatus *_Nonnull out
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_MODE_FOOTER_SHOWN
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_MODE_FOOTER_SHOWN
 int8_t uniffi_app_core_fn_func_mode_footer_shown(RustBuffer mode, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_MODE_HOURS_AFTER_SET
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_MODE_HOURS_AFTER_SET
-RustBuffer uniffi_app_core_fn_func_mode_hours_after_set(RustBuffer id, uint32_t hours, RustBuffer screens, RustBuffer mode_hours, uint32_t sleep_hours, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_MODE_LABEL
@@ -1050,7 +998,7 @@ RustBuffer uniffi_app_core_fn_func_resolved_screen_configs(RustBuffer screens, R
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_RING
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_RING
-RustBuffer uniffi_app_core_fn_func_ring(RustBuffer mode, int8_t quiet_active, int8_t panel_shows_nothing, RustBuffer screens, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_app_core_fn_func_ring(RustBuffer mode, int8_t quiet_active, int8_t panel_shows_nothing, RustBuffer screens, uint32_t idle_cycle_secs, RustBuffer idle_since_ms, uint64_t now_ms, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_ROTATION_ADD
@@ -1104,12 +1052,6 @@ RustBuffer uniffi_app_core_fn_func_screens_added(RustBuffer screens, RustBuffer 
 int8_t uniffi_app_core_fn_func_screens_editable(int8_t screens_supported, RustCallStatus *_Nonnull out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_SCREENS_EXPLAINER
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_SCREENS_EXPLAINER
-RustBuffer uniffi_app_core_fn_func_screens_explainer(RustCallStatus *_Nonnull out_status
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_SCREENS_LOADING_NOTE
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_SCREENS_LOADING_NOTE
 RustBuffer uniffi_app_core_fn_func_screens_loading_note(RustCallStatus *_Nonnull out_status
@@ -1118,7 +1060,7 @@ RustBuffer uniffi_app_core_fn_func_screens_loading_note(RustCallStatus *_Nonnull
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_SCREENS_REMOVED
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_SCREENS_REMOVED
-RustBuffer uniffi_app_core_fn_func_screens_removed(RustBuffer screens, RustBuffer id, RustBuffer mode, RustBuffer wake_at, RustBuffer mode_hours, RustBuffer off_modes, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_app_core_fn_func_screens_removed(RustBuffer screens, RustBuffer id, RustBuffer mode, RustBuffer wake_at, RustBuffer off_modes, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_SCREENS_WITH_IDLE
@@ -1672,42 +1614,6 @@ uint16_t uniffi_app_core_checksum_func_held_after(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HOLD_TIMER_HOURS
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HOLD_TIMER_HOURS
-uint16_t uniffi_app_core_checksum_func_hold_timer_hours(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HOLD_TIMER_LABEL
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HOLD_TIMER_LABEL
-uint16_t uniffi_app_core_checksum_func_hold_timer_label(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HOLD_TIMER_OPTIONS
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HOLD_TIMER_OPTIONS
-uint16_t uniffi_app_core_checksum_func_hold_timer_options(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HOLD_TIMER_OPTIONS_FOR
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HOLD_TIMER_OPTIONS_FOR
-uint16_t uniffi_app_core_checksum_func_hold_timer_options_for(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HOLD_TIMER_SELECTED
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HOLD_TIMER_SELECTED
-uint16_t uniffi_app_core_checksum_func_hold_timer_selected(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HOLD_TIMER_TITLE
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HOLD_TIMER_TITLE
-uint16_t uniffi_app_core_checksum_func_hold_timer_title(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HOST_PORT_FOR_BOARD
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HOST_PORT_FOR_BOARD
 uint16_t uniffi_app_core_checksum_func_host_port_for_board(void
@@ -1717,12 +1623,6 @@ uint16_t uniffi_app_core_checksum_func_host_port_for_board(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HTTP_BASE
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HTTP_BASE
 uint16_t uniffi_app_core_checksum_func_http_base(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_IDLE_CYCLE_APPLIES
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_IDLE_CYCLE_APPLIES
-uint16_t uniffi_app_core_checksum_func_idle_cycle_applies(void
     
 );
 #endif
@@ -1750,9 +1650,9 @@ uint16_t uniffi_app_core_checksum_func_idle_cycle_title(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_IDLE_EXPLAINER
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_IDLE_EXPLAINER
-uint16_t uniffi_app_core_checksum_func_idle_explainer(void
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_IDLE_EXPLAINER_PARTS
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_IDLE_EXPLAINER_PARTS
+uint16_t uniffi_app_core_checksum_func_idle_explainer_parts(void
     
 );
 #endif
@@ -1831,12 +1731,6 @@ uint16_t uniffi_app_core_checksum_func_mode_back_suffix(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_MODE_FOOTER_SHOWN
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_MODE_FOOTER_SHOWN
 uint16_t uniffi_app_core_checksum_func_mode_footer_shown(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_MODE_HOURS_AFTER_SET
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_MODE_HOURS_AFTER_SET
-uint16_t uniffi_app_core_checksum_func_mode_hours_after_set(void
     
 );
 #endif
@@ -2011,12 +1905,6 @@ uint16_t uniffi_app_core_checksum_func_screens_added(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_SCREENS_EDITABLE
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_SCREENS_EDITABLE
 uint16_t uniffi_app_core_checksum_func_screens_editable(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_SCREENS_EXPLAINER
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_SCREENS_EXPLAINER
-uint16_t uniffi_app_core_checksum_func_screens_explainer(void
     
 );
 #endif
@@ -2368,12 +2256,6 @@ uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_mode(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_MODE_HOURS
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_MODE_HOURS
-uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_mode_hours(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_OFF_MODE
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_OFF_MODE
 uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_off_mode(void
@@ -2407,12 +2289,6 @@ uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_quiet_hours(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_SCREENS
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_SCREENS
 uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_screens(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_SLEEP_HOURS
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_METHOD_SCOREBOARDCLIENT_SET_SLEEP_HOURS
-uint16_t uniffi_app_core_checksum_method_scoreboardclient_set_sleep_hours(void
     
 );
 #endif

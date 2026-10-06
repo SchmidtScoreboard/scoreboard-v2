@@ -23,9 +23,10 @@ Feature-complete against the iOS app for everything a phone does:
 - **Settings** — display name, seconds per screen, Screens (the board's
   screen list: Sports and Off pinned, your screens with live previews —
   add, remove, drag to reorder with Move up/down for TalkBack — the
-  "show when nothing is on" checks and the idle rotation timer, per-screen
-  pages with their layout, hold timer and Remove, quiet hours), Spoilers,
-  Updates, Troubleshooting, Advanced.
+  "show when nothing is on" checks, the idle sentence whose "every N
+  minutes" link opens the idle-timer picker, per-screen pages with their
+  layout and Remove — every picked screen holds 24 hours — quiet hours),
+  Spoilers, Updates, Troubleshooting, Advanced.
 
 Every RULE in there is a call into the shared core — ordering, ring
 precedence, the picker, descriptor interpretation, the provisioning sequence

@@ -118,22 +118,14 @@ pub fn demo_games_explainer() -> String {
 // ---- screens (MAR-117) ----
 //
 // The Screens page's copy, the held-mode footer and the settings transfer.
-// Section headers ("Screens", "When nothing is on") stay on the platform per
-// the charter above; the sentences live here.
+// Section headers ("Screens") stay on the platform per the charter above; the
+// sentences live here.
 
 /// What Sports is called everywhere — the rail, the Screens list, footers.
 /// The protocol's name, which the board's knob also uses (uppercased).
 #[uniffi::export]
 pub fn sports_label() -> String {
     scoreboard_protocol::SCORES_LABEL.into()
-}
-
-/// The Screens list's footer, where screens can be edited
-/// (`screens_editable`); show `update_server_note` in its place where they
-/// cannot. Promises nothing about the knob — stable boards have no menu.
-#[uniffi::export]
-pub fn screens_explainer() -> String {
-    "Sports and Off are always available. Add, remove, and reorder the rest.".into()
 }
 
 #[uniffi::export]
@@ -152,24 +144,50 @@ pub fn idle_toggle_label() -> String {
     "Show when nothing is on".into()
 }
 
-/// What the board does when nothing you follow is playing, for the screens
-/// `screen_list` returned and the board's idle timer: dark with none
-/// checked, the one screen with one, and the rotation with two or more.
+/// The Screens list's footer, in three runs so the idle timer can sit
+/// inline as a tappable link: `before`, then `link` (when present), then
+/// `after`. Concatenated, it is one sentence.
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct UiIdleExplainer {
+    pub before: String,
+    /// "every 5 minutes": tapping it opens the idle-timer picker
+    /// (`idle_cycle_title`, `idle_cycle_options`, committed with
+    /// `set_idle_cycle`). None when there is nothing to pick — fewer than two
+    /// checked screens, or a server that cannot store the timer — and the
+    /// whole sentence is then plain text.
+    pub link: Option<String>,
+    pub after: String,
+}
+
+/// What the board does when nothing you follow is playing — the Screens
+/// list's footer — for the rows `screen_list` returned and the board's idle
+/// timer: dark with none checked, the one screen with one, and the rotation
+/// with two or more, whose timer is the link when `editable`
+/// (`screens_editable`). Where screens are not editable, show
+/// `update_server_note` after it.
 #[uniffi::export]
-pub fn idle_explainer(screens: Vec<crate::rules::UiScreen>, idle_cycle_secs: u32) -> String {
+pub fn idle_explainer_parts(
+    screens: Vec<crate::rules::UiScreen>,
+    idle_cycle_secs: u32,
+    editable: bool,
+) -> UiIdleExplainer {
+    const LEAD: &str = "When nothing you follow is playing, the board";
+    let plain = |text: String| UiIdleExplainer { before: text, link: None, after: String::new() };
     let idle: Vec<&crate::rules::UiScreen> = screens.iter().filter(|s| s.idle && !s.fixed).collect();
     match idle.as_slice() {
-        [] => "When nothing you follow is playing, the board stays dark.".into(),
-        [one] => format!("When nothing you follow is playing, the board shows {}.", one.label),
+        [] => plain(format!("{LEAD} stays dark.")),
+        [one] => plain(format!("{LEAD} shows {}.", one.label)),
         _ => {
             let every = match crate::rules::idle_cycle_selected(idle_cycle_secs) {
-                3600 => "hour".to_string(),
-                secs => crate::rules::idle_cycle_label(secs),
+                3600 => "every hour".to_string(),
+                secs => format!("every {}", crate::rules::idle_cycle_label(secs)),
             };
-            format!(
-                "When nothing you follow is playing, the board switches between the checked \
-                 screens every {every}."
-            )
+            let before = format!("{LEAD} switches between the checked screens ");
+            if editable {
+                UiIdleExplainer { before, link: Some(every), after: ".".into() }
+            } else {
+                plain(format!("{before}{every}."))
+            }
         }
     }
 }
@@ -445,26 +463,37 @@ mod tests {
         }
     }
 
-    /// 0, 1 and 2+ checked screens each say what the board will do.
+    /// 0, 1 and 2+ checked screens each say what the board will do; with
+    /// two or more the timer is the link — only where the server can store
+    /// it — and the three runs always read as one sentence.
     #[test]
     fn the_idle_explainer_counts_the_checked_screens() {
+        let whole = |e: &UiIdleExplainer| format!("{}{}{}", e.before, e.link.clone().unwrap_or_default(), e.after);
         let mut rows = vec![screen("scores", "Sports", false, true), screen("off", "Off", false, true)];
-        assert_eq!(
-            idle_explainer(rows.clone(), 300),
-            "When nothing you follow is playing, the board stays dark."
-        );
+        for editable in [true, false] {
+            let e = idle_explainer_parts(rows.clone(), 300, editable);
+            assert_eq!(e.link, None, "nothing to pick");
+            assert_eq!(whole(&e), "When nothing you follow is playing, the board stays dark.");
+        }
         rows.push(screen("weather.2", "Forecast", true, false));
-        assert_eq!(
-            idle_explainer(rows.clone(), 300),
-            "When nothing you follow is playing, the board shows Forecast."
-        );
+        let e = idle_explainer_parts(rows.clone(), 300, true);
+        assert_eq!(e.link, None, "one screen has no timer");
+        assert_eq!(whole(&e), "When nothing you follow is playing, the board shows Forecast.");
         rows.push(screen("clock", "Clock", true, false));
+        let e = idle_explainer_parts(rows.clone(), 300, true);
         assert_eq!(
-            idle_explainer(rows.clone(), 300),
-            "When nothing you follow is playing, the board switches between the checked screens \
-             every 5 minutes."
+            e,
+            UiIdleExplainer {
+                before: "When nothing you follow is playing, the board switches between the checked screens ".into(),
+                link: Some("every 5 minutes".into()),
+                after: ".".into(),
+            }
         );
-        assert!(idle_explainer(rows, 3600).ends_with("every hour."));
+        assert_eq!(idle_explainer_parts(rows.clone(), 3600, true).link.as_deref(), Some("every hour"));
+        assert_eq!(idle_explainer_parts(rows.clone(), 400, true).link.as_deref(), Some("every 5 minutes"), "snapped");
+        let old = idle_explainer_parts(rows, 300, false);
+        assert_eq!(old.link, None, "a server without lists cannot store the timer: plain text");
+        assert_eq!(whole(&old), whole(&e), "the same sentence either way");
     }
 
     #[test]
@@ -477,8 +506,6 @@ mod tests {
         assert!(export_footer().contains("screens") && export_sheet_summary().contains("screens"));
         let black = troubleshooting_guides().into_iter().find(|g| g.slug == "black").unwrap();
         assert!(black.advice.contains("pick Sports") && !black.advice.contains("Scores"));
-        assert_eq!(screens_explainer(), "Sports and Off are always available. Add, remove, and reorder the rest.");
-        assert!(!screens_explainer().contains("knob"), "stable boards have no knob menu");
     }
 
     /// The Controls card and the Transfer section's remaining sentences,

@@ -275,10 +275,28 @@ private fun ModePicker(session: Session, state: Session.AppState, boardId: Strin
     if (tiles.isEmpty()) return
     // Upcoming/bumped entries are not on the panel — the core decides.
     val nothingShowing = panelShowsNothing(if (board.stateReceived) board.nowShowing else null)
-    // Several tiles wear the ring while the board idles through several
-    // screens: one of them is on the glass and the board never says which.
-    val ringed = remember(cfg.mode, board.quietActive, nothingShowing, screens) {
-        ring(cfg.mode, board.quietActive, nothingShowing, screens)
+    // ONE tile wears the ring: the screen on the glass. While the board
+    // idles through several, the core counts the slot from when the server
+    // says the rotation began, on this phone's clock — and says when it next
+    // moves; `tick` re-asks then. Evaluated with the clock as it is NOW, so a
+    // push mid-slot never rings from a stale time.
+    var tick by remember { mutableIntStateOf(0) }
+    val ringed = remember(cfg.mode, board.quietActive, nothingShowing, screens, cfg.idleCycleSecs, cfg.idleSinceMs, tick) {
+        ring(
+            cfg.mode, board.quietActive, nothingShowing, screens,
+            cfg.idleCycleSecs, cfg.idleSinceMs, System.currentTimeMillis().toULong(),
+        )
+    }
+    LaunchedEffect(ringed.nextChangeMs, tick) {
+        val next = ringed.nextChangeMs?.toLong() ?: return@LaunchedEffect
+        // Waits on the WALL clock in steps of at most a second: `delay`
+        // counts uptime, which stops while the phone sleeps, so one long
+        // delay would leave the ring stale for most of a slot after unlock.
+        // +1 ms: land past the boundary, not on it.
+        while (System.currentTimeMillis() <= next) {
+            kotlinx.coroutines.delay((next - System.currentTimeMillis() + 1).coerceIn(1, 1_000))
+        }
+        tick++
     }
     // Opens scrolled to the SELECTED tile — a rail whose selection sits
     // off-screen reads as "nothing is selected" (MAR-110). On entry and
@@ -303,11 +321,10 @@ private fun ModePicker(session: Session, state: Session.AppState, boardId: Strin
             val bmp = rememberPreview(t.preview?.let { "${session.httpBase}$it" })
             val on = t.id in ringed.ids
             Column(
-                // Every ringed tile reads as selected, as on iOS: while the
-                // idle rotation runs, each checked screen is on the glass in turn.
+                // The ringed tile reads as selected, as on iOS.
                 Modifier.width(128.dp)
                     .semantics { selected = on }
-                    .clickable { session.setMode(boardId, t.id, t.kind) },
+                    .clickable { session.setMode(boardId, t.id) },
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 LedFrame(bmp, selected = on)
