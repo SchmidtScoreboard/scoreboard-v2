@@ -1,8 +1,6 @@
 package com.markschmidt.scoreboard
 
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -16,9 +14,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
@@ -31,6 +27,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.dp
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
 import uniffi.app_core.UiBoardConfig
@@ -217,13 +220,14 @@ private fun ScreensList(
  * The list's footer: what the board does when nothing you follow is playing,
  * one sentence from the core. With two or more screens checked on a server
  * that stores lists, its "every 5 minutes" is a link opening the idle-timer
- * picker; elsewhere the sentence is plain, and an old server's update note
- * follows it.
+ * picker — a menu anchored to the link itself; elsewhere the sentence is
+ * plain, and an old server's update note follows it.
  */
 @Composable
 private fun IdleFooter(rows: List<UiScreen>, idleCycleSecs: UInt, editable: Boolean, onPick: (UInt) -> Unit) {
     val parts = remember(rows, idleCycleSecs, editable) { idleExplainerParts(rows, idleCycleSecs, editable) }
     var picking by remember { mutableStateOf(false) }
+    var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
     val linkStyle = TextLinkStyles(
         SpanStyle(color = MaterialTheme.colorScheme.primary, textDecoration = TextDecoration.Underline),
     )
@@ -235,11 +239,33 @@ private fun IdleFooter(rows: List<UiScreen>, idleCycleSecs: UInt, editable: Bool
         append(parts.after)
     }
     Column(Modifier.padding(top = 4.dp)) {
-        Text(
-            sentence,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.outline,
-        )
+        Box {
+            Text(
+                sentence,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.outline,
+                onTextLayout = { layout = it },
+            )
+            // The menu hangs off a box laid over the link's first line, so it
+            // opens from "every 5 minutes" rather than from the paragraph.
+            val link = parts.link
+            val anchor = layout?.takeIf { link != null }?.let {
+                linkBounds(it, parts.before.length, parts.before.length + link!!.length)
+            }
+            if (anchor != null) {
+                val density = LocalDensity.current
+                Box(
+                    Modifier
+                        .offset { IntOffset(anchor.left.roundToInt(), anchor.top.roundToInt()) }
+                        .size(with(density) { anchor.width.toDp() }, with(density) { anchor.height.toDp() }),
+                ) {
+                    IdleCycleMenu(picking, idleCycleSelected(idleCycleSecs), onDismiss = { picking = false }) {
+                        picking = false
+                        onPick(it)
+                    }
+                }
+            }
+        }
         if (!editable) {
             Text(
                 updateServerNote(),
@@ -249,44 +275,41 @@ private fun IdleFooter(rows: List<UiScreen>, idleCycleSecs: UInt, editable: Bool
             )
         }
     }
-    if (picking) {
-        IdleCycleDialog(idleCycleSelected(idleCycleSecs), onDismiss = { picking = false }) {
-            picking = false
-            onPick(it)
-        }
-    }
 }
 
-/** The idle timer's choices as a radio list, the current one selected;
- *  a choice commits at once, Cancel leaves it as it was. */
+/** Where the link's FIRST line landed in the text (a link that wraps opens
+ *  its menu from the line it starts on). */
+private fun linkBounds(layout: TextLayoutResult, start: Int, end: Int): Rect {
+    val line = layout.getLineForOffset(start)
+    val lineEnd = minOf(end, layout.getLineEnd(line, visibleEnd = true))
+    return if (lineEnd > start) layout.getPathForRange(start, lineEnd).getBounds() else layout.getBoundingBox(start)
+}
+
+/** The idle timer's choices under its title, the current one checked; a
+ *  choice commits at once, tapping away leaves it as it was. */
 @Composable
-private fun IdleCycleDialog(current: UInt, onDismiss: () -> Unit, onPick: (UInt) -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(idleCycleTitle()) },
-        text = {
-            Column(Modifier.selectableGroup()) {
-                for (o in idleCycleOptions()) {
-                    val on = o.secs == current
-                    Row(
-                        Modifier.fillMaxWidth()
-                            .selectable(selected = on, role = Role.RadioButton) {
-                                if (on) onDismiss() else onPick(o.secs)
-                            }
-                            .padding(vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        RadioButton(selected = on, onClick = null)
-                        Spacer(Modifier.width(12.dp))
-                        Text(o.label)
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text(stringResource(android.R.string.cancel)) }
-        },
-    )
+private fun IdleCycleMenu(expanded: Boolean, current: UInt, onDismiss: () -> Unit, onPick: (UInt) -> Unit) {
+    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        Text(
+            idleCycleTitle(),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.outline,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+        )
+        for (o in idleCycleOptions()) {
+            val on = o.secs == current
+            DropdownMenuItem(
+                text = { Text(o.label) },
+                onClick = { if (on) onDismiss() else onPick(o.secs) },
+                trailingIcon = if (on) {
+                    { Icon(Icons.Filled.Check, contentDescription = null) }
+                } else {
+                    null
+                },
+                modifier = Modifier.semantics { selected = on },
+            )
+        }
+    }
 }
 
 /** One screen: its panel, its name, and — for the user's screens — the

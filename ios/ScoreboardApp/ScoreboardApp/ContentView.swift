@@ -5745,6 +5745,65 @@ struct SettingsView: View {
         let parts = idleExplainerParts(
             screens: model.screenRows, idleCycleSecs: model.current.idleCycleSecs, editable: editable
         )
+        return VStack(alignment: .leading, spacing: 6) {
+            if #available(iOS 18, *), let link = parts.link {
+                anchoredIdleSentence(parts, link: link)
+            } else {
+                linkedIdleSentence(parts)
+            }
+            if !editable {
+                Text(updateServerNote())
+            }
+        }
+    }
+
+    /// The sentence with its link run marked, and a hit area laid exactly
+    /// over that run. The picker hangs off the hit area, so its popover
+    /// points at "every 5 minutes" rather than the middle of the paragraph.
+    /// (A link inside an AttributedString can't anchor anything: SwiftUI
+    /// only reports where a run landed through `Text.Layout`, iOS 18+.)
+    @available(iOS 18, *)
+    private func anchoredIdleSentence(_ parts: UiIdleExplainer, link: String) -> some View {
+        (Text(parts.before) + Text(link).customAttribute(IdleLinkRun()).foregroundStyle(.tint) + Text(parts.after))
+            .overlayPreferenceValue(Text.LayoutKey.self) { layouts in
+                GeometryReader { proxy in
+                    if let r = Self.idleLinkRect(layouts, in: proxy) {
+                        Button { showIdleCycle = true } label: {
+                            Color.clear.contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .frame(width: r.width + 8, height: r.height + 12)
+                        .position(x: r.midX, y: r.midY)
+                        .accessibilityLabel(link)
+                        .confirmationDialog(idleCycleTitle(), isPresented: $showIdleCycle, titleVisibility: .visible) {
+                            idleCycleChoices
+                        }
+                    }
+                }
+            }
+    }
+
+    /// Where the link's first line landed, in the overlay's coordinates. A
+    /// link that wraps anchors on the line it starts on.
+    @available(iOS 18, *)
+    private static func idleLinkRect(_ layouts: [Text.LayoutKey.AnchoredLayout], in proxy: GeometryProxy) -> CGRect? {
+        for anchored in layouts {
+            let origin = proxy[anchored.origin]
+            for line in anchored.layout {
+                var rect: CGRect?
+                for run in line where run[IdleLinkRun.self] != nil {
+                    let r = run.typographicBounds.rect
+                    rect = rect.map { $0.union(r) } ?? r
+                }
+                if let r = rect { return r.offsetBy(dx: origin.x, dy: origin.y) }
+            }
+        }
+        return nil
+    }
+
+    /// iOS 17, and the plain sentence everywhere: an inline link the
+    /// openURL handler claims, with the picker anchored to the sentence.
+    private func linkedIdleSentence(_ parts: UiIdleExplainer) -> some View {
         var sentence = AttributedString(parts.before)
         if let link = parts.link {
             var run = AttributedString(link)
@@ -5753,35 +5812,34 @@ struct SettingsView: View {
             sentence += run
         }
         sentence += AttributedString(parts.after)
-        return VStack(alignment: .leading, spacing: 6) {
-            Text(sentence)
-                .environment(\.openURL, OpenURLAction { url in
-                    guard url == Self.idleCycleLink else { return .systemAction }
-                    showIdleCycle = true
-                    return .handled
-                })
-                // Anchored to the sentence, so on iPad it pops over from it.
-                .confirmationDialog(idleCycleTitle(), isPresented: $showIdleCycle, titleVisibility: .visible) {
-                    // A stored value that is not a preset selects the preset
-                    // it snaps to — the one the board times itself by.
-                    let selected = idleCycleSelected(secs: model.current.idleCycleSecs)
-                    ForEach(idleCycleOptions(), id: \.secs) { o in
-                        Button {
-                            model.setIdleCycle(o.secs)
-                        } label: {
-                            if o.secs == selected {
-                                Label(o.label, systemImage: "checkmark")
-                            } else {
-                                Text(o.label)
-                            }
-                        }
-                    }
-                    Button("Cancel", role: .cancel) {}
+        return Text(sentence)
+            .environment(\.openURL, OpenURLAction { url in
+                guard url == Self.idleCycleLink else { return .systemAction }
+                showIdleCycle = true
+                return .handled
+            })
+            .confirmationDialog(idleCycleTitle(), isPresented: $showIdleCycle, titleVisibility: .visible) {
+                idleCycleChoices
+            }
+    }
+
+    /// The idle timer's choices, the current one ticked. A stored value
+    /// that is not a preset ticks the preset it snaps to — the one the board
+    /// times itself by.
+    @ViewBuilder private var idleCycleChoices: some View {
+        let selected = idleCycleSelected(secs: model.current.idleCycleSecs)
+        ForEach(idleCycleOptions(), id: \.secs) { o in
+            Button {
+                model.setIdleCycle(o.secs)
+            } label: {
+                if o.secs == selected {
+                    Label(o.label, systemImage: "checkmark")
+                } else {
+                    Text(o.label)
                 }
-            if !editable {
-                Text(updateServerNote())
             }
         }
+        Button("Cancel", role: .cancel) {}
     }
 
     /// The footer link's target: an in-app action, not a place.
@@ -6746,3 +6804,8 @@ extension UiOffMode: Identifiable {}
 /// A screen's identity is its INSTANCE id — unique even when a kind repeats.
 extension UiScreen: Identifiable {}
 extension UiScreenConfig: Identifiable {}
+
+/// Tags the idle sentence's "every N minutes" run, so its laid-out rect can
+/// be found in `Text.Layout` and the timer picker anchored to it.
+@available(iOS 18, *)
+private struct IdleLinkRun: TextAttribute {}
