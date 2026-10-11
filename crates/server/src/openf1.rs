@@ -381,6 +381,12 @@ struct Interval {
     /// where gap-to-leader turns the midfield into large meaningless numbers.
     /// A number, or a string like "+1 LAP" for lapped cars, or null for the
     /// leader. serde_json::Value covers all three honestly.
+    ///
+    /// Also null, now and then, for a RUNNING car: a partial record whose
+    /// `gap_to_leader` is still a number, landing a fraction of a second
+    /// after a complete one (185 of 24,930 records at the 2026 Azerbaijan
+    /// GP, never more than two in a row). It says nothing about the
+    /// interval, so `rows_from_live` skips it.
     #[serde(default)]
     interval: serde_json::Value,
     #[serde(default)]
@@ -662,8 +668,10 @@ fn rows_from_live(
             *e = (p.date.as_str(), p.position);
         }
     }
+    // Only records that carry an interval: a partial one (see `Interval`)
+    // taken as the latest blanked that driver until the next poll (MAR-114).
     let mut gap: HashMap<u32, (&str, &serde_json::Value)> = HashMap::new();
-    for i in intervals {
+    for i in intervals.iter().filter(|i| !i.interval.is_null()) {
         let e = gap.entry(i.driver_number).or_insert((i.date.as_str(), &i.interval));
         if i.date.as_str() >= e.0 {
             *e = (i.date.as_str(), &i.interval);
@@ -969,6 +977,25 @@ mod tests {
         assert_eq!(rows[1].value, "+1.36", "the INTERVAL to the car ahead, in hundredths");
         assert_eq!(rows[1].tire, Some('H'));
         assert_eq!(rows[2].value, "+1L", "lapped cars tighten for 64px");
+    }
+
+    /// A partial interval record (null interval, numeric gap_to_leader) is
+    /// not the driver's latest interval. Verbatim from the 2026 Azerbaijan
+    /// GP, #87 in P11 at 11:35Z: newest-wins blanked him (MAR-114).
+    #[test]
+    fn a_partial_interval_record_does_not_blank_the_driver() {
+        let positions: Vec<Position> = serde_json::from_str(
+            r#"[{"driver_number":1,"position":1,"date":"2026-09-26T11:35:00+00:00"},
+                {"driver_number":63,"position":2,"date":"2026-09-26T11:35:00+00:00"}]"#,
+        )
+        .unwrap();
+        let intervals: Vec<Interval> = serde_json::from_str(
+            r#"[{"driver_number":63,"gap_to_leader":31.285,"interval":2.028,"date":"2026-09-26T11:35:01.987000+00:00"},
+                {"driver_number":63,"gap_to_leader":31.281,"interval":null,"date":"2026-09-26T11:35:02.610000+00:00"}]"#,
+        )
+        .unwrap();
+        let rows = rows_from_live(&positions, &intervals, &[], &drivers());
+        assert_eq!(rows[1].value, "+2.03", "the last COMPLETE record stands");
     }
 
     /// Q2 of the 2026 Spanish GP, shapes verbatim: segments come from the
