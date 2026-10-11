@@ -77,9 +77,11 @@ fn notice_lines(state: &AppState, board: &str) -> Vec<String> {
 // ---- the deploy-day invariant ----
 
 /// A board that never saved a list gets EXACTLY the manifest it got before
-/// lists existed, but for the two differences chosen on purpose: the knob
-/// reads SPORTS first and OFF second (§0 Q2), and a stored mode "blank"
-/// loads as "off" (it was already dark; now the board says so).
+/// lists existed, but for the differences chosen on purpose: the knob reads
+/// SPORTS first and OFF second (§0 Q2), a stored mode "blank" loads as "off"
+/// (it was already dark; now the board says so), and a non-default layout
+/// names its knob entry as the app names the screen, FORECAST rather than
+/// WEATHER (MAR-119).
 ///
 /// The expectations are built the way the pre-list server built them —
 /// `render_off_mode(id, flat params)`, dwell 60 s, epoch 0 — so a change to
@@ -90,12 +92,15 @@ fn notice_lines(state: &AppState, board: &str) -> Vec<String> {
 #[test]
 fn an_unsaved_board_keeps_todays_manifest() {
     freeze_at(FROZEN);
-    let knob = vec![
-        ModeEntry { id: "scores".into(), label: "SPORTS".into() },
-        ModeEntry { id: "off".into(), label: "OFF".into() },
-        ModeEntry { id: "clock".into(), label: "CLOCK".into() },
-        ModeEntry { id: "weather".into(), label: "WEATHER".into() },
-    ];
+    let knob_naming = |clock: &str, weather: &str| {
+        vec![
+            ModeEntry { id: "scores".into(), label: "SPORTS".into() },
+            ModeEntry { id: "off".into(), label: "OFF".into() },
+            ModeEntry { id: "clock".into(), label: clock.into() },
+            ModeEntry { id: "weather".into(), label: weather.into() },
+        ]
+    };
+    let knob = knob_naming("CLOCK", "WEATHER");
     let lit = |state: &AppState, cfg: &BoardConfig, kind: &str, mode: &str| {
         let rotation: Vec<RotationEntry> = render(state, cfg, kind, &cfg.off_mode_params)
             .into_iter()
@@ -144,7 +149,10 @@ fn an_unsaved_board_keeps_todays_manifest() {
     let mut b = watch_all();
     b.set_off_mode("weather", false);
     b.off_mode_params = params(&[("variant", "forecast"), ("location", ZIP)]);
-    check("idle forecast", b, false, &|s, c| lit(s, c, "weather", "scores"));
+    check("idle forecast", b, false, &|s, c| Manifest {
+        modes: knob_naming("CLOCK", "FORECAST"),
+        ..lit(s, c, "weather", "scores")
+    });
 
     let mut c = watch_all();
     c.set_off_mode("blank", true);
@@ -158,11 +166,17 @@ fn an_unsaved_board_keeps_todays_manifest() {
     let mut e = watch_all();
     e.set_mode("clock");
     e.off_mode_params = params(&[("style", "word")]);
-    check("held word clock", e, false, &|s, c| lit(s, c, "clock", "clock"));
+    check("held word clock", e, false, &|s, c| Manifest {
+        modes: knob_naming("WORD CLOCK", "WEATHER"),
+        ..lit(s, c, "clock", "clock")
+    });
 
     let mut h24 = watch_all();
     h24.off_mode_params = params(&[("style", "compact"), ("hour24", "1")]);
-    check("24-hour idle clock", h24, false, &|s, c| lit(s, c, "clock", "scores"));
+    check("24-hour idle clock", h24, false, &|s, c| Manifest {
+        modes: knob_naming("SMALL CLOCK", "WEATHER"),
+        ..lit(s, c, "clock", "scores")
+    });
 
     let mut f = watch_all();
     f.set_mode("off");

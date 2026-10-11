@@ -2679,7 +2679,7 @@ mod screens_tests {
         let got: Vec<(&str, bool)> = list.iter().map(|s| (s.id.as_str(), s.idle)).collect();
         assert_eq!(got, [("scores", false), ("off", false), ("clock", false), ("weather", true), ("stocks", false)]);
         let w = &list[3];
-        assert_eq!(w.label, "Weather", "one instance keeps the descriptor label");
+        assert_eq!(w.label, "Forecast", "named by its layout, even alone (MAR-119)");
         assert_eq!(w.preview.as_deref(), Some("/offmode/weather.png?variant=forecast"), "the layout is kept, the ZIP is not");
         let raw = resolved_screen_configs(vec![], "weather".into(), flat.clone(), ui_catalog());
         assert_eq!(raw[3].params, map(&[("variant", "forecast")]));

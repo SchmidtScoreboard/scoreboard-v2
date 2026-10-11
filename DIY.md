@@ -307,9 +307,10 @@ These rules keep that working:
   two Weather screens with different layouts. Every other field (a location,
   24-hour time) is board-wide, typed once and shared by every copy.
 - **Give each option of a per-screen choice a short `screen_label`** (15
-  characters or fewer: "Forecast", "Word clock"). It names the screen when a
-  board has more than one copy. Without it the app falls back to
-  "Weather · Forecast" and the knob to a shortened form of that.
+  characters or fewer: "Forecast", "Word clock"). It names every screen with
+  that option. Without it a single copy goes by the mode's label, and copies
+  that repeat fall back to "Weather · Forecast" (the knob shows a shortened
+  form of that).
 - **Render exactly one frame, with 16 colors or fewer.** A screen in the idle
   rotation shares the board's 24 KB frame cache with every other screen in it.
   The board keeps its place in the rotation only while the rotation's length

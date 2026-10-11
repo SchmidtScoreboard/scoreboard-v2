@@ -39,8 +39,8 @@
 //!   by every instance of the kind. Renders read the board-wide values overlaid
 //!   by the instance's own.
 //! - **`screen_label`** on each choice of a per-screen field: the short name
-//!   (at most 15 characters, it is also the knob label) a screen goes by when
-//!   its kind appears on the list more than once.
+//!   (at most 15 characters, it is also the knob label) a screen with that
+//!   layout goes by.
 //!
 //! Anything that needs a reading fetched (weather needs a location) declares
 //! the field rather than being recognised by id — see [`needs_location`].
@@ -139,7 +139,7 @@ fn per_screen(mut f: OffModeField) -> OffModeField {
 }
 
 /// The four weather layouts, as choices rather than as four top-level modes.
-/// Each names the screen when Weather is on a board's list more than once.
+/// Each names a screen with that layout.
 fn weather_variants() -> Vec<OffModeChoice> {
     [
         ("simple", "Simple", "Big weather"),
@@ -157,9 +157,8 @@ fn weather_variants() -> Vec<OffModeChoice> {
     .collect()
 }
 
-/// A clock style's name as a screen, for when Clock is on a board's list more
-/// than once. A style this table does not know falls back to the protocol's
-/// "{mode} · {choice}".
+/// A clock style's name as a screen. A style this table does not know falls
+/// back to the protocol's rule: "Clock" alone, "Clock · {choice}" repeated.
 fn clock_screen_label(style: &str) -> Option<String> {
     match style {
         "classic" => Some("Clock"),

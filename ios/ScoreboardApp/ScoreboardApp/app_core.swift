@@ -3408,9 +3408,9 @@ public struct UiOffModeChoice {
     public var label: String
     public var preview: String?
     /**
-     * Server-declared short name for a SCREEN using this choice, used when
-     * its kind appears more than once on a board. None = the core composes
-     * "{mode} · {choice}" (see `screen_list`, `addable_screens`).
+     * Server-declared short name for a SCREEN using this choice. None = the
+     * mode's label alone, or "{mode} · {choice}" when the kind repeats (see
+     * `screen_list`, `addable_screens`).
      */
     public var screenLabel: String?
 
@@ -3418,9 +3418,9 @@ public struct UiOffModeChoice {
     // declare one manually.
     public init(value: String, label: String, preview: String?,
                 /**
-                    * Server-declared short name for a SCREEN using this choice, used when
-                    * its kind appears more than once on a board. None = the core composes
-                    * "{mode} · {choice}" (see `screen_list`, `addable_screens`).
+                    * Server-declared short name for a SCREEN using this choice. None = the
+                    * mode's label alone, or "{mode} · {choice}" when the kind repeats (see
+                    * `screen_list`, `addable_screens`).
                     */ screenLabel: String?)
     {
         self.value = value

@@ -248,11 +248,12 @@ pub struct OffModeChoice {
     /// build a URL out of an id it is not allowed to understand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
-    /// Short name for a SCREEN using this choice, for when its kind appears
-    /// more than once on a board ("Big weather" beside "Forecast"). Server-
-    /// declared so the app never composes a name out of ids, and at most 15
-    /// characters so it fits the board's knob menu. `None` falls back to
-    /// "{mode label} · {choice label}" — see [`screen_labels`].
+    /// Short name for a SCREEN using this choice ("Big weather", "Forecast",
+    /// "Word clock"). Server-declared so the app never composes a name out
+    /// of ids, and at most 15 characters so it fits the board's knob menu.
+    /// `None` falls back to the mode's label, or "{mode label} · {choice
+    /// label}" when the kind is on the list more than once — see
+    /// [`screen_labels`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screen_label: Option<String>,
 }
@@ -1797,10 +1798,12 @@ pub fn resolved_screens(cfg: &BoardConfig, catalog: &[OffModeDescriptor]) -> Vec
     normalize_screens(list, catalog)
 }
 
-/// A screen's name before any tie is broken. Sports and Off are fixed; a
-/// kind on the list once keeps its descriptor label, so nothing is renamed
-/// on the day lists ship; a kind on it more than once is named by its layout
-/// or style — the selected option of its first per-screen choice field.
+/// A screen's name before any tie is broken. Sports and Off are fixed; any
+/// other screen is named by its layout or style — the `screen_label` of the
+/// selected option of its kind's first per-screen choice field — so a lone
+/// word clock reads "Word clock", as Add Screen offered it (MAR-119). An
+/// option without one leaves a kind on the list once its descriptor label,
+/// and names a repeated kind "{mode} · {choice}".
 fn screen_base_label(screens: &[ScreenConfig], i: usize, catalog: &[OffModeDescriptor]) -> String {
     let s = &screens[i];
     if s.kind == MODE_SCORES {
@@ -1812,16 +1815,15 @@ fn screen_base_label(screens: &[ScreenConfig], i: usize, catalog: &[OffModeDescr
     let Some(d) = catalog.iter().find(|d| d.id == s.kind) else {
         return s.id.clone();
     };
-    if screens.iter().filter(|o| o.kind == s.kind).count() <= 1 {
-        return d.label.clone();
-    }
     let Some(f) = d.fields.iter().find(|f| f.per_screen && f.kind == "choice") else {
         return d.label.clone();
     };
     let value = d.value(&f.key, &s.params);
+    let lone = screens.iter().filter(|o| o.kind == s.kind).count() <= 1;
     match f.options.iter().find(|o| o.value == value) {
         Some(o) => match o.screen_label.as_deref().filter(|l| !l.is_empty()) {
             Some(l) => l.to_string(),
+            None if lone => d.label.clone(),
             None => format!("{} · {}", d.label, o.label),
         },
         None => d.label.clone(),
@@ -3783,10 +3785,11 @@ mod screens_tests {
         }
     }
 
-    /// A kind on the list once keeps the label it has today, so nothing is
-    /// renamed when lists ship; a repeated kind is named by its layout.
+    /// Every screen is named by its layout, lone or repeated: a lone word
+    /// clock is "Word clock", as Add Screen offered it (MAR-119). The default
+    /// layouts' names are the kinds', so a fresh list reads as it always has.
     #[test]
-    fn labels_name_a_repeated_kind_by_its_layout() {
+    fn labels_name_every_screen_by_its_layout() {
         let cat = catalog();
         let fresh = resolved_screens(&BoardConfig::default(), &cat);
         assert_eq!(screen_labels(&fresh, &cat), ["Sports", "Off", "Clock", "Weather"]);
@@ -3804,15 +3807,21 @@ mod screens_tests {
         );
         assert_eq!(
             screen_labels(&list, &cat),
-            ["Sports", "Off", "Big weather", "Forecast", "Weather", "Forecast 2", "Clock"]
+            ["Sports", "Off", "Big weather", "Forecast", "Weather", "Forecast 2", "Word clock"]
         );
         assert_eq!(screen_label(&list, 3, &cat), "Forecast");
         assert_eq!(screen_label(&list, 99, &cat), "");
         assert_eq!(
             board_labels(&list, &cat),
-            ["SPORTS", "OFF", "BIG WEATHER", "FORECAST", "WEATHER", "FORECAST 2", "CLOCK"]
+            ["SPORTS", "OFF", "BIG WEATHER", "FORECAST", "WEATHER", "FORECAST 2", "WORD CLOCK"]
         );
-        assert_eq!(board_label(&list, 6, &cat), "CLOCK");
+        assert_eq!(board_label(&list, 6, &cat), "WORD CLOCK");
+
+        let lone = normalize_screens(
+            vec![screen("clock", "clock", &[("style", "word")], false), screen("weather", "weather", &[("variant", "forecast")], false)],
+            &cat,
+        );
+        assert_eq!(screen_labels(&lone, &cat)[2..], ["Word clock", "Forecast"]);
     }
 
     /// A server that declares no screen label still names each screen, and
@@ -3833,6 +3842,9 @@ mod screens_tests {
         );
         assert_eq!(screen_labels(&list, &cat)[2..], ["Weather · Simple", "Weather · Clock + Weather"]);
         assert_eq!(board_labels(&list, &cat)[2..], ["WEATHER SIMPLE", "WEATHER CLOCK +"]);
+        // Alone, the kind's own name says enough.
+        let lone = normalize_screens(vec![screen("weather", "weather", &[("variant", "simple")], false)], &cat);
+        assert_eq!(screen_labels(&lone, &cat)[2..], ["Weather"]);
     }
 
     fn assert_knob_safe(list: &[ScreenConfig], cat: &[OffModeDescriptor]) {

@@ -99,9 +99,9 @@ pub struct UiOffModeChoice {
     pub value: String,
     pub label: String,
     pub preview: Option<String>,
-    /// Server-declared short name for a SCREEN using this choice, used when
-    /// its kind appears more than once on a board. None = the core composes
-    /// "{mode} · {choice}" (see `screen_list`, `addable_screens`).
+    /// Server-declared short name for a SCREEN using this choice. None = the
+    /// mode's label alone, or "{mode} · {choice}" when the kind repeats (see
+    /// `screen_list`, `addable_screens`).
     pub screen_label: Option<String>,
 }
 
