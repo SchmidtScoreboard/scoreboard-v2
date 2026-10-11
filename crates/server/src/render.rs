@@ -894,13 +894,6 @@ fn field_x(yards: i32) -> i32 {
     EZ_HOME + (yards.clamp(0, 100) * field_w) / 100
 }
 
-/// A team colour at end-zone weight — enough to say whose end it is, dim enough
-/// that the white scrimmage line stays the brightest thing on the bar.
-fn end_zone_tint(c: Rgb888) -> Rgb888 {
-    let f = |v: u8| (v as u32 * 2 / 5) as u8;
-    Rgb888::new(f(c.r()), f(c.g()), f(c.b()))
-}
-
 /// Where the ball is, as yards from the HOME goal line — the bar's fixed
 /// left edge.
 ///
@@ -965,8 +958,10 @@ fn draw_football_field(c: &mut Canvas, g: &Game, yards: Option<i32>, to_gain: Op
     const TOP: i32 = 24;
     const H: u32 = 7;
     fill(c, 0, TOP, FRAME_WIDTH as u32, H, Rgb888::new(0, 26, 0));
-    fill(c, 0, TOP, EZ_HOME as u32, H, end_zone_tint(g.home.primary));
-    fill(c, FRAME_WIDTH as i32 - EZ_AWAY, TOP, EZ_AWAY as u32, H, end_zone_tint(g.away.primary));
+    // Each end zone is its team's primary, exactly the colour its row
+    // draws (MAR-120). A dimmed tint crushed dark navies to black.
+    fill(c, 0, TOP, EZ_HOME as u32, H, g.home.primary);
+    fill(c, FRAME_WIDTH as i32 - EZ_AWAY, TOP, EZ_AWAY as u32, H, g.away.primary);
     // Yard markings: 1px hashes at every 10, top and bottom rows only.
     //
     // The middle five rows stay clean turf, which is what keeps the hierarchy
@@ -982,9 +977,9 @@ fn draw_football_field(c: &mut Canvas, g: &Game, yards: Option<i32>, to_gain: Op
     // where the red zone was a STATE — the defending end zone came up to full
     // colour inside the 20 — and that cue was only ever as loud as the
     // defending team's primary: navy at full strength is barely brighter than
-    // the same navy at the 40% these end zones use, so the most exciting moment
-    // in the game announced itself for one team and stayed silent for the
-    // other. Worth remembering, because it is the reason not to try that again.
+    // the same navy at the 40% the end zones once used, so the most exciting
+    // moment in the game announced itself for one team and stayed silent for
+    // the other. Worth remembering, because it is the reason not to try that again.
     // The line that replaced it was honest but it was a fourth vertical on a
     // seven-pixel bar, and you can already see the ball approaching the goal.
     for yard in (10..=90).step_by(10) {
@@ -2849,13 +2844,12 @@ mod kern_tests {
             "right edge: four blanks"
         );
         assert_eq!(px565(&mid, field_x(30), 27), white, "the scrimmage line sits at the 30");
-        // The FIXED sides, the point of this test: home's tint on the left,
+        // The FIXED sides, the point of this test: home's colour on the left,
         // away's on the right, for BOTH possessions.
         let ref_game = sit_game("nfl", "", "", Situation::Football {
             down_string: String::new(), ball_position: String::new(), home_possession: None,
         });
-        let (home_tint, away_tint) =
-            (c565(end_zone_tint(ref_game.home.primary)), c565(end_zone_tint(ref_game.away.primary)));
+        let (home_tint, away_tint) = (c565(ref_game.home.primary), c565(ref_game.away.primary));
         for home_ball in [false, true] {
             let px = bar("SEA 25", home_ball);
             assert_eq!(px565(&px, 1, 27), home_tint, "home zone left (home_ball={home_ball})");
