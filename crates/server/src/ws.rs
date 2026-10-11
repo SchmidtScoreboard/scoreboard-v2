@@ -1411,13 +1411,13 @@ mod tests {
         let stranger = [1u8; 32];
         let (reply, _keep) = auth_blessed(&url, Role::Device, &stranger, None).await;
         assert!(matches!(reply, Some(ServerMsg::NotAuthorized)), "unauthorized board refused, got {reply:?}");
-        let forged = Some(hex::encode(scoreboard_protocol::bless(&[5u8; 32], &stranger)));
+        let forged = Some(hex::encode(scoreboard_protocol::bless(&[5u8; 32], &pubkey_bytes(&stranger))));
         let (reply, _keep2) = auth_blessed(&url, Role::Device, &stranger, forged).await;
         assert!(matches!(reply, Some(ServerMsg::NotAuthorized)), "blessed by the wrong key, got {reply:?}");
         assert!(state.devices.lock().unwrap().get(&pubkey_hex(&stranger)).is_none(), "never registered as a device");
 
         let sold = [2u8; 32];
-        let blessing = Some(hex::encode(scoreboard_protocol::bless(&OWNER, &sold)));
+        let blessing = Some(hex::encode(scoreboard_protocol::bless(&OWNER, &pubkey_bytes(&sold))));
         let (reply, _dev) = auth_blessed(&url, Role::Device, &sold, blessing).await;
         assert!(matches!(reply, Some(ServerMsg::AuthOk)), "a blessed board is served, got {reply:?}");
 

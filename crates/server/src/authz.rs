@@ -80,7 +80,7 @@ impl BoardAuthz {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scoreboard_protocol::{bless, pubkey_hex};
+    use scoreboard_protocol::{bless, pubkey_bytes, pubkey_hex};
 
     const OWNER: [u8; 32] = [11u8; 32];
 
@@ -92,13 +92,13 @@ mod tests {
     fn only_the_owners_blessing_of_this_board_authorizes_it() {
         let board = [22u8; 32];
         let id = pubkey_hex(&board);
-        let blessing = hex::encode(bless(&OWNER, &board));
+        let blessing = hex::encode(bless(&OWNER, &pubkey_bytes(&board)));
         let authz = BoardAuthz::new(&owner_pubkey(), true).unwrap();
 
         assert!(authz.authorized(&id, Some(&blessing)));
         assert!(!authz.authorized(&id, None), "no blessing");
         assert!(!authz.authorized(&pubkey_hex(&[44u8; 32]), Some(&blessing)), "another board's blessing");
-        let forged = hex::encode(bless(&[99u8; 32], &board));
+        let forged = hex::encode(bless(&[99u8; 32], &pubkey_bytes(&board)));
         assert!(!authz.authorized(&id, Some(&forged)), "blessed by someone else");
     }
 

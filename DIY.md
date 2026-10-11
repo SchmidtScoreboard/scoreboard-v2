@@ -9,9 +9,9 @@ There are two ways to run a scoreboard:
    This guide. You own the data, the keys, and the uptime.
 2. **The hosted server** — a one-time fee, no server to run. You still build the
    hardware and flash it; you just skip [Part 2](#part-2--run-a-server). The
-   hosted server only serves boards we've authorized, so we send you a small
-   identity file to flash with it (see
-   [BYOD](docs/provisioning.md#byod--your-hardware-our-server)).
+   hosted server only serves boards we've authorized: you send us your board's
+   id, we send back an authorization code, and you flash it with the firmware
+   (see [BYOD](docs/provisioning.md#byod--your-hardware-our-server)).
 
 Everything below is the same for both except Part 2 and one field during setup.
 

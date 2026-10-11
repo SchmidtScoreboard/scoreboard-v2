@@ -28,12 +28,12 @@
 # Either way a TLS build without its pin fails at COMPILE time, on purpose —
 # there is no safe default and a wrong pin is unrecoverable over the air.
 #
-# IDENTITY=<image.bin> also writes an authorized identity (MAR-90) minted by
-# `cargo run -p server --bin bless-board -- <image.bin>` into the identity
-# sector, so the board can use a hosted server that requires authorization.
-# It REPLACES whatever identity the board had, so the board becomes a new
-# board to the server and its phones. Delete the image afterwards: it IS the
-# board.
+# IDENTITY=<image.bin> also writes an authorized identity (MAR-90) from
+# `bless-board` (minted in one step, or `--new-identity` + `--attach`) into the
+# identity sector, so the board can use a hosted server that requires
+# authorization. It REPLACES whatever identity the board had, so the board
+# becomes a new board to the server and its phones. Keep the image private:
+# it IS the board.
 set -euo pipefail
 cd "$(dirname "$0")/../firmware-rs"
 

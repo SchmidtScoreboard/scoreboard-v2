@@ -361,8 +361,9 @@ holds only the owner's public key. A self-hosted server sets none of this and
 serves every board.
 
 **Minting.** `bless-board` keeps the owner's seed at
-`~/.config/scoreboard/board-blessing.key` (generated on first use; back it up,
-never put it on a server):
+`~/.config/scoreboard/board-blessing.key`. Only `--print-pubkey` creates it;
+minting and signing refuse to run without it. Back it up, and never put it on
+a server.
 
 ```sh
 cargo run -p server --bin bless-board -- --print-pubkey     # -> BOARD_BLESSING_PUBKEY
@@ -370,6 +371,15 @@ cargo run -p server --bin bless-board -- board-0042.bin     # mint one board
 IDENTITY=board-0042.bin FEATURES=prod SCOREBOARD_TLS_PIN=… scripts/flash.sh
 cargo run -p server --bin bless-board -- --check board-0042.bin   # optional
 rm board-0042.bin                                            # the image IS the board
+```
+
+**BYOD.** The builder creates the identity (`--new-identity`) and sends only
+its board id; the secret never leaves their machine. You answer with an
+authorization code, which they `--attach` before flashing (the whole flow is in
+[provisioning.md](provisioning.md#byod--your-hardware-our-server)):
+
+```sh
+cargo run -p server --bin bless-board -- --sign <board id>  # -> auth1-…, not secret
 ```
 
 **Rolling it out** without turning off a board you meant to keep:

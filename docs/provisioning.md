@@ -131,15 +131,39 @@ set to "My own server." TLS costs them nothing at all.
 ### BYOD — your hardware, our server
 
 The hosted server only serves authorized boards, so a board you built needs
-an identity from us. We mint one for your board and send you its image: one
-4 KB file, which you flash exactly the way we flash a board we sell
-(`IDENTITY=…`, `FEATURES=prod`, the hosted server's pin from
-[Deriving a pin](#deriving-a-pin-from-a-running-server)). Treat the file like
-a password, and delete it once it's flashed. Your board then behaves like one
-we sold, including keeping its authorization through a factory reset.
+an authorization code from us. You create your board's identity yourself, and
+its secret never leaves your machine: all we ever see is its public id.
 
-A board pointed at the hosted server without one connects, is refused, and
-shows NOT AUTHORIZED.
+1. **Create the identity.** One 4 KB file; the board id is printed.
+
+   ```sh
+   cargo run -p server --bin bless-board -- --new-identity board.bin
+   ```
+
+   Keep `board.bin` private: whoever has it can be your board.
+
+2. **Send us the board id** (the 64 hex characters it printed). We send back an
+   authorization code, `auth1-…`. It is not secret: it is useless without your
+   `board.bin`.
+
+3. **Attach it, then flash** with the hosted-server image and its pin (from
+   [Deriving a pin](#deriving-a-pin-from-a-running-server)):
+
+   ```sh
+   cargo run -p server --bin bless-board -- --attach auth1-… board.bin
+   IDENTITY=board.bin FEATURES=prod SCOREBOARD_TLS_PIN=<pin> bash scripts/flash.sh
+   ```
+
+   `--attach` refuses a code that is damaged or was made for a different
+   board, so a copy-paste slip is caught before anything is flashed.
+
+Then set it up in the app like any board. It behaves like one we sold,
+including keeping its authorization through a factory reset. Keep
+`board.bin` somewhere safe if you'd like to be able to restore the board after
+replacing its flash; otherwise delete it.
+
+A board pointed at the hosted server without an authorization connects, is
+refused, and shows NOT AUTHORIZED.
 
 Self-hosting below needs nothing from us and is unaffected.
 

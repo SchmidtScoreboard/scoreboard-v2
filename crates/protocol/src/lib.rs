@@ -2636,7 +2636,19 @@ fn decode_pal_rle(body: &[u8]) -> Option<Vec<u8>> {
 
 /// Public key (hex) derived from a 32-byte Ed25519 secret seed.
 pub fn pubkey_hex(secret: &[u8; 32]) -> String {
-    hex::encode(SigningKey::from_bytes(secret).verifying_key().to_bytes())
+    hex::encode(pubkey_bytes(secret))
+}
+
+/// The raw 32-byte public key derived from a secret seed.
+pub fn pubkey_bytes(secret: &[u8; 32]) -> [u8; 32] {
+    SigningKey::from_bytes(secret).verifying_key().to_bytes()
+}
+
+/// A board id (hex public key) as raw bytes, if it is one: 64 hex digits that
+/// decode to a valid Ed25519 point.
+pub fn parse_board_id(id: &str) -> Option<[u8; 32]> {
+    let pk: [u8; 32] = hex::decode(id.trim()).ok()?.try_into().ok()?;
+    VerifyingKey::from_bytes(&pk).ok().map(|_| pk)
 }
 
 /// Sign `msg` with the secret seed; returns the 64-byte signature as hex.
@@ -2675,12 +2687,12 @@ pub fn blessing_message(board_pubkey: &[u8; 32]) -> Vec<u8> {
     m
 }
 
-/// The owner's blessing for the board whose seed is `board_secret`, as raw
-/// bytes, ready for an identity record. Tooling only: the owner's seed never
-/// reaches the server or a board.
-pub fn bless(owner_secret: &[u8; 32], board_secret: &[u8; 32]) -> [u8; 64] {
-    let board_pk = SigningKey::from_bytes(board_secret).verifying_key().to_bytes();
-    SigningKey::from_bytes(owner_secret).sign(&blessing_message(&board_pk)).to_bytes()
+/// The owner's blessing for the board with public key `board_pubkey`, as raw
+/// bytes, ready for an identity record. Needs only the board's PUBLIC key, so
+/// a board's secret never has to reach the owner. Tooling only: the owner's
+/// seed never reaches the server or a board.
+pub fn bless(owner_secret: &[u8; 32], board_pubkey: &[u8; 32]) -> [u8; 64] {
+    SigningKey::from_bytes(owner_secret).sign(&blessing_message(board_pubkey)).to_bytes()
 }
 
 /// True iff `blessing_hex` is `owner_pubkey`'s blessing of the board
@@ -2748,7 +2760,7 @@ mod blessing_tests {
     fn a_blessing_verifies_only_for_its_board_and_owner() {
         let (owner, board) = ([1u8; 32], [2u8; 32]);
         let owner_pk: [u8; 32] = SigningKey::from_bytes(&owner).verifying_key().to_bytes();
-        let b = hex::encode(bless(&owner, &board));
+        let b = hex::encode(bless(&owner, &pubkey_bytes(&board)));
         assert!(verify_blessing(&owner_pk, &pubkey_hex(&board), &b));
         assert!(!verify_blessing(&owner_pk, &pubkey_hex(&[3u8; 32]), &b), "another board");
         let other: [u8; 32] = SigningKey::from_bytes(&[9u8; 32]).verifying_key().to_bytes();
