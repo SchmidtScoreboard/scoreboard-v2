@@ -865,9 +865,10 @@ async fn device(
         if refused {
             // Refused for want of authorization. Retrying every few seconds
             // would change nothing and cost the server a TLS handshake each
-            // time, so wait minutes; a board authorized meanwhile (its id
-            // grandfathered) is back within one wait. NOT AUTHORIZED stays on
-            // the panel, and hold-to-reset works throughout (flash_task).
+            // time, so wait minutes; if the server stops refusing it (its
+            // enforcement switched off, say), the board is back within one
+            // wait. NOT AUTHORIZED stays on the panel, and hold-to-reset works
+            // throughout (flash_task).
             Timer::after(Duration::from_secs(300)).await;
             continue;
         }

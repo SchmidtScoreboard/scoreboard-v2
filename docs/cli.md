@@ -27,7 +27,6 @@ release binary directly — flags are identical).
 | `STATE_DIR` | `.` | Where `scoreboard.db` (pairings, board configs) and the catalog cache live. |
 | `BOARD_BLESSING_PUBKEY` | unset | The owner's public key (hex, from `bless-board --print-pubkey`). Set = check every board's authorization; unset = serve any board, which is what a self-hosted server wants. Malformed refuses to start. See [Board authorization](#board-authorization). |
 | `BOARD_BLESSING_ENFORCE` | unset | `1` = refuse unauthorized boards (`NotAuthorized`, NOT AUTHORIZED on the panel). Anything else only logs them, which is how the check is rolled out. |
-| `BOARD_GRANDFATHERED` | unset | Board ids (hex public keys, comma- or space-separated) served without authorization: boards that predate it and minted their own identity. |
 | `FIRMWARE_DIR` | `./firmware-dist` | Where the OTA release channels live (`{stable,beta,dev}/firmware.{bin,json}`). Loaded once at startup and integrity-checked: a missing channel is quietly off, a *broken* one refuses to start (a board must never download an image that won't verify). The Dockerfile ships `firmware-dist/` inside the server image and points here at `/firmware-dist`. |
 
 ## Debug-friendly HTTP routes
@@ -375,17 +374,17 @@ rm board-0042.bin                                            # the image IS the 
 
 **Rolling it out** without turning off a board you meant to keep:
 
-1. Set `BOARD_BLESSING_PUBKEY` and `BOARD_GRANDFATHERED` (every existing
-   board id you want to keep) and deploy. Log-only: nothing is refused.
-2. Watch `railway logs` for `is not authorized (log-only…)` and `/health`'s
-   `authorization.unauthorized_boards`. Each unexpected id is a board you
-   either grandfather or accept losing.
+1. Set `BOARD_BLESSING_PUBKEY` and deploy. Log-only: nothing is refused.
+2. Flash every board you mean to keep with an identity (above). There is no
+   exemption list: a board that predates authorization is authorized like any
+   other. Watch `railway logs` for `is not authorized (log-only…)` and
+   `/health`'s `authorization.unauthorized_boards` until only boards you're
+   willing to lose show up.
 3. Set `BOARD_BLESSING_ENFORCE=1` and redeploy.
 
 A refused board on current firmware shows NOT AUTHORIZED and asks again every
-five minutes, so grandfathering it later brings it back without a visit.
-Older firmware ignores the refusal and redials; the server holds each refused
-socket for 25s to pace that.
+five minutes. Older firmware ignores the refusal and redials; the server holds
+each refused socket for 25s to pace that.
 
 An authorized board keeps its identity through a factory reset (it *is* the
 authorization). It still comes back unpaired from every phone: it reports the

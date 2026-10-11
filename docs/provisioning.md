@@ -228,9 +228,9 @@ keeping the board's identity and pairing.
 
 **The board shows `NOT AUTHORIZED`.** It reached the server, and the server
 only serves authorized boards (the hosted one, or yours with
-`BOARD_BLESSING_PUBKEY` set). The board asks again every five minutes, so a
-board authorized server-side meanwhile (its id grandfathered) comes back on its
-own. A board you built needs an identity from us (see
+`BOARD_BLESSING_PUBKEY` set). Nothing on the server can authorize it: the
+authorization travels with the board's identity, so it has to be flashed one.
+A board you built needs an identity from us (see
 [BYOD](#byod--your-hardware-our-server)), or a server of your own.
 
 **The board sits on `FINDING SERVER` and never connects.** A pin mismatch is a

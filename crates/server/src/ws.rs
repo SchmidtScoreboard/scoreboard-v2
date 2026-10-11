@@ -73,7 +73,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer: Option<std::net
     // Only authorized boards, when this server asks for that (MAR-90). Apps
     // are never checked: an app is not a board.
     if let (Role::Device, Some(authz)) = (&role, &state.authz) {
-        if authz.check(&pubkey, blessing.as_deref()) == crate::authz::Verdict::Refused {
+        if !authz.authorized(&pubkey, blessing.as_deref()) {
             let first = authz.note_refused(&pubkey);
             if authz.enforced() {
                 if first {
@@ -1394,20 +1394,19 @@ mod tests {
 
     const OWNER: [u8; 32] = [77u8; 32];
 
-    fn authz_state(enforce: bool, grandfathered: &str) -> AppState {
+    fn authz_state(enforce: bool) -> AppState {
         let mut state = AppState::new_ephemeral();
-        let authz = crate::authz::BoardAuthz::new(&pubkey_hex(&OWNER), enforce, grandfathered).unwrap();
+        let authz = crate::authz::BoardAuthz::new(&pubkey_hex(&OWNER), enforce).unwrap();
         state.authz = Some(std::sync::Arc::new(authz));
         state
     }
 
-    /// Enforced: a board needs the owner's blessing (or a grandfathered id).
+    /// Enforced: a board needs the owner's blessing.
     /// A refused one is told so instead of AuthOk and never becomes a device.
     /// Apps are not boards, and are never asked.
     #[tokio::test]
     async fn an_enforcing_server_serves_only_authorized_boards() {
-        let old_board = [3u8; 32];
-        let (url, state) = spawn_server_with(authz_state(true, &pubkey_hex(&old_board))).await;
+        let (url, state) = spawn_server_with(authz_state(true)).await;
 
         let stranger = [1u8; 32];
         let (reply, _keep) = auth_blessed(&url, Role::Device, &stranger, None).await;
@@ -1422,9 +1421,6 @@ mod tests {
         let (reply, _dev) = auth_blessed(&url, Role::Device, &sold, blessing).await;
         assert!(matches!(reply, Some(ServerMsg::AuthOk)), "a blessed board is served, got {reply:?}");
 
-        let (reply, _old) = auth_blessed(&url, Role::Device, &old_board, None).await;
-        assert!(matches!(reply, Some(ServerMsg::AuthOk)), "a grandfathered board is served, got {reply:?}");
-
         let (reply, _app) = auth_blessed(&url, Role::Controller, &[9u8; 32], None).await;
         assert!(matches!(reply, Some(ServerMsg::AuthOk)), "apps are never checked, got {reply:?}");
 
@@ -1437,7 +1433,7 @@ mod tests {
     /// and counted.
     #[tokio::test]
     async fn a_log_only_server_serves_and_counts_unauthorized_boards() {
-        let (url, state) = spawn_server_with(authz_state(false, "")).await;
+        let (url, state) = spawn_server_with(authz_state(false)).await;
         let (reply, _dev) = auth_blessed(&url, Role::Device, &[1u8; 32], None).await;
         assert!(matches!(reply, Some(ServerMsg::AuthOk)), "served anyway, got {reply:?}");
         let (_, report) = crate::health_report(&state);
