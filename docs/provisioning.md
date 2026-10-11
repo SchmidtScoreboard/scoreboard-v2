@@ -69,14 +69,21 @@ These are easy to confuse. They point in opposite directions.
 | Secret? | No — publish it freely | **Yes** — never leaves the board |
 | Unique per board? | **No** — every board on a server shares it | Yes — it *is* the board's id |
 | Proves | the server, to the board | the board, to the server |
-| Set when | Flash time, or BLE provisioning | Minted on first boot |
-| If lost | Re-derive from the certificate | The board becomes a new board |
+| Set when | Flash time, or BLE provisioning | Written at flash time (authorized), or minted on first boot |
+| If lost | Re-derive from the certificate | The board becomes a new board (and loses its authorization) |
 
 The board's identity is what makes "someone can't just connect and receive your
 frames" true. Every connection is a challenge-response: the server sends a
 random challenge, the board signs it, and its public key *is* its `board_id`.
 Anyone can generate a keypair and connect — they get their own empty board.
 Reaching *yours* needs your board's secret, which is only ever in its flash.
+
+The hosted server goes one step further: it serves only boards we have
+**authorized**. Their identity is written at flash time together with our
+signature over its public key (a *blessing*), which the board presents with
+every connection. A board without one is refused and shows NOT AUTHORIZED.
+A server you run yourself doesn't check this unless you ask it to (see
+[cli.md](cli.md#board-authorization)).
 
 ## Where the pin is stored
 
@@ -99,17 +106,20 @@ deliberately preserved), cleared by a factory reset.
 
 ### A board we sell
 
-**Us, once per board:**
+**Us, once per board:** mint the board's authorized identity, then flash it
+with the hosted-server image.
 
 ```sh
-SCOREBOARD_TLS_PIN=<pin of the deployed cert> FEATURES=prod bash scripts/flash.sh
+cargo run -p server --bin bless-board -- board.bin
+IDENTITY=board.bin SCOREBOARD_TLS_PIN=<pin of the deployed cert> FEATURES=prod bash scripts/flash.sh
+rm board.bin
 ```
 
 That bakes in the hosted server's address, its pin, and the firmware signing
-public key. Then ship it. Nothing else: a new board has no stored credentials, so
-it comes up in Bluetooth provisioning. It mints its identity on the first boot
-*after* it has been given a network — a board that is flashed, boxed and never
-provisioned has no `board_id` at all.
+public key, and writes the identity the hosted server will accept. Delete the
+image afterwards: whoever holds it can be that board. Then ship it. A new board
+has no stored credentials, so it comes up in Bluetooth provisioning; its
+`board_id` already exists, so it is known before it is ever switched on.
 
 **The buyer:** plug in → app → pick the Wi-Fi network, type the password → the
 board joins, connects over TLS, and shows a 6-digit code → type that into the
@@ -120,12 +130,16 @@ set to "My own server." TLS costs them nothing at all.
 
 ### BYOD — your hardware, our server
 
-**Not documented yet, on purpose.** Nothing in the server currently distinguishes
-a board we sold from any other: a board mints its own keypair and the server
-verifies only that it holds the secret for the key it just presented. There is no
-registration and no entitlement check, so a build pointed at the hosted server
-works — and writing that down as a recipe would be publishing a way to run on our
-capacity for free before we have decided whether that is on offer.
+The hosted server only serves authorized boards, so a board you built needs
+an identity from us. We mint one for your board and send you its image: one
+4 KB file, which you flash exactly the way we flash a board we sell
+(`IDENTITY=…`, `FEATURES=prod`, the hosted server's pin from
+[Deriving a pin](#deriving-a-pin-from-a-running-server)). Treat the file like
+a password, and delete it once it's flashed. Your board then behaves like one
+we sold, including keeping its authorization through a factory reset.
+
+A board pointed at the hosted server without one connects, is refused, and
+shows NOT AUTHORIZED.
 
 Self-hosting below needs nothing from us and is unaffected.
 
@@ -148,8 +162,9 @@ server, including one you bought from us — with one catch: a board that alread
 has credentials in flash never advertises `Scoreboard Setup`, so it has to be put
 back into Bluetooth setup first. A new board already is, out of the box. One that
 has been running needs the knob held for ten seconds (or ERASE from the menu),
-which is a full factory reset — it also mints a new identity and un-pairs the
-board from every phone. (The single press that forgets *only* the network is
+which is a full factory reset — it un-pairs the board from every phone. (A board
+that minted its own identity also gets a new one; a board we authorized keeps
+its identity, and its authorization, through a reset.) (The single press that forgets *only* the network is
 offered after a failed join, on the `PRESS TO SET UP` screen, and not otherwise.)
 
 Then, in the app: tap **Use my own server**, pick "My own server", type your
@@ -210,6 +225,13 @@ If you meant to build the image that talks to the **hosted** server, you want
 the network, not TLS — a wrong password looks exactly like a slow join. Press
 the knob to clear the stored network and come back up in Bluetooth provisioning,
 keeping the board's identity and pairing.
+
+**The board shows `NOT AUTHORIZED`.** It reached the server, and the server
+only serves authorized boards (the hosted one, or yours with
+`BOARD_BLESSING_PUBKEY` set). The board asks again every five minutes, so a
+board authorized server-side meanwhile (its id grandfathered) comes back on its
+own. A board you built needs an identity from us (see
+[BYOD](#byod--your-hardware-our-server)), or a server of your own.
 
 **The board sits on `FINDING SERVER` and never connects.** A pin mismatch is a
 handshake failure, so the board never reaches a connected state to drop from: the

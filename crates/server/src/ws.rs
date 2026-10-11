@@ -16,6 +16,12 @@ use tokio::sync::mpsc;
 type WsSender = SplitSink<WebSocket, Message>;
 type WsReceiver = SplitStream<WebSocket>;
 
+/// How long a refused board's socket is held open, silent, before it is
+/// closed (see `handle_socket`). Older firmware redials the moment a socket
+/// closes, and drops one that is silent for 30s, so this paces it to about
+/// one attempt every 25 seconds.
+const REFUSED_HOLD: std::time::Duration = std::time::Duration::from_secs(25);
+
 /// `conn` is stamped on every request by the sniffing listener (see serve.rs).
 /// It is optional because a test can call this router without one; nothing
 /// depends on it beyond logging.
@@ -44,13 +50,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer: Option<std::net
         return;
     }
 
-    let (role, pubkey, sig) = loop {
+    let (role, pubkey, sig, blessing) = loop {
         match receiver.next().await {
             Some(Ok(Message::Text(t))) => {
-                if let Ok(ClientMsg::Auth { role, pubkey, sig }) =
+                if let Ok(ClientMsg::Auth { role, pubkey, sig, blessing }) =
                     serde_json::from_str::<ClientMsg>(&t)
                 {
-                    break (role, pubkey, sig);
+                    break (role, pubkey, sig, blessing);
                 }
             }
             Some(Ok(_)) => continue,
@@ -62,6 +68,30 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer: Option<std::net
     if !verify_hex(&pubkey, challenge.as_bytes(), &sig) {
         tracing::warn!("auth rejected: bad signature for pubkey '{pubkey}'");
         return; // drop the connection
+    }
+
+    // Only authorized boards, when this server asks for that (MAR-90). Apps
+    // are never checked: an app is not a board.
+    if let (Role::Device, Some(authz)) = (&role, &state.authz) {
+        if authz.check(&pubkey, blessing.as_deref()) == crate::authz::Verdict::Refused {
+            let first = authz.note_refused(&pubkey);
+            if authz.enforced() {
+                if first {
+                    tracing::warn!("device '{pubkey}' refused: not authorized for this server");
+                }
+                let _ = sender
+                    .send(Message::Text(serde_json::to_string(&ServerMsg::NotAuthorized).unwrap()))
+                    .await;
+                // Current firmware backs off for minutes on NotAuthorized.
+                // Older firmware ignores it and redials as soon as the socket
+                // closes, so hold it open (silent) to pace that loop.
+                tokio::time::sleep(REFUSED_HOLD).await;
+                return;
+            }
+            if first {
+                tracing::warn!("device '{pubkey}' is not authorized (log-only: serving it anyway)");
+            }
+        }
     }
 
     let _ = sender
@@ -198,10 +228,17 @@ async fn device_loop(
                     crate::handle_device_version(&state, &board_id, version);
                 }
                 Ok(ClientMsg::FactoryReset) => {
-                    // The board is wiping itself as we read this. Forget it
-                    // wholesale so it returns as a brand-new scoreboard.
+                    // Forget the board wholesale so it returns as a brand-new
+                    // scoreboard. Usually it is wiping itself as we read this.
+                    // An authorized board keeps its identity, though, and
+                    // sends this on the connect after an OFFLINE reset
+                    // (MAR-90). It stays connected, so it is a new, unpaired
+                    // board now: put its code up and send it the setup frame.
+                    // A board that is rebooting just never reads them.
                     tracing::info!("device '{board_id}' factory reset — forgetting the board");
                     state.forget_board(&board_id);
+                    let _ = tx.send(Message::Text(serde_json::to_string(&ServerMsg::NeedsPairing).unwrap()));
+                    push_board(&state, &board_id);
                 }
                 Ok(ClientMsg::DebugLog { lines }) => {
                     // Logged at debug level as well as buffered: a `railway
@@ -1335,9 +1372,81 @@ mod tests {
         };
         let pubkey = pubkey_hex(secret);
         let sig = sign_hex(secret, challenge.as_bytes());
-        send(&mut ws, &ClientMsg::Auth { role, pubkey: pubkey.clone(), sig }).await;
+        send(&mut ws, &ClientMsg::Auth { role, pubkey: pubkey.clone(), sig, blessing: None }).await;
         assert!(matches!(recv(&mut ws).await, Some(ServerMsg::AuthOk)));
         (ws, pubkey)
+    }
+
+    /// Connect and authenticate with an optional blessing; the server's
+    /// first answer (AuthOk or NotAuthorized) and the open socket.
+    async fn auth_blessed(url: &str, role: Role, secret: &[u8; 32], blessing: Option<String>) -> (Option<ServerMsg>, Client) {
+        let (mut ws, _) = connect_async(url).await.unwrap();
+        let challenge = match recv(&mut ws).await {
+            Some(ServerMsg::Hello { challenge }) => challenge,
+            _ => panic!("expected Hello"),
+        };
+        let sig = sign_hex(secret, challenge.as_bytes());
+        send(&mut ws, &ClientMsg::Auth { role, pubkey: pubkey_hex(secret), sig, blessing }).await;
+        (recv(&mut ws).await, ws)
+    }
+
+    // ---- board authorization (MAR-90) ----
+
+    const OWNER: [u8; 32] = [77u8; 32];
+
+    fn authz_state(enforce: bool, grandfathered: &str) -> AppState {
+        let mut state = AppState::new_ephemeral();
+        let authz = crate::authz::BoardAuthz::new(&pubkey_hex(&OWNER), enforce, grandfathered).unwrap();
+        state.authz = Some(std::sync::Arc::new(authz));
+        state
+    }
+
+    /// Enforced: a board needs the owner's blessing (or a grandfathered id).
+    /// A refused one is told so instead of AuthOk and never becomes a device.
+    /// Apps are not boards, and are never asked.
+    #[tokio::test]
+    async fn an_enforcing_server_serves_only_authorized_boards() {
+        let old_board = [3u8; 32];
+        let (url, state) = spawn_server_with(authz_state(true, &pubkey_hex(&old_board))).await;
+
+        let stranger = [1u8; 32];
+        let (reply, _keep) = auth_blessed(&url, Role::Device, &stranger, None).await;
+        assert!(matches!(reply, Some(ServerMsg::NotAuthorized)), "unauthorized board refused, got {reply:?}");
+        let forged = Some(hex::encode(scoreboard_protocol::bless(&[5u8; 32], &stranger)));
+        let (reply, _keep2) = auth_blessed(&url, Role::Device, &stranger, forged).await;
+        assert!(matches!(reply, Some(ServerMsg::NotAuthorized)), "blessed by the wrong key, got {reply:?}");
+        assert!(state.devices.lock().unwrap().get(&pubkey_hex(&stranger)).is_none(), "never registered as a device");
+
+        let sold = [2u8; 32];
+        let blessing = Some(hex::encode(scoreboard_protocol::bless(&OWNER, &sold)));
+        let (reply, _dev) = auth_blessed(&url, Role::Device, &sold, blessing).await;
+        assert!(matches!(reply, Some(ServerMsg::AuthOk)), "a blessed board is served, got {reply:?}");
+
+        let (reply, _old) = auth_blessed(&url, Role::Device, &old_board, None).await;
+        assert!(matches!(reply, Some(ServerMsg::AuthOk)), "a grandfathered board is served, got {reply:?}");
+
+        let (reply, _app) = auth_blessed(&url, Role::Controller, &[9u8; 32], None).await;
+        assert!(matches!(reply, Some(ServerMsg::AuthOk)), "apps are never checked, got {reply:?}");
+
+        let (_, report) = crate::health_report(&state);
+        assert_eq!(report["authorization"]["mode"], "enforced");
+        assert_eq!(report["authorization"]["unauthorized_boards"], 1, "one stranger, however many tries");
+    }
+
+    /// Log-only (the rollout mode): an unauthorized board is still served,
+    /// and counted.
+    #[tokio::test]
+    async fn a_log_only_server_serves_and_counts_unauthorized_boards() {
+        let (url, state) = spawn_server_with(authz_state(false, "")).await;
+        let (reply, _dev) = auth_blessed(&url, Role::Device, &[1u8; 32], None).await;
+        assert!(matches!(reply, Some(ServerMsg::AuthOk)), "served anyway, got {reply:?}");
+        let (_, report) = crate::health_report(&state);
+        assert_eq!(report["authorization"]["mode"], "log-only");
+        assert_eq!(report["authorization"]["unauthorized_boards"], 1);
+
+        // And a server not asked to check at all says so.
+        let (_, report) = crate::health_report(&AppState::new_ephemeral());
+        assert_eq!(report["authorization"]["mode"], "off");
     }
 
     /// SetLeagueNameStyle upserts the league's SportConfig.name_style like the
@@ -2220,6 +2329,12 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         assert!(forgotten, "pairings and config both forgotten");
+        // An authorized board stays connected through its reset (it keeps its
+        // identity), so it is told to put its code up right away.
+        match recv_until(&mut dev, |m| matches!(m, ServerMsg::NeedsPairing)).await {
+            Some(ServerMsg::NeedsPairing) => {}
+            other => panic!("a still-connected board shows its code after a reset, got {other:?}"),
+        }
 
         // The same id reconnecting is a virgin board: pair code prompt again.
         let (mut dev2, _) = auth(&url, Role::Device, &[7u8; 32]).await;

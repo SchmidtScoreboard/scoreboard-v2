@@ -519,6 +519,7 @@ impl ScoreboardClient {
                     role: Role::Controller,
                     pubkey: pubkey_hex(&secret),
                     sig: sign_hex(&secret, challenge.as_bytes()),
+                    blessing: None, // boards only
                 };
                 let _ = write.send(Message::Text(serde_json::to_string(&auth).unwrap())).await;
                 // Re-subscribe to every board we've paired with (empty until first

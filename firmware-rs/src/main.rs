@@ -213,9 +213,14 @@ async fn main(spawner: Spawner) -> ! {
             // `try_new` only fails with no live `TrngSource`; one is right above,
             // so this is an invariant, not a runtime condition.
             let trng = esp_hal::rng::Trng::try_new().expect("TrngSource constructed above");
-            let secret = identity::load_or_create(&mut *flash.lock().await, &trng);
+            let ident = identity::load_or_create(&mut *flash.lock().await, &trng);
+            let secret = ident.secret;
+            // The owner's authorization, when this board was flashed with one
+            // (MAR-90). Presented with every Auth; a server that doesn't ask
+            // for it ignores it.
+            let blessing = ident.blessing.map(hex::encode);
             let board_id = pubkey_hex(&secret);
-            println!("[id] board {}", board_id);
+            println!("[id] board {} ({})", board_id, if blessing.is_some() { "authorized" } else { "self-minted" });
 
             // Fresh 6-digit pairing code per boot: shown on the settings
             // menu's PAIR CODE screen (hold 3s -> menu; double-press is
@@ -294,8 +299,8 @@ async fn main(spawner: Spawner) -> ! {
             );
             spawner.spawn(
                 device(
-                    stack, board, board_id, secret, code, server_host, server_port, server_pin,
-                    flash, fw_unconfirmed,
+                    stack, board, board_id, secret, blessing, code, server_host, server_port,
+                    server_pin, flash, fw_unconfirmed,
                 )
                 .unwrap(),
             );
@@ -463,6 +468,7 @@ async fn device(
     board: &'static SharedBoard,
     board_id: String,
     secret: [u8; 32],
+    blessing: Option<String>,
     pair_code: String,
     server_host: String,
     server_port: u16,
@@ -486,6 +492,9 @@ async fn device(
     // websocket (a Railway redeploy CAN move the server), so a stale entry
     // costs exactly one failed pass before fresh DNS takes over.
     let mut cached_ip: Option<core::net::Ipv4Addr> = None;
+    // A factory reset this authorized board has yet to report (MAR-90; see
+    // identity::factory_reset). Read once: a reset always reboots.
+    let mut forget_pending = identity::forget_pending(&mut *flash.lock().await);
     // TLS record + plaintext staging buffers, minted ONCE. embedded-tls never
     // allocates; it works out of buffers the caller hands it, and re-taking
     // ~9KB on every reconnect (the Railway proxy recycles the socket every
@@ -589,6 +598,8 @@ async fn device(
         // Set when the server orders a firmware update: the ws loop ends and the
         // download takes over this task's socket buffers (see below).
         let mut pending_update: Option<ota::UpdateJob> = None;
+        // Set when the server refuses this board (NotAuthorized).
+        let mut refused = false;
         // Everything that borrows the socket lives inside this block. The OTA
         // download below reuses this task's rx/tx buffers, so the link — and
         // the reader/writer halves it was built on — must be gone before
@@ -692,12 +703,18 @@ async fn device(
                                 role: Role::Device,
                                 pubkey: board_id.clone(),
                                 sig: sign_hex(&secret, challenge.as_bytes()),
+                                blessing: blessing.clone(),
                             };
                             let _ = ws::write_text(&mut link, &serde_json::to_vec(&auth).unwrap()).await;
                             // Register the pairing code on every connect so the
                             // app's code entry always resolves to this board.
-                            let setup = ClientMsg::EnterSetup { code: pair_code.clone() };
-                            let _ = ws::write_text(&mut link, &serde_json::to_vec(&setup).unwrap()).await;
+                            // Unless a reset is still to be reported: the
+                            // server's forget drops this board's codes, so the
+                            // code goes AFTER the FactoryReset (see AuthOk).
+                            if !forget_pending {
+                                let setup = ClientMsg::EnterSetup { code: pair_code.clone() };
+                                let _ = ws::write_text(&mut link, &serde_json::to_vec(&setup).unwrap()).await;
+                            }
                             // No `DeviceTimezone` here any more: the board has no
                             // zone of its own to report (see the boot loop above).
                             // The server still ACCEPTS the message — boards on
@@ -727,6 +744,38 @@ async fn device(
                             if fw_unconfirmed {
                                 ota::confirm_running_image(flash).await;
                             }
+                            board.lock().await.set_not_authorized(false);
+                            // An authorized board keeps its identity through a
+                            // factory reset (MAR-90), so the reset is reported
+                            // here, on the first connection a server accepted:
+                            // forget me, then here is my new code. Cleared once
+                            // written; a lost write costs one reset report, and
+                            // re-sending forever would unpair the board on every
+                            // reconnect.
+                            if forget_pending {
+                                println!("[reset] reporting the factory reset to the server");
+                                let reset = serde_json::to_vec(&ClientMsg::FactoryReset).unwrap();
+                                let setup = serde_json::to_vec(&ClientMsg::EnterSetup { code: pair_code.clone() }).unwrap();
+                                if ws::write_text(&mut link, &reset).await.is_ok() {
+                                    identity::clear_forget_pending(&mut *flash.lock().await);
+                                    forget_pending = false;
+                                }
+                                let _ = ws::write_text(&mut link, &setup).await;
+                            }
+                        }
+                        // This server only serves authorized boards, and this
+                        // is not one of them (MAR-90). Say so on the panel and
+                        // ask again only rarely: nothing will change until
+                        // someone authorizes it.
+                        Ok(ServerMsg::NotAuthorized) => {
+                            println!("[ws] server refused this board: not authorized");
+                            {
+                                let mut b = board.lock().await;
+                                b.set_not_authorized(true);
+                                b.set_online(false);
+                            }
+                            refused = true;
+                            break;
                         }
                         // Debug logging on/off. Deliberately not persisted:
                         // a board that reboots comes back quiet.
@@ -813,6 +862,15 @@ async fn device(
         // trivial (see the StackResources comment — the pool's failure mode
         // is a panic).
         drop(sock);
+        if refused {
+            // Refused for want of authorization. Retrying every few seconds
+            // would change nothing and cost the server a TLS handshake each
+            // time, so wait minutes; a board authorized meanwhile (its id
+            // grandfathered) is back within one wait. NOT AUTHORIZED stays on
+            // the panel, and hold-to-reset works throughout (flash_task).
+            Timer::after(Duration::from_secs(300)).await;
+            continue;
+        }
         if !established {
             // Never came up: a TLS or websocket handshake failure means this
             // address didn't produce a working link, so re-resolve next pass
@@ -923,18 +981,21 @@ async fn flash_task(flash: &'static ota::SharedFlash, board: &'static SharedBoar
         // Hold-to-reset: let the "reset complete" checkmark show for a beat, then
         // wipe creds + reboot — which comes back up in BLE provisioning mode.
         if reset {
-            // Full factory wipe: credentials, the identity seed (the next
-            // boot mints a fresh one — a reset board is a brand-new
-            // scoreboard, unpaired from every phone), and the stored
-            // brightness. The 1s beat lets RESET COMPLETE show AND gives the
-            // ws task its window to flush the best-effort FactoryReset the
-            // latch queued, so the server forgets the old id too.
+            // Full factory wipe: credentials, the identity (a self-minted
+            // seed is destroyed and the next boot mints a fresh one; an
+            // authorized board keeps its identity and reports the reset on
+            // its next connect, see identity::factory_reset — either way a
+            // reset board is a brand-new scoreboard, unpaired from every
+            // phone), and the stored brightness. The 1s beat lets RESET
+            // COMPLETE show AND gives the ws task its window to flush the
+            // best-effort FactoryReset the latch queued, so the server
+            // forgets the old id too.
             println!("[reset] full factory wipe, rebooting into setup");
             Timer::after(Duration::from_millis(1000)).await;
             {
                 let mut f = flash.lock().await;
                 creds::clear(&mut *f);
-                identity::clear(&mut f);
+                identity::factory_reset(&mut f);
                 brightness::clear(&mut f);
             }
             esp_hal::system::software_reset();
@@ -959,8 +1020,10 @@ async fn flash_task(flash: &'static ota::SharedFlash, board: &'static SharedBoar
 /// Hold-to-reset watcher for BLE provisioning mode (flash_task owns the reset
 /// in WiFi mode). No creds exist in this mode, but the identity and brightness
 /// might — a reset must produce a brand-new scoreboard from EVERY state, or
-/// "reset then hand it to a friend" leaks the old pairing identity. The
-/// GESTURE must work everywhere, or the board can get stuck un-resettable.
+/// "reset then hand it to a friend" leaks the old pairing identity. (There is
+/// no network here, so an authorized board's reset is reported on its next
+/// connect; see identity::factory_reset.) The GESTURE must work everywhere,
+/// or the board can get stuck un-resettable.
 #[embassy_executor::task]
 async fn setup_reset_task(board: &'static SharedBoard, flash: &'static ota::SharedFlash) {
     loop {
@@ -971,7 +1034,7 @@ async fn setup_reset_task(board: &'static SharedBoard, flash: &'static ota::Shar
             {
                 let mut f = flash.lock().await;
                 creds::clear(&mut *f);
-                identity::clear(&mut f);
+                identity::factory_reset(&mut f);
                 brightness::clear(&mut f);
             }
             esp_hal::system::software_reset();

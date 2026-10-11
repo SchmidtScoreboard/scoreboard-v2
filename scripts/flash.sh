@@ -27,6 +27,13 @@
 #   cargo run -p server --bin gen-tls-cert -- --pin cert.pem
 # Either way a TLS build without its pin fails at COMPILE time, on purpose —
 # there is no safe default and a wrong pin is unrecoverable over the air.
+#
+# IDENTITY=<image.bin> also writes an authorized identity (MAR-90) minted by
+# `cargo run -p server --bin bless-board -- <image.bin>` into the identity
+# sector, so the board can use a hosted server that requires authorization.
+# It REPLACES whatever identity the board had, so the board becomes a new
+# board to the server and its phones. Delete the image afterwards: it IS the
+# board.
 set -euo pipefail
 cd "$(dirname "$0")/../firmware-rs"
 
@@ -44,6 +51,16 @@ if [[ -f local.env ]]; then
     done < local.env
 fi
 
+IDENTITY="${IDENTITY:-}"
+if [[ -n "$IDENTITY" ]]; then
+    # Relative to where the caller ran this, not firmware-rs/.
+    [[ "$IDENTITY" = /* ]] || IDENTITY="$OLDPWD/$IDENTITY"
+    if [[ ! -f "$IDENTITY" || "$(wc -c < "$IDENTITY" | tr -d ' ')" != 4096 ]]; then
+        echo "IDENTITY must be a 4096-byte image from bless-board: $IDENTITY" >&2
+        exit 1
+    fi
+fi
+
 PORT="${1:-$(ls /dev/cu.usbmodem* 2>/dev/null | head -1)}"
 if [[ -z "$PORT" ]]; then
     echo "No /dev/cu.usbmodem* port found — is the board plugged in?" >&2
@@ -59,6 +76,13 @@ echo "==> freeing serial port (closing any monitors)"
 pkill -f "device monitor" 2>/dev/null || true
 lsof -t /dev/cu.usbmodem* 2>/dev/null | xargs -r kill 2>/dev/null || true
 sleep 1
+
+if [[ -n "$IDENTITY" ]]; then
+    # 0xB000 is the identity sector (firmware-rs/src/identity.rs), inside the
+    # nvs partition that the app flash below leaves alone.
+    echo "==> writing the authorized identity via $PORT"
+    espflash write-bin -p "$PORT" 0xB000 "$IDENTITY"
+fi
 
 echo "==> flashing via $PORT"
 # --partition-table: the OTA layout (nvs kept at 0x9000 so creds/brightness/

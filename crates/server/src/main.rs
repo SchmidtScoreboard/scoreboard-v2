@@ -3,6 +3,7 @@
 //! by those preferences. Talks to boards + controllers over a websocket.
 
 mod alerts;
+mod authz;
 mod bdf;
 mod espn;
 mod model;
@@ -166,6 +167,9 @@ pub struct AppState {
     /// OpenF1 alternate feed — Some only when the environment carries the
     /// personal-use credentials. See `crates/server/src/openf1.rs`.
     pub openf1: Arc<Option<openf1::OpenF1>>,
+    /// Which boards this server serves (MAR-90). None = every board, which
+    /// is the default and what a self-hosted server wants. See `authz.rs`.
+    pub authz: Option<Arc<authz::BoardAuthz>>,
     /// The latest OpenF1 session rows, swapped into f1 frames by `board_view`
     /// for boards that opted in. None until the first successful fetch.
     pub openf1_rows: Arc<Mutex<Option<openf1::SessionRows>>>,
@@ -484,6 +488,7 @@ impl AppState {
             controllers: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
             openf1: Arc::new(openf1::OpenF1::from_env()),
+            authz: authz::BoardAuthz::from_env().map(Arc::new),
             openf1_rows: Arc::new(Mutex::new(None)),
             allow: Arc::new(Mutex::new(allow)),
             db: db.map(|c| Arc::new(Mutex::new(c))),
@@ -3653,6 +3658,11 @@ pub fn health_report(state: &AppState) -> (bool, serde_json::Value) {
         "games": state.games.lock().unwrap().len(),
         "frames_cached": state.frames.lock().unwrap().len(),
         "version": env!("CARGO_PKG_VERSION"),
+        // A count, never the ids: this route is public.
+        "authorization": match &state.authz {
+            Some(a) => serde_json::json!({ "mode": a.mode(), "unauthorized_boards": a.refused_count() }),
+            None => serde_json::json!({ "mode": "off" }),
+        },
     });
     (ok, report)
 }

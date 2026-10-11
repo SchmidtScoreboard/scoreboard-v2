@@ -511,6 +511,9 @@ async fn run_client(
                                                 role: Role::Device,
                                                 pubkey: pubkey_hex(&secret),
                                                 sig: sign_hex(&secret, challenge.as_bytes()),
+                                                // A simulated board is never authorized: it
+                                                // runs against servers that don't require it.
+                                                blessing: None,
                                             };
                                             let _ = write
                                                 .send(Message::Text(serde_json::to_string(&auth).unwrap()))

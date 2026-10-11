@@ -225,6 +225,11 @@ pub struct Board {
     /// Set by the host after its join attempts pass a timeout; turns the connect
     /// screen's bottom line into an offer to re-provision.
     wifi_stuck: bool,
+    /// The server refused this board: it is not authorized there (MAR-90).
+    /// Set by the host on `ServerMsg::NotAuthorized`, cleared on `AuthOk`.
+    /// Without it a refused board sat on FINDING SERVER forever, which
+    /// looks exactly like a network fault.
+    not_authorized: bool,
     /// The user accepted that offer. The host clears the stored credentials and
     /// reboots into BLE provisioning — a LATCH, like `reset_done`, because the
     /// board cannot do either of those things itself.
@@ -301,6 +306,7 @@ impl Board {
             offline_since: None,
             wifi_up: false,
             wifi_stuck: false,
+            not_authorized: false,
             reprovision: false,
             setup_phase: SetupPhase::WaitingBluetooth,
             brightness_changed_at: None,
@@ -436,6 +442,12 @@ impl Board {
     /// knob for ten seconds to factory reset.
     pub fn set_wifi_stuck(&mut self, stuck: bool) {
         self.wifi_stuck = stuck;
+    }
+
+    /// Host reports the server's verdict on this board's authorization
+    /// (MAR-90): true on `NotAuthorized`, false once a server accepts it.
+    pub fn set_not_authorized(&mut self, refused: bool) {
+        self.not_authorized = refused;
     }
 
     /// The user pressed the knob on that offer: clear Wi-Fi credentials and come
@@ -1315,6 +1327,14 @@ impl Board {
             scale_buf(&mut buf, self.brightness());
             return buf;
         }
+        // Refused by the server: say so, whatever was cached. The board will
+        // never be served here, so holding old content would only hide why.
+        // Below reset and the menu, so the knob still works.
+        if self.not_authorized && matches!(self.mode, Mode::Booting | Mode::Running) {
+            let mut buf = self.screen_connecting();
+            scale_buf(&mut buf, self.brightness());
+            return buf;
+        }
         let mut buf = match self.mode {
             Mode::Booting => self.screen_boot(),
             Mode::Setup => self.screen_setup(),
@@ -1522,7 +1542,14 @@ impl Board {
         // around the panel's center line (x = 31.5): 14,17,20,23,26 reflects
         // to 49,46,43,40,37. The old 15/38 crowded the Wi-Fi mark from the
         // left (margins 3-and-1 vs 2-and-1) and read visibly lopsided.
-        if self.wifi_up {
+        if self.wifi_up && self.not_authorized {
+            // The server answered and said no. Nothing is coming up, so
+            // nothing walks: a red leg, and the reason.
+            let red = Rgb888::new(0xFF, 0x55, 0x55);
+            draw_leg(&mut c, 14, green, None);
+            draw_leg(&mut c, 37, red, None);
+            center_text(&mut c, "NOT AUTHORIZED", 27, &FONT_4X6, red);
+        } else if self.wifi_up {
             draw_leg(&mut c, 14, green, None);
             draw_leg(&mut c, 37, dim, Some(self.anim % 5));
             center_text(&mut c, "FINDING SERVER", 27, &FONT_4X6, amber);
@@ -3389,6 +3416,39 @@ mod tests {
         b.set_wifi(true);
         let finding = b.framebuffer();
         assert_ne!(joining, finding, "wifi state must change the connect screen");
+    }
+
+    /// A board the server refused says NOT AUTHORIZED (MAR-90) instead of
+    /// FINDING SERVER forever: a still screen, shown over anything cached,
+    /// gone once a server accepts it, and never in the way of hold-to-reset.
+    #[test]
+    fn a_refused_board_says_not_authorized_and_still_resets() {
+        let mut b = Board::new();
+        b.mode = Mode::Running;
+        b.set_wifi(true);
+        b.tick(1000);
+        let finding = b.framebuffer();
+        b.set_not_authorized(true);
+        let refused = b.framebuffer();
+        assert_ne!(refused, finding, "says why, not FINDING SERVER");
+        b.tick(1400);
+        assert_eq!(b.framebuffer(), refused, "nothing walks: nothing is coming up");
+        b.set_online(true);
+        assert_eq!(b.framebuffer(), refused, "the verdict wins over a socket or cached content");
+
+        let mut reference = Board::new();
+        reference.mode = Mode::Running;
+        reference.tick(1400);
+        b.button_down(1400);
+        reference.button_down(1400);
+        b.tick(2300);
+        reference.tick(2300);
+        assert_eq!(b.framebuffer(), reference.framebuffer(), "the reset hold still takes over");
+        b.button_up(2400);
+        b.tick(2400);
+
+        b.set_not_authorized(false);
+        assert_ne!(b.framebuffer(), refused, "accepted: back to normal");
     }
 
     /// The traveling dot on the connect screen must keep moving — a frozen leg

@@ -8,7 +8,10 @@ There are two ways to run a scoreboard:
 1. **Your own server** — anywhere: a cloud box, a Raspberry Pi, or your laptop.
    This guide. You own the data, the keys, and the uptime.
 2. **The hosted server** — a one-time fee, no server to run. You still build the
-   hardware and flash it; you just skip [Part 2](#part-2--run-a-server).
+   hardware and flash it; you just skip [Part 2](#part-2--run-a-server). The
+   hosted server only serves boards we've authorized, so we send you a small
+   identity file to flash with it (see
+   [BYOD](docs/provisioning.md#byod--your-hardware-our-server)).
 
 Everything below is the same for both except Part 2 and one field during setup.
 
@@ -218,7 +221,8 @@ Done — live scores.
   opens the settings part only.
 - **Hold ~10 seconds** — factory reset from any state, including a board that
   can't connect. Wi-Fi, server, pin, and the board's identity are all erased and
-  it returns to Bluetooth setup.
+  it returns to Bluetooth setup, unpaired from every phone. (A board authorized
+  for the hosted server keeps its identity, which is its authorization.)
 
 That last one is your way out of any mistake in Part 5. It needs no server and no
 app, which is exactly why it's there.

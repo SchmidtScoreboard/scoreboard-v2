@@ -2087,7 +2087,19 @@ pub enum Role {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "t")]
 pub enum ClientMsg {
-    Auth { role: Role, pubkey: String, sig: String },
+    Auth {
+        role: Role,
+        pubkey: String,
+        sig: String,
+        /// A device's authorization (MAR-90): the owner's Ed25519 signature
+        /// over [`blessing_message`] for this `pubkey`, as hex. Written to
+        /// the board at flash time with its identity. A server that requires
+        /// it (`BOARD_BLESSING_PUBKEY`) answers a board without a valid one
+        /// with [`ServerMsg::NotAuthorized`]. Absent for apps, for boards
+        /// that create their own identity, and for older firmware.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blessing: Option<String>,
+    },
     NeedFrames {
         ids: Vec<FrameId>,
         /// Frame payload codecs THIS CLIENT can decode ([`FRAME_CODEC_RAW`],
@@ -2124,10 +2136,13 @@ pub enum ClientMsg {
     // device announces it is factory-resetting RIGHT NOW (best-effort, sent
     // in the second before the wipe+reboot when a socket happens to be up):
     // the server deletes everything it knows about the board — pairings,
-    // config, version — so it returns as a brand-new scoreboard. The device
-    // also wipes its own identity seed, so even an OFFLINE reset comes back
-    // under a fresh board_id; this message just keeps the server's tables
-    // from accumulating orphans and unpairs the old id from every phone.
+    // config, version — so it returns as a brand-new scoreboard. A board
+    // that created its own identity also wipes its seed, so even an OFFLINE
+    // reset comes back under a fresh board_id. An AUTHORIZED board keeps its
+    // identity (it is the authorization, MAR-90), so it remembers an offline
+    // reset and sends this on its next connect instead, after AuthOk and
+    // before EnterSetup. The server forgets the board and, as it is still
+    // connected, tells it to show its pair code.
     FactoryReset,
     // device reports a single knob press — the server decides sleep/wake/notice.
     // LEGACY: picker-era firmware sends SelectMode instead (and only falls
@@ -2177,6 +2192,12 @@ pub enum ClientMsg {
 pub enum ServerMsg {
     Hello { challenge: String },
     AuthOk,
+    /// Sent to a device instead of `AuthOk` when this server only serves
+    /// authorized boards and this one presented no valid blessing (MAR-90).
+    /// The server closes the socket after it. Current firmware shows NOT
+    /// AUTHORIZED and waits minutes before retrying. Older firmware ignores
+    /// the message and simply reconnects.
+    NotAuthorized,
     /// The board's local wall clock, as milliseconds since the Unix epoch with
     /// the board's timezone offset ALREADY APPLIED. The board has no RTC and no
     /// tz database, so it gets an answer, not the inputs to compute one — and
@@ -2631,6 +2652,140 @@ pub fn verify_hex(pubkey_hex: &str, msg: &[u8], sig_hex: &str) -> bool {
     let Ok(sig_bytes) = hex::decode(sig_hex) else { return false };
     let Ok(sig): Result<[u8; 64], _> = sig_bytes.try_into() else { return false };
     vk.verify(msg, &Signature::from_bytes(&sig)).is_ok()
+}
+
+// ---- Board authorization (MAR-90) ----
+// The hosted server serves only boards its owner has authorized. The owner
+// signs each board's public key with a key of their own (never on the
+// server), and the board presents that signature, its "blessing", in
+// `ClientMsg::Auth`. The server holds only the owner's public key. The
+// blessing is written to the board with its identity at flash time, in the
+// v2 identity record below, so it can't be forged by reading this source.
+
+/// Domain separation: a blessing can never be mistaken for a signature over
+/// anything else the owner's key might sign.
+const BLESSING_DOMAIN: &[u8] = b"openscoreboard/board-blessing/v1:";
+
+/// The exact bytes a blessing signs: the domain, then the board's 32-byte
+/// public key.
+pub fn blessing_message(board_pubkey: &[u8; 32]) -> Vec<u8> {
+    let mut m = Vec::with_capacity(BLESSING_DOMAIN.len() + 32);
+    m.extend_from_slice(BLESSING_DOMAIN);
+    m.extend_from_slice(board_pubkey);
+    m
+}
+
+/// The owner's blessing for the board whose seed is `board_secret`, as raw
+/// bytes, ready for an identity record. Tooling only: the owner's seed never
+/// reaches the server or a board.
+pub fn bless(owner_secret: &[u8; 32], board_secret: &[u8; 32]) -> [u8; 64] {
+    let board_pk = SigningKey::from_bytes(board_secret).verifying_key().to_bytes();
+    SigningKey::from_bytes(owner_secret).sign(&blessing_message(&board_pk)).to_bytes()
+}
+
+/// True iff `blessing_hex` is `owner_pubkey`'s blessing of the board
+/// `board_pubkey_hex`.
+pub fn verify_blessing(owner_pubkey: &[u8; 32], board_pubkey_hex: &str, blessing_hex: &str) -> bool {
+    let Ok(pk_bytes) = hex::decode(board_pubkey_hex) else { return false };
+    let Ok(board_pk): Result<[u8; 32], _> = pk_bytes.try_into() else { return false };
+    let Ok(vk) = VerifyingKey::from_bytes(owner_pubkey) else { return false };
+    let Ok(sig_bytes) = hex::decode(blessing_hex) else { return false };
+    let Ok(sig): Result<[u8; 64], _> = sig_bytes.try_into() else { return false };
+    vk.verify(&blessing_message(&board_pk), &Signature::from_bytes(&sig)).is_ok()
+}
+
+// ---- The board identity record (flash layout, own nvs sector 0xB000) ----
+// Shared so the firmware that reads it and the tool that mints it can never
+// disagree about the bytes. Little-endian magic first.
+//   v1 "WBK1": magic(4) | secret(32)                — created by the board
+//   v2 "WBK2": magic(4) | secret(32) | blessing(64) — written at flash time
+
+const IDENTITY_MAGIC_V1: u32 = 0x5742_4B31;
+const IDENTITY_MAGIC_V2: u32 = 0x5742_4B32;
+/// Bytes a record can occupy: the v2 length. Wipes cover all of it.
+pub const IDENTITY_RECORD_LEN: usize = 100;
+
+/// A board's identity as stored in flash.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IdentityRecord {
+    pub secret: [u8; 32],
+    /// Present on an authorized board (a v2 record).
+    pub blessing: Option<[u8; 64]>,
+}
+
+impl IdentityRecord {
+    /// The record's bytes: v2 when blessed, else v1, padded with erased-flash
+    /// 0xFF to [`IDENTITY_RECORD_LEN`].
+    pub fn encode(&self) -> [u8; IDENTITY_RECORD_LEN] {
+        let mut out = [0xFFu8; IDENTITY_RECORD_LEN];
+        let magic = if self.blessing.is_some() { IDENTITY_MAGIC_V2 } else { IDENTITY_MAGIC_V1 };
+        out[0..4].copy_from_slice(&magic.to_le_bytes());
+        out[4..36].copy_from_slice(&self.secret);
+        if let Some(b) = &self.blessing {
+            out[36..100].copy_from_slice(b);
+        }
+        out
+    }
+
+    /// Parse a record read from flash; None for anything else, erased flash
+    /// included.
+    pub fn decode(buf: &[u8]) -> Option<Self> {
+        let magic = u32::from_le_bytes(buf.get(0..4)?.try_into().ok()?);
+        let secret: [u8; 32] = buf.get(4..36)?.try_into().ok()?;
+        match magic {
+            IDENTITY_MAGIC_V1 => Some(Self { secret, blessing: None }),
+            IDENTITY_MAGIC_V2 => Some(Self { secret, blessing: Some(buf.get(36..100)?.try_into().ok()?) }),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod blessing_tests {
+    use super::*;
+
+    #[test]
+    fn a_blessing_verifies_only_for_its_board_and_owner() {
+        let (owner, board) = ([1u8; 32], [2u8; 32]);
+        let owner_pk: [u8; 32] = SigningKey::from_bytes(&owner).verifying_key().to_bytes();
+        let b = hex::encode(bless(&owner, &board));
+        assert!(verify_blessing(&owner_pk, &pubkey_hex(&board), &b));
+        assert!(!verify_blessing(&owner_pk, &pubkey_hex(&[3u8; 32]), &b), "another board");
+        let other: [u8; 32] = SigningKey::from_bytes(&[9u8; 32]).verifying_key().to_bytes();
+        assert!(!verify_blessing(&other, &pubkey_hex(&board), &b), "another owner");
+        assert!(!verify_blessing(&owner_pk, &pubkey_hex(&board), "beef"), "malformed");
+        // A signature over the bare key, without the domain, is not a blessing.
+        let bare = sign_hex(&owner, &SigningKey::from_bytes(&board).verifying_key().to_bytes());
+        assert!(!verify_blessing(&owner_pk, &pubkey_hex(&board), &bare), "domain separated");
+    }
+
+    #[test]
+    fn identity_records_round_trip_and_v1_still_reads() {
+        let v2 = IdentityRecord { secret: [5u8; 32], blessing: Some([6u8; 64]) };
+        assert_eq!(IdentityRecord::decode(&v2.encode()), Some(v2.clone()));
+        let v1 = IdentityRecord { secret: [5u8; 32], blessing: None };
+        assert_eq!(IdentityRecord::decode(&v1.encode()), Some(v1));
+        // Exactly the bytes the pre-MAR-90 firmware wrote: "WBK1" + secret.
+        let mut old = [0xFFu8; IDENTITY_RECORD_LEN];
+        old[0..4].copy_from_slice(&0x5742_4B31u32.to_le_bytes());
+        old[4..36].copy_from_slice(&[5u8; 32]);
+        assert_eq!(IdentityRecord::decode(&old[..36]).map(|r| r.blessing), Some(None));
+        assert_eq!(IdentityRecord::decode(&[0xFFu8; IDENTITY_RECORD_LEN]), None, "erased flash");
+        assert_eq!(IdentityRecord::decode(&v2.encode()[..60]), None, "a torn v2 record");
+    }
+
+    #[test]
+    fn auth_carries_a_blessing_only_when_there_is_one() {
+        let without = ClientMsg::Auth { role: Role::Device, pubkey: "aa".into(), sig: "bb".into(), blessing: None };
+        let json = serde_json::to_string(&without).unwrap();
+        assert!(!json.contains("blessing"), "{json}");
+        // What older firmware and the apps send still parses.
+        let old: ClientMsg = serde_json::from_str(r#"{"t":"Auth","role":"Device","pubkey":"aa","sig":"bb"}"#).unwrap();
+        assert!(matches!(old, ClientMsg::Auth { blessing: None, .. }));
+        let with = ClientMsg::Auth { role: Role::Device, pubkey: "aa".into(), sig: "bb".into(), blessing: Some("cc".into()) };
+        let back: ClientMsg = serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+        assert!(matches!(back, ClientMsg::Auth { blessing: Some(b), .. } if b == "cc"));
+    }
 }
 
 #[cfg(test)]

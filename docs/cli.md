@@ -25,6 +25,9 @@ release binary directly — flags are identical).
 | `TLS_KEY_PEM` | unset | PEM private key matching `TLS_CERT_PEM`. Secret. Both variables must be set together; anything else logs an error and degrades to plaintext rather than crash-looping. |
 | `POLL_SECS` | `180` | ESPN poll interval. Polling skips entirely while nothing is connected. |
 | `STATE_DIR` | `.` | Where `scoreboard.db` (pairings, board configs) and the catalog cache live. |
+| `BOARD_BLESSING_PUBKEY` | unset | The owner's public key (hex, from `bless-board --print-pubkey`). Set = check every board's authorization; unset = serve any board, which is what a self-hosted server wants. Malformed refuses to start. See [Board authorization](#board-authorization). |
+| `BOARD_BLESSING_ENFORCE` | unset | `1` = refuse unauthorized boards (`NotAuthorized`, NOT AUTHORIZED on the panel). Anything else only logs them, which is how the check is rolled out. |
+| `BOARD_GRANDFATHERED` | unset | Board ids (hex public keys, comma- or space-separated) served without authorization: boards that predate it and minted their own identity. |
 | `FIRMWARE_DIR` | `./firmware-dist` | Where the OTA release channels live (`{stable,beta,dev}/firmware.{bin,json}`). Loaded once at startup and integrity-checked: a missing channel is quietly off, a *broken* one refuses to start (a board must never download an image that won't verify). The Dockerfile ships `firmware-dist/` inside the server image and points here at `/firmware-dist`. |
 
 ## Debug-friendly HTTP routes
@@ -52,7 +55,9 @@ All curl-able; the app uses the same ones.
   self-hosted server needs no accounts. Cached and refreshed every 10 minutes
   by `weather_loop`, never fetched while rendering a frame.
 - `GET /health` — liveness plus the numbers worth watching: per-loop heartbeat
-  ages, boards connected, games, cached frames. Returns **503** when a loop has
+  ages, boards connected, games, cached frames, and the board-authorization
+  mode with how many distinct boards it has refused (or, log-only, would have)
+  since boot — a count, never the ids. Returns **503** when a loop has
   stalled, which is what `railway.json` points its healthcheck at, so a wedged
   container gets restarted instead of staying up and useless.
 - `GET /offmode/{id}.png` — what an off mode looks like on the panel, rendered
@@ -346,6 +351,45 @@ the one that just broke.
 This staged dance is for the **hosted** fleet, whose pins arrive in firmware.
 A self-hosted board carries one provisioned pin and rotates by being
 re-provisioned — see below.
+
+## Board authorization
+
+The hosted server can serve only the boards its owner has authorized (MAR-90).
+A board's identity is an Ed25519 key, and anyone can mint one, so the server
+also asks for the owner's signature over that key: a *blessing*, written to the
+board with its identity at flash time and sent with every `Auth`. The server
+holds only the owner's public key. A self-hosted server sets none of this and
+serves every board.
+
+**Minting.** `bless-board` keeps the owner's seed at
+`~/.config/scoreboard/board-blessing.key` (generated on first use; back it up,
+never put it on a server):
+
+```sh
+cargo run -p server --bin bless-board -- --print-pubkey     # -> BOARD_BLESSING_PUBKEY
+cargo run -p server --bin bless-board -- board-0042.bin     # mint one board
+IDENTITY=board-0042.bin FEATURES=prod SCOREBOARD_TLS_PIN=… scripts/flash.sh
+cargo run -p server --bin bless-board -- --check board-0042.bin   # optional
+rm board-0042.bin                                            # the image IS the board
+```
+
+**Rolling it out** without turning off a board you meant to keep:
+
+1. Set `BOARD_BLESSING_PUBKEY` and `BOARD_GRANDFATHERED` (every existing
+   board id you want to keep) and deploy. Log-only: nothing is refused.
+2. Watch `railway logs` for `is not authorized (log-only…)` and `/health`'s
+   `authorization.unauthorized_boards`. Each unexpected id is a board you
+   either grandfather or accept losing.
+3. Set `BOARD_BLESSING_ENFORCE=1` and redeploy.
+
+A refused board on current firmware shows NOT AUTHORIZED and asks again every
+five minutes, so grandfathering it later brings it back without a visit.
+Older firmware ignores the refusal and redials; the server holds each refused
+socket for 25s to pace that.
+
+An authorized board keeps its identity through a factory reset (it *is* the
+authorization). It still comes back unpaired from every phone: it reports the
+reset to the server on its next connect, even when the reset happened offline.
 
 ## Running your own server
 
