@@ -6922,8 +6922,8 @@ public func addableScreenGroups(screens: [UiScreenConfig], offModes: [UiOffMode]
 
 /**
  * What can be added, grouped by kind in catalog order: one preset per
- * layout or style for a kind that has them (Big weather, Forecast, Word
- * clock ...), else one per kind. A preset already on the list — a screen of
+ * layout or style for a kind that has them (Big Weather, Forecast, Word
+ * Clock ...), else one per kind. A preset already on the list — a screen of
  * its kind whose resolved layout matches, defaults included — is left out,
  * since two identical screens are only confusing.
  */
@@ -8273,7 +8273,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_func_addable_screen_groups() != 29979 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_func_addable_screens() != 39792 {
+    if uniffi_app_core_checksum_func_addable_screens() != 51804 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_ble_contract() != 45310 {

@@ -1553,8 +1553,8 @@ fn preset_field(d: &OffModeDescriptor) -> Option<&OffModeField> {
 }
 
 /// What can be added, grouped by kind in catalog order: one preset per
-/// layout or style for a kind that has them (Big weather, Forecast, Word
-/// clock ...), else one per kind. A preset already on the list — a screen of
+/// layout or style for a kind that has them (Big Weather, Forecast, Word
+/// Clock ...), else one per kind. A preset already on the list — a screen of
 /// its kind whose resolved layout matches, defaults included — is left out,
 /// since two identical screens are only confusing.
 #[uniffi::export]
@@ -2372,7 +2372,7 @@ mod screens_tests {
                     "detailed",
                     true,
                     vec![
-                        choice("simple", "Simple", "/offmode/weather.png?variant=simple", Some("Big weather")),
+                        choice("simple", "Simple", "/offmode/weather.png?variant=simple", Some("Big Weather")),
                         choice("detailed", "Detailed", "/offmode/weather.png?variant=detailed", None),
                         choice("forecast", "Forecast", "/offmode/weather.png?variant=forecast", Some("Forecast")),
                     ],
@@ -2400,7 +2400,7 @@ mod screens_tests {
                         true,
                         vec![
                             choice("classic", "Classic", "/offmode/clock.png?style=classic", None),
-                            choice("word", "Word", "/offmode/clock.png?style=word", Some("Word clock")),
+                            choice("word", "Word", "/offmode/clock.png?style=word", Some("Word Clock")),
                         ],
                     ),
                 ],
@@ -2750,7 +2750,7 @@ mod screens_tests {
         let got: Vec<(&str, &str)> = add.iter().map(|a| (a.kind.as_str(), a.label.as_str())).collect();
         assert_eq!(
             got,
-            [("clock", "Word clock"), ("weather", "Big weather"), ("weather", "Forecast"), ("stocks", "Stocks")],
+            [("clock", "Word Clock"), ("weather", "Big Weather"), ("weather", "Forecast"), ("stocks", "Stocks")],
             "Classic and Detailed are the defaults the board already shows"
         );
         assert_eq!(add[1].params, map(&[("variant", "simple")]));
@@ -2761,7 +2761,7 @@ mod screens_tests {
 
         let full = addable_screens(base(), ui_catalog());
         let labels: Vec<&str> = full.iter().map(|a| a.label.as_str()).collect();
-        assert_eq!(labels, ["Word clock", "Big weather"], "Forecast and Stocks are on the board");
+        assert_eq!(labels, ["Word Clock", "Big Weather"], "Forecast and Stocks are on the board");
         // An unlabelled option composes its name.
         let mut cat = proto_catalog();
         cat[1].fields[1].options[1].screen_label = None;

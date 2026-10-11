@@ -307,7 +307,7 @@ These rules keep that working:
   two Weather screens with different layouts. Every other field (a location,
   24-hour time) is board-wide, typed once and shared by every copy.
 - **Give each option of a per-screen choice a short `screen_label`** (15
-  characters or fewer: "Forecast", "Word clock"). It names every screen with
+  characters or fewer: "Forecast", "Word Clock"). It names every screen with
   that option. Without it a single copy goes by the mode's label, and copies
   that repeat fall back to "Weather · Forecast" (the knob shows a shortened
   form of that).

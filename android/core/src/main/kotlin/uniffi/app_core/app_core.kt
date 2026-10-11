@@ -1921,7 +1921,7 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_app_core_checksum_func_addable_screen_groups() != 29979.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_app_core_checksum_func_addable_screens() != 39792.toShort()) {
+    if (lib.uniffi_app_core_checksum_func_addable_screens() != 51804.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_ble_contract() != 45310.toShort()) {
@@ -7605,8 +7605,8 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
 
         /**
          * What can be added, grouped by kind in catalog order: one preset per
-         * layout or style for a kind that has them (Big weather, Forecast, Word
-         * clock ...), else one per kind. A preset already on the list — a screen of
+         * layout or style for a kind that has them (Big Weather, Forecast, Word
+         * Clock ...), else one per kind. A preset already on the list — a screen of
          * its kind whose resolved layout matches, defaults included — is left out,
          * since two identical screens are only confusing.
          */ fun `addableScreens`(`screens`: List<UiScreenConfig>, `offModes`: List<UiOffMode>): List<UiAddableScreen> {

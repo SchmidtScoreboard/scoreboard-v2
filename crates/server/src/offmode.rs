@@ -142,7 +142,7 @@ fn per_screen(mut f: OffModeField) -> OffModeField {
 /// Each names a screen with that layout.
 fn weather_variants() -> Vec<OffModeChoice> {
     [
-        ("simple", "Simple", "Big weather"),
+        ("simple", "Simple", "Big Weather"),
         ("detailed", "Detailed", "Weather"),
         ("forecast", "Forecast", "Forecast"),
         ("clock", "Clock + Weather", "Clock + Weather"),
@@ -162,9 +162,9 @@ fn weather_variants() -> Vec<OffModeChoice> {
 fn clock_screen_label(style: &str) -> Option<String> {
     match style {
         "classic" => Some("Clock"),
-        "large" => Some("Big clock"),
-        "compact" => Some("Small clock"),
-        "word" => Some("Word clock"),
+        "large" => Some("Big Clock"),
+        "compact" => Some("Small Clock"),
+        "word" => Some("Word Clock"),
         _ => None,
     }
     .map(String::from)

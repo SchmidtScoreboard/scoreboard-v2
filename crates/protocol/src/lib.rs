@@ -248,8 +248,8 @@ pub struct OffModeChoice {
     /// build a URL out of an id it is not allowed to understand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
-    /// Short name for a SCREEN using this choice ("Big weather", "Forecast",
-    /// "Word clock"). Server-declared so the app never composes a name out
+    /// Short name for a SCREEN using this choice ("Big Weather", "Forecast",
+    /// "Word Clock"). Server-declared so the app never composes a name out
     /// of ids, and at most 15 characters so it fits the board's knob menu.
     /// `None` falls back to the mode's label, or "{mode label} · {choice
     /// label}" when the kind is on the list more than once — see
@@ -1801,7 +1801,7 @@ pub fn resolved_screens(cfg: &BoardConfig, catalog: &[OffModeDescriptor]) -> Vec
 /// A screen's name before any tie is broken. Sports and Off are fixed; any
 /// other screen is named by its layout or style — the `screen_label` of the
 /// selected option of its kind's first per-screen choice field — so a lone
-/// word clock reads "Word clock", as Add Screen offered it (MAR-119). An
+/// word clock reads "Word Clock", as Add Screen offered it (MAR-119). An
 /// option without one leaves a kind on the list once its descriptor label,
 /// and names a repeated kind "{mode} · {choice}".
 fn screen_base_label(screens: &[ScreenConfig], i: usize, catalog: &[OffModeDescriptor]) -> String {
@@ -3161,9 +3161,9 @@ mod screens_tests {
                         true,
                         vec![
                             choice("classic", "Classic", Some("Clock")),
-                            choice("large", "Large", Some("Big clock")),
-                            choice("compact", "Compact", Some("Small clock")),
-                            choice("word", "Word", Some("Word clock")),
+                            choice("large", "Large", Some("Big Clock")),
+                            choice("compact", "Compact", Some("Small Clock")),
+                            choice("word", "Word", Some("Word Clock")),
                         ],
                     ),
                 ],
@@ -3180,7 +3180,7 @@ mod screens_tests {
                         "detailed",
                         true,
                         vec![
-                            choice("simple", "Simple", Some("Big weather")),
+                            choice("simple", "Simple", Some("Big Weather")),
                             choice("detailed", "Detailed", Some("Weather")),
                             choice("forecast", "Forecast", Some("Forecast")),
                             choice("clock", "Clock + Weather", Some("Clock+Weather")),
@@ -3786,7 +3786,7 @@ mod screens_tests {
     }
 
     /// Every screen is named by its layout, lone or repeated: a lone word
-    /// clock is "Word clock", as Add Screen offered it (MAR-119). The default
+    /// clock is "Word Clock", as Add Screen offered it (MAR-119). The default
     /// layouts' names are the kinds', so a fresh list reads as it always has.
     #[test]
     fn labels_name_every_screen_by_its_layout() {
@@ -3807,7 +3807,7 @@ mod screens_tests {
         );
         assert_eq!(
             screen_labels(&list, &cat),
-            ["Sports", "Off", "Big weather", "Forecast", "Weather", "Forecast 2", "Word clock"]
+            ["Sports", "Off", "Big Weather", "Forecast", "Weather", "Forecast 2", "Word Clock"]
         );
         assert_eq!(screen_label(&list, 3, &cat), "Forecast");
         assert_eq!(screen_label(&list, 99, &cat), "");
@@ -3821,7 +3821,7 @@ mod screens_tests {
             vec![screen("clock", "clock", &[("style", "word")], false), screen("weather", "weather", &[("variant", "forecast")], false)],
             &cat,
         );
-        assert_eq!(screen_labels(&lone, &cat)[2..], ["Word clock", "Forecast"]);
+        assert_eq!(screen_labels(&lone, &cat)[2..], ["Word Clock", "Forecast"]);
     }
 
     /// A server that declares no screen label still names each screen, and
