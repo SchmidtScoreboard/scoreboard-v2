@@ -1886,6 +1886,15 @@ async fn get_demo_render(
         .into_response()
 }
 
+/// The settings previews (spoiler, extras, name style, round): a fixed sample
+/// game rendered the way a setting would change it.
+///
+/// Cached an hour (MAR-103). `public` is safe because this route takes no
+/// state and no `?board=`, so it has no spoiler scope to leak, unlike
+/// `/render` and `/game`. The fixtures read no wall clock, so a cached copy
+/// is byte-identical to a fresh one. An hour rather than `/guide`'s day
+/// because renderer changes land often, and these tiles exist to show what
+/// a setting does now.
 async fn get_sample(
     axum::extract::Path(variant): axum::extract::Path<String>,
     axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
@@ -1940,7 +1949,10 @@ async fn get_sample(
         .unwrap_or_else(|| default_name_style(&g.sport_id));
     let (_, px) = render::render_frame(&g, spoiler, None, style);
     (
-        [(axum::http::header::CONTENT_TYPE, "image/png")],
+        [
+            (axum::http::header::CONTENT_TYPE, "image/png"),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
         render_png(&px),
     )
         .into_response()
@@ -10246,6 +10258,34 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// GET /sample/{variant}.png: the settings previews carry the hour-long
+    /// public cache header (MAR-103), and caching them is honest because the
+    /// same URL renders the same bytes twice.
+    #[tokio::test]
+    async fn sample_previews_are_cacheable_and_stable() {
+        let app = Router::new().route("/sample/:variant", get(get_sample));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        for path in ["normal.png", "strict.png?sport=nhl", "game.png?sport=nhl&extras=off"] {
+            let fetch = || async {
+                let resp = reqwest::get(format!("http://{addr}/sample/{path}")).await.unwrap();
+                assert_eq!(resp.status(), 200, "{path}");
+                assert_eq!(resp.headers().get(reqwest::header::CONTENT_TYPE).unwrap(), "image/png", "{path}");
+                assert_eq!(
+                    resp.headers().get(reqwest::header::CACHE_CONTROL).unwrap(),
+                    "public, max-age=3600",
+                    "{path}"
+                );
+                resp.bytes().await.unwrap()
+            };
+            let (a, b) = (fetch().await, fetch().await);
+            assert!(a.starts_with(&[0x89, b'P', b'N', b'G']), "{path} must be a real PNG");
+            assert_eq!(a, b, "{path}: a cached copy must match a fresh render");
+        }
     }
 
     /// GET /guide/{name}.png: every troubleshooting screen serves a 200 PNG

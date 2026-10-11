@@ -61,6 +61,11 @@ All curl-able; the app uses the same ones.
   Screen, the Controls rail); a screen's own layout rides as query params.
   404 on an id this server does not offer — a wrong picture would
   misrepresent what the board will do.
+- `GET /sample/{variant}.png` — a fixed sample game drawn the way a setting
+  would change it (`normal`/`strict` spoilers; `?sport=`, `?extras=off`,
+  `?round=off`, `?thru=off`, `?live=1`, `?style=`). Drives the settings previews.
+  `Cache-Control: public, max-age=3600`: it is not board-scoped and reads no
+  clock, so the bytes are stable, and an hour keeps it fresh across deploys.
 - `GET /demo/games` — the synthetic slate as JSON. The whole demo set, on the
   same poll cadence as live data; this is how you learn the `demo-*` ids
   without pairing a board. Not board-scoped (synthetic games carry no spoiler
