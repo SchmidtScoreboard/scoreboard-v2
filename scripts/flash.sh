@@ -77,13 +77,6 @@ pkill -f "device monitor" 2>/dev/null || true
 lsof -t /dev/cu.usbmodem* 2>/dev/null | xargs -r kill 2>/dev/null || true
 sleep 1
 
-if [[ -n "$IDENTITY" ]]; then
-    # 0xB000 is the identity sector (firmware-rs/src/identity.rs), inside the
-    # nvs partition that the app flash below leaves alone.
-    echo "==> writing the authorized identity via $PORT"
-    espflash write-bin -p "$PORT" 0xB000 "$IDENTITY"
-fi
-
 echo "==> flashing via $PORT"
 # --partition-table: the OTA layout (nvs kept at 0x9000 so creds/brightness/
 #   identity survive; two 3MB app slots for over-the-air updates).
@@ -96,6 +89,17 @@ espflash flash -p "$PORT" \
     --target-app-partition ota_0 \
     --erase-parts otadata \
     target/xtensa-esp32s3-none-elf/release/firmware-rs
+
+if [[ -n "$IDENTITY" ]]; then
+    # AFTER the app, never before: firmware older than MAR-90 reads only the
+    # v1 identity record, so if it booted between the two writes it would
+    # take the v2 record for no identity at all, mint a fresh one over it,
+    # and destroy the authorization. The new firmware just flashed reads v2.
+    # 0xB000 is the identity sector (firmware-rs/src/identity.rs), inside the
+    # nvs partition that the app flash above leaves alone.
+    echo "==> writing the authorized identity via $PORT"
+    espflash write-bin -p "$PORT" 0xB000 "$IDENTITY"
+fi
 
 echo
 echo "=============================================================="
