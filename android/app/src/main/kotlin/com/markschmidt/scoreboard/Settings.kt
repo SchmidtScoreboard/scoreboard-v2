@@ -1,5 +1,7 @@
 package com.markschmidt.scoreboard
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -12,10 +14,12 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.Article
 import androidx.compose.material.icons.automirrored.outlined.HelpOutline
 import androidx.compose.material.icons.outlined.Build
+import androidx.compose.material.icons.outlined.ContentPaste
 import androidx.compose.material.icons.outlined.DarkMode
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Downloading
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material.icons.outlined.Upload
 import androidx.compose.material.icons.outlined.VisibilityOff
@@ -23,6 +27,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
@@ -492,8 +497,26 @@ private fun TroubleshootingPage(session: Session, onBack: () -> Unit) {
 private fun AdvancedPage(session: Session, state: Session.AppState, boardId: String, onBack: () -> Unit) {
     val cfg = state.boards[boardId]?.config
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
+    val context = LocalContext.current
     var confirmRemove by remember { mutableStateOf(false) }
-    var importAlert by remember { mutableStateOf<String?>(null) }
+    // Import's two refusals before the server is asked: (title, message).
+    var importAlert by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var importMenu by remember { mutableStateOf(false) }
+    // Import from the file an export was saved to. Read one byte past the
+    // core's cap so an oversized file is refused without loading all of it;
+    // the core's `importPayload` decides what can be an export.
+    val pickImport = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult // cancelled
+        val bytes = runCatching {
+            context.contentResolver.openInputStream(uri)?.use { readAtMost(it, 256 * 1024 + 1) }
+        }.getOrNull()
+        val text = bytes?.let { uniffi.app_core.importPayload(it) }
+        if (text != null) {
+            session.importSettings(boardId, text)
+        } else {
+            importAlert = uniffi.app_core.importUnreadableTitle() to uniffi.app_core.importUnreadableMessage()
+        }
+    }
 
     // Server-answered one-shots: the export sheet and the import verdict.
     state.importResult?.let { result ->
@@ -506,10 +529,10 @@ private fun AdvancedPage(session: Session, state: Session.AppState, boardId: Str
             },
         )
     }
-    importAlert?.let { msg ->
+    importAlert?.let { (title, msg) ->
         AlertDialog(
             onDismissRequest = { importAlert = null },
-            title = { Text(uniffi.app_core.importEmptyTitle()) },
+            title = { Text(title) },
             text = { Text(msg) },
             confirmButton = { TextButton(onClick = { importAlert = null }) { Text("OK") } },
         )
@@ -546,19 +569,41 @@ private fun AdvancedPage(session: Session, state: Session.AppState, boardId: Str
                             session.exportSettings(boardId)
                         },
                     )
-                    ListItem(
-                        headlineContent = { Text("Import settings") },
-                        leadingContent = { GroupIcon(Icons.Outlined.Download) },
-                        colors = groupItemColors(),
-                        modifier = Modifier.clickable(enabled = state.connected) {
-                            val clip = clipboard.getText()?.text?.trim() ?: ""
-                            if (clip.isEmpty()) {
-                                importAlert = uniffi.app_core.importEmptyMessage()
-                            } else {
-                                session.importSettings(boardId, clip)
-                            }
-                        },
-                    )
+                    // Two sources: the file an export was saved to, or the
+                    // clipboard. The menu hangs off the row it came from.
+                    Box {
+                        ListItem(
+                            headlineContent = { Text("Import settings") },
+                            leadingContent = { GroupIcon(Icons.Outlined.Download) },
+                            colors = groupItemColors(),
+                            modifier = Modifier.clickable(enabled = state.connected) { importMenu = true },
+                        )
+                        DropdownMenu(expanded = importMenu, onDismissRequest = { importMenu = false }) {
+                            DropdownMenuItem(
+                                text = { Text(uniffi.app_core.importFromFileLabel()) },
+                                leadingIcon = { Icon(Icons.Outlined.FolderOpen, contentDescription = null) },
+                                onClick = {
+                                    importMenu = false
+                                    // octet-stream too: some providers don't know .json.
+                                    pickImport.launch(arrayOf("application/json", "text/*", "application/octet-stream"))
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(uniffi.app_core.importFromClipboardLabel()) },
+                                leadingIcon = { Icon(Icons.Outlined.ContentPaste, contentDescription = null) },
+                                onClick = {
+                                    importMenu = false
+                                    val clip = (clipboard.getText()?.text ?: "").toByteArray()
+                                    val text = uniffi.app_core.importPayload(clip)
+                                    if (text != null) {
+                                        session.importSettings(boardId, text)
+                                    } else {
+                                        importAlert = uniffi.app_core.importEmptyTitle() to uniffi.app_core.importEmptyMessage()
+                                    }
+                                },
+                            )
+                        }
+                    }
                 }
                 Text(
                     if (state.connected) uniffi.app_core.exportFooter()
@@ -719,4 +764,16 @@ internal fun <T> ChoiceRow(
             }
         }
     }
+}
+
+/** Up to [limit] bytes of [input] (InputStream.readNBytes needs API 33). */
+private fun readAtMost(input: java.io.InputStream, limit: Int): ByteArray {
+    val out = java.io.ByteArrayOutputStream()
+    val buf = ByteArray(8192)
+    while (out.size() < limit) {
+        val n = input.read(buf, 0, minOf(buf.size, limit - out.size()))
+        if (n < 0) break
+        out.write(buf, 0, n)
+    }
+    return out.toByteArray()
 }

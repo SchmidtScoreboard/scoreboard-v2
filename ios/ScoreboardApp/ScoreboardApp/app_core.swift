@@ -7393,6 +7393,55 @@ public func importEmptyTitle() -> String {
     })
 }
 
+public func importFromClipboardLabel() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_import_from_clipboard_label($0
+        )
+    })
+}
+
+/**
+ * Import settings offers two sources: a saved export file, or the clipboard.
+ */
+public func importFromFileLabel() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_import_from_file_label($0
+        )
+    })
+}
+
+/**
+ * The text to send as an import, from a file's or the clipboard's bytes:
+ * trimmed UTF-8, or None when it can't be an export. A real export is a
+ * few KB; anything past 256 KB is some other file, and isn't worth sending
+ * to the server to be told so.
+ */
+public func importPayload(bytes: Data) -> String? {
+    return try! FfiConverterOptionString.lift(try! rustCall {
+        uniffi_app_core_fn_func_import_payload(
+            FfiConverterData.lower(bytes), $0
+        )
+    })
+}
+
+public func importUnreadableMessage() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_import_unreadable_message($0
+        )
+    })
+}
+
+/**
+ * The alert when the chosen file can't be an export at all (unreadable,
+ * not text, empty, or far too big). The server judges everything else.
+ */
+public func importUnreadableTitle() -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_import_unreadable_title($0
+        )
+    })
+}
+
 /**
  * Whether a game involves one of the board's favorited teams.
  */
@@ -8379,6 +8428,21 @@ private var initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_import_empty_title() != 46841 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_import_from_clipboard_label() != 9539 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_import_from_file_label() != 26086 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_import_payload() != 9925 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_import_unreadable_message() != 5977 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_import_unreadable_title() != 59443 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_involves_favorite() != 62993 {

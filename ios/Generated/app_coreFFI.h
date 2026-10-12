@@ -857,6 +857,35 @@ RustBuffer uniffi_app_core_fn_func_import_empty_title(RustCallStatus *_Nonnull o
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_IMPORT_FROM_CLIPBOARD_LABEL
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_IMPORT_FROM_CLIPBOARD_LABEL
+RustBuffer uniffi_app_core_fn_func_import_from_clipboard_label(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_IMPORT_FROM_FILE_LABEL
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_IMPORT_FROM_FILE_LABEL
+RustBuffer uniffi_app_core_fn_func_import_from_file_label(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_IMPORT_PAYLOAD
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_IMPORT_PAYLOAD
+RustBuffer uniffi_app_core_fn_func_import_payload(RustBuffer bytes, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_IMPORT_UNREADABLE_MESSAGE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_IMPORT_UNREADABLE_MESSAGE
+RustBuffer uniffi_app_core_fn_func_import_unreadable_message(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_IMPORT_UNREADABLE_TITLE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_IMPORT_UNREADABLE_TITLE
+RustBuffer uniffi_app_core_fn_func_import_unreadable_title(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_INVOLVES_FAVORITE
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_INVOLVES_FAVORITE
 int8_t uniffi_app_core_fn_func_involves_favorite(RustBuffer sport_id, RustBuffer away, RustBuffer home, RustBuffer favorite_team_ids, RustCallStatus *_Nonnull out_status
@@ -1677,6 +1706,36 @@ uint16_t uniffi_app_core_checksum_func_import_empty_message(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_IMPORT_EMPTY_TITLE
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_IMPORT_EMPTY_TITLE
 uint16_t uniffi_app_core_checksum_func_import_empty_title(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_IMPORT_FROM_CLIPBOARD_LABEL
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_IMPORT_FROM_CLIPBOARD_LABEL
+uint16_t uniffi_app_core_checksum_func_import_from_clipboard_label(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_IMPORT_FROM_FILE_LABEL
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_IMPORT_FROM_FILE_LABEL
+uint16_t uniffi_app_core_checksum_func_import_from_file_label(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_IMPORT_PAYLOAD
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_IMPORT_PAYLOAD
+uint16_t uniffi_app_core_checksum_func_import_payload(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_IMPORT_UNREADABLE_MESSAGE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_IMPORT_UNREADABLE_MESSAGE
+uint16_t uniffi_app_core_checksum_func_import_unreadable_message(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_IMPORT_UNREADABLE_TITLE
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_IMPORT_UNREADABLE_TITLE
+uint16_t uniffi_app_core_checksum_func_import_unreadable_title(void
     
 );
 #endif

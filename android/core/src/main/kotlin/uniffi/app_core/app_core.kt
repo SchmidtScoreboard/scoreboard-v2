@@ -1131,6 +1131,16 @@ internal open class UniffiVTableCallbackInterfaceClientListener(
 
 
 
+
+
+
+
+
+
+
+
+
+
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -1336,6 +1346,16 @@ internal interface UniffiLib : Library {
     fun uniffi_app_core_fn_func_import_empty_message(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_import_empty_title(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_import_from_clipboard_label(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_import_from_file_label(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_import_payload(`bytes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_import_unreadable_message(uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_import_unreadable_title(uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_involves_favorite(`sportId`: RustBuffer.ByValue,`away`: RustBuffer.ByValue,`home`: RustBuffer.ByValue,`favoriteTeamIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
@@ -1644,6 +1664,16 @@ internal interface UniffiLib : Library {
     fun uniffi_app_core_checksum_func_import_empty_message(
     ): Short
     fun uniffi_app_core_checksum_func_import_empty_title(
+    ): Short
+    fun uniffi_app_core_checksum_func_import_from_clipboard_label(
+    ): Short
+    fun uniffi_app_core_checksum_func_import_from_file_label(
+    ): Short
+    fun uniffi_app_core_checksum_func_import_payload(
+    ): Short
+    fun uniffi_app_core_checksum_func_import_unreadable_message(
+    ): Short
+    fun uniffi_app_core_checksum_func_import_unreadable_title(
     ): Short
     fun uniffi_app_core_checksum_func_involves_favorite(
     ): Short
@@ -2027,6 +2057,21 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_import_empty_title() != 46841.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_import_from_clipboard_label() != 9539.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_import_from_file_label() != 26086.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_import_payload() != 9925.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_import_unreadable_message() != 5977.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_import_unreadable_title() != 59443.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_involves_favorite() != 62993.toShort()) {
@@ -8096,6 +8141,64 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
             return FfiConverterString.lift(
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_app_core_fn_func_import_empty_title(
+        _status)
+}
+    )
+    }
+    
+ fun `importFromClipboardLabel`(): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_import_from_clipboard_label(
+        _status)
+}
+    )
+    }
+    
+
+        /**
+         * Import settings offers two sources: a saved export file, or the clipboard.
+         */ fun `importFromFileLabel`(): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_import_from_file_label(
+        _status)
+}
+    )
+    }
+    
+
+        /**
+         * The text to send as an import, from a file's or the clipboard's bytes:
+         * trimmed UTF-8, or None when it can't be an export. A real export is a
+         * few KB; anything past 256 KB is some other file, and isn't worth sending
+         * to the server to be told so.
+         */ fun `importPayload`(`bytes`: kotlin.ByteArray): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_import_payload(
+        FfiConverterByteArray.lower(`bytes`),_status)
+}
+    )
+    }
+    
+ fun `importUnreadableMessage`(): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_import_unreadable_message(
+        _status)
+}
+    )
+    }
+    
+
+        /**
+         * The alert when the chosen file can't be an export at all (unreadable,
+         * not text, empty, or far too big). The server judges everything else.
+         */ fun `importUnreadableTitle`(): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_import_unreadable_title(
         _status)
 }
     )

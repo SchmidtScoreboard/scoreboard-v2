@@ -262,15 +262,52 @@ pub fn import_empty_title() -> String {
 #[uniffi::export]
 pub fn import_empty_message() -> String {
     "Copy an export from another scoreboard first (Export settings → Copy), then come \
-     back and tap Import settings."
+     back and paste it. Or choose the file you saved it to."
         .into()
+}
+
+/// Import settings offers two sources: a saved export file, or the clipboard.
+#[uniffi::export]
+pub fn import_from_file_label() -> String {
+    "Choose a file…".into()
+}
+
+#[uniffi::export]
+pub fn import_from_clipboard_label() -> String {
+    "Paste from clipboard".into()
+}
+
+/// The alert when the chosen file can't be an export at all (unreadable,
+/// not text, empty, or far too big). The server judges everything else.
+#[uniffi::export]
+pub fn import_unreadable_title() -> String {
+    "Can't import that file".into()
+}
+
+#[uniffi::export]
+pub fn import_unreadable_message() -> String {
+    "Choose the file you saved from Export settings on another scoreboard.".into()
+}
+
+/// The text to send as an import, from a file's or the clipboard's bytes:
+/// trimmed UTF-8, or None when it can't be an export. A real export is a
+/// few KB; anything past 256 KB is some other file, and isn't worth sending
+/// to the server to be told so.
+#[uniffi::export]
+pub fn import_payload(bytes: Vec<u8>) -> Option<String> {
+    if bytes.len() > 256 * 1024 {
+        return None;
+    }
+    let text = String::from_utf8(bytes).ok()?;
+    let text = text.trim_start_matches('\u{feff}').trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 /// The export sheet's summary of what travels.
 #[uniffi::export]
 pub fn export_sheet_summary() -> String {
     "League preferences, screens, spoiler rules, brightness, and timing. On the other \
-     scoreboard, tap Import settings with this on the clipboard."
+     scoreboard, tap Import settings and paste this, or choose a file you saved it to."
         .into()
 }
 
@@ -517,8 +554,19 @@ mod tests {
         assert_eq!(
             import_empty_message(),
             "Copy an export from another scoreboard first (Export settings → Copy), then come back and \
-             tap Import settings."
+             paste it. Or choose the file you saved it to."
         );
+    }
+
+    /// Both import sources go through one rule: trimmed UTF-8 text (a
+    /// leading byte-order mark, as some editors save, dropped), or nothing.
+    #[test]
+    fn import_payload_accepts_text_and_rejects_the_rest() {
+        assert_eq!(import_payload(b"  {\"v\":1}\n".to_vec()).as_deref(), Some("{\"v\":1}"));
+        assert_eq!(import_payload("\u{feff}{\"v\":1}".as_bytes().to_vec()).as_deref(), Some("{\"v\":1}"));
+        assert_eq!(import_payload(b" \n\t".to_vec()), None, "blank");
+        assert_eq!(import_payload(vec![0xFF, 0xD8, 0xFF, 0xE0]), None, "a photo, not text");
+        assert_eq!(import_payload(vec![b'a'; 256 * 1024 + 1]), None, "far too big to be an export");
     }
 
     /// The guide slugs are a server contract (`/guide/{slug}.png`) — pin them.

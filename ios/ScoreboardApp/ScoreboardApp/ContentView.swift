@@ -4,6 +4,7 @@ import Security
 import CoreGraphics
 import UIKit
 import LinkPresentation
+import UniformTypeIdentifiers
 
 /// The app's Ed25519 identity (32-byte secret seed, hex) lives in the Keychain so it
 /// survives app restarts AND unpairing — losing it would mean re-pairing every board.
@@ -5259,6 +5260,9 @@ struct SettingsView: View {
     /// Which settings-row explainer card is up (nil = none).
     /// Import tapped with nothing usable on the clipboard.
     @State private var showImportEmptyAlert = false
+    /// Import's file picker, and its "that can't be an export" alert.
+    @State private var showImportFile = false
+    @State private var showImportUnreadable = false
     /// The board-screens guide (also reachable from the offline card's ⓘ).
     @State private var showTroubleshooting = false
     /// The Add Screen chooser (Screens page).
@@ -5993,8 +5997,8 @@ struct SettingsView: View {
 
     /// Export/import the board's durable preferences as a portable blob — the
     /// way to clone a setup onto a second scoreboard, even one that lives on a
-    /// different server. Export presents a share/copy sheet; import reads the
-    /// clipboard and reports the server's verdict.
+    /// different server. Export presents a share/copy sheet; import takes a
+    /// saved export file or the clipboard, and reports the server's verdict.
     private var transferSection: some View {
         Section {
             // Disabled offline: the request would queue in the client's outbox
@@ -6004,14 +6008,27 @@ struct SettingsView: View {
                 model.exportSettings()
             }
             .disabled(!model.connected)
-            Button("Import settings") {
-                let text = UIPasteboard.general.string?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                if text.isEmpty {
-                    showImportEmptyAlert = true
-                } else {
-                    model.importSettings(text)
+            // Two sources: the file an export was saved to (Share → Save to
+            // Files), or the clipboard (Copy for import). Both go through the
+            // core's `importPayload`; the server judges the rest.
+            Menu {
+                Button {
+                    showImportFile = true
+                } label: {
+                    Label(importFromFileLabel(), systemImage: "folder")
                 }
+                Button {
+                    let clip = Data((UIPasteboard.general.string ?? "").utf8)
+                    if let text = importPayload(bytes: clip) {
+                        model.importSettings(text)
+                    } else {
+                        showImportEmptyAlert = true
+                    }
+                } label: {
+                    Label(importFromClipboardLabel(), systemImage: "doc.on.clipboard")
+                }
+            } label: {
+                Text("Import settings")
             }
             .disabled(!model.connected)
         } header: {
@@ -6023,6 +6040,29 @@ struct SettingsView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(importEmptyMessage())
+        }
+        .fileImporter(isPresented: $showImportFile, allowedContentTypes: [.json, .plainText]) { result in
+            guard case .success(let url) = result else {
+                showImportUnreadable = true
+                return
+            }
+            // A picked file outside the sandbox is readable only inside this
+            // window. Read one byte past the core's cap, so an oversized
+            // file is refused without loading all of it.
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            let bytes = (try? FileHandle(forReadingFrom: url))
+                .flatMap { try? $0.read(upToCount: 256 * 1024 + 1) } ?? Data()
+            if let text = importPayload(bytes: bytes) {
+                model.importSettings(text)
+            } else {
+                showImportUnreadable = true
+            }
+        }
+        .alert(importUnreadableTitle(), isPresented: $showImportUnreadable) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(importUnreadableMessage())
         }
         .alert(
             model.importOutcome?.error == nil ? "Settings imported" : "Import failed",
