@@ -248,8 +248,13 @@ private fun IdleFooter(rows: List<UiScreen>, idleCycleSecs: UInt, editable: Bool
             )
             // The menu hangs off a box laid over the link's first line, so it
             // opens from "every 5 minutes" rather than from the paragraph.
+            // `layout` trails the sentence by one composition: checking a
+            // second screen grows the sentence a link while `layout` still
+            // measures the shorter text, and the link's offsets threw out of
+            // bounds. Only measure a layout of the sentence being shown (by
+            // its text: the link's click lambda is new every composition).
             val link = parts.link
-            val anchor = layout?.takeIf { link != null }?.let {
+            val anchor = layout?.takeIf { link != null && it.layoutInput.text.text == sentence.text }?.let {
                 linkBounds(it, parts.before.length, parts.before.length + link!!.length)
             }
             if (anchor != null) {
