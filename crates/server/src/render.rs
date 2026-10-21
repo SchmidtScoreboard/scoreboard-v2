@@ -1794,14 +1794,15 @@ fn clock_parts(hour24: u32, minute: u32, h24: bool) -> (String, Option<&'static 
 ///
 /// A five-row face and a full clock vocabulary do not both fit; something had to
 /// go, and what went was the ceremony rather than the time. No IT IS, no AM/PM.
-/// What remains is 74 characters of words in 80 cells.
+/// What remains fills 78 of the 80 cells with words.
 ///
 /// The packing leans on words sharing letters, which is what the physical
 /// clocks do and is the only reason five rows work at all:
 ///
 /// * `HALFIVE` — HALF and FIVE share an F.
-/// * `PASTONE` — PAST and TO share a T, TO and ONE share an O. Three words in
-///   seven cells, and "quarter past one" reads straight across the row.
+/// * `PASTOONE` — PAST and TO share a T, and ONE follows TO's O. That O is the
+///   unlit gap in "half past one", and "quarter past one" reads straight
+///   across the row.
 /// * `THREELEVENINE` — THREE into ELEVEN on an E, ELEVEN into NINE on an N.
 ///   Three hours in thirteen cells.
 /// * `FIVEIGHTEN` — FIVE into EIGHT on an E, EIGHT into TEN on a T.
@@ -1818,17 +1819,21 @@ fn clock_parts(hour24: u32, minute: u32, h24: bool) -> (String, Option<&'static 
 /// are free. Anything that CAN light at once must stay disjoint, or the two
 /// words fuse into one on the panel: `TO` and `ONE` sharing an O drew "quarter
 /// to one" as `QUARTER ... TONE`. That one is answered by putting ONE on the
-/// face twice — see `W_ONE_PAST` — rather than by giving up the shared O.
-/// `no_two_words_that_light_together_ever_overlap` walks every minute of the
-/// day and enforces the rule.
+/// face twice — see `W_ONE_PAST`. `no_two_words_that_light_together_ever_overlap`
+/// walks every minute of the day and enforces the rule.
 ///
-/// The three leftover cells carry filler letters, as on the reference clock,
+/// Not sharing is not enough on its own: two lit words in neighbouring cells
+/// read as one just the same. PAST ran straight into ONE, and every "past one"
+/// drew as `PASTONE`. Words that light together on a row keep an unlit cell
+/// between them, and `words_that_light_together_on_a_row_keep_a_gap` checks it.
+///
+/// The two leftover cells carry filler letters, as on the reference clock,
 /// and sit BETWEEN words rather than at the ends of rows. Trailing filler reads
 /// as leftovers; filler in the gap between two words reads as the gap. They are
 /// never matched against either way: every word is addressed by coordinate.
 const WORD_GRID: [&str; 5] = [
     "TENTWENTYHALFIVE",
-    "QUARTERKVPASTONE",
+    "QUARTERKPASTOONE",
     "THREELEVENINEONE",
     "SEVENTWOJSIXFOUR",
     "FIVEIGHTENTWELVE",
@@ -1844,17 +1849,18 @@ const W_HALF: Cell = (0, 9, 4);
 const W_FIVE: Cell = (0, 12, 4);
 const W_QUARTER: Cell = (1, 0, 7);
 // Connectors.
-const W_PAST: Cell = (1, 9, 4);
-const W_TO: Cell = (1, 12, 2);
+const W_PAST: Cell = (1, 8, 4);
+const W_TO: Cell = (1, 11, 2);
 
 /// ONE is on the face twice, and which one lights depends on the connector.
 ///
-/// It shares its O with TO, so the half of the hour that reads "to" lit
-/// `QUARTER ... TONE` — one four-letter run, not two words. Moving ONE off row 1
-/// would fix that and cost the best line on the face: QUARTER, PAST and ONE sit
-/// end to end there, so "quarter past one" reads straight across. So the face
-/// carries ONE twice, and the "to" half borrows the copy on row 2. A duplicated
-/// word is invisible on a panel where only one of the two is ever lit.
+/// Row 1's ONE starts right after TO's O, so the half of the hour that reads
+/// "to" would light `QUARTER ... TOONE` — one run, not two words. (When the two
+/// shared that O it was `TONE`.) Moving ONE off row 1 would fix that and cost
+/// the best line on the face: QUARTER, PAST and ONE sit across it in reading
+/// order, so "quarter past one" reads straight across. So the face carries ONE
+/// twice, and the "to" half borrows the copy on row 2. A duplicated word is
+/// invisible on a panel where only one of the two is ever lit.
 const W_ONE_PAST: Cell = (1, 13, 3);
 const W_ONE_TO: Cell = (2, 13, 3);
 
@@ -2025,8 +2031,8 @@ mod kern_tests {
 
     /// Every word must actually BE where the layout says it is.
     ///
-    /// The face is hand-packed on shared letters — HALF into FIVE, PAST into TO
-    /// into ONE — and addressed by coordinate, so a one-character slip shifts a
+    /// The face is hand-packed on shared letters — HALF into FIVE, PAST into
+    /// TO — and addressed by coordinate, so a one-character slip shifts a
     /// word and still lights letters that look plausible. This is the test that
     /// makes the packing safe to touch.
     #[test]
@@ -2096,7 +2102,39 @@ mod kern_tests {
         }
     }
 
-    /// Only three leftover cells are filler, and none of them is on an edge.
+    /// Words that light together on one row keep an unlit cell between them.
+    ///
+    /// Not sharing a cell is not enough: two lit words in neighbouring cells
+    /// still run together. Row 1 used to end `PASTONE`, so every "past one"
+    /// (half past one, quarter past one) lit PAST and ONE as a single word.
+    /// The gap there is now TO's O, which never lights with the row-1 ONE.
+    #[test]
+    fn words_that_light_together_on_a_row_keep_a_gap() {
+        for h in 0..24u32 {
+            for m in (0..60).step_by(5) {
+                let lit = word_clock_cells(h, m);
+                for (i, a) in lit.iter().enumerate() {
+                    for b in lit.iter().skip(i + 1) {
+                        if a.0 != b.0 {
+                            continue;
+                        }
+                        let (a_end, b_end) = (a.1 + a.2, b.1 + b.2);
+                        let touching = a.1 <= b_end && b.1 <= a_end;
+                        assert!(
+                            !touching,
+                            "at {h:02}:{m:02} two lit words touch on row {}: {:?} and {:?} \
+                             — with no unlit cell between, they read as one word",
+                            a.0,
+                            WORD_GRID[a.0].chars().skip(a.1).take(a.2).collect::<String>(),
+                            WORD_GRID[b.0].chars().skip(b.1).take(b.2).collect::<String>(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Only two leftover cells are filler, and neither is on an edge.
     ///
     /// Filler is part of the look, but it is also where a packing regression
     /// would hide: a word that got shorter frees cells silently, and the face
@@ -2107,7 +2145,7 @@ mod kern_tests {
     /// junk. Between words it reads as the gap between them, which is what an
     /// unlit letter looks like anyway.
     #[test]
-    fn the_face_is_words_with_three_filler_cells_all_of_them_interior() {
+    fn the_face_is_words_with_two_filler_cells_both_interior() {
         let mut covered = [[false; 16]; 5];
         let mut mark = |(r, c, len): Cell| {
             for i in c..c + len {
@@ -2124,8 +2162,8 @@ mod kern_tests {
             .flat_map(|r| (0..16).map(move |c| (r, c)))
             .filter(|(r, c)| !covered[*r][*c])
             .collect();
-        assert_eq!(filler.len(), 3, "expected three filler cells, got {filler:?}");
-        assert_eq!(filler, vec![(1, 7), (1, 8), (3, 8)]);
+        assert_eq!(filler.len(), 2, "expected two filler cells, got {filler:?}");
+        assert_eq!(filler, vec![(1, 7), (3, 8)]);
         for (r, c) in filler {
             assert!(c > 0 && c < 15, "filler at ({r},{c}) is on the row's edge");
         }
@@ -2234,11 +2272,35 @@ mod kern_tests {
         assert_eq!(say(23, 45), "QUARTER TO TWELVE");
 
         // Both ONEs get used, and only in their own half of the hour: the row-1
-        // copy runs on from PAST, the row-2 copy keeps clear of TO's O.
+        // copy follows PAST across TO's unlit O, the row-2 copy keeps clear of TO.
         assert_eq!(word_clock_cells(13, 15).last(), Some(&W_ONE_PAST));
         assert_eq!(word_clock_cells(1, 0).last(), Some(&W_ONE_PAST));
         assert_eq!(word_clock_cells(12, 45).last(), Some(&W_ONE_TO));
         assert_eq!(word_clock_cells(0, 55).last(), Some(&W_ONE_TO));
+    }
+
+    /// Writes word-clock faces as LED-style PNGs for eyeballing:
+    ///   MOCKUP_OUT=/tmp/word cargo test -p server dump_word_clock_frames -- --ignored
+    #[test]
+    #[ignore = "writes preview PNGs; run with --ignored and MOCKUP_OUT"]
+    fn dump_word_clock_frames() {
+        let out = std::path::PathBuf::from(std::env::var("MOCKUP_OUT").expect("MOCKUP_OUT"));
+        std::fs::create_dir_all(&out).unwrap();
+        for (h, m) in [(1, 30), (13, 15), (12, 45), (15, 25), (9, 40)] {
+            let (_, px) = render_word_clock(h, m);
+            let mut img = image::RgbImage::new(FRAME_WIDTH as u32 * 8, FRAME_HEIGHT as u32 * 8);
+            for y in 0..FRAME_HEIGHT as i32 {
+                for x in 0..FRAME_WIDTH as i32 {
+                    let v = px565(&px, x, y);
+                    let (r, g, b) = (((v >> 11) as u8) << 3, (((v >> 5) & 0x3F) as u8) << 2, ((v & 0x1F) as u8) << 3);
+                    if v == 0 { continue; }
+                    for dy in 0..6u32 { for dx in 0..6u32 {
+                        img.put_pixel(x as u32 * 8 + 1 + dx, y as u32 * 8 + 1 + dy, image::Rgb([r, g, b]));
+                    }}
+                }
+            }
+            img.save(out.join(format!("word-{h:02}{m:02}.png"))).unwrap();
+        }
     }
 
     /// The gap between the time and its AM/PM must be the SAME on every clock,
