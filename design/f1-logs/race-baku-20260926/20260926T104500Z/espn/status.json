@@ -1,0 +1,1 @@
+{"$ref":"http://sports.core.api.espn.com/v2/sports/racing/leagues/f1/events/600057444/competitions/401839112/status?lang=en&region=us","clock":0.0,"displayClock":"0:00","period":0,"type":{"id":"1","name":"STATUS_SCHEDULED","state":"pre","completed":false,"description":"Scheduled","detail":"Sat, September 26th at 7:00 AM EDT","shortDetail":"9/26 - 7:00 AM EDT"}}

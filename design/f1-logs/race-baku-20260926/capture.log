@@ -1,0 +1,174 @@
+03:44:53Z waiting for 2026-09-26 10:40:00Z (race, every 60s, hard stop 14:40Z)
+10:40:01Z openf1 session 11377 (Baku, Race)
+10:40:11Z #1 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 0 classified 0 | board espn laps None | 0 errors
+10:41:09Z #2 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 0 classified 0 | board espn laps None | 0 errors
+10:42:09Z #3 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 0 classified 0 | board espn laps None | 0 errors
+10:43:09Z #4 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 0 classified 0 | board espn laps None | 0 errors
+10:44:09Z #5 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 0 classified 0 | board espn laps None | 0 errors
+10:45:09Z #6 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 0 classified 0 | board espn laps None | 0 errors
+10:46:09Z #7 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 0 classified 0 | board espn laps None | 0 errors
+10:47:09Z #8 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 0 classified 0 | board espn laps None | 0 errors
+10:48:09Z #9 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 0 classified 0 | board espn laps None | 0 errors
+10:49:09Z #10 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 0 classified 0 | board espn laps None | 0 errors
+10:50:09Z #11 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 0 classified 0 | board espn laps None | 0 errors
+10:51:09Z #12 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 0 classified 0 | board espn laps None | 0 errors
+10:52:09Z #13 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 0 classified 0 | board espn laps None | 0 errors
+10:53:09Z #14 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 0 classified 0 | board espn laps None | 0 errors
+10:54:09Z #15 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 0 classified 0 | board espn laps None | 0 errors
+10:55:09Z #16 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 0 classified 0 | board espn laps None | 0 errors
+10:56:09Z #17 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 0 classified 0 | board espn laps None | 0 errors
+10:57:09Z #18 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 0 classified 0 | board espn laps None | 0 errors
+10:58:09Z #19 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 0 classified 0 | board espn laps None | 0 errors
+10:59:09Z #20 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 0 classified 0 | board espn laps None | 0 errors
+11:00:09Z #21 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 0 classified 0 | board espn laps None | 0 errors
+11:01:10Z #22 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 1 classified 0 | board espn laps None | 0 errors
+11:02:09Z #23 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 1 classified 0 | board espn laps None | 0 errors
+11:03:10Z #24 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 1 classified 0 | board espn laps None | 0 errors
+11:04:09Z #25 espn STATUS_SCHEDULED lap 0 flag None | openf1 leader #63 lap-records 1 classified 0 | board espn laps None | 0 errors
+11:05:09Z #26 espn STATUS_IN_PROGRESS lap 0 flag GREEN | openf1 leader #63 lap-records 1 classified 0 | board espn laps None | 0 errors
+11:06:10Z #27 espn STATUS_IN_PROGRESS lap 1 flag GREEN | openf1 leader #63 lap-records 2 classified 0 | board espn laps None | 0 errors
+11:07:09Z #28 espn STATUS_IN_PROGRESS lap 2 flag GREEN | openf1 leader #63 lap-records 2 classified 0 | board espn laps {'completed': 1, 'total': 51} | 0 errors
+11:08:10Z #29 espn STATUS_IN_PROGRESS lap 2 flag GREEN | openf1 leader #63 lap-records 3 classified 0 | board espn laps {'completed': 1, 'total': 51} | 0 errors
+11:09:09Z #30 espn STATUS_IN_PROGRESS lap 2 flag GREEN | openf1 leader #63 lap-records 3 classified 0 | board espn laps {'completed': 1, 'total': 51} | 0 errors
+11:10:10Z #31 espn STATUS_IN_PROGRESS lap 3 flag GREEN | openf1 leader #63 lap-records 4 classified 0 | board espn laps {'completed': 2, 'total': 51} | 0 errors
+11:11:09Z #32 espn STATUS_IN_PROGRESS lap 3 flag GREEN | openf1 leader #63 lap-records 4 classified 0 | board espn laps {'completed': 2, 'total': 51} | 0 errors
+11:12:10Z #33 espn STATUS_IN_PROGRESS lap 4 flag GREEN | openf1 leader #63 lap-records 5 classified 0 | board espn laps {'completed': 2, 'total': 51} | 0 errors
+11:13:10Z #34 espn STATUS_IN_PROGRESS lap 5 flag GREEN | openf1 leader #63 lap-records 6 classified 0 | board espn laps {'completed': 4, 'total': 51} | 0 errors
+11:14:09Z #35 espn STATUS_IN_PROGRESS lap 5 flag GREEN | openf1 leader #63 lap-records 6 classified 0 | board espn laps {'completed': 4, 'total': 51} | 0 errors
+11:15:10Z #36 espn STATUS_IN_PROGRESS lap 6 flag GREEN | openf1 leader #63 lap-records 7 classified 0 | board espn laps {'completed': 4, 'total': 51} | 0 errors
+11:16:10Z #37 espn STATUS_IN_PROGRESS lap 6 flag GREEN | openf1 leader #63 lap-records 7 classified 0 | board espn laps {'completed': 6, 'total': 51} | 0 errors
+11:17:10Z #38 espn STATUS_IN_PROGRESS lap 7 flag GREEN | openf1 leader #63 lap-records 8 classified 0 | board espn laps {'completed': 6, 'total': 51} | 0 errors
+11:18:10Z #39 espn STATUS_IN_PROGRESS lap 7 flag GREEN | openf1 leader #63 lap-records 8 classified 0 | board espn laps {'completed': 6, 'total': 51} | 0 errors
+11:19:10Z #40 espn STATUS_IN_PROGRESS lap 8 flag GREEN | openf1 leader #63 lap-records 9 classified 0 | board espn laps {'completed': 7, 'total': 51} | 0 errors
+11:20:10Z #41 espn STATUS_IN_PROGRESS lap 9 flag GREEN | openf1 leader #63 lap-records 9 classified 0 | board espn laps {'completed': 7, 'total': 51} | 0 errors
+11:21:10Z #42 espn STATUS_IN_PROGRESS lap 9 flag GREEN | openf1 leader #63 lap-records 10 classified 0 | board espn laps {'completed': 7, 'total': 51} | 0 errors
+11:22:10Z #43 espn STATUS_IN_PROGRESS lap 10 flag GREEN | openf1 leader #63 lap-records 11 classified 0 | board espn laps {'completed': 9, 'total': 51} | 0 errors
+11:23:10Z #44 espn STATUS_IN_PROGRESS lap 10 flag GREEN | openf1 leader #63 lap-records 11 classified 0 | board espn laps {'completed': 9, 'total': 51} | 0 errors
+11:24:10Z #45 espn STATUS_IN_PROGRESS lap 11 flag GREEN | openf1 leader #63 lap-records 12 classified 0 | board espn laps {'completed': 9, 'total': 51} | 0 errors
+11:25:10Z #46 espn STATUS_IN_PROGRESS lap 11 flag GREEN | openf1 leader #63 lap-records 12 classified 0 | board espn laps {'completed': 11, 'total': 51} | 0 errors
+11:26:10Z #47 espn STATUS_IN_PROGRESS lap 12 flag GREEN | openf1 leader #63 lap-records 13 classified 0 | board espn laps {'completed': 11, 'total': 51} | 0 errors
+11:27:10Z #48 espn STATUS_IN_PROGRESS lap 12 flag GREEN | openf1 leader #63 lap-records 13 classified 0 | board espn laps {'completed': 11, 'total': 51} | 0 errors
+11:28:10Z #49 espn STATUS_IN_PROGRESS lap 13 flag GREEN | openf1 leader #63 lap-records 14 classified 0 | board espn laps {'completed': 12, 'total': 51} | 0 errors
+11:29:10Z #50 espn STATUS_IN_PROGRESS lap 14 flag GREEN | openf1 leader #63 lap-records 14 classified 0 | board espn laps {'completed': 12, 'total': 51} | 0 errors
+11:30:10Z #51 espn STATUS_IN_PROGRESS lap 14 flag GREEN | openf1 leader #63 lap-records 15 classified 0 | board espn laps {'completed': 12, 'total': 51} | 0 errors
+11:31:10Z #52 espn STATUS_IN_PROGRESS lap 15 flag GREEN | openf1 leader #63 lap-records 16 classified 0 | board espn laps {'completed': 14, 'total': 51} | 0 errors
+11:32:10Z #53 espn STATUS_IN_PROGRESS lap 15 flag GREEN | openf1 leader #63 lap-records 16 classified 0 | board espn laps {'completed': 14, 'total': 51} | 0 errors
+11:33:09Z #54 espn STATUS_IN_PROGRESS lap 16 flag GREEN | openf1 leader #63 lap-records 17 classified 0 | board espn laps {'completed': 14, 'total': 51} | 0 errors
+11:34:10Z #55 espn STATUS_IN_PROGRESS lap 16 flag GREEN | openf1 leader #63 lap-records 17 classified 0 | board espn laps {'completed': 16, 'total': 51} | 0 errors
+11:35:11Z #56 espn STATUS_IN_PROGRESS lap 17 flag GREEN | openf1 leader #63 lap-records 18 classified 0 | board espn laps {'completed': 16, 'total': 51} | 0 errors
+11:36:10Z #57 espn STATUS_IN_PROGRESS lap 17 flag GREEN | openf1 leader #63 lap-records 18 classified 0 | board espn laps {'completed': 16, 'total': 51} | 0 errors
+11:37:09Z #58 espn STATUS_IN_PROGRESS lap 18 flag GREEN | openf1 leader #63 lap-records 19 classified 0 | board espn laps {'completed': 18, 'total': 51} | 0 errors
+11:38:10Z #59 espn STATUS_IN_PROGRESS lap 18 flag GREEN | openf1 leader #63 lap-records 19 classified 0 | board espn laps {'completed': 18, 'total': 51} | 0 errors
+11:39:10Z #60 espn STATUS_IN_PROGRESS lap 19 flag GREEN | openf1 leader #63 lap-records 20 classified 0 | board espn laps {'completed': 18, 'total': 51} | 0 errors
+11:40:10Z #61 espn STATUS_IN_PROGRESS lap 20 flag GREEN | openf1 leader #63 lap-records 21 classified 0 | board espn laps {'completed': 19, 'total': 51} | 0 errors
+11:41:10Z #62 espn STATUS_IN_PROGRESS lap 20 flag GREEN | openf1 leader #63 lap-records 21 classified 0 | board espn laps {'completed': 19, 'total': 51} | 0 errors
+11:42:10Z #63 espn STATUS_IN_PROGRESS lap 21 flag GREEN | openf1 leader #63 lap-records 22 classified 0 | board espn laps {'completed': 19, 'total': 51} | 0 errors
+11:43:10Z #64 espn STATUS_IN_PROGRESS lap 21 flag GREEN | openf1 leader #63 lap-records 22 classified 0 | board espn laps {'completed': 21, 'total': 51} | 0 errors
+11:44:10Z #65 espn STATUS_IN_PROGRESS lap 22 flag GREEN | openf1 leader #63 lap-records 23 classified 0 | board espn laps {'completed': 21, 'total': 51} | 0 errors
+11:45:11Z #66 espn STATUS_IN_PROGRESS lap 22 flag GREEN | openf1 leader #63 lap-records 23 classified 0 | board espn laps {'completed': 21, 'total': 51} | 0 errors
+11:46:11Z #67 espn STATUS_IN_PROGRESS lap 23 flag GREEN | openf1 leader #63 lap-records 24 classified 0 | board espn laps {'completed': 23, 'total': 51} | 0 errors
+11:47:11Z #68 espn STATUS_IN_PROGRESS lap 23 flag GREEN | openf1 leader #63 lap-records 25 classified 0 | board espn laps {'completed': 23, 'total': 51} | 0 errors
+11:48:11Z #69 espn STATUS_IN_PROGRESS lap 24 flag GREEN | openf1 leader #63 lap-records 25 classified 0 | board espn laps {'completed': 23, 'total': 51} | 0 errors
+11:49:11Z #70 espn STATUS_IN_PROGRESS lap 25 flag GREEN | openf1 leader #63 lap-records 26 classified 0 | board espn laps {'completed': 24, 'total': 51} | 0 errors
+11:50:11Z #71 espn STATUS_IN_PROGRESS lap 25 flag GREEN | openf1 leader #63 lap-records 26 classified 0 | board espn laps {'completed': 24, 'total': 51} | 0 errors
+11:51:11Z #72 espn STATUS_IN_PROGRESS lap 26 flag GREEN | openf1 leader #63 lap-records 27 classified 0 | board espn laps {'completed': 24, 'total': 51} | 0 errors
+11:52:11Z #73 espn STATUS_IN_PROGRESS lap 26 flag GREEN | openf1 leader #63 lap-records 27 classified 0 | board espn laps {'completed': 26, 'total': 51} | 0 errors
+11:53:11Z #74 espn STATUS_IN_PROGRESS lap 27 flag GREEN | openf1 leader #63 lap-records 28 classified 0 | board espn laps {'completed': 26, 'total': 51} | 0 errors
+11:54:11Z #75 espn STATUS_IN_PROGRESS lap 27 flag GREEN | openf1 leader #63 lap-records 28 classified 0 | board espn laps {'completed': 26, 'total': 51} | 0 errors
+11:55:11Z #76 espn STATUS_IN_PROGRESS lap 28 flag GREEN | openf1 leader #63 lap-records 29 classified 0 | board espn laps {'completed': 28, 'total': 51} | 0 errors
+11:56:12Z #77 espn STATUS_IN_PROGRESS lap 28 flag GREEN | openf1 leader #63 lap-records 30 classified 0 | board espn laps {'completed': 28, 'total': 51} | 0 errors
+11:57:11Z #78 espn STATUS_IN_PROGRESS lap 29 flag GREEN | openf1 leader #63 lap-records 30 classified 0 | board espn laps {'completed': 28, 'total': 51} | 0 errors
+11:58:11Z #79 espn STATUS_IN_PROGRESS lap 30 flag GREEN | openf1 leader #63 lap-records 31 classified 0 | board espn laps {'completed': 29, 'total': 51} | 0 errors
+11:59:11Z #80 espn STATUS_IN_PROGRESS lap 30 flag GREEN | openf1 leader #63 lap-records 31 classified 0 | board espn laps {'completed': 29, 'total': 51} | 0 errors
+12:00:11Z #81 espn STATUS_IN_PROGRESS lap 30 flag GREEN | openf1 leader #63 lap-records 31 classified 0 | board espn laps {'completed': 29, 'total': 51} | 0 errors
+12:01:11Z #82 espn STATUS_IN_PROGRESS lap 30 flag GREEN | openf1 leader #63 lap-records 32 classified 0 | board espn laps {'completed': 30, 'total': 51} | 0 errors
+12:02:12Z #83 espn STATUS_IN_PROGRESS lap 31 flag GREEN | openf1 leader #63 lap-records 32 classified 0 | board espn laps {'completed': 30, 'total': 51} | 0 errors
+12:03:11Z #84 espn STATUS_IN_PROGRESS lap 32 flag GREEN | openf1 leader #63 lap-records 32 classified 0 | board espn laps {'completed': 30, 'total': 51} | 0 errors
+12:04:11Z #85 espn STATUS_IN_PROGRESS lap 32 flag GREEN | openf1 leader #63 lap-records 33 classified 0 | board espn laps {'completed': 30, 'total': 51} | 0 errors
+12:05:11Z #86 espn STATUS_IN_PROGRESS lap 32 flag GREEN | openf1 leader #63 lap-records 33 classified 0 | board espn laps {'completed': 32, 'total': 51} | 0 errors
+12:06:11Z #87 espn STATUS_IN_PROGRESS lap 33 flag GREEN | openf1 leader #63 lap-records 34 classified 0 | board espn laps {'completed': 32, 'total': 51} | 0 errors
+12:07:10Z #88 espn STATUS_IN_PROGRESS lap 33 flag GREEN | openf1 leader #63 lap-records 34 classified 0 | board espn laps {'completed': 32, 'total': 51} | 0 errors
+12:08:10Z #89 espn STATUS_IN_PROGRESS lap 33 flag GREEN | openf1 leader #63 lap-records 34 classified 0 | board espn laps {'completed': 33, 'total': 51} | 0 errors
+12:09:13Z #90 espn STATUS_IN_PROGRESS lap 34 flag GREEN | openf1 leader #63 lap-records 35 classified 0 | board espn laps {'completed': 33, 'total': 51} | 0 errors
+12:10:13Z #91 espn STATUS_IN_PROGRESS lap 34 flag GREEN | openf1 leader #63 lap-records 35 classified 0 | board espn laps {'completed': 33, 'total': 51} | 0 errors
+12:11:14Z #92 espn STATUS_IN_PROGRESS lap 34 flag GREEN | openf1 leader #63 lap-records 35 classified 0 | board espn laps {'completed': 34, 'total': 51} | 0 errors
+12:12:13Z #93 espn STATUS_IN_PROGRESS lap 35 flag GREEN | openf1 leader #63 lap-records 36 classified 0 | board espn laps {'completed': 34, 'total': 51} | 0 errors
+12:13:11Z #94 espn STATUS_IN_PROGRESS lap 35 flag GREEN | openf1 leader #63 lap-records 36 classified 0 | board espn laps {'completed': 34, 'total': 51} | 0 errors
+12:14:11Z #95 espn STATUS_IN_PROGRESS lap 35 flag GREEN | openf1 leader #63 lap-records 37 classified 0 | board espn laps {'completed': 35, 'total': 51} | 0 errors
+12:15:11Z #96 espn STATUS_IN_PROGRESS lap 36 flag GREEN | openf1 leader #63 lap-records 37 classified 0 | board espn laps {'completed': 35, 'total': 51} | 0 errors
+12:16:12Z #97 espn STATUS_IN_PROGRESS lap 36 flag GREEN | openf1 leader #63 lap-records 37 classified 0 | board espn laps {'completed': 35, 'total': 51} | 0 errors
+12:17:11Z #98 espn STATUS_IN_PROGRESS lap 37 flag GREEN | openf1 leader #63 lap-records 38 classified 0 | board espn laps {'completed': 36, 'total': 51} | 0 errors
+12:18:12Z #99 espn STATUS_IN_PROGRESS lap 37 flag GREEN | openf1 leader #63 lap-records 38 classified 0 | board espn laps {'completed': 36, 'total': 51} | 0 errors
+12:19:11Z #100 espn STATUS_IN_PROGRESS lap 38 flag GREEN | openf1 leader #63 lap-records 39 classified 0 | board espn laps {'completed': 36, 'total': 51} | 0 errors
+12:20:11Z #101 espn STATUS_IN_PROGRESS lap 38 flag GREEN | openf1 leader #63 lap-records 39 classified 0 | board espn laps {'completed': 38, 'total': 51} | 0 errors
+12:21:11Z #102 espn STATUS_IN_PROGRESS lap 39 flag GREEN | openf1 leader #63 lap-records 40 classified 0 | board espn laps {'completed': 38, 'total': 51} | 0 errors
+12:22:10Z #103 espn STATUS_IN_PROGRESS lap 39 flag GREEN | openf1 leader #63 lap-records 40 classified 0 | board espn laps {'completed': 38, 'total': 51} | 0 errors
+12:23:11Z #104 espn STATUS_IN_PROGRESS lap 40 flag GREEN | openf1 leader #63 lap-records 41 classified 0 | board espn laps {'completed': 39, 'total': 51} | 0 errors
+12:24:12Z #105 espn STATUS_IN_PROGRESS lap 40 flag GREEN | openf1 leader #63 lap-records 41 classified 0 | board espn laps {'completed': 39, 'total': 51} | 0 errors
+12:25:11Z #106 espn STATUS_IN_PROGRESS lap 41 flag GREEN | openf1 leader #63 lap-records 42 classified 0 | board espn laps {'completed': 39, 'total': 51} | 0 errors
+12:26:12Z #107 espn STATUS_IN_PROGRESS lap 42 flag GREEN | openf1 leader #63 lap-records 43 classified 0 | board espn laps {'completed': 41, 'total': 51} | 0 errors
+12:27:11Z #108 espn STATUS_IN_PROGRESS lap 42 flag GREEN | openf1 leader #63 lap-records 43 classified 0 | board espn laps {'completed': 41, 'total': 51} | 0 errors
+12:28:11Z #109 espn STATUS_IN_PROGRESS lap 43 flag GREEN | openf1 leader #63 lap-records 44 classified 0 | board espn laps {'completed': 41, 'total': 51} | 0 errors
+12:29:12Z #110 espn STATUS_IN_PROGRESS lap 43 flag GREEN | openf1 leader #63 lap-records 44 classified 0 | board espn laps {'completed': 43, 'total': 51} | 0 errors
+12:30:12Z #111 espn STATUS_IN_PROGRESS lap 44 flag GREEN | openf1 leader #63 lap-records 45 classified 0 | board espn laps {'completed': 43, 'total': 51} | 0 errors
+12:31:11Z #112 espn STATUS_IN_PROGRESS lap 44 flag GREEN | openf1 leader #63 lap-records 45 classified 0 | board espn laps {'completed': 43, 'total': 51} | 0 errors
+12:32:11Z #113 espn STATUS_IN_PROGRESS lap 45 flag GREEN | openf1 leader #63 lap-records 46 classified 0 | board espn laps {'completed': 45, 'total': 51} | 0 errors
+12:33:12Z #114 espn STATUS_IN_PROGRESS lap 45 flag GREEN | openf1 leader #63 lap-records 47 classified 0 | board espn laps {'completed': 45, 'total': 51} | 0 errors
+12:34:11Z #115 espn STATUS_IN_PROGRESS lap 46 flag GREEN | openf1 leader #63 lap-records 47 classified 0 | board espn laps {'completed': 45, 'total': 51} | 0 errors
+12:35:12Z #116 espn STATUS_IN_PROGRESS lap 47 flag GREEN | openf1 leader #63 lap-records 48 classified 0 | board espn laps {'completed': 46, 'total': 51} | 0 errors
+12:36:11Z #117 espn STATUS_IN_PROGRESS lap 47 flag GREEN | openf1 leader #63 lap-records 48 classified 0 | board espn laps {'completed': 46, 'total': 51} | 0 errors
+12:37:12Z #118 espn STATUS_IN_PROGRESS lap 48 flag GREEN | openf1 leader #63 lap-records 49 classified 0 | board espn laps {'completed': 46, 'total': 51} | 0 errors
+12:38:12Z #119 espn STATUS_IN_PROGRESS lap 48 flag GREEN | openf1 leader #63 lap-records 49 classified 0 | board espn laps {'completed': 48, 'total': 51} | 0 errors
+12:39:13Z #120 espn STATUS_IN_PROGRESS lap 49 flag GREEN | openf1 leader #63 lap-records 50 classified 0 | board espn laps {'completed': 48, 'total': 51} | 0 errors
+12:40:12Z #121 espn STATUS_IN_PROGRESS lap 49 flag GREEN | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 48, 'total': 51} | 0 errors
+12:41:12Z #122 espn STATUS_IN_PROGRESS lap 50 flag GREEN | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 50, 'total': 51} | 0 errors
+12:42:12Z #123 espn STATUS_IN_PROGRESS lap 50 flag GREEN | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 50, 'total': 51} | 0 errors
+12:43:11Z #124 espn STATUS_IN_PROGRESS lap 50 flag GREEN | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 50, 'total': 51} | 0 errors
+12:44:12Z #125 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+12:45:11Z #126 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+12:46:11Z #127 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+12:47:11Z #128 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+12:48:11Z #129 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+12:49:12Z #130 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+12:50:11Z #131 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+12:51:11Z #132 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+12:52:12Z #133 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+12:53:11Z #134 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+12:54:12Z #135 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+12:55:12Z #136 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+12:56:12Z #137 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+12:57:12Z #138 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+12:58:11Z #139 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+12:59:11Z #140 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:00:11Z #141 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:01:11Z #142 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:02:11Z #143 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:03:12Z #144 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:04:11Z #145 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:05:39Z #146 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 1 errors
+13:05:39Z    server render board: HTTP 0 <urlopen error [Errno 54] Connection reset by peer>
+13:06:33Z #147 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:07:34Z #148 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:08:34Z #149 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:09:34Z #150 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:10:34Z #151 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:11:34Z #152 espn STATUS_SESSION_COMPLETE lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:12:34Z #153 espn STATUS_FINAL lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 0 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:12:34Z espn reports the session complete
+13:13:34Z #154 espn STATUS_FINAL lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 22 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:14:34Z #155 espn STATUS_FINAL lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 22 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:15:33Z #156 espn STATUS_FINAL lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 22 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:16:34Z #157 espn STATUS_FINAL lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 22 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:17:34Z #158 espn STATUS_FINAL lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 22 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:18:33Z #159 espn STATUS_FINAL lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 22 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:19:34Z #160 espn STATUS_FINAL lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 22 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:20:34Z #161 espn STATUS_FINAL lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 22 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:21:34Z #162 espn STATUS_FINAL lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 22 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:22:34Z #163 espn STATUS_FINAL lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 22 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:23:34Z #164 espn STATUS_FINAL lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 22 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:24:33Z #165 espn STATUS_FINAL lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 22 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:25:35Z #166 espn STATUS_FINAL lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 22 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:26:34Z #167 espn STATUS_FINAL lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 22 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:27:34Z #168 espn STATUS_FINAL lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 22 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:28:34Z #169 espn STATUS_FINAL lap 51 flag CHECKER | openf1 leader #63 lap-records 51 classified 22 | board espn laps {'completed': 51, 'total': 51} | 0 errors
+13:28:34Z done: 169 snapshots

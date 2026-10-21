@@ -1,0 +1,26 @@
+{
+  "boards_connected": 1,
+  "boards_known": 3,
+  "controllers_connected": 0,
+  "frames_cached": 2,
+  "games": 79,
+  "loops": {
+    "poll": {
+      "age_secs": 93,
+      "limit_secs": 600,
+      "stale": false
+    },
+    "tick": {
+      "age_secs": 13,
+      "limit_secs": 180,
+      "stale": false
+    },
+    "weather": {
+      "age_secs": 241,
+      "limit_secs": 2400,
+      "stale": false
+    }
+  },
+  "ok": true,
+  "version": "2026.7.0"
+}

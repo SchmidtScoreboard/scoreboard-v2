@@ -1,0 +1,1 @@
+{"$ref":"http://sports.core.api.espn.com/v2/sports/racing/leagues/f1/events/600057444/competitions/401839112/competitors/5752/status?lang=en&region=us","period":51,"type":{"id":"12","name":"STATUS_CLASSIFIED","state":"post","completed":true,"description":"Classified","detail":"Classified","shortDetail":"Classified"},"displayValue":"Classified"}

@@ -1,0 +1,1 @@
+{"$ref":"http://sports.core.api.espn.com/v2/sports/racing/leagues/f1/events/600057444/competitions/401839112/competitors/5501/status?lang=en&region=us","period":35,"type":{"id":"8","name":"STATUS_RETIRED","state":"post","completed":false,"description":"Retired","detail":"Retired","shortDetail":"Retired"},"displayValue":"Retired"}

@@ -1,0 +1,1 @@
+{"$ref":"http://sports.core.api.espn.com/v2/sports/racing/leagues/f1/events/600057444/competitions/401839112/competitors/5752/status?lang=en&region=us","period":16,"type":{"id":"16","name":"STATUS_ON_TRACK","state":"in","completed":false,"description":"On Track","detail":"On Track","shortDetail":"On Track"},"displayValue":"On Track"}

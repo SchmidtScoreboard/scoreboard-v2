@@ -1,0 +1,35 @@
+{
+ "captured_at": "2026-09-26T12:28:00.921493+00:00",
+ "session": "race",
+ "errors": [],
+ "espn": {
+  "event": "600057444",
+  "competition": "401839112",
+  "circuit": "Baku City Circuit",
+  "period": 43,
+  "status": "STATUS_IN_PROGRESS",
+  "state": "in",
+  "completed": false,
+  "flag": "GREEN"
+ },
+ "game_id": "600057444-race",
+ "openf1": {
+  "session_key": 11377,
+  "circuit": "Baku",
+  "leader": 63,
+  "leader_lap_records": 44,
+  "classified": 0
+ },
+ "empty": [
+  "openf1 session_result"
+ ],
+ "server_board": {
+  "data_source": "espn",
+  "data_source_active": "espn",
+  "laps": {
+   "completed": 41,
+   "total": 51
+  },
+  "flag": null
+ }
+}
