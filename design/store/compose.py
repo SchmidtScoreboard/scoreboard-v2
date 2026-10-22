@@ -32,32 +32,16 @@ AV_BOLD, AV_MEDIUM = 0, 5
 BG_TOP, BG_BOTTOM = (13, 17, 30), (4, 5, 9)
 TITLE, SUBTITLE = (255, 255, 255), (160, 170, 190)
 
-# One list drives every platform. `shot` names a capture per platform.
+# One list drives every platform. `shot` names a capture per platform; `sub`
+# (a line under the title) is optional. The other captures in raw/ (all games,
+# league editor, screens) are unused but kept for slides that may come back.
 SLIDES = [
     dict(key='01-hero', hero=True, accent=(255, 184, 28),
-         title='Live scores,\non your wall.',
-         sub='A real LED scoreboard that follows your teams.',
+         title='Control your OpenScoreboard',
          shot=dict(ios='dashboard', ipad='dashboard', android='dashboard')),
     dict(key='02-teams', accent=(10, 132, 255),
-         title='Follow your teams.',
-         sub='Hockey, basketball, baseball, football, soccer, golf and F1.',
+         title='Follow Your Teams',
          shot=dict(ios='teams', ipad='teams', android='teams')),
-    dict(key='03-situations', accent=(48, 209, 88),
-         title='Every situation,\nat a glance.',
-         sub='Downs and field position. Bases and the count.',
-         shot=dict(ios='situations', ipad='situations', android='situations')),
-    dict(key='04-leaderboards', accent=(255, 69, 58),
-         title='Leaderboards, too.',
-         sub='Golf majors and Formula 1 on the same panel.',
-         shot=dict(ios='leaderboards', ipad='leaderboards', android='leaderboards')),
-    dict(key='05-make-it-yours', accent=(191, 90, 242),
-         title='Make it yours.',
-         sub='Big games, spoilers, team names — every choice previewed on the panel.',
-         shot=dict(ios='league', ipad='league', android='league')),
-    dict(key='06-screens', accent=(100, 210, 255),
-         title='Clock and weather\nwhen nothing’s on.',
-         sub='Quiet hours put the board to sleep overnight.',
-         shot=dict(ios='screens', ipad='screens', android='screens')),
 ]
 
 # Per-target geometry. `screen` is the device kind drawn around the capture.
@@ -153,6 +137,8 @@ def draw_text(img, slide, t, top):
     for line in wrap(slide['title'], tf, W * 0.9):
         d.text((W / 2, y), line, font=tf, fill=TITLE, anchor='ma')
         y += tf.size * 1.12
+    if not slide.get('sub'):
+        return y
     y += tf.size * 0.32
     for line in balanced(slide['sub'], sf, W * 0.80):
         d.text((W / 2, y), line, font=sf, fill=SUBTITLE, anchor='ma')
@@ -358,8 +344,15 @@ def feature_graphic():
 
 
 def main():
+    keep = {s['key'] + '.png' for s in SLIDES}
     for name, t in TARGETS.items():
         os.makedirs(os.path.join(OUT, name), exist_ok=True)
+        # Each folder is uploaded whole, so a slide dropped from SLIDES must
+        # not linger in it.
+        for f in os.listdir(os.path.join(OUT, name)):
+            if f.endswith('.png') and f not in keep:
+                os.remove(os.path.join(OUT, name, f))
+                print('removed', os.path.join('out', name, f))
         for slide in SLIDES:
             img = compose_slide(slide, t)
             if img is None:
