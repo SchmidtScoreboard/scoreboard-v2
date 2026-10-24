@@ -1,0 +1,3 @@
+- When nothing you follow is playing and you've picked more than one screen in the app (say, the clock and the weather), the scoreboard now takes turns between them on the timer you chose. Before, a longer timer could keep starting over on the first screen.
+- Scoreboards authorized for the OpenScoreboard service now show it when they connect. A scoreboard the service doesn't recognize says NOT AUTHORIZED on the panel instead of retrying over and over.
+- Holding the knob to erase the scoreboard still wipes its Wi-Fi and unpairs every phone. An authorized scoreboard keeps its authorization through the erase, so it can be set up again right away.
