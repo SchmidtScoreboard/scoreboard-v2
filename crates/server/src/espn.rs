@@ -141,7 +141,10 @@ impl EspnSource {
                 League { sport_id: "nba", sport: "basketball", league: "nba", games_query: "" },
                 League { sport_id: "mlb", sport: "baseball", league: "mlb", games_query: "" },
                 League { sport_id: "nfl", sport: "football", league: "nfl", games_query: "" },
-                League { sport_id: "cfb", sport: "football", league: "college-football", games_query: "" },
+                // Without `groups` ESPN serves only games with a Top 25 team, so a
+                // favorite that is unranked never reached the slate (Oregon at
+                // Illinois, 2026-10-24). 80 is all of FBS, as 50 is all of D-I below.
+                League { sport_id: "cfb", sport: "football", league: "college-football", games_query: "?groups=80" },
                 League { sport_id: "cbb", sport: "basketball", league: "mens-college-basketball", games_query: "?groups=50" },
                 League { sport_id: "wcbb", sport: "basketball", league: "womens-college-basketball", games_query: "?groups=50" },
                 League { sport_id: "wnba", sport: "basketball", league: "wnba", games_query: "" },
