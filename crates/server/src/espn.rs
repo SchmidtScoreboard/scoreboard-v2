@@ -1495,14 +1495,22 @@ fn fold_diacritic(c: char) -> char {
 fn clean_golf_name(short: &str) -> String {
     let up = short.to_uppercase();
     let mapped = golf_name_map(&up).map(String::from).unwrap_or(up);
-    let pre = mapped.split("PRES").next().unwrap_or(&mapped).trim().to_string();
-    let mut words: Vec<&str> = pre.split_whitespace().collect();
+    let mut words: Vec<&str> = mapped.split_whitespace().collect();
+    // "pres. by <sponsor>" goes — as a WORD. Cutting at the letters "PRES"
+    // also cut inside EXPRESS ("THE AMERICAN EX") and left the Presidents Cup
+    // with no name at all.
+    if let Some(idx) = words.iter().position(|w| matches!(*w, "PRES" | "PRES." | "PRESENTED")) {
+        words.truncate(idx);
+    }
+    let mut filler_cut = None;
     for filler in ["TOURNAMENT", "CHAMPIONSHIP", "CHALLENGE", "CLASSIC", "INVITATIONAL"] {
         if let Some(idx) = words.iter().position(|w| *w == filler) {
             words.truncate(idx);
+            filler_cut = Some(filler);
         }
     }
-    if words.first() == Some(&"THE") {
+    let had_the = words.first() == Some(&"THE");
+    if had_the {
         words.remove(0);
     }
     if words
@@ -1511,8 +1519,22 @@ fn clean_golf_name(short: &str) -> String {
     {
         words.remove(0);
     }
+    let mut of_tail = Vec::new();
     if let Some(idx) = words.iter().position(|w| *w == "OF") {
-        words.truncate(idx);
+        of_tail = words.split_off(idx);
+    }
+    // One short word left is a fragment, not a tournament: the PGA
+    // Championship drew "PGA", The Open "OPEN", the Bank of Utah "BANK", and
+    // the BMW, TOUR and ISCO Championships one bare word each. Put back the
+    // last thing cut, in its shortest form.
+    if words.len() == 1 && words[0].chars().count() <= 4 {
+        if !of_tail.is_empty() {
+            words.extend(of_tail);
+        } else if let Some(filler) = filler_cut {
+            words.push(if filler == "CHAMPIONSHIP" { "CHAMP" } else { filler });
+        } else if had_the {
+            words.insert(0, "THE");
+        }
     }
     let name = words.join(" ");
     let name = if words.first() == Some(&"MASTERS") {
@@ -1608,6 +1630,8 @@ fn golf_name_map(name: &str) -> Option<&'static str> {
         // becomes "SCOTTISH OPEN" — identical to the men's, on a board that can
         // show both in the same week.
         "PUERTO RICO OPEN" => "PUERTO RICO",
+        // AMERICAN EXPRESS is 65px (one N too many); EXPRESS alone names a card.
+        "THE AMERICAN EXPRESS" => "THE AMEX",
         "THE ANNIKA DRIVEN BY GAINBRIDGE AT PELICAN" => "THE ANNIKA",
         "ISPS HANDA WOMEN'S SCOTTISH OPEN" => "WOMENS SCOTTISH",
         "CPKC WOMEN'S OPEN" => "CPKC OPEN",
@@ -1616,8 +1640,32 @@ fn golf_name_map(name: &str) -> Option<&'static str> {
 }
 
 /// Shorten an F1 race `shortName` (drop leading sponsor words until it fits).
+/// The race title from an F1 `shortName` ("MSC Cruises United States GP").
+///
+/// ESPN puts the sponsor first and the place right before "GP", so the place
+/// is what to keep. Dropping leading words until the name fit — what this did
+/// before — cut every two-word place in half ("STATES GP", "CITY GP",
+/// "ARABIAN GP") and kept the tail of "Bahrain GP in Malaysia" ("IN
+/// MALAYSIA"). Two-word places are named here; anything else keeps its last
+/// word, and anything after "GP" goes. Accents fold: the 4x6 font draws
+/// "SAO", not "SÃO".
 fn clean_f1_name(short: &str) -> String {
-    fit_words(&short.to_uppercase(), 13)
+    let up: String = short.to_uppercase().chars().map(fold_diacritic).collect();
+    let words: Vec<&str> = up.split_whitespace().collect();
+    let place = match words.iter().position(|w| *w == "GP").map(|gp| &words[..gp]) {
+        Some([.., "UNITED", "STATES"]) => "US",
+        Some([.., "SAUDI", "ARABIAN"]) => "SAUDI",
+        Some([.., "MEXICO", "CITY"]) => "MEXICO",
+        Some([.., "EMILIA", "ROMAGNA"]) => "IMOLA",
+        Some([.., "SAO", "PAULO"]) => "SAO PAULO",
+        Some([.., "LAS", "VEGAS"]) => "LAS VEGAS",
+        Some([.., "ABU", "DHABI"]) => "ABU DHABI",
+        // "BARCELONA-CATALUNYA" -> "BARCELONA".
+        Some([.., last]) => last.split('-').next().unwrap_or(last),
+        // No "GP" in it: not a shape this knows, so just make it fit.
+        _ => return fit_words(&up, 13),
+    };
+    fit_words(&format!("{place} GP"), 13)
 }
 
 /// Fit `text` to `max` chars for the 64px frame by dropping LEADING words (they
@@ -4478,5 +4526,88 @@ mod golf_title_tests {
         // And a place is not renamed to a different place.
         assert_eq!(clean_golf_name("Puerto Rico Open"), "PUERTO RICO");
     }
+
+    /// Cutting the sponsor or a filler word never leaves a bare fragment.
+    ///
+    /// From an audit of every 2026 PGA and LPGA event: "pres. by" was cut at
+    /// the LETTERS, so EXPRESS lost its tail and the Presidents Cup its whole
+    /// name; and dropping "Championship" left one short word — two majors
+    /// among them ("PGA", "OPEN").
+    #[test]
+    fn a_tournament_title_is_never_a_fragment() {
+        for (name, want) in [
+            ("The American Express", "THE AMEX"),
+            ("Presidents Cup", "PRESIDENTS CUP"),
+            ("PGA Championship", "PGA CHAMP"),
+            ("The Open", "THE OPEN"),
+            ("BMW Championship", "BMW CHAMP"),
+            ("TOUR Championship", "TOUR CHAMP"),
+            ("ISCO Championship", "ISCO CHAMP"),
+            ("The RSM Classic", "RSM CLASSIC"),
+            ("Bank of Utah Championship", "BANK OF UTAH"),
+            ("Ford Championship pres. by Wild Horse Pass", "FORD CHAMP"),
+            ("Dow Championship", "DOW CHAMP"),
+            ("FM Championship", "FM CHAMP"),
+            // A whole word after the cut is a name, and stays as it was.
+            ("Wyndham Championship", "WYNDHAM"),
+            ("The Chevron Championship", "CHEVRON"),
+            ("BMW Ladies Championship", "BMW LADIES"),
+            ("Zurich Classic of New Orleans", "ZURICH"),
+            ("the Memorial Tournament pres. by Workday", "MEMORIAL"),
+        ] {
+            assert_eq!(clean_golf_name(name), want, "{name:?}");
+        }
+    }
 }
 
+#[cfg(test)]
+mod f1_title_tests {
+    use super::*;
+
+    /// Every race on the 2026 calendar, as ESPN's `shortName` spells it,
+    /// reads as its place.
+    ///
+    /// The old rule kept the last 13 characters' worth of words, which cut
+    /// two-word places in half — the US Grand Prix drew "STATES GP" — and kept
+    /// "IN MALAYSIA" from "Bahrain GP in Malaysia".
+    #[test]
+    fn every_2026_grand_prix_reads_as_its_place() {
+        for (short, want) in [
+            ("Qatar Airways Australian GP", "AUSTRALIAN GP"),
+            ("Heineken Chinese GP", "CHINESE GP"),
+            ("Aramco Japanese GP", "JAPANESE GP"),
+            ("Gulf Air Bahrain GP", "BAHRAIN GP"),
+            ("STC Saudi Arabian GP", "SAUDI GP"),
+            ("Crypto.com Miami GP", "MIAMI GP"),
+            ("Lenovo Canadian GP", "CANADIAN GP"),
+            ("Monaco GP", "MONACO GP"),
+            ("MSC Cruises Barcelona-Catalunya GP", "BARCELONA GP"),
+            ("Lenovo Austrian GP", "AUSTRIAN GP"),
+            ("Pirelli British GP", "BRITISH GP"),
+            ("Moët & Chandon Belgian GP", "BELGIAN GP"),
+            ("AWS Hungarian GP", "HUNGARIAN GP"),
+            ("Heineken Dutch GP", "DUTCH GP"),
+            ("Pirelli Italian GP", "ITALIAN GP"),
+            ("Tag Heuer Spanish GP", "SPANISH GP"),
+            ("Qatar Airways Azerbaijan GP", "AZERBAIJAN GP"),
+            ("Gulf Air Bahrain GP in Malaysia", "BAHRAIN GP"),
+            ("Singapore Airlines Singapore GP", "SINGAPORE GP"),
+            ("MSC Cruises United States GP", "US GP"),
+            ("Mexico City GP", "MEXICO GP"),
+            ("MSC Cruises São Paulo GP", "SAO PAULO GP"),
+            ("Heineken Las Vegas GP", "LAS VEGAS GP"),
+            ("Qatar Airways Qatar GP", "QATAR GP"),
+            ("Etihad Airways Abu Dhabi GP", "ABU DHABI GP"),
+        ] {
+            let got = clean_f1_name(short);
+            assert_eq!(got, want, "{short:?}");
+            // Every session title the parser builds from it fits the panel.
+            // 65, not 64: `text_width` counts the last glyph's blank advance
+            // column, so "AZERBAIJAN GP SQ" measures 65 and inks exactly 64.
+            for suffix in ["", " Q", " S", " SQ"] {
+                let title = format!("{got}{suffix}");
+                assert!(crate::render::text_width(&title, false) <= 65, "{title:?} is too wide");
+            }
+        }
+    }
+}
