@@ -1494,8 +1494,13 @@ fn fold_diacritic(c: char) -> char {
 /// Shorten a tournament `shortName` to fit the panel (ported from `golf.py`).
 fn clean_golf_name(short: &str) -> String {
     let up = short.to_uppercase();
-    let mapped = golf_name_map(&up).map(String::from).unwrap_or(up);
-    let mut words: Vec<&str> = mapped.split_whitespace().collect();
+    // A name in the table is the answer. Running it through the rules below
+    // as well undid them: "TOURN OF CHAMPS" was cut at OF, and "THE ANNIKA"
+    // lost its THE.
+    if let Some(name) = golf_name_map(&up) {
+        return fit_words_px(name, crate::protocol_frame_width());
+    }
+    let mut words: Vec<&str> = up.split_whitespace().collect();
     // "pres. by <sponsor>" goes — as a WORD. Cutting at the letters "PRES"
     // also cut inside EXPRESS ("THE AMERICAN EX") and left the Presidents Cup
     // with no name at all.
@@ -1632,6 +1637,9 @@ fn golf_name_map(name: &str) -> Option<&'static str> {
         "PUERTO RICO OPEN" => "PUERTO RICO",
         // AMERICAN EXPRESS is 65px (one N too many); EXPRESS alone names a card.
         "THE AMERICAN EXPRESS" => "THE AMEX",
+        // The rules leave the sponsor ("GRAND VACATIONS"); the event is the
+        // Tournament of Champions, and this spelling of it is 61px.
+        "HILTON GRAND VACATIONS TOURNAMENT OF CHAMPIONS" => "TOURN OF CHAMPS",
         "THE ANNIKA DRIVEN BY GAINBRIDGE AT PELICAN" => "THE ANNIKA",
         "ISPS HANDA WOMEN'S SCOTTISH OPEN" => "WOMENS SCOTTISH",
         "CPKC WOMEN'S OPEN" => "CPKC OPEN",
@@ -4537,6 +4545,8 @@ mod golf_title_tests {
     fn a_tournament_title_is_never_a_fragment() {
         for (name, want) in [
             ("The American Express", "THE AMEX"),
+            ("Hilton Grand Vacations Tournament of Champions", "TOURN OF CHAMPS"),
+            ("The ANNIKA driven by Gainbridge at Pelican", "THE ANNIKA"),
             ("Presidents Cup", "PRESIDENTS CUP"),
             ("PGA Championship", "PGA CHAMP"),
             ("The Open", "THE OPEN"),

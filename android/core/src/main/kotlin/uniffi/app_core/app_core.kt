@@ -2017,7 +2017,7 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_app_core_checksum_func_game_source() != 30305.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_app_core_checksum_func_game_title() != 18481.toShort()) {
+    if (lib.uniffi_app_core_checksum_func_game_title() != 42241.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_group_leagues() != 37891.toShort()) {
@@ -7955,7 +7955,7 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
          * full names truncate at card width), or the event name for leaderboard
          * sports (golf/F1), whose `home` is empty. Event names arrive panel-style
          * ALL CAPS; the card reads better as "Monaco GP" — words of two letters or
-         * fewer (GP, Q) stay caps.
+         * fewer (GP, Q) stay caps, and so do initialisms.
          */ fun `gameTitle`(`away`: kotlin.String, `home`: kotlin.String): kotlin.String {
             return FfiConverterString.lift(
     uniffiRustCall() { _status ->

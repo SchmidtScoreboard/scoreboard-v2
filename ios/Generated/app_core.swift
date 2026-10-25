@@ -7216,7 +7216,7 @@ public func gameSource(gameId: String, sportId: String, away: String, home: Stri
  * full names truncate at card width), or the event name for leaderboard
  * sports (golf/F1), whose `home` is empty. Event names arrive panel-style
  * ALL CAPS; the card reads better as "Monaco GP" — words of two letters or
- * fewer (GP, Q) stay caps.
+ * fewer (GP, Q) stay caps, and so do initialisms.
  */
 public func gameTitle(away: String, home: String) -> String {
     return try! FfiConverterString.lift(try! rustCall {
@@ -8388,7 +8388,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_func_game_source() != 30305 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_func_game_title() != 18481 {
+    if uniffi_app_core_checksum_func_game_title() != 42241 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_group_leagues() != 37891 {

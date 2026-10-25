@@ -38,14 +38,32 @@ pub fn team_id(sport_id: String, abbrev: String) -> String {
 /// full names truncate at card width), or the event name for leaderboard
 /// sports (golf/F1), whose `home` is empty. Event names arrive panel-style
 /// ALL CAPS; the card reads better as "Monaco GP" — words of two letters or
-/// fewer (GP, Q) stay caps.
+/// fewer (GP, Q) stay caps, and so do initialisms.
 #[uniffi::export]
 pub fn game_title(away: String, home: String) -> String {
     if !home.is_empty() {
         return format!("{away} @ {home}");
     }
     away.split(' ')
-        .map(|w| {
+        .enumerate()
+        .map(|(i, w)| {
+            // Initialisms WITH a vowel, which the vowel rule below cannot
+            // tell from words: "Pga Champ", "Lpga Shanghai", "Aig Women's
+            // Open" and "Cme Group Tour" were all on the 2026 calendars.
+            if matches!(w, "PGA" | "LPGA" | "AIG" | "CME" | "ISCO") {
+                return w.to_string();
+            }
+            match w {
+                "FEDEX" => return "FedEx".to_string(),
+                // Saint, not an initialism: no vowel, but "ST." is not "BMW".
+                "ST." => return "St.".to_string(),
+                _ => {}
+            }
+            // A connector mid-title is lower case: "Bank of Utah", not the
+            // two-letter rule's "Bank OF Utah".
+            if i > 0 && matches!(w, "OF" | "AT" | "IN" | "BY") {
+                return w.to_lowercase();
+            }
             // Short words stay caps ("GP", "US") — and so does any word with
             // no vowel: "BMW" and "CPKC" are initialisms, and "Bmw" reads as
             // a typo. Y counts as a vowel so "LYNX"-shaped words still fold.
@@ -54,11 +72,17 @@ pub fn game_title(away: String, home: String) -> String {
             if w.chars().count() <= 2 || vowelless {
                 w.to_string()
             } else {
-                let mut cs = w.chars();
-                match cs.next() {
-                    Some(f) => f.to_string() + &cs.as_str().to_lowercase(),
-                    None => String::new(),
-                }
+                // Each part of a hyphenated word: "Q-School", not "Q-school".
+                w.split('-')
+                    .map(|part| {
+                        let mut cs = part.chars();
+                        match cs.next() {
+                            Some(f) => f.to_string() + &cs.as_str().to_lowercase(),
+                            None => String::new(),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("-")
             }
         })
         .collect::<Vec<_>>()
@@ -2036,6 +2060,22 @@ mod tests {
         assert_eq!(game_title("CPKC WOMENS OPEN".into(), String::new()), "CPKC Womens Open");
         assert_eq!(game_title("DUTCH GP".into(), String::new()), "Dutch GP");
         assert_eq!(game_title("MONACO GP".into(), String::new()), "Monaco GP");
+        // Initialisms that have a vowel, from the 2026 PGA and LPGA calendars.
+        for (panel, card) in [
+            ("PGA CHAMP", "PGA Champ"),
+            ("LPGA SHANGHAI", "LPGA Shanghai"),
+            ("AIG WOMEN'S OPEN", "AIG Women's Open"),
+            ("CME GROUP TOUR", "CME Group Tour"),
+            ("ISCO CHAMP", "ISCO Champ"),
+            ("FEDEX ST. JUDE", "FedEx St. Jude"),
+            ("BANK OF UTAH", "Bank of Utah"),
+            ("TOURN OF CHAMPS", "Tourn of Champs"),
+            ("TOUR Q-SCHOOL", "Tour Q-School"),
+            ("US GP", "US GP"),
+            ("SAO PAULO GP", "Sao Paulo GP"),
+        ] {
+            assert_eq!(game_title(panel.into(), String::new()), card, "{panel}");
+        }
     }
 
     #[test]
