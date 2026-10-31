@@ -20,7 +20,10 @@ cd "$(dirname "$0")"
 export JAVA_HOME="${JAVA_HOME:-/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home}"
 export ANDROID_HOME="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
 export PATH="$JAVA_HOME/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
-APP=com.markschmidt.scoreboard
+# The installed app id (Play's package name) differs from the Kotlin package
+# the classes live in, so the activity is named in full when launching.
+APP=com.markschmidt.openscoreboard
+ACTIVITY=com.markschmidt.scoreboard.MainActivity
 
 WANT_EMU=0; WANT_LOGS=0; WANT_CLEAN=0; WANT_RELEASE=0; SERIAL=""
 while [[ $# -gt 0 ]]; do
@@ -113,7 +116,7 @@ fi
 APK="$HOME/Library/Caches/scoreboard-android/app/outputs/apk/$APKDIR/$APKNAME"
 [[ -f "$APK" ]] || { echo "no APK at $APK" >&2; exit 1; }
 adb -s "$SERIAL" install -r "$APK"
-adb -s "$SERIAL" shell am start -n "$APP/.MainActivity" >/dev/null
+adb -s "$SERIAL" shell am start -n "$APP/$ACTIVITY" >/dev/null
 echo "launched on $SERIAL"
 
 if [[ "$WANT_LOGS" == 1 ]]; then

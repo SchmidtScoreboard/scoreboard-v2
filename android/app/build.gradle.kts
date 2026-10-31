@@ -1,18 +1,43 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
 }
 
+// The Play upload key lives outside the repo, beside the board and firmware
+// keys: ~/.config/scoreboard/play-upload.properties (storeFile, storePassword,
+// keyAlias, keyPassword), or wherever $SCOREBOARD_PLAY_UPLOAD points. NEVER
+// commit it. Google re-signs for the store (Play App Signing), so a lost
+// upload key can be reset in Play Console — but only by its owner.
+val playUpload: Properties? =
+    file(System.getenv("SCOREBOARD_PLAY_UPLOAD") ?: "${System.getProperty("user.home")}/.config/scoreboard/play-upload.properties")
+        .takeIf { it.isFile }
+        ?.let { f -> Properties().apply { f.inputStream().use { load(it) } } }
+
 android {
+    signingConfigs {
+        if (playUpload != null) {
+            create("upload") {
+                storeFile = file(playUpload.getProperty("storeFile"))
+                storePassword = playUpload.getProperty("storePassword")
+                keyAlias = playUpload.getProperty("keyAlias")
+                keyPassword = playUpload.getProperty("keyPassword")
+            }
+        }
+    }
     namespace = "com.markschmidt.scoreboard"
     compileSdk = 35
     defaultConfig {
-        applicationId = "com.markschmidt.scoreboard"
+        // The Play package name, permanent once uploaded; matches the iOS
+        // bundle id. `namespace` (the Kotlin package) stays as it was.
+        applicationId = "com.markschmidt.openscoreboard"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "2026.8.0"
+        // versionCode must rise with every Play upload.
+        versionCode = 3
+        versionName = "2026.10.0"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -21,11 +46,14 @@ android {
     kotlinOptions { jvmTarget = "17" }
     buildTypes {
         release {
-            // Personal-device build, not a store build: R8 on, signed with
-            // the debug key so `adb install` over the debug flow still works.
+            // R8 on. Signed with the Play upload key when this machine has it
+            // (`./gradlew bundleRelease` is then the store build); without
+            // it, the debug key, so `run.sh --release` still installs on a
+            // personal device. Play rejects a debug-signed upload outright,
+            // so the fallback cannot reach the store by mistake.
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("upload") ?: signingConfigs.getByName("debug")
         }
     }
     buildFeatures {
