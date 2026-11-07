@@ -3163,8 +3163,11 @@ fn ordinal(n: i64) -> String {
 fn overtime_label(sport_id: &str, period: i64) -> Option<String> {
     let regulation = match sport_id {
         "nhl" | "olyhm" | "olyhw" => 3,
-        "nba" | "wnba" | "olybm" | "olybw" | "nfl" | "cfb" => 4,
-        "cbb" | "wcbb" => 2, // halves
+        // NCAA women's basketball has played quarters since 2015-16; only the
+        // men's game still plays halves. Grouped with cbb, a women's 3rd
+        // quarter read "OT" and every regulation final "FINAL 2OT".
+        "nba" | "wnba" | "olybm" | "olybw" | "nfl" | "cfb" | "wcbb" => 4,
+        "cbb" => 2, // halves
         // Baseball counts innings forever: a 12th is a 12th, not a 3rd OT.
         _ if is_soccer(sport_id) => 2,
         _ => return None,
@@ -4161,6 +4164,11 @@ mod champ_tests {
         assert_eq!(say("nba", 5, None), "OT");
         assert_eq!(say("nba", 6, None), "2OT");
         assert_eq!(say("cbb", 3, None), "OT", "college basketball plays halves");
+        // ...the men's game does. The women's plays quarters: its 3rd is a
+        // 3rd, and a regulation final (period 4, no altDetail) is no overtime.
+        assert_eq!(say("wcbb", 3, None), "3rd");
+        assert_eq!(say("wcbb", 4, None), "4th", "a regulation final, not 2OT");
+        assert_eq!(say("wcbb", 5, None), "OT");
         assert_eq!(say("nfl", 5, None), "OT");
         assert_eq!(say("nhl", 4, None), "OT", "the first NHL overtime is unambiguous");
         assert_eq!(say("nhl", 5, None), "5th", "SO or 2OT — refuses to guess");
