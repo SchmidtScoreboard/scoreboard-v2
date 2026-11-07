@@ -41,7 +41,7 @@ DEBUG-only on iOS).
 One-time setup:
 
 ```bash
-# Android Studio (or commandline-tools) with SDK 35 and NDK r27+
+# Android Studio (or commandline-tools) with SDK 36 and NDK r27+
 rustup target add aarch64-linux-android x86_64-linux-android
 cargo install cargo-ndk
 export ANDROID_NDK_HOME=~/Library/Android/sdk/ndk/<version>

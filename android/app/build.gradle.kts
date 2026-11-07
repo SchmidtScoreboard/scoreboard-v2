@@ -28,16 +28,26 @@ android {
         }
     }
     namespace = "com.markschmidt.scoreboard"
-    compileSdk = 35
+    // Play's target-API floor is 36 (Android 16) for new uploads.
+    compileSdk = 36
+    // The NDK strips libapp_core.so for packaging and extracts its symbol
+    // table into the bundle for Play's crash reports. Same NDK build-core.sh
+    // builds the core with; without it the libs ship unstripped.
+    ndkVersion = "27.2.12479018"
     defaultConfig {
         // The Play package name, permanent once uploaded; matches the iOS
         // bundle id. `namespace` (the Kotlin package) stays as it was.
         applicationId = "com.markschmidt.openscoreboard"
         minSdk = 26
-        targetSdk = 35
-        // versionCode must rise with every Play upload.
-        versionCode = 3
+        targetSdk = 36
+        // versionCode must rise with every Play upload — including uploads
+        // Play rejected: 3 went up targeting API 35 and is spent.
+        versionCode = 4
         versionName = "2026.10.0"
+        // build-core.sh builds the Rust core for these two ABIs only, while
+        // JNA carries jnidispatch for every ABI. Unfiltered, Play would offer
+        // the app to 32-bit phones that cannot load libapp_core.
+        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -54,6 +64,9 @@ android {
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.findByName("upload") ?: signingConfigs.getByName("debug")
+            // The Rust core's symbols ride in the bundle (BUNDLE-METADATA), so
+            // Play symbolicates native crashes without a separate upload.
+            ndk { debugSymbolLevel = "SYMBOL_TABLE" }
         }
     }
     buildFeatures {
