@@ -116,8 +116,11 @@ pub fn shorten_location(name: &str) -> String {
         }
     }
     // Leading direction word -> its initial. ESPN's college locations use both
-    // the bare ("East Carolina") and the -ERN form ("Eastern Michigan").
-    if let Some(first) = parts.first_mut() {
+    // the bare ("East Carolina") and the -ERN form ("Eastern Michigan"). Only
+    // when a word follows: "Southern" and "Eastern" are whole locations, and
+    // alone the initial is just "S" / "E".
+    if parts.len() > 1 {
+        let first = &mut parts[0];
         for (dir, init) in [
             ("NORTH", "N"), ("NORTHERN", "N"), ("EAST", "E"), ("EASTERN", "E"),
             ("SOUTH", "S"), ("SOUTHERN", "S"), ("WEST", "W"), ("WESTERN", "W"),
@@ -242,6 +245,26 @@ pub fn flag_colors(abbrev: &str) -> Option<(&'static str, &'static str)> {
         "BLR" => ("c8313e", "4aa657"),
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod location_tests {
+    use super::*;
+
+    #[test]
+    fn a_direction_word_collapses_only_when_a_place_follows_it() {
+        assert_eq!(shorten_location("South Alabama"), "S Alabama");
+        assert_eq!(shorten_location("Eastern Michigan"), "E Michigan");
+        assert_eq!(shorten_location("Central Michigan"), "C Michigan");
+        // ESPN's whole location for Southern (SOU) and Eastern (EU): the
+        // initial alone drew a bare "S" on the board.
+        assert_eq!(shorten_location("Southern"), "Southern");
+        assert_eq!(shorten_location("Eastern"), "Eastern");
+        for name in ["SOUTHERN", "EASTERN"] {
+            let (w, avail) = crate::render::team_name_metrics("cfb", name);
+            assert!(w <= avail, "{name} is {w}px, the row has {avail}px");
+        }
+    }
 }
 
 #[cfg(test)]
