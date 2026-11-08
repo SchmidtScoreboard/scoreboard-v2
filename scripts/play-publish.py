@@ -4,6 +4,13 @@
     scripts/play-publish.py                  what each track holds (read-only)
     scripts/play-publish.py upload [--track internal] [--aab PATH]
                             [--notes TEXT | --notes-file PATH] [--draft] [--dry-run]
+    scripts/play-publish.py listing [--dry-run]
+
+listing replaces the en-US store listing with what the repo holds: the text in
+design/store/play/ (title, short and full description), the icon
+design/icon/play-icon.png (made by design/icon/gen_icon.py), and the feature
+graphic and phone screenshots design/store/compose.py writes to
+design/store/out/.
 
 Build the bundle first: `./gradlew bundleRelease` in android/ signs it with the
 upload key (see android/app/build.gradle.kts). Every versionCode Play receives
@@ -43,6 +50,10 @@ KEY = os.environ.get(
 AAB = os.path.expanduser(
     "~/Library/Caches/scoreboard-android/app/outputs/bundle/release/app-release.aab"
 )
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LANG = "en-US"
+# Play's limits on the listing text.
+TEXT_LIMITS = {"title": 30, "short-description": 80, "full-description": 4000}
 API = f"https://androidpublisher.googleapis.com/androidpublisher/v3/applications/{PACKAGE}"
 UPLOAD = f"https://androidpublisher.googleapis.com/upload/androidpublisher/v3/applications/{PACKAGE}"
 
@@ -150,6 +161,14 @@ class Edit:
         return call("POST", f"{UPLOAD}/edits/{self.id}/bundles?uploadType=media",
                     self.token, data=data, ctype="application/octet-stream")
 
+    def replace_images(self, kind, paths):
+        call("DELETE", f"{API}/edits/{self.id}/listings/{LANG}/{kind}", self.token)
+        for path in paths:
+            with open(path, "rb") as f:
+                data = f.read()
+            call("POST", f"{UPLOAD}/edits/{self.id}/listings/{LANG}/{kind}?uploadType=media",
+                 self.token, data=data, ctype="image/png")
+
     def commit(self):
         self.post(":commit")
         self.committed = True
@@ -221,6 +240,51 @@ def upload(args):
         print("  finish the rollout in Play Console (Test and release › the track)")
 
 
+def listing(args):
+    text = {}
+    for name, limit in TEXT_LIMITS.items():
+        path = os.path.join(ROOT, "design", "store", "play", f"{name}.txt")
+        with open(path) as f:
+            text[name] = f.read().strip()
+        if not text[name] or len(text[name]) > limit:
+            sys.exit(f"{os.path.relpath(path, ROOT)} is {len(text[name])} characters; Play allows 1-{limit}")
+    out = os.path.join(ROOT, "design", "store", "out")
+    phone = sorted(
+        os.path.join(out, "play-phone", f)
+        for f in os.listdir(os.path.join(out, "play-phone")) if f.endswith(".png")
+    )
+    images = {
+        "icon": [os.path.join(ROOT, "design", "icon", "play-icon.png")],
+        "featureGraphic": [os.path.join(out, "play-feature.png")],
+        "phoneScreenshots": phone,
+    }
+    if not 2 <= len(phone) <= 8:
+        sys.exit(f"Play needs 2-8 phone screenshots; design/store/out/play-phone has {len(phone)}")
+    for paths in images.values():
+        for path in paths:
+            if not os.path.isfile(path):
+                sys.exit(f"missing {os.path.relpath(path, ROOT)}")
+
+    with Edit(access_token()) as e:
+        e.put(f"/listings/{LANG}", {
+            "language": LANG,
+            "title": text["title"],
+            "shortDescription": text["short-description"],
+            "fullDescription": text["full-description"],
+        })
+        print(f"text: title, short ({len(text['short-description'])}), "
+              f"full ({len(text['full-description'])} characters)")
+        for kind, paths in images.items():
+            e.replace_images(kind, paths)
+            print(f"{kind}: {', '.join(os.path.relpath(p, ROOT) for p in paths)}")
+        e.post(":validate")
+        if args.dry_run:
+            print("dry run: the listing validated; discarding the edit, nothing changed")
+            return
+        e.commit()
+    print(f"committed the {LANG} store listing")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = p.add_subparsers(dest="cmd")
@@ -234,9 +298,12 @@ def main():
     u.add_argument("--draft", action="store_true", help="create the release as a draft")
     u.add_argument("--dry-run", action="store_true",
                    help="run every step, then discard the edit instead of committing")
+    lst = sub.add_parser("listing", help="replace the store listing with the repo's")
+    lst.add_argument("--dry-run", action="store_true",
+                     help="upload and validate everything, then discard the edit")
     args = p.parse_args()
     try:
-        (upload if args.cmd == "upload" else status)(args)
+        {"upload": upload, "listing": listing}.get(args.cmd, status)(args)
     except PlayError as err:
         sys.exit(str(err))
 

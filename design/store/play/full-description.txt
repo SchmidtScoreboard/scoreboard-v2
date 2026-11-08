@@ -1,0 +1,9 @@
+Set up and manage your OpenScoreboard!
+
+OpenScoreboard is a 64×32 LED scoreboard that follows the games you care about. This app gets it on Wi-Fi, pairs it with your phone, and decides what it shows.
+
+- Set favorite teams and leagues to watch
+- Manually select games and events
+- Configure off-modes so your Scoreboard is always showing something interesting
+
+It covers pro and college football, basketball, hockey and baseball, soccer, golf and racing. When nothing is on, the board can show a clock or the weather instead.

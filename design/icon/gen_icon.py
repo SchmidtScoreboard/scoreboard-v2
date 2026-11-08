@@ -88,6 +88,24 @@ grad = (f'<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">'
         f'<rect width="{S}" height="{S}" fill="url(#g)"/>')
 write(os.path.join(icon_dir, 'android-preview.svg'), svg(dial+face+leds, bg=grad))
 
+# Play Store hi-res icon: that same full-bleed square at 512px (Play applies
+# its own corner mask). Chrome rasterizes the SVG, PIL downsamples it.
+CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+if os.path.exists(CHROME):
+    import subprocess, tempfile
+    from PIL import Image
+    with tempfile.TemporaryDirectory() as tmp:
+        shot = os.path.join(tmp, 'icon.png')
+        subprocess.run([CHROME, '--headless=new', '--disable-gpu', '--hide-scrollbars',
+                        '--force-device-scale-factor=1', f'--window-size={S},{S}',
+                        f'--screenshot={shot}', 'file://' + os.path.join(icon_dir, 'android-preview.svg')],
+                       check=True, capture_output=True)
+        play = os.path.join(icon_dir, 'play-icon.png')
+        Image.open(shot).convert('RGBA').resize((512, 512), Image.LANCZOS).save(play)
+        print('wrote', os.path.relpath(play, ROOT))
+else:
+    print('skipped design/icon/play-icon.png: needs Google Chrome to rasterize')
+
 # ---- Android adaptive icon ----
 # 108dp canvas; the launcher shows the inner 72dp. The 1024 canvas maps to
 # that 72dp so the board sits where the previews showed it.

@@ -106,6 +106,7 @@ receives, rejected uploads included), then:
 ../scripts/play-publish.py                   # what each track holds
 ../scripts/play-publish.py upload --track internal --notes "…" --dry-run
 ../scripts/play-publish.py upload --track internal --notes "…"
+../scripts/play-publish.py listing           # store listing from design/store
 ```
 
 Both keys live outside the repo in `~/.config/scoreboard/`: the upload key
