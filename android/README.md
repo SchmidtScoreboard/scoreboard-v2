@@ -96,6 +96,23 @@ exactly that prompt.
 `build-core.sh` is the only correct way to refresh the core — the same rule
 as `ios/build-core.sh`.
 
+### Releasing to Google Play
+
+Bump `versionCode` in `app/build.gradle.kts` (Play spends every code it
+receives, rejected uploads included), then:
+
+```bash
+./gradlew bundleRelease                      # signed with the upload key
+../scripts/play-publish.py                   # what each track holds
+../scripts/play-publish.py upload --track internal --notes "…" --dry-run
+../scripts/play-publish.py upload --track internal --notes "…"
+```
+
+Both keys live outside the repo in `~/.config/scoreboard/`: the upload key
+(`play-upload.properties` + `.jks`) and the Play Developer API service
+account (`play-service-account.json`). Never commit either. Store
+declarations (content rating, data safety, testers) stay in Play Console.
+
 ### Why the build output is in ~/Library/Caches
 
 This repo lives in `~/Documents`, which iCloud Drive syncs — deliberately, for
