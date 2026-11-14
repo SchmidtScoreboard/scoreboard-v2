@@ -797,6 +797,16 @@ RustBuffer uniffi_app_core_fn_func_group_leagues(RustBuffer sports, RustCallStat
 RustBuffer uniffi_app_core_fn_func_held_after(RustBuffer held_id, RustBuffer screens, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HELD_SCREEN_ROW
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HELD_SCREEN_ROW
+RustBuffer uniffi_app_core_fn_func_held_screen_row(RustBuffer mode, RustBuffer screens, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HELD_UNTIL
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HELD_UNTIL
+RustBuffer uniffi_app_core_fn_func_held_until(RustBuffer time, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HOST_PORT_FOR_BOARD
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_HOST_PORT_FOR_BOARD
 RustBuffer uniffi_app_core_fn_func_host_port_for_board(RustBuffer ws_url, RustCallStatus *_Nonnull out_status
@@ -917,17 +927,6 @@ RustBuffer uniffi_app_core_fn_func_league_dwell_override_label(uint32_t secs, Ru
 RustBuffer uniffi_app_core_fn_func_league_prefs(RustBuffer config, RustBuffer sports, RustCallStatus *_Nonnull out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_MODE_BACK_PREFIX
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_MODE_BACK_PREFIX
-RustBuffer uniffi_app_core_fn_func_mode_back_prefix(RustBuffer label, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_MODE_BACK_SUFFIX
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_MODE_BACK_SUFFIX
-RustBuffer uniffi_app_core_fn_func_mode_back_suffix(RustCallStatus *_Nonnull out_status
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_MODE_FOOTER_SHOWN
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_MODE_FOOTER_SHOWN
 int8_t uniffi_app_core_fn_func_mode_footer_shown(RustBuffer mode, RustCallStatus *_Nonnull out_status
@@ -941,11 +940,6 @@ RustBuffer uniffi_app_core_fn_func_mode_label(RustBuffer id, RustBuffer off_mode
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_MODE_POWER
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_MODE_POWER
 int8_t uniffi_app_core_fn_func_mode_power(RustBuffer mode, RustCallStatus *_Nonnull out_status
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_MODE_UNTIL_CHANGED
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_MODE_UNTIL_CHANGED
-RustBuffer uniffi_app_core_fn_func_mode_until_changed(RustBuffer label, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_FN_FUNC_NAME_STYLE_OPTIONS
@@ -1643,6 +1637,18 @@ uint16_t uniffi_app_core_checksum_func_held_after(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HELD_SCREEN_ROW
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HELD_SCREEN_ROW
+uint16_t uniffi_app_core_checksum_func_held_screen_row(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HELD_UNTIL
+#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HELD_UNTIL
+uint16_t uniffi_app_core_checksum_func_held_until(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HOST_PORT_FOR_BOARD
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_HOST_PORT_FOR_BOARD
 uint16_t uniffi_app_core_checksum_func_host_port_for_board(void
@@ -1775,18 +1781,6 @@ uint16_t uniffi_app_core_checksum_func_league_prefs(void
     
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_MODE_BACK_PREFIX
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_MODE_BACK_PREFIX
-uint16_t uniffi_app_core_checksum_func_mode_back_prefix(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_MODE_BACK_SUFFIX
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_MODE_BACK_SUFFIX
-uint16_t uniffi_app_core_checksum_func_mode_back_suffix(void
-    
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_MODE_FOOTER_SHOWN
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_MODE_FOOTER_SHOWN
 uint16_t uniffi_app_core_checksum_func_mode_footer_shown(void
@@ -1802,12 +1796,6 @@ uint16_t uniffi_app_core_checksum_func_mode_label(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_MODE_POWER
 #define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_MODE_POWER
 uint16_t uniffi_app_core_checksum_func_mode_power(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_MODE_UNTIL_CHANGED
-#define UNIFFI_FFIDEF_UNIFFI_APP_CORE_CHECKSUM_FUNC_MODE_UNTIL_CHANGED
-uint16_t uniffi_app_core_checksum_func_mode_until_changed(void
     
 );
 #endif

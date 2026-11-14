@@ -7264,6 +7264,38 @@ public func heldAfter(heldId: String, screens: [UiScreenConfig]) -> String {
 }
 
 /**
+ * The Controls row that carries the held-screen caption ("until 9:30 PM"
+ * and Keep indefinitely, from `held_until` / `keep_label`): the screen
+ * holding the panel. None while Sports rests or before the config lands,
+ * and None when no row is that screen. A legacy kind id names its first
+ * instance and the dark off-mode is the Off row — the same rows [`ring`]
+ * rings. The caption shows only while the board's wake timer is still
+ * ahead; held indefinitely, the row carries no text at all.
+ */
+public func heldScreenRow(mode: String, screens: [UiScreenConfig]) -> String? {
+    return try! FfiConverterOptionString.lift(try! rustCall {
+        uniffi_app_core_fn_func_held_screen_row(
+            FfiConverterString.lower(mode),
+            FfiConverterSequenceTypeUiScreenConfig.lower(screens), $0
+        )
+    })
+}
+
+/**
+ * The caption under the held screen's Controls row while its wake timer
+ * runs: "until 9:30 PM". `time` is when it hands back to Sports, formatted
+ * on the platform (the reader's clock format; a weekday when it is not
+ * today). Its row is [`crate::rules::held_screen_row`].
+ */
+public func heldUntil(time: String) -> String {
+    return try! FfiConverterString.lift(try! rustCall {
+        uniffi_app_core_fn_func_held_until(
+            FfiConverterString.lower(time), $0
+        )
+    })
+}
+
+/**
  * The `host:port` to write to a board's `server` characteristic, for the
  * websocket URL the phone is using. Empty means "keep the firmware default".
  */
@@ -7457,7 +7489,8 @@ public func involvesFavorite(sportId: String, away: String, home: String, favori
 }
 
 /**
- * The footer's button: hold the screen until changed (`clear_wake_timer`).
+ * The button beside that caption: hold the screen until changed
+ * (`clear_wake_timer`). Afterwards the row carries no caption at all.
  */
 public func keepLabel() -> String {
     return try! FfiConverterString.lift(try! rustCall {
@@ -7523,34 +7556,8 @@ public func leaguePrefs(config: UiBoardConfig, sports: [UiSport]) -> [UiLeaguePr
 }
 
 /**
- * The start of the footer while a held screen runs on its timer: "Clock —
- * back to Sports in ". The platform appends its own formatted duration
- * (relative time is locale formatting), then [`mode_back_suffix`].
- */
-public func modeBackPrefix(label: String) -> String {
-    return try! FfiConverterString.lift(try! rustCall {
-        uniffi_app_core_fn_func_mode_back_prefix(
-            FfiConverterString.lower(label), $0
-        )
-    })
-}
-
-/**
- * The end of that footer, after the duration.
- */
-public func modeBackSuffix() -> String {
-    return try! FfiConverterString.lift(try! rustCall {
-        uniffi_app_core_fn_func_mode_back_suffix($0
-        )
-    })
-}
-
-/**
- * Does the held-screen footer show for `mode`? Whenever something other
- * than Sports holds the panel. Not for Sports, and not for "" (the board's
- * config has not arrived). Its sentence is `mode_until_changed` or
- * `mode_back_prefix` + duration + `mode_back_suffix`, labelled by
- * [`screen_label_for`].
+ * Is something other than Sports holding the panel? Not for Sports, and
+ * not for "" (the board's config has not arrived).
  */
 public func modeFooterShown(mode: String) -> Bool {
     return try! FfiConverterBool.lift(try! rustCall {
@@ -7583,17 +7590,6 @@ public func modePower(mode: String) -> Bool {
     return try! FfiConverterBool.lift(try! rustCall {
         uniffi_app_core_fn_func_mode_power(
             FfiConverterString.lower(mode), $0
-        )
-    })
-}
-
-/**
- * The footer while a held screen runs with no timer: "Clock until changed."
- */
-public func modeUntilChanged(label: String) -> String {
-    return try! FfiConverterString.lift(try! rustCall {
-        uniffi_app_core_fn_func_mode_until_changed(
-            FfiConverterString.lower(label), $0
         )
     })
 }
@@ -8397,6 +8393,12 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_func_held_after() != 9162 {
         return InitializationResult.apiChecksumMismatch
     }
+    if uniffi_app_core_checksum_func_held_screen_row() != 43907 {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if uniffi_app_core_checksum_func_held_until() != 6202 {
+        return InitializationResult.apiChecksumMismatch
+    }
     if uniffi_app_core_checksum_func_host_port_for_board() != 3292 {
         return InitializationResult.apiChecksumMismatch
     }
@@ -8448,7 +8450,7 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_func_involves_favorite() != 62993 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_func_keep_label() != 40167 {
+    if uniffi_app_core_checksum_func_keep_label() != 59479 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_leaderboard_depth_options() != 20168 {
@@ -8463,22 +8465,13 @@ private var initializationResult: InitializationResult = {
     if uniffi_app_core_checksum_func_league_prefs() != 47967 {
         return InitializationResult.apiChecksumMismatch
     }
-    if uniffi_app_core_checksum_func_mode_back_prefix() != 37435 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_app_core_checksum_func_mode_back_suffix() != 31492 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_app_core_checksum_func_mode_footer_shown() != 27396 {
+    if uniffi_app_core_checksum_func_mode_footer_shown() != 2841 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_mode_label() != 2918 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_mode_power() != 39171 {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if uniffi_app_core_checksum_func_mode_until_changed() != 28005 {
         return InitializationResult.apiChecksumMismatch
     }
     if uniffi_app_core_checksum_func_name_style_options() != 22961 {

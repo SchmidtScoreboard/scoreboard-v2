@@ -1139,8 +1139,6 @@ internal open class UniffiVTableCallbackInterfaceClientListener(
 
 
 
-
-
 // A JNA Library to expose the extern-C FFI definitions.
 // This is an implementation detail which will be called internally by the public API.
 
@@ -1325,6 +1323,10 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_held_after(`heldId`: RustBuffer.ByValue,`screens`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_held_screen_row(`mode`: RustBuffer.ByValue,`screens`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    fun uniffi_app_core_fn_func_held_until(`time`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_host_port_for_board(`wsUrl`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_http_base(`wsUrl`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1369,18 +1371,12 @@ internal interface UniffiLib : Library {
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_league_prefs(`config`: RustBuffer.ByValue,`sports`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
-    fun uniffi_app_core_fn_func_mode_back_prefix(`label`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
-    fun uniffi_app_core_fn_func_mode_back_suffix(uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_mode_footer_shown(`mode`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
     fun uniffi_app_core_fn_func_mode_label(`id`: RustBuffer.ByValue,`offModes`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_mode_power(`mode`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
-    fun uniffi_app_core_fn_func_mode_until_changed(`label`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-    ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_name_style_options(`sportId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     fun uniffi_app_core_fn_func_normalized_pin(`raw`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1643,6 +1639,10 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_app_core_checksum_func_held_after(
     ): Short
+    fun uniffi_app_core_checksum_func_held_screen_row(
+    ): Short
+    fun uniffi_app_core_checksum_func_held_until(
+    ): Short
     fun uniffi_app_core_checksum_func_host_port_for_board(
     ): Short
     fun uniffi_app_core_checksum_func_http_base(
@@ -1687,17 +1687,11 @@ internal interface UniffiLib : Library {
     ): Short
     fun uniffi_app_core_checksum_func_league_prefs(
     ): Short
-    fun uniffi_app_core_checksum_func_mode_back_prefix(
-    ): Short
-    fun uniffi_app_core_checksum_func_mode_back_suffix(
-    ): Short
     fun uniffi_app_core_checksum_func_mode_footer_shown(
     ): Short
     fun uniffi_app_core_checksum_func_mode_label(
     ): Short
     fun uniffi_app_core_checksum_func_mode_power(
-    ): Short
-    fun uniffi_app_core_checksum_func_mode_until_changed(
     ): Short
     fun uniffi_app_core_checksum_func_name_style_options(
     ): Short
@@ -2026,6 +2020,12 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_app_core_checksum_func_held_after() != 9162.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_app_core_checksum_func_held_screen_row() != 43907.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_app_core_checksum_func_held_until() != 6202.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_app_core_checksum_func_host_port_for_board() != 3292.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2077,7 +2077,7 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_app_core_checksum_func_involves_favorite() != 62993.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_app_core_checksum_func_keep_label() != 40167.toShort()) {
+    if (lib.uniffi_app_core_checksum_func_keep_label() != 59479.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_leaderboard_depth_options() != 20168.toShort()) {
@@ -2092,22 +2092,13 @@ private fun uniffiCheckApiChecksums(lib: UniffiLib) {
     if (lib.uniffi_app_core_checksum_func_league_prefs() != 47967.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_app_core_checksum_func_mode_back_prefix() != 37435.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_app_core_checksum_func_mode_back_suffix() != 31492.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_app_core_checksum_func_mode_footer_shown() != 27396.toShort()) {
+    if (lib.uniffi_app_core_checksum_func_mode_footer_shown() != 2841.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_mode_label() != 2918.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_mode_power() != 39171.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_app_core_checksum_func_mode_until_changed() != 28005.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_app_core_checksum_func_name_style_options() != 22961.toShort()) {
@@ -8004,6 +7995,39 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     
 
         /**
+         * The Controls row that carries the held-screen caption ("until 9:30 PM"
+         * and Keep indefinitely, from `held_until` / `keep_label`): the screen
+         * holding the panel. None while Sports rests or before the config lands,
+         * and None when no row is that screen. A legacy kind id names its first
+         * instance and the dark off-mode is the Off row — the same rows [`ring`]
+         * rings. The caption shows only while the board's wake timer is still
+         * ahead; held indefinitely, the row carries no text at all.
+         */ fun `heldScreenRow`(`mode`: kotlin.String, `screens`: List<UiScreenConfig>): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_held_screen_row(
+        FfiConverterString.lower(`mode`),FfiConverterSequenceTypeUiScreenConfig.lower(`screens`),_status)
+}
+    )
+    }
+    
+
+        /**
+         * The caption under the held screen's Controls row while its wake timer
+         * runs: "until 9:30 PM". `time` is when it hands back to Sports, formatted
+         * on the platform (the reader's clock format; a weekday when it is not
+         * today). Its row is [`crate::rules::held_screen_row`].
+         */ fun `heldUntil`(`time`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_app_core_fn_func_held_until(
+        FfiConverterString.lower(`time`),_status)
+}
+    )
+    }
+    
+
+        /**
          * The `host:port` to write to a board's `server` characteristic, for the
          * websocket URL the phone is using. Empty means "keep the firmware default".
          */ fun `hostPortForBoard`(`wsUrl`: kotlin.String): kotlin.String {
@@ -8218,7 +8242,8 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     
 
         /**
-         * The footer's button: hold the screen until changed (`clear_wake_timer`).
+         * The button beside that caption: hold the screen until changed
+         * (`clear_wake_timer`). Afterwards the row carries no caption at all.
          */ fun `keepLabel`(): kotlin.String {
             return FfiConverterString.lift(
     uniffiRustCall() { _status ->
@@ -8289,37 +8314,8 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     
 
         /**
-         * The start of the footer while a held screen runs on its timer: "Clock —
-         * back to Sports in ". The platform appends its own formatted duration
-         * (relative time is locale formatting), then [`mode_back_suffix`].
-         */ fun `modeBackPrefix`(`label`: kotlin.String): kotlin.String {
-            return FfiConverterString.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_app_core_fn_func_mode_back_prefix(
-        FfiConverterString.lower(`label`),_status)
-}
-    )
-    }
-    
-
-        /**
-         * The end of that footer, after the duration.
-         */ fun `modeBackSuffix`(): kotlin.String {
-            return FfiConverterString.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_app_core_fn_func_mode_back_suffix(
-        _status)
-}
-    )
-    }
-    
-
-        /**
-         * Does the held-screen footer show for `mode`? Whenever something other
-         * than Sports holds the panel. Not for Sports, and not for "" (the board's
-         * config has not arrived). Its sentence is `mode_until_changed` or
-         * `mode_back_prefix` + duration + `mode_back_suffix`, labelled by
-         * [`screen_label_for`].
+         * Is something other than Sports holding the panel? Not for Sports, and
+         * not for "" (the board's config has not arrived).
          */ fun `modeFooterShown`(`mode`: kotlin.String): kotlin.Boolean {
             return FfiConverterBoolean.lift(
     uniffiRustCall() { _status ->
@@ -8353,18 +8349,6 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_app_core_fn_func_mode_power(
         FfiConverterString.lower(`mode`),_status)
-}
-    )
-    }
-    
-
-        /**
-         * The footer while a held screen runs with no timer: "Clock until changed."
-         */ fun `modeUntilChanged`(`label`: kotlin.String): kotlin.String {
-            return FfiConverterString.lift(
-    uniffiRustCall() { _status ->
-    UniffiLib.INSTANCE.uniffi_app_core_fn_func_mode_until_changed(
-        FfiConverterString.lower(`label`),_status)
 }
     )
     }

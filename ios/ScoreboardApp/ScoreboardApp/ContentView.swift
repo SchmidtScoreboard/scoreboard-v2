@@ -150,7 +150,7 @@ struct BoardInfo {
     /// What the board is DOING: Sports, Off, or the id of the screen INSTANCE
     /// held persistently. Open string, mirroring the server. "" until the
     /// config arrives — the core reads that as Sports (`ring`,
-    /// `modeFooterShown`).
+    /// `heldScreenRow`).
     var mode: String = ""
     /// The board's screen list, VERBATIM from the server (MAR-117). Empty
     /// means a server without lists — never read it raw: every list rule
@@ -696,9 +696,9 @@ final class BoardViewModel: ObservableObject {
         )
     }
 
-    /// The one rail tile on the glass at `now` (none while an idle rotation
-    /// has no known start), the tile MAR-110 scrolls to, and when that
-    /// changes on its own — the rail re-asks at `nextChangeMs`.
+    /// The one screen row on the glass at `now` (none while an idle rotation
+    /// has no known start), the row the core names first, and when that
+    /// changes on its own — the rows re-ask at `nextChangeMs`.
     func screenRing(at now: Date) -> UiRing {
         ring(
             mode: current.mode,
@@ -714,6 +714,16 @@ final class BoardViewModel: ObservableObject {
     /// A screen or held mode's label — distinct across the list.
     func screenLabel(_ id: String) -> String {
         screenLabelFor(id: id, screens: resolvedScreens, offModes: offModes)
+    }
+
+    /// The Controls row that carries the held-screen caption, and when its
+    /// timer hands the panel back to Sports — nil once it has passed or was
+    /// dropped (Keep indefinitely): then the row carries no caption. Which
+    /// row is the core's (`heldScreenRow`).
+    var heldRow: String? { heldScreenRow(mode: current.mode, screens: resolvedScreens) }
+    var heldEnds: Date? {
+        guard let w = current.wakeAt, TimeInterval(w) > Date().timeIntervalSince1970 else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(w))
     }
 
     /// The params screen `id` RENDERS with (the server's layering of its own
@@ -2385,7 +2395,7 @@ struct DashboardView: View {
     /// see `CardSheets`.
     @StateObject private var cardSheets = CardSheets()
     /// Bumped when the board's idle rotation moves to its next screen, so the
-    /// rail re-asks the core which tile is on the glass. The board advances
+    /// Controls rows re-ask the core which screen is on the glass. The board advances
     /// on its OWN clock and never reports it; the core counts the slot from
     /// the server's anchor, and this only says "ask again now".
     @State private var ringTick = 0
@@ -2631,75 +2641,22 @@ struct DashboardView: View {
 
     /// Brightness plus the MODE PICKER — there is no power button any more.
     /// "Off" is one mode among several, which dissolved the five-way state
-    /// machine a single press used to mean: every tile does exactly one thing.
+    /// machine a single press used to mean: every row does exactly one thing.
     private var controlsSection: some View {
-        Section {
+        // Read here so a bump re-renders the rows; the ring itself is always
+        // asked at the real now.
+        let _ = ringTick
+        let ring = model.screenRing(at: Date())
+        let ringed = Set(ring.ids)
+        let held = model.heldRow
+        let until = model.heldEnds
+        return Section {
             BrightnessControl(
                 value: model.brightness,
                 onPreview: { model.previewBrightness($0) },
                 onCommit: { model.setBrightness($0) }
             )
             .listRowSeparator(.hidden)
-            modePicker
-                .listRowSeparator(.hidden)
-                // The rail spans the CARD: zero row insets so the scroll view
-                // owns the full width and clips at the section's edge, with a
-                // content margin putting the first tile back on the other
-                // rows' leading line — the dashboard carousel's exact recipe.
-                // Left inside its own row insets, the rail clipped mid-card,
-                // which read as tiles vanishing at a random x.
-                .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
-        } header: {
-            Text("Controls")
-        } footer: {
-            VStack(alignment: .leading, spacing: 4) {
-                modeFooter
-                quietFooter
-            }
-        }
-    }
-
-    /// A horizontal rail of mode tiles. Compact on purpose — this sits on the
-    /// dashboard, not in Settings — but each tile is still the real frame,
-    /// because a picture of what the panel will do is the app's language for
-    /// choices like this.
-    private var modePicker: some View {
-        // Read here so a bump re-renders the rail; the ring itself is always
-        // asked at the real now.
-        let _ = ringTick
-        let ring = model.screenRing(at: Date())
-        // Opens scrolled to the SELECTED tile: with four-plus modes the
-        // current one can sit off-screen, and a rail with no visible
-        // selection reads as "nothing is selected" (MAR-110).
-        return ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                // The 20pt inset is the tiles' own PADDING, not a content
-                // margin: `scrollTo` ignores content margins when it clamps,
-                // so centring the first tile slid it 20pt under the card's
-                // edge. As padding, the clamp lands on the leading line.
-                modePickerTiles(ringed: Set(ring.ids))
-                    .padding(.horizontal, 20)
-            }
-            // On entry AND whenever the selection moves. On entry alone it
-            // aimed at a placeholder: the row appears before the board's
-            // state arrives, when `current` is still the default record, so
-            // the rail settled on the placeholder's ring and the real one
-            // then moved off-screen with no second scroll. A mode change
-            // later (the timer returning the board to Sports) deserves the
-            // same reveal. The TILE LIST is in the key too: the server's
-            // screen list can land after the mode settles, and a scroll to a
-            // tile that does not exist yet is dropped — Android hit exactly
-            // this on a cold start. While the board idles through its checked
-            // screens the target moves with the board's rotation; when the
-            // ring is empty (rotation start unknown) the core still names
-            // one tile, so both platforms land on the same one.
-            .onChange(of: [ring.scrollTarget] + model.screenRows.map(\.id), initial: true) { _, key in
-                // Every tile, the first included: a rail moved off Sports
-                // must come back when the selection does. (It used to skip
-                // the first tile, and stranded the rail wherever it last
-                // was — Sports cut off at the card's edge on every open.)
-                proxy.scrollTo(key[0], anchor: .center)
-            }
             // The idle rotation moves on the board's clock: sleep to the
             // core's next boundary, then bump so the ring is asked again.
             // Restarts whenever the boundary changes (new anchor, new timer,
@@ -2716,43 +2673,70 @@ struct DashboardView: View {
                 }
                 if !Task.isCancelled { ringTick &+= 1 }
             }
+            // One row per screen INSTANCE in the board's order — keyed by
+            // instance id, which is unique even when a kind repeats (two
+            // Weather screens). A vertical list, not the old horizontal rail:
+            // with Clock and Weather checked the rail pushed Sports off its
+            // edge, and a choice you cannot see reads as no choice at all.
+            ForEach(model.screenRows, id: \.id) { m in
+                modeRow(m, showing: ringed.contains(m.id), until: m.id == held ? until : nil)
+            }
+        } header: {
+            Text("Controls")
+        } footer: {
+            quietFooter
         }
     }
 
-    /// One tile per screen INSTANCE in the board's order — keyed by instance
-    /// id, which is unique even when a kind repeats (two Weather screens).
-    /// `ringed` holds at most the one tile on the glass.
-    private func modePickerTiles(ringed: Set<String>) -> some View {
-            HStack(alignment: .top, spacing: 10) {
-                ForEach(model.screenRows, id: \.id) { m in
-                    let showing = ringed.contains(m.id)
-                    Button { model.setMode(m) } label: {
-                        VStack(spacing: 5) {
-                            Group {
-                                if let path = m.preview {
-                                    FetchedFrameImage(url: URL(string: "\(model.httpBase)\(path)"))
-                                } else {
-                                    Color.black
-                                }
-                            }
-                            .ledPanel(width: 116, height: 58)
-                            .padding(2)
-                            .overlay {
-                                Rectangle()
-                                    .strokeBorder(showing ? Color.accentColor : .clear, lineWidth: 2)
-                            }
-                            Text(m.label)
-                                .font(.caption)
-                                .foregroundStyle(showing ? Color.primary : Color.secondary)
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(m.label)
-                    .accessibilityAddTraits(showing ? .isSelected : [])
+    /// One screen: its real frame (a picture of what the panel will do is
+    /// the app's language for choices like this), its name, and — on the
+    /// held screen's row while its timer runs — "until 9:30 PM" with Keep
+    /// indefinitely. Held indefinitely, the row says nothing more. The ring
+    /// marks the one screen on the glass.
+    private func modeRow(_ m: UiScreen, showing: Bool, until: Date?) -> some View {
+        HStack(spacing: 12) {
+            Group {
+                if let path = m.preview {
+                    FetchedFrameImage(url: URL(string: "\(model.httpBase)\(path)"))
+                } else {
+                    Color.black
                 }
             }
-            .padding(.vertical, 2)
+            .ledPanel(width: 80, height: 40)
+            .padding(2)
+            .overlay {
+                Rectangle()
+                    .strokeBorder(showing ? Color.accentColor : .clear, lineWidth: 2)
+            }
+            .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(m.label)
+                    .foregroundStyle(showing ? Color.primary : Color.secondary)
+                    .accessibilityAddTraits(showing ? [.isButton, .isSelected] : .isButton)
+                if let until {
+                    let caption = Text(heldUntil(time: Self.untilText(until)))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    // Its own button inside the tappable row: the child's tap
+                    // wins, so Keep never also re-picks. The font goes on the
+                    // button itself — a List row's button ignores the
+                    // container's — and one line each: at large text sizes
+                    // the pair stacks rather than wrapping the button.
+                    let keep = Button(keepLabel()) { model.keepMode() }
+                        .font(.caption.weight(.semibold))
+                        .buttonStyle(.borderless)
+                        .lineLimit(1)
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 8) { caption.lineLimit(1); keep }
+                        VStack(alignment: .leading, spacing: 2) { caption; keep }
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
+        .onTapGesture { model.setMode(m) }
     }
 
     /// Quiet hours on the dashboard — but ONLY while the window is actually
@@ -2778,30 +2762,13 @@ struct DashboardView: View {
         return d.formatted(date: .omitted, time: .shortened)
     }
 
-    /// While a screen other than Sports holds the panel: a live countdown to
-    /// when it returns to Sports, with an escape hatch to hold it
-    /// indefinitely — or, timerless, a note that it stays until changed. The
-    /// sentences and the when-to-show rule are the core's; only the duration
-    /// is formatted here.
-    @ViewBuilder private var modeFooter: some View {
-        if modeFooterShown(mode: model.current.mode) {
-            let label = model.screenLabel(model.current.mode)
-            if let w = model.current.wakeAt, TimeInterval(w) > Date().timeIntervalSince1970 {
-                HStack(spacing: 12) {
-                    // `.relative` keeps itself accurate ("1 hr, 53 min" … "45 sec").
-                    (Text(modeBackPrefix(label: label))
-                        + Text(Date(timeIntervalSince1970: TimeInterval(w)), style: .relative)
-                        + Text(modeBackSuffix()))
-                    Spacer(minLength: 8)
-                    Button(keepLabel()) { model.keepMode() }
-                        .font(.footnote.weight(.semibold))
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.tint)
-                }
-            } else {
-                Text(modeUntilChanged(label: label))
-            }
+    /// When a held screen hands back to Sports, in the reader's clock format:
+    /// "9:30 PM" today, "Sat 9:30 AM" on a later day.
+    static func untilText(_ date: Date) -> String {
+        if Calendar.current.isDateInToday(date) {
+            return date.formatted(date: .omitted, time: .shortened)
         }
+        return date.formatted(.dateTime.weekday(.abbreviated).hour().minute())
     }
 
     /// Add League, as a full-width capsule under every sport section.

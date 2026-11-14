@@ -219,30 +219,20 @@ pub fn update_server_note() -> String {
     "Update your server to add, remove, or reorder screens.".into()
 }
 
-/// The footer while a held screen runs with no timer: "Clock until changed."
+/// The caption under the held screen's Controls row while its wake timer
+/// runs: "until 9:30 PM". `time` is when it hands back to Sports, formatted
+/// on the platform (the reader's clock format; a weekday when it is not
+/// today). Its row is [`crate::rules::held_screen_row`].
 #[uniffi::export]
-pub fn mode_until_changed(label: String) -> String {
-    format!("{label} until changed.")
+pub fn held_until(time: String) -> String {
+    format!("until {time}")
 }
 
-/// The start of the footer while a held screen runs on its timer: "Clock —
-/// back to Sports in ". The platform appends its own formatted duration
-/// (relative time is locale formatting), then [`mode_back_suffix`].
-#[uniffi::export]
-pub fn mode_back_prefix(label: String) -> String {
-    format!("{label} — back to {} in ", scoreboard_protocol::SCORES_LABEL)
-}
-
-/// The end of that footer, after the duration.
-#[uniffi::export]
-pub fn mode_back_suffix() -> String {
-    ".".into()
-}
-
-/// The footer's button: hold the screen until changed (`clear_wake_timer`).
+/// The button beside that caption: hold the screen until changed
+/// (`clear_wake_timer`). Afterwards the row carries no caption at all.
 #[uniffi::export]
 pub fn keep_label() -> String {
-    "Keep".into()
+    "Keep indefinitely".into()
 }
 
 /// The dashboard line while quiet hours darken the panel: "Quiet hours —
@@ -538,8 +528,8 @@ mod tests {
         assert_eq!(sports_label(), "Sports");
         assert_eq!(screen_cap_note(), "You can have up to 8 screens.");
         assert_eq!(nothing_to_add_note(), "Every screen this server offers is already on your list.");
-        assert_eq!(mode_until_changed("Clock".into()), "Clock until changed.");
-        assert_eq!(mode_back_prefix("Clock".into()), "Clock — back to Sports in ");
+        assert_eq!(held_until("9:30 PM".into()), "until 9:30 PM");
+        assert_eq!(keep_label(), "Keep indefinitely");
         assert!(export_footer().contains("screens") && export_sheet_summary().contains("screens"));
         let black = troubleshooting_guides().into_iter().find(|g| g.slug == "black").unwrap();
         assert!(black.advice.contains("pick Sports") && !black.advice.contains("Scores"));

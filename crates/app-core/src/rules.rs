@@ -1746,14 +1746,28 @@ pub fn sports_id() -> String {
     MODE_SCORES.into()
 }
 
-/// Does the held-screen footer show for `mode`? Whenever something other
-/// than Sports holds the panel. Not for Sports, and not for "" (the board's
-/// config has not arrived). Its sentence is `mode_until_changed` or
-/// `mode_back_prefix` + duration + `mode_back_suffix`, labelled by
-/// [`screen_label_for`].
+/// Is something other than Sports holding the panel? Not for Sports, and
+/// not for "" (the board's config has not arrived).
 #[uniffi::export]
 pub fn mode_footer_shown(mode: String) -> bool {
     !mode.is_empty() && mode != MODE_SCORES
+}
+
+/// The Controls row that carries the held-screen caption ("until 9:30 PM"
+/// and Keep indefinitely, from `held_until` / `keep_label`): the screen
+/// holding the panel. None while Sports rests or before the config lands,
+/// and None when no row is that screen. A legacy kind id names its first
+/// instance and the dark off-mode is the Off row — the same rows [`ring`]
+/// rings. The caption shows only while the board's wake timer is still
+/// ahead; held indefinitely, the row carries no text at all.
+#[uniffi::export]
+pub fn held_screen_row(mode: String, screens: Vec<UiScreenConfig>) -> Option<String> {
+    if !mode_footer_shown(mode.clone()) {
+        return None;
+    }
+    let id = if mode == OFF_MODE_BLANK { MODE_OFF.to_string() } else { mode };
+    let list = to_configs(screens);
+    scoreboard_protocol::resolve_screen(&list, &id).map(|s| s.id.clone())
 }
 
 /// The label for a screen or held-mode id (footers, the held tile): its
@@ -3033,5 +3047,21 @@ mod screens_tests {
         }
         assert_eq!(ring(String::new(), false, false, base(), 300, None, 0).ids, ["scores"], "unknown mode rings Sports");
         assert_eq!(ring(String::new(), false, true, base(), 300, None, 0).ids, ["weather"], "and idles like Sports");
+    }
+
+    /// The caption rides on the held screen's own row: an instance by id, a
+    /// legacy kind by its first instance, the dark off-mode on Off. Nothing
+    /// for Sports, for a config not yet arrived, or for a row that is gone.
+    #[test]
+    fn the_held_caption_rides_on_the_held_screens_row() {
+        let row = |m: &str| held_screen_row(m.into(), base());
+        assert_eq!(row("weather.2").as_deref(), Some("weather.2"));
+        assert_eq!(row("clock").as_deref(), Some("clock"));
+        assert_eq!(row("weather").as_deref(), Some("weather"), "a kind names its first instance");
+        assert_eq!(row("off").as_deref(), Some("off"));
+        assert_eq!(row("blank").as_deref(), Some("off"), "the dark off-mode is the Off row");
+        assert_eq!(row("scores"), None);
+        assert_eq!(row(""), None);
+        assert_eq!(row("countdown"), None, "no such row");
     }
 }

@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.*
@@ -182,7 +181,6 @@ private fun ControlsSection(
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             BrightnessRow(session, boardId, cfg.brightness)
             ModePicker(session, state, boardId, cfg)
-            ModeFooter(session, boardId, cfg, state)
             if (board.quietActive) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Outlined.DarkMode, null, Modifier.size(16.dp),
@@ -195,46 +193,6 @@ private fun ControlsSection(
                     )
                 }
             }
-        }
-    }
-}
-
-/** "{Screen} — back to Sports in {n}." with Keep, or "{Screen} until
- *  changed." — the sentences, the label and whether it shows at all are the
- *  core's; only the duration is formatted here. */
-@Composable
-private fun ModeFooter(session: Session, boardId: String, cfg: UiBoardConfig, state: Session.AppState) {
-    if (!modeFooterShown(cfg.mode)) return
-    val label = remember(cfg.mode, cfg.screens, cfg.offMode, cfg.offModeParams, state.offModes) {
-        screenLabelFor(cfg.mode, resolvedScreens(cfg, state.offModes), state.offModes)
-    }
-    val wake = cfg.wakeAt?.toLong()
-    // Re-evaluate each minute so the countdown text stays honest.
-    var now by remember { mutableStateOf(System.currentTimeMillis() / 1000) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            kotlinx.coroutines.delay(60_000)
-            now = System.currentTimeMillis() / 1000
-        }
-    }
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        if (wake != null && wake > now) {
-            val mins = ((wake - now) + 59) / 60
-            val span = if (mins >= 120) "${(mins + 30) / 60} hours"
-            else if (mins >= 60) "1 hour" else "$mins min"
-            Text(
-                modeBackPrefix(label) + span + modeBackSuffix(),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.outline,
-                modifier = Modifier.weight(1f),
-            )
-            TextButton(onClick = { session.keepMode(boardId) }) { Text(keepLabel()) }
-        } else {
-            Text(
-                modeUntilChanged(label),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.outline,
-            )
         }
     }
 }
@@ -265,7 +223,7 @@ private fun ModePicker(session: Session, state: Session.AppState, boardId: Strin
     val board = state.boards[boardId] ?: return
     // The board's own screens, in its order — Sports, Off, then the user's —
     // remembered on the config fields they come from as well as the catalog,
-    // so an add, remove or reorder redraws the rail at once.
+    // so an add, remove or reorder redraws the rows at once.
     val tiles = remember(cfg.screens, cfg.offMode, cfg.offModeParams, state.offModes) {
         screenList(cfg.screens, cfg.offMode, cfg.offModeParams, state.offModes)
     }
@@ -275,7 +233,7 @@ private fun ModePicker(session: Session, state: Session.AppState, boardId: Strin
     if (tiles.isEmpty()) return
     // Upcoming/bumped entries are not on the panel — the core decides.
     val nothingShowing = panelShowsNothing(if (board.stateReceived) board.nowShowing else null)
-    // ONE tile wears the ring: the screen on the glass. While the board
+    // ONE row wears the ring: the screen on the glass. While the board
     // idles through several, the core counts the slot from when the server
     // says the rotation began, on this phone's clock — and says when it next
     // moves; `tick` re-asks then. Evaluated with the clock as it is NOW, so a
@@ -298,43 +256,66 @@ private fun ModePicker(session: Session, state: Session.AppState, boardId: Strin
         }
         tick++
     }
-    // Opens scrolled to the SELECTED tile — a rail whose selection sits
-    // off-screen reads as "nothing is selected" (MAR-110). On entry and
-    // whenever the selection moves (state arriving after first composition,
-    // or the timer returning the board to Sports); between moves the user
-    // owns the scroll position. Keyed on the TILES too: on a cold start the
-    // cached board state can land before the list it rings into, so the
-    // first scroll finds no such tile, and nothing would re-scroll when the
-    // tiles arrive with the selection unchanged.
-    val listState = rememberLazyListState()
-    val tileIds = tiles.map { it.id }
-    LaunchedEffect(ringed.scrollTarget, tileIds) {
-        val i = tileIds.indexOf(ringed.scrollTarget)
-        // Every tile, the first included: a rail moved off Sports must come
-        // back when the selection does.
-        if (i >= 0) listState.scrollToItem(i)
-    }
-    LazyRow(state = listState, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        // Keyed by INSTANCE id: two Weather screens share a kind, and a
-        // duplicate key crashes the list.
-        items(tiles, key = { it.id }) { t ->
-            val bmp = rememberPreview(t.preview?.let { "${session.httpBase}$it" })
-            val on = t.id in ringed.ids
-            Column(
-                // The ringed tile reads as selected, as on iOS.
-                Modifier.width(128.dp)
-                    .semantics { selected = on }
-                    .clickable { session.setMode(boardId, t.id) },
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                LedFrame(bmp, selected = on)
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    t.label,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = if (on) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.outline,
+    // The held screen's row carries "until 9:30 PM" and Keep indefinitely
+    // while its timer runs; held indefinitely it carries nothing. Which row
+    // is the core's.
+    val held = remember(cfg.mode, screens) { heldScreenRow(cfg.mode, screens) }
+    val wake = cfg.wakeAt?.toLong()?.takeIf { it > System.currentTimeMillis() / 1000 }
+    // A vertical list, not the old horizontal rail: with Clock and Weather
+    // checked the rail pushed Sports off its edge, and a choice you cannot
+    // see reads as no choice at all.
+    Column {
+        tiles.forEach { t ->
+            // Keyed by INSTANCE id: two Weather screens share a kind.
+            key(t.id) {
+                ModeRow(
+                    session, boardId, t,
+                    on = t.id in ringed.ids,
+                    until = if (t.id == held) wake else null,
                 )
+            }
+        }
+    }
+}
+
+/** One screen: its real frame, its name, and — on the held screen's row
+ *  while its timer runs — "until 9:30 PM" with Keep indefinitely. The ring
+ *  marks the one screen on the glass. */
+@Composable
+private fun ModeRow(session: Session, boardId: String, t: UiScreen, on: Boolean, until: Long?) {
+    val bmp = rememberPreview(t.preview?.let { "${session.httpBase}$it" })
+    Row(
+        // The ringed row reads as selected, as on iOS.
+        Modifier.fillMaxWidth()
+            .semantics { selected = on }
+            .clickable { session.setMode(boardId, t.id) }
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        LedFrame(bmp, Modifier.width(80.dp), selected = on)
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                t.label,
+                style = MaterialTheme.typography.bodyLarge,
+                color = if (on) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (until != null) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        heldUntil(untilText(until)),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline,
+                    )
+                    // Its own click target inside the clickable row: the
+                    // button consumes the tap, so Keep never also re-picks.
+                    TextButton(
+                        onClick = { session.keepMode(boardId) },
+                        contentPadding = PaddingValues(horizontal = 8.dp),
+                        modifier = Modifier.heightIn(min = 32.dp),
+                    ) { Text(keepLabel(), style = MaterialTheme.typography.labelMedium) }
+                }
             }
         }
     }
@@ -523,4 +504,16 @@ fun clockText(minutes: UShort): String {
         set(java.util.Calendar.MINUTE, minutes.toInt() % 60)
     }
     return android.text.format.DateFormat.getTimeFormat(context).format(cal.time)
+}
+
+/** When a held screen hands back to Sports, in the reader's clock format:
+ *  "9:30 PM" today, "Sat 9:30 AM" on a later day. Needs the real Context —
+ *  DateFormat NPEs on a null one at render. */
+@Composable
+fun untilText(epochSecs: Long): String {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val date = java.util.Date(epochSecs * 1000)
+    val time = android.text.format.DateFormat.getTimeFormat(context).format(date)
+    if (android.text.format.DateUtils.isToday(epochSecs * 1000)) return time
+    return java.text.SimpleDateFormat("EEE", java.util.Locale.getDefault()).format(date) + " " + time
 }
